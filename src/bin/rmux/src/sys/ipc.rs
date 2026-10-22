@@ -31,12 +31,12 @@ use std::sync::mpsc::channel;
 use std::time::Duration;
 use std::time::Instant;
 
-use moto_ipc::sync::ChannelSize;
-use moto_ipc::sync::ClientConnection;
-use moto_ipc::sync::LocalServer;
-use moto_ipc::sync::RequestHeader;
-use moto_ipc::sync::ResponseHeader;
 use moto_rt::ErrorCode;
+use moto_sdk::ipc::sync::ChannelSize;
+use moto_sdk::ipc::sync::ClientConnection;
+use moto_sdk::ipc::sync::LocalServer;
+use moto_sdk::ipc::sync::RequestHeader;
+use moto_sdk::ipc::sync::ResponseHeader;
 use moto_sys::SysCpu;
 use moto_sys::SysHandle;
 use moto_sys::SysObj;

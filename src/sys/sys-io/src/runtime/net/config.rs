@@ -1,6 +1,6 @@
-use async_fs::FileSystem;
 use ipnetwork::IpNetwork;
 use moto_netstack::wire::{IpCidr, IpEndpoint, Ipv4Cidr, Ipv6Cidr};
+use moto_sdk::async_fs::FileSystem;
 use moto_sys::ErrorCode;
 use serde::{Deserialize, Deserializer, de};
 use std::{
@@ -290,7 +290,7 @@ pub(super) fn find_route<'a>(
 /// one silently costs a round trip per call. Neither shows up in a config that
 /// happens to fit in one block, which every config did until this was written.
 fn chunk_end(read: usize, len: usize) -> usize {
-    ((read / async_fs::BLOCK_SIZE + 1) * async_fs::BLOCK_SIZE).min(len)
+    ((read / moto_sdk::async_fs::BLOCK_SIZE + 1) * moto_sdk::async_fs::BLOCK_SIZE).min(len)
 }
 
 /// Load net config. Note that we cannot use std::fs::*, as it will block forever.
@@ -346,36 +346,50 @@ pub(super) async fn write_resolv_conf(
     let mut fs = root.write().await?;
 
     let Some((system, _)) = fs
-        .stat(async_fs::Role::System, async_fs::ROOT_ID, "system")
+        .stat(
+            moto_sdk::async_fs::Role::System,
+            moto_sdk::async_fs::ROOT_ID,
+            "system",
+        )
         .await?
     else {
         return Ok(());
     };
     let system = root.check_local(system)?;
-    let Some((cfg, _)) = fs.stat(async_fs::Role::System, system, "cfg").await? else {
+    let Some((cfg, _)) = fs
+        .stat(moto_sdk::async_fs::Role::System, system, "cfg")
+        .await?
+    else {
         return Ok(());
     };
     let cfg = root.check_local(cfg)?;
-    let Some((libc, _)) = fs.stat(async_fs::Role::System, cfg, "libc").await? else {
+    let Some((libc, _)) = fs
+        .stat(moto_sdk::async_fs::Role::System, cfg, "libc")
+        .await?
+    else {
         // The base image has no libc overlay and no resolver file to update.
         return Ok(());
     };
     let libc = root.check_local(libc)?;
 
-    if let Some((stale, _)) = fs.stat(async_fs::Role::System, libc, TEMP_NAME).await? {
+    if let Some((stale, _)) = fs
+        .stat(moto_sdk::async_fs::Role::System, libc, TEMP_NAME)
+        .await?
+    {
         let stale = root.check_local(stale)?;
-        fs.delete_entry(async_fs::Role::System, stale).await?;
+        fs.delete_entry(moto_sdk::async_fs::Role::System, stale)
+            .await?;
     }
     let temp = fs
         .create_entry(
-            async_fs::Role::System,
+            moto_sdk::async_fs::Role::System,
             libc,
-            async_fs::EntryKind::File,
+            moto_sdk::async_fs::EntryKind::File,
             TEMP_NAME,
-            async_fs::RolePermissions::new(
-                async_fs::AccessPermissions::Rw,
-                async_fs::AccessPermissions::R,
-                async_fs::AccessPermissions::R,
+            moto_sdk::async_fs::RolePermissions::new(
+                moto_sdk::async_fs::AccessPermissions::Rw,
+                moto_sdk::async_fs::AccessPermissions::R,
+                moto_sdk::async_fs::AccessPermissions::R,
             ),
         )
         .await?;
@@ -386,7 +400,7 @@ pub(super) async fn write_resolv_conf(
         let end = chunk_end(written, contents.len());
         match fs
             .write(
-                async_fs::Role::System,
+                moto_sdk::async_fs::Role::System,
                 temp,
                 written as u64,
                 &contents.as_bytes()[written..end],
@@ -394,17 +408,21 @@ pub(super) async fn write_resolv_conf(
             .await
         {
             Ok(0) => {
-                let _ = fs.delete_entry(async_fs::Role::System, temp).await;
+                let _ = fs
+                    .delete_entry(moto_sdk::async_fs::Role::System, temp)
+                    .await;
                 return Err(ErrorKind::WriteZero.into());
             }
             Ok(count) => written += count,
             Err(err) => {
-                let _ = fs.delete_entry(async_fs::Role::System, temp).await;
+                let _ = fs
+                    .delete_entry(moto_sdk::async_fs::Role::System, temp)
+                    .await;
                 return Err(err);
             }
         }
     }
-    fs.move_entry(async_fs::Role::System, temp, libc, "resolv.conf")
+    fs.move_entry(moto_sdk::async_fs::Role::System, temp, libc, "resolv.conf")
         .await?;
     log::debug!("published {} DNS server(s)", servers.len());
     Ok(())
@@ -527,7 +545,7 @@ pub(crate) mod self_test {
     }
 
     /// `/system/cfg/sys-net.toml` used to be read with a single `read` into a
-    /// 4096-byte array -- one `async_fs::BLOCK_SIZE` -- and whatever came back
+    /// 4096-byte array -- one `moto_sdk::async_fs::BLOCK_SIZE` -- and whatever came back
     /// was taken as the whole file. A larger config was cut at 4096 and the
     /// prefix parsed, which is the dangerous half: a prefix of a TOML file is
     /// usually still valid TOML. Reproduced with a 7715-byte config declaring a
@@ -537,7 +555,7 @@ pub(crate) mod self_test {
     /// The walk is what this pins. `BLOCK_SIZE` is not spelled as a literal, so
     /// the arithmetic is checked and not the constant.
     fn the_config_read_walks_whole_blocks() -> Result<(), String> {
-        const B: usize = async_fs::BLOCK_SIZE;
+        const B: usize = moto_sdk::async_fs::BLOCK_SIZE;
 
         // A file inside one block is one read, ending at the file and not at
         // the block: asking past the end is not this function's job to allow.

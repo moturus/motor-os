@@ -1,4 +1,4 @@
-use moto_io::fs::{AccessPermissions, FsClient, RolePermissions};
+use moto_sdk::io::fs::{AccessPermissions, FsClient, RolePermissions};
 use std::path::Path;
 
 fn print_usage_and_exit(exit_code: i32) -> ! {
@@ -53,7 +53,7 @@ pub fn do_command(args: &[String]) {
         print_usage_and_exit(1);
     };
 
-    let failed = moto_async::LocalRuntime::new().block_on(async {
+    let failed = moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = match FsClient::connect() {
             Ok(client) => client,
             Err(err) => {

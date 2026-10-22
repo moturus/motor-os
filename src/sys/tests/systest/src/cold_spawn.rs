@@ -5,9 +5,9 @@
 //! syscall buffers in untouched pages work, and unusual or malformed images
 //! fall back or are refused.
 
+use moto_sdk::sys_io::api_fs::SpawnRequest;
 use moto_sys::stats::ProcessInfoV1;
 use moto_sys::{SysCpu, SysHandle, SysObj, SysRay};
-use moto_sys_io::api_fs::SpawnRequest;
 use std::io::{BufRead, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -296,14 +296,14 @@ fn copy(dir: &Path, name: &str, perm: u64, patch: impl FnOnce(&mut Vec<u8>)) -> 
 /// requester is gone right after the response, so the connection must
 /// outlive every handle the tests hold, as rt.vdso's outlives its process.
 struct Requester {
-    runtime: moto_async::LocalRuntime,
-    client: Rc<moto_io::fs::FsClient>,
+    runtime: moto_sdk::async_runtime::LocalRuntime,
+    client: Rc<moto_sdk::io::fs::FsClient>,
 }
 
 impl Requester {
     fn new() -> Self {
-        let mut runtime = moto_async::LocalRuntime::new();
-        let client = runtime.block_on(async { moto_io::fs::FsClient::connect().unwrap() });
+        let mut runtime = moto_sdk::async_runtime::LocalRuntime::new();
+        let client = runtime.block_on(async { moto_sdk::io::fs::FsClient::connect().unwrap() });
         Self { runtime, client }
     }
 
@@ -909,8 +909,8 @@ fn test_unauthorized_entries(dir: &Path, requester: &mut Requester) {
 /// the response ring is full by then, so sys-io cannot send the response
 /// before it finds the client gone.
 fn test_abandoned_request(dir: &Path, requester: &mut Requester) {
-    use moto_ipc::io_channel::QUEUE_SIZE;
-    use moto_sys_io::api_fs;
+    use moto_sdk::ipc::io_channel::QUEUE_SIZE;
+    use moto_sdk::sys_io::api_fs;
     use std::time::{Duration, Instant};
 
     let program = copy(dir, "abandoned", EXEC, |_| {});
@@ -938,7 +938,7 @@ fn test_abandoned_request(dir: &Path, requester: &mut Requester) {
     let client = &requester.client;
     let channel = requester.runtime.block_on(async {
         let (entry_id, _) = client.stat(&path).await.unwrap();
-        let (sender, mut receiver) = moto_ipc::io_channel::connect(api_fs::FS_URL).unwrap();
+        let (sender, mut receiver) = moto_sdk::ipc::io_channel::connect(api_fs::FS_URL).unwrap();
         // One request answered: the connection is accepted and served.
         let mut msg = api_fs::metadata_msg_encode(entry_id);
         msg.id = 1;

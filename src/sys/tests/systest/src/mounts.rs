@@ -1,6 +1,6 @@
 //! Mounted memfs namespace, cross-device operations, and bounded memory use.
-use moto_io::fs::{EntryId, EntryKind, FsClient, MountInfo, MountKind};
-use moto_sys_io::api_fs;
+use moto_sdk::io::fs::{EntryId, EntryKind, FsClient, MountInfo, MountKind};
+use moto_sdk::sys_io::api_fs;
 use std::io::ErrorKind;
 
 const RAM_DIR: &str = "/none/tmp/systest-mounts";
@@ -32,7 +32,7 @@ pub fn run_all_tests() {
 }
 
 pub fn none_role() {
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().unwrap();
         let mount = memfs_mount(&client).await.unwrap();
         assert!(mount.cap.is_some());
@@ -62,7 +62,7 @@ pub fn none_role() {
             .unwrap();
         assert!(
             client
-                .set_permissions(root, moto_io::fs::AccessPermissions::Rwx)
+                .set_permissions(root, moto_sdk::io::fs::AccessPermissions::Rwx)
                 .await
                 .is_err()
         );
@@ -142,7 +142,7 @@ fn namespace() {
         ErrorKind::PermissionDenied
     );
 
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().unwrap();
         let mount = memfs_mount(&client).await.unwrap();
         assert!(mount.id != 0 && !mount.corrupted);
@@ -176,7 +176,7 @@ fn namespace() {
         }
         assert!(seen);
         // The component and whole-path protocol operations agree on identity.
-        let (sender, mut receiver) = moto_ipc::io_channel::connect(api_fs::FS_URL).unwrap();
+        let (sender, mut receiver) = moto_sdk::ipc::io_channel::connect(api_fs::FS_URL).unwrap();
         let page = sender.alloc_page(u64::MAX).await.unwrap();
         sender
             .send(api_fs::stat_msg_encode(none, "tmp", page))
@@ -270,13 +270,13 @@ fn check(condition: bool, message: &str) -> Result<(), String> {
 
 fn metric(name: &str) -> Result<u64, String> {
     let provider =
-        moto_stats::Collector::provider_by_name("sys-io").ok_or("missing sys-io provider")?;
-    let desc = moto_stats::Collector::describe(&provider)
+        moto_sdk::stats::Collector::provider_by_name("sys-io").ok_or("missing sys-io provider")?;
+    let desc = moto_sdk::stats::Collector::describe(&provider)
         .map_err(|err| err.to_string())?
         .into_iter()
         .find(|desc| desc.name == name)
         .ok_or_else(|| format!("missing metric {name}"))?;
-    moto_stats::Collector::read(&provider, desc.id, moto_stats::SCOPE_GLOBAL)
+    moto_sdk::stats::Collector::read(&provider, desc.id, moto_sdk::stats::SCOPE_GLOBAL)
         .map_err(|err| err.to_string())
 }
 
@@ -302,7 +302,7 @@ pub(super) async fn delete_held_entries(
 }
 
 fn memory() {
-    let result = moto_async::LocalRuntime::new().block_on(async {
+    let result = moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().map_err(|err| err.to_string())?;
         let baseline = memfs_mount(&client).await?;
         let cap = baseline.cap.ok_or("missing memfs capacity")?;

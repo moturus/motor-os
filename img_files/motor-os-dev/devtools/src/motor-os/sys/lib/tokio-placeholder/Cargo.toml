@@ -1,0 +1,20 @@
+# An empty stand-in for tokio, with no code.
+#
+# moto-sdk uses tokio only on Unix, for its filesystem code there, so Motor
+# OS never builds it. But Cargo.lock covers every target, and Lorry, like
+# Cargo, rejects a lock without a tokio entry. This package fills that entry,
+# so no tokio sources reach the image. The features are the ones moto-sdk
+# enables; if moto-sdk enables another one, resolution here fails until it is
+# added.
+[package]
+name = "tokio"
+version = "1.47.1"
+edition = "2024"
+publish = false
+
+[features]
+fs = []
+io-util = []
+rt = []
+sync = []
+time = []

@@ -17,12 +17,12 @@
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use moto_io::net::NetClient;
-use moto_io::net::{Reservation, ReserveError};
 use moto_rt::mutex::Mutex;
+use moto_sdk::io::net::NetClient;
+use moto_sdk::io::net::{Reservation, ReserveError};
 use moto_sys::SysHandle;
 
-type WaiterTx = moto_async::oneshot::Sender<Result<Reservation, moto_rt::Error>>;
+type WaiterTx = moto_sdk::async_runtime::oneshot::Sender<Result<Reservation, moto_rt::Error>>;
 
 struct Waiter {
     id: u64,
@@ -108,7 +108,7 @@ impl NetPool {
     /// one channel connect; if the connection-storm soak owed at the flip
     /// shows it matters, release notification is the follow-up.
     pub async fn reserve(&'static self) -> Result<Reservation, moto_rt::Error> {
-        let (tx, rx) = moto_async::oneshot();
+        let (tx, rx) = moto_sdk::async_runtime::oneshot();
         let (need_spawn, id) = {
             let mut inner = self.inner.lock();
             let mut out_of_memory = false;
@@ -131,7 +131,7 @@ impl NetPool {
             inner.next_waiter_id += 1;
             inner.waiters.push_back(Waiter { id, tx });
             let supply =
-                inner.provisions_in_flight * (moto_sys_io::api_net::IO_SUBCHANNELS as usize);
+                inner.provisions_in_flight * (moto_sdk::sys_io::api_net::IO_SUBCHANNELS as usize);
             if inner.waiters.len() > supply {
                 inner.provisions_in_flight += 1;
                 (true, id)
@@ -190,7 +190,7 @@ extern "C" fn channel_thread_entry(ctx: u64) {
 // Owns the runtime so that it is freed when this returns: SysObj::put(SELF)
 // ends the thread without dropping its caller's locals.
 fn run_channel(pool: &'static NetPool) {
-    let mut runtime = match moto_async::LocalRuntime::try_new() {
+    let mut runtime = match moto_sdk::async_runtime::LocalRuntime::try_new() {
         Ok(runtime) => runtime,
         Err(err) => {
             let mut inner = pool.inner.lock();
@@ -201,7 +201,7 @@ fn run_channel(pool: &'static NetPool) {
     };
 
     runtime.block_on(async move {
-        let (client, driver) = match moto_io::net::connect().await {
+        let (client, driver) = match moto_sdk::io::net::connect().await {
             Ok(pair) => pair,
             Err(err) => {
                 let mut inner = pool.inner.lock();

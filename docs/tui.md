@@ -60,7 +60,7 @@ program's own stdin — immediately, and again on every resize:
 | `CSI 48 ; rows ; cols ; h_px ; w_px t` | terminal → app | the report |
 
 Note **rows before columns**, the opposite order from crossterm's
-`(cols, rows)`. The wire helpers are in `src/sys/lib/moto-tooling/src/mode2048.rs`.
+`(cols, rows)`. The wire helpers are in `src/sys/lib/moto-sdk/src/tooling/mode2048.rs`.
 
 This is not a Motor invention: mode 2048 is an emerging convention among
 terminals that hit the same wall — foot, Ghostty, iTerm2 and kitty implement

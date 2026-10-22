@@ -1,12 +1,12 @@
-use async_fs::AccessPermissions;
-use async_fs::AsyncBlockDevice;
-use async_fs::EntryId;
-use async_fs::EntryKind;
-use async_fs::FileSystem;
-use async_fs::Role;
-use async_fs::RolePermissions;
-use async_fs::file_block_device::AsyncFileBlockDevice;
 use camino::Utf8PathBuf;
+use moto_sdk::async_fs::AccessPermissions;
+use moto_sdk::async_fs::AsyncBlockDevice;
+use moto_sdk::async_fs::EntryId;
+use moto_sdk::async_fs::EntryKind;
+use moto_sdk::async_fs::FileSystem;
+use moto_sdk::async_fs::Role;
+use moto_sdk::async_fs::RolePermissions;
+use moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice;
 use rand::Rng;
 use std::cell::Cell;
 use std::io::ErrorKind;
@@ -31,7 +31,8 @@ async fn create_fs(tag: &str, num_blocks: u64) -> Result<MotorFs> {
     let path = Utf8PathBuf::from_path_buf(path).unwrap();
     std::fs::remove_file(path.clone()).ok();
 
-    let bd = async_fs::file_block_device::AsyncFileBlockDevice::create(&path, num_blocks).await?;
+    let bd = moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice::create(&path, num_blocks)
+        .await?;
     MotorFs::format(Box::new(bd)).await
 }
 
@@ -39,7 +40,7 @@ async fn open_fs(tag: &str) -> Result<MotorFs> {
     let path = std::env::temp_dir().join(tag);
     let path = Utf8PathBuf::from_path_buf(path).unwrap();
 
-    let bd = async_fs::file_block_device::AsyncFileBlockDevice::open(&path).await?;
+    let bd = moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice::open(&path).await?;
     MotorFs::open(Box::new(bd)).await
 }
 
@@ -56,7 +57,7 @@ impl AsyncBlockDevice for FlushErrorBlockDevice {
         self.inner.num_blocks()
     }
 
-    async fn read_block<T: AsMut<fittings::iobuf::IoBuf> + Unpin>(
+    async fn read_block<T: AsMut<moto_sdk::iobuf::IoBuf> + Unpin>(
         &self,
         block_no: u64,
         block: T,
@@ -64,7 +65,7 @@ impl AsyncBlockDevice for FlushErrorBlockDevice {
         self.inner.read_block(block_no, block).await
     }
 
-    async fn write_block<T: AsRef<fittings::iobuf::IoBuf> + Unpin>(
+    async fn write_block<T: AsRef<moto_sdk::iobuf::IoBuf> + Unpin>(
         &self,
         block_no: u64,
         block: T,
@@ -75,7 +76,7 @@ impl AsyncBlockDevice for FlushErrorBlockDevice {
     async fn write_blocks_with_completion(
         &self,
         first_block_no: u64,
-        blocks: Vec<async_fs::block_cache::CheckpointedBlock>,
+        blocks: Vec<moto_sdk::async_fs::block_cache::CheckpointedBlock>,
     ) -> Result<Self::Completion> {
         self.inner
             .write_blocks_with_completion(first_block_no, blocks)
@@ -117,7 +118,7 @@ fn generation_advances_only_for_entries() {
             .await?;
         let first_generation = crate::EntryIdInternal::from(first).generation;
 
-        let bytes = [0x5a; async_fs::BLOCK_SIZE];
+        let bytes = [0x5a; moto_sdk::async_fs::BLOCK_SIZE];
         for offset in (0..2 * 1024 * 1024).step_by(bytes.len()) {
             assert_eq!(
                 fs.write(Role::System, first, offset as u64, &bytes).await?,
@@ -443,7 +444,7 @@ async fn basic_test() -> Result<()> {
         .create_entry(
             Role::System,
             root,
-            async_fs::EntryKind::Directory,
+            moto_sdk::async_fs::EntryKind::Directory,
             "first",
             RolePermissions::all(AccessPermissions::Rwx),
         )
@@ -457,7 +458,7 @@ async fn basic_test() -> Result<()> {
         fs.create_entry(
             Role::System,
             first,
-            async_fs::EntryKind::Directory,
+            moto_sdk::async_fs::EntryKind::Directory,
             "/",
             RolePermissions::all(AccessPermissions::Rwx)
         )
@@ -1872,7 +1873,7 @@ async fn random_file_test() -> Result<()> {
         let block_idx: usize = rng.r#gen::<usize>() % blocks.len();
         let block_no = blocks.remove(block_idx);
 
-        let mut block = Box::new(async_fs::Block::new_zeroed());
+        let mut block = Box::new(moto_sdk::async_fs::Block::new_zeroed());
         rng.fill_bytes(block.as_bytes_mut());
 
         fs.write(
@@ -1892,7 +1893,7 @@ async fn random_file_test() -> Result<()> {
     // Fill the remainder.
     loop {
         let block_no = bytes.len();
-        let mut block = Box::new(async_fs::Block::new_zeroed());
+        let mut block = Box::new(moto_sdk::async_fs::Block::new_zeroed());
         rng.fill_bytes(block.as_bytes_mut());
 
         match fs
@@ -1932,7 +1933,7 @@ async fn random_file_test() -> Result<()> {
     assert_eq!((file_sz / 4096) as usize, bytes.len());
 
     // Check the data.
-    let mut file_bytes = async_fs::Block::new_zeroed();
+    let mut file_bytes = moto_sdk::async_fs::Block::new_zeroed();
     for idx in 0..bytes.len() {
         fs.read(
             Role::System,
@@ -2869,7 +2870,7 @@ async fn write_speed_test() -> Result<()> {
 
     let mut fs = create_fs("motor_fs_write_speed_test", NUM_BLOCKS).await?;
 
-    let mut block = Box::new(async_fs::Block::new_zeroed());
+    let mut block = Box::new(moto_sdk::async_fs::Block::new_zeroed());
     rng.fill_bytes(block.as_bytes_mut());
 
     let file_id = fs
@@ -2921,7 +2922,7 @@ async fn native_write_speed_test() -> Result<()> {
 
     const FILE_BLOCKS: u64 = NUM_BLOCKS - (RESERVED_BLOCKS as u64 + NUM_BLOCKS / 100 + 1);
 
-    let mut block = Box::new(async_fs::Block::new_zeroed());
+    let mut block = Box::new(moto_sdk::async_fs::Block::new_zeroed());
     rng.fill_bytes(block.as_bytes_mut());
 
     let mut file = std::fs::File::create("/tmp/motor_fs_native_write_speed_test").unwrap();
@@ -2955,7 +2956,7 @@ async fn native_write_speed_async_test() -> Result<()> {
 
     const FILE_BLOCKS: u64 = NUM_BLOCKS - (RESERVED_BLOCKS as u64 + NUM_BLOCKS / 100 + 1);
 
-    let mut block = Box::new(async_fs::Block::new_zeroed());
+    let mut block = Box::new(moto_sdk::async_fs::Block::new_zeroed());
     rng.fill_bytes(block.as_bytes_mut());
 
     let mut file = tokio::fs::File::create("/tmp/motor_fs_native_write_speed_async_test")
@@ -3035,7 +3036,7 @@ fn access_triple_and_gate() {
 #[test]
 fn access_zeroed_metadata_is_rwx() {
     // (§8.2) A zeroed Metadata reads back as fully permissive for every role.
-    let m = async_fs::Metadata::zeroed();
+    let m = moto_sdk::async_fs::Metadata::zeroed();
     for role in [Role::None, Role::Interactive, Role::System] {
         assert_eq!(m.access(role).unwrap(), AccessPermissions::Rwx);
     }
@@ -3086,15 +3087,15 @@ fn perms_monotonic_check() {
     let idx = |n: AccessPermissions, i: AccessPermissions, s: AccessPermissions| {
         RolePermissions::new(s, i, n)
     };
-    assert!(async_fs::perms_monotonic(idx(R, Rw, Rwx)));
-    assert!(async_fs::perms_monotonic(idx(
+    assert!(moto_sdk::async_fs::perms_monotonic(idx(R, Rw, Rwx)));
+    assert!(moto_sdk::async_fs::perms_monotonic(idx(
         AccessPermissions::None,
         R,
         Rwx
     )));
-    assert!(async_fs::perms_monotonic(idx(Rwx, Rwx, Rwx)));
-    assert!(!async_fs::perms_monotonic(idx(Rwx, R, R))); // None wider than Interactive
-    assert!(!async_fs::perms_monotonic(idx(
+    assert!(moto_sdk::async_fs::perms_monotonic(idx(Rwx, Rwx, Rwx)));
+    assert!(!moto_sdk::async_fs::perms_monotonic(idx(Rwx, R, R))); // None wider than Interactive
+    assert!(!moto_sdk::async_fs::perms_monotonic(idx(
         AccessPermissions::None,
         Rx,
         Rw
@@ -3105,7 +3106,7 @@ fn perms_monotonic_check() {
 fn may_set_matrix() {
     // (§8.7) exhaustive authority matrix and the two self-role exceptions.
     use AccessPermissions::{R, Rw, Rwx, Rx};
-    use async_fs::may_set;
+    use moto_sdk::async_fs::may_set;
     let roles = [Role::None, Role::Interactive, Role::System];
     for &c in &roles {
         for &t in &roles {
@@ -3355,7 +3356,7 @@ async fn permissions_require_parent_write_test() -> Result<()> {
     }
 
     let root_before = fs.metadata(Role::System, root).await?;
-    for root_id in [root, async_fs::ROOT_ID] {
+    for root_id in [root, moto_sdk::async_fs::ROOT_ID] {
         assert_eq!(
             ErrorKind::PermissionDenied,
             fs.set_permissions(
@@ -3380,8 +3381,12 @@ async fn permissions_require_parent_write_test() -> Result<()> {
         root_before.modified.as_nanos(),
         fs.metadata(Role::System, root).await?.modified.as_nanos()
     );
-    fs.set_all_permissions(Role::System, async_fs::ROOT_ID, root_before.permissions()?)
-        .await?;
+    fs.set_all_permissions(
+        Role::System,
+        moto_sdk::async_fs::ROOT_ID,
+        root_before.permissions()?,
+    )
+    .await?;
 
     // Known entry IDs need only parent write, even without traversal.
     let rw_parent = fs
@@ -4072,14 +4077,14 @@ struct CountingBlockDevice {
 }
 
 #[async_trait::async_trait(?Send)]
-impl async_fs::AsyncBlockDevice for CountingBlockDevice {
-    type Completion = <AsyncFileBlockDevice as async_fs::AsyncBlockDevice>::Completion;
+impl moto_sdk::async_fs::AsyncBlockDevice for CountingBlockDevice {
+    type Completion = <AsyncFileBlockDevice as moto_sdk::async_fs::AsyncBlockDevice>::Completion;
 
     fn num_blocks(&self) -> u64 {
         self.inner.num_blocks()
     }
 
-    async fn read_block<T: AsMut<fittings::iobuf::IoBuf> + Unpin>(
+    async fn read_block<T: AsMut<moto_sdk::iobuf::IoBuf> + Unpin>(
         &self,
         block_no: u64,
         block: T,
@@ -4098,7 +4103,7 @@ impl async_fs::AsyncBlockDevice for CountingBlockDevice {
         result
     }
 
-    async fn write_block<T: AsRef<fittings::iobuf::IoBuf> + Unpin>(
+    async fn write_block<T: AsRef<moto_sdk::iobuf::IoBuf> + Unpin>(
         &self,
         block_no: u64,
         block: T,
@@ -4109,7 +4114,7 @@ impl async_fs::AsyncBlockDevice for CountingBlockDevice {
     async fn write_blocks_with_completion(
         &self,
         first_block_no: u64,
-        blocks: Vec<async_fs::block_cache::CheckpointedBlock>,
+        blocks: Vec<moto_sdk::async_fs::block_cache::CheckpointedBlock>,
     ) -> Result<Self::Completion> {
         self.inner
             .write_blocks_with_completion(first_block_no, blocks)
@@ -4361,7 +4366,7 @@ impl AsyncBlockDevice for RangeCheckingBlockDevice {
         self.inner.num_blocks()
     }
 
-    async fn read_block<T: AsMut<fittings::iobuf::IoBuf> + Unpin>(
+    async fn read_block<T: AsMut<moto_sdk::iobuf::IoBuf> + Unpin>(
         &self,
         block_no: u64,
         block: T,
@@ -4372,7 +4377,7 @@ impl AsyncBlockDevice for RangeCheckingBlockDevice {
         self.inner.read_block(block_no, block).await
     }
 
-    async fn write_block<T: AsRef<fittings::iobuf::IoBuf> + Unpin>(
+    async fn write_block<T: AsRef<moto_sdk::iobuf::IoBuf> + Unpin>(
         &self,
         block_no: u64,
         block: T,
@@ -4386,7 +4391,7 @@ impl AsyncBlockDevice for RangeCheckingBlockDevice {
     async fn write_blocks_with_completion(
         &self,
         first_block_no: u64,
-        blocks: Vec<async_fs::block_cache::CheckpointedBlock>,
+        blocks: Vec<moto_sdk::async_fs::block_cache::CheckpointedBlock>,
     ) -> Result<Self::Completion> {
         self.check(first_block_no)?;
         self.inner
@@ -4521,7 +4526,11 @@ async fn entry_id_range_test() -> Result<()> {
     // Nothing above touched the filesystem, and the root is still reachable
     // both as `ROOT_ID` and by its own entry id.
     assert_eq!(fs.metadata(role, root).await?.size, 1);
-    assert!(fs.stat(role, async_fs::ROOT_ID, "file").await?.is_some());
+    assert!(
+        fs.stat(role, moto_sdk::async_fs::ROOT_ID, "file")
+            .await?
+            .is_some()
+    );
     assert!(fs.stat(role, root, "file").await?.is_some());
     assert_eq!(fs.read(role, file, 0, &mut buf).await?, 8);
     assert_eq!(&buf, b"original");
@@ -4548,7 +4557,7 @@ async fn stat_non_entry_parent_test() -> Result<()> {
         .create_entry(role, crate::ROOT_DIR_ID, EntryKind::File, "file", all)
         .await?;
     // A whole block of data does not fit inline, so it gets a block of its own.
-    let data = [0xa5_u8; async_fs::BLOCK_SIZE];
+    let data = [0xa5_u8; moto_sdk::async_fs::BLOCK_SIZE];
     assert_eq!(fs.write(role, file, 0, &data).await?, data.len());
 
     let txn_log_start = NUM_BLOCKS - crate::MAX_BLOCKS_IN_TXN_LOG as u64;

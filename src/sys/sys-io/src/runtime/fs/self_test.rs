@@ -1,7 +1,7 @@
 //! Native request-level mount regressions on isolated, bounded filesystems.
 use super::*;
-use moto_ipc::io_channel;
-use moto_sys_io::api_fs::{MountInfo, MountKind};
+use moto_sdk::ipc::io_channel;
+use moto_sdk::sys_io::api_fs::{MountInfo, MountKind};
 
 pub(super) const TESTS: &[crate::self_test::SelfTest] = &[
     ("fs::mount_requests", run),
@@ -42,7 +42,7 @@ fn ensure(condition: bool, what: &str) -> Result<()> {
 }
 
 fn run() -> std::result::Result<(), String> {
-    moto_async::LocalRuntime::new()
+    moto_sdk::async_runtime::LocalRuntime::new()
         .block_on(requests())
         .map_err(|err| err.to_string())
 }
@@ -165,7 +165,7 @@ async fn requests() -> Result<()> {
     }
 
     // Every request allocates its task: keep it within frusa's 4 KiB slabs.
-    let (tickets, _) = moto_async::channel(1);
+    let (tickets, _) = moto_sdk::async_runtime::channel(1);
     let task = request_task(
         api_fs::flush_msg_encode(),
         server.clone(),
@@ -497,7 +497,7 @@ async fn requests() -> Result<()> {
 /// A replacing rename needs only `w` on the destination directory, as in the
 /// backends, while mount roots and running executables there stay protected.
 fn replace_without_traverse() -> std::result::Result<(), String> {
-    moto_async::LocalRuntime::new()
+    moto_sdk::async_runtime::LocalRuntime::new()
         .block_on(replacements())
         .map_err(|err| err.to_string())
 }
@@ -566,7 +566,7 @@ async fn replacements() -> Result<()> {
 /// A lock holder can still unlock on a quarantined mount; its queued waiter
 /// then gets the mount's error instead of waiting for a disconnect.
 fn quarantined_unlock() -> std::result::Result<(), String> {
-    moto_async::LocalRuntime::new()
+    moto_sdk::async_runtime::LocalRuntime::new()
         .block_on(unlock_after_quarantine())
         .map_err(|err| err.to_string())
 }

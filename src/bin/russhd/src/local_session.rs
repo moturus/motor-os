@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use moto_tooling::mode2048;
+use moto_sdk::tooling::mode2048;
 
 pub const SSH_RECEIVE_WINDOW: u32 = 2 * 1024 * 1024;
 

@@ -65,7 +65,18 @@ DEV_TMP=/user/tmp/dev-sources
 NATIVE_FIXTURE_DIR="$DEV_TMP/native-tests"
 NATIVE_FIXTURES=(native-fstat.c native-temp.c native-temp.cpp)
 SYS_LIB=/devtools/src/motor-os/sys/lib
-SYS_LIB_CRATES=(moto-rt moto-sys moto-mpmc moto-async moto-ipc)
+SYS_LIB_CRATES=(moto-rt moto-sys moto-sdk)
+# moto-sdk's files with #[test] functions, each with the module path libtest
+# reports for its tests.
+SDK_TEST_FILES=(
+  tests/async_runtime_fallible.rs:
+  tests/mpmc_fallible.rs:
+  tests/reexports.rs:
+  src/async_runtime/timeq.rs:async_runtime::timeq::
+  src/ipc/stdio_pipe.rs:ipc::stdio_pipe::tests::
+  src/sys_io/api_net.rs:sys_io::api_net::
+  src/tooling/mode2048.rs:tooling::mode2048::tests::
+)
 LORRY_VENDOR_ENV=""
 if [ "$BUILD" = debug ]; then
   LORRY_VENDOR_ENV="LORRY_CURL_STDERR_SPILL_LIMIT_BYTES=104857600"
@@ -164,21 +175,22 @@ source_tests() {
 }
 
 # The native test may compile only the staged sources, plus the build scripts
-# of dependencies, which Lorry never caches. Every test of the three crates
-# must pass. Lorry reports on stderr; the harnesses' results arrive on stdout,
-# not in step with it.
+# of dependencies, which Lorry never caches. Every test of moto-sdk must pass.
+# Lorry reports on stderr; the harnesses' results arrive on stdout, not in
+# step with it.
 check_native_tests() {
-  local progress="$1" results="$2" compiled passed expected missing
+  local progress="$1" results="$2" compiled passed expected missing entry
   compiled="$(awk -v staged=" ($SYS_LIB/" '
     /^Compiling / && index($0, staged) == 0 && !/ \[build script\]$/' "$progress")"
   [ -z "$compiled" ] && ! grep -q '^Rebuilding global dependency cache$' "$progress" ||
     fail "native lorry test compiled dependencies that make dev.img prepared: $compiled"
   passed="$(awk '/^test .* \.\.\. ok$/ { print $2 }' "$results")"
-  expected="$(source_tests moto-mpmc/tests/fallible.rs ''
-    source_tests moto-async/tests/fallible.rs ''
-    source_tests moto-async/src/timeq.rs timeq::
-    source_tests moto-ipc/src/stdio_pipe.rs stdio_pipe::tests::)" ||
-    fail "cannot list the tests of $SYS_LIB"
+  [ "$(cd "$ROOT_DIR/src/sys/lib/moto-sdk" && grep -rl --include='*.rs' '#\[test\]' src tests |
+    LC_ALL=C sort)" = "$(printf '%s\n' "${SDK_TEST_FILES[@]%%:*}" | LC_ALL=C sort)" ] ||
+    fail "SDK_TEST_FILES does not list exactly the moto-sdk files with tests"
+  expected="$(for entry in "${SDK_TEST_FILES[@]}"; do
+    source_tests "moto-sdk/${entry%%:*}" "${entry#*:}"
+  done)" || fail "cannot list the tests of $SYS_LIB"
   # comm matches each line once, so a name both fallible harnesses use must
   # pass twice.
   missing="$(LC_ALL=C comm -23 <(LC_ALL=C sort <<< "$expected") \

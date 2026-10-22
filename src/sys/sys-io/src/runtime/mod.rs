@@ -10,7 +10,7 @@ use std::{
     },
 };
 
-use moto_ipc::io_channel;
+use moto_sdk::ipc::io_channel;
 use moto_sys::SysHandle;
 use std::io::Result as IoResult;
 
@@ -120,24 +120,24 @@ impl virtio_async::KernelAdapter for Mapper {
 
 /// Spawn the async runtime.
 pub fn spawn_async() {
-    let (tx, rx) = moto_async::oneshot();
+    let (tx, rx) = moto_sdk::async_runtime::oneshot();
 
     let _runtime_thread = std::thread::Builder::new()
         .name("sys-io:runtime".to_owned())
         .spawn(move || {
             // I/O IRQs are affined to CPU 0.
             moto_sys::SysCpu::affine_to_cpu(Some(0)).unwrap();
-            moto_async::LocalRuntime::new().block_on(async move {
+            moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
                 async_runtime(tx).await;
             });
         });
 
-    moto_async::LocalRuntime::new().block_on(async move {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
         let _ = rx.await;
     });
 }
 
-async fn async_runtime(started: moto_async::oneshot::Sender<()>) {
+async fn async_runtime(started: moto_sdk::async_runtime::oneshot::Sender<()>) {
     log::debug!("async runtime starting");
     let channel_budget = Rc::new(channel_budget::ChannelBudget::default());
 
@@ -194,7 +194,7 @@ async fn async_runtime(started: moto_async::oneshot::Sender<()>) {
 
     // Sleep forever, so that the current thread has a live async runtime.
     loop {
-        moto_async::sleep(std::time::Duration::from_secs(60 * 60 * 24 * 365)).await;
+        moto_sdk::async_runtime::sleep(std::time::Duration::from_secs(60 * 60 * 24 * 365)).await;
         log::warn!("sys-io async runtime slept for a full year?");
     }
 

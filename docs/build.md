@@ -62,9 +62,13 @@ runtime-only `/devtools/bin/wasmtime-rt`, with Javy's default plugin at
 image's example under `/devtools/src/wasm`.
 
 The developer image also stages Motor OS library sources in
-`/devtools/src/motor-os/sys/lib` for offline native `lorry test` runs. Their
-crates.io dependencies are an add-on too, locked to `src/sys/Cargo.lock`.
-When that lock changes them, refresh the add-on with:
+`/devtools/src/motor-os/sys/lib` for offline native `lorry test` runs: moto-sdk
+with moto-rt and moto-sys. Their crates.io dependencies are an add-on too,
+locked to `src/sys/Cargo.lock`. moto-sdk uses tokio only on Unix, and Motor OS
+never builds it, but Cargo.lock covers every target. So the staged workspace
+patches tokio to an empty placeholder package, `tokio-placeholder`, and no
+tokio sources reach the image. When the lock changes the dependencies, refresh
+the add-on with:
 
 ```sh
 src/build-motor-os.sh --sys-lib-deps-only

@@ -234,7 +234,7 @@ fn probe_fresh_client(service: &str, dips: &mut usize) -> Result<Hand, moto_rt::
         if !flag_up() {
             return Ok(Hand::Neither);
         }
-        let conn = moto_ipc::io_channel::ClientConnection::connect(service)?;
+        let conn = moto_sdk::ipc::io_channel::ClientConnection::connect(service)?;
         let mut dropped = false;
         let mut dipped = false;
         for _ in 0..500 {
@@ -755,8 +755,8 @@ pub fn run_all_tests() {
 /// Both service gates must reclaim already-free memfs pages before refusing.
 /// Held memfs IDs still permit freeing while the squeeze keeps the flag up.
 pub fn test_memfs_reclamation() {
-    use moto_io::fs::{EntryKind, FsClient};
-    let mut runtime = moto_async::LocalRuntime::new();
+    use moto_sdk::io::fs::{EntryKind, FsClient};
+    let mut runtime = moto_sdk::async_runtime::LocalRuntime::new();
     let client = FsClient::connect().unwrap();
     let (root, _) = runtime.block_on(client.stat("/none/tmp")).unwrap();
     // Warm the net channel before the squeeze, so this probes sys-io's gate.

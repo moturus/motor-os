@@ -10,7 +10,7 @@ pub fn do_command(args: &[String]) {
         print_usage_and_exit(1);
     }
 
-    let mut svc = moto_sys_io::stats::IoStatsService::connect().unwrap();
+    let mut svc = moto_sdk::sys_io::stats::IoStatsService::connect().unwrap();
 
     let mut num_sockets = 0;
     let mut last_socket_id = 0;

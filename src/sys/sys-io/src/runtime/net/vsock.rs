@@ -6,10 +6,10 @@ use std::task::Poll;
 use std::time::Duration;
 
 use futures::FutureExt;
-use moto_ipc::io_channel;
+use moto_sdk::ipc::io_channel;
+use moto_sdk::sys_io::api_net::NetCmd;
+use moto_sdk::sys_io::api_vsock;
 use moto_sys::SysHandle;
-use moto_sys_io::api_net::NetCmd;
-use moto_sys_io::api_vsock;
 use virtio_async::vsock::{
     DecodeError, Event, Operation, PacketHeader, RawHeader, SHUTDOWN_RECEIVE, SHUTDOWN_SEND,
     SocketType, VsockDevice,
@@ -62,9 +62,9 @@ pub(super) struct VsockRuntime {
     device: DeviceState,
     pub(super) tuples: TupleIndex,
     controls: VecDeque<PendingControl>,
-    submit_notify: Option<Rc<moto_async::LocalNotify>>,
-    control_space: Option<Rc<moto_async::LocalNotify>>,
-    failure_notify: Option<Rc<moto_async::LocalNotify>>,
+    submit_notify: Option<Rc<moto_sdk::async_runtime::LocalNotify>>,
+    control_space: Option<Rc<moto_sdk::async_runtime::LocalNotify>>,
+    failure_notify: Option<Rc<moto_sdk::async_runtime::LocalNotify>>,
     next_tx_socket: u64,
     pumps_started: bool,
 }
@@ -116,23 +116,23 @@ impl VsockRuntime {
         self.controls.len() < MAX_PENDING_CONTROLS
     }
 
-    fn submit_notify(&self) -> Rc<moto_async::LocalNotify> {
+    fn submit_notify(&self) -> Rc<moto_sdk::async_runtime::LocalNotify> {
         self.submit_notify
             .as_ref()
             .expect("activated vsock has no submit notifier")
             .clone()
     }
 
-    fn control_space(&self) -> Rc<moto_async::LocalNotify> {
+    fn control_space(&self) -> Rc<moto_sdk::async_runtime::LocalNotify> {
         self.control_space
             .as_ref()
             .expect("activated vsock has no control-space notifier")
             .clone()
     }
 
-    fn failure_notify(&mut self) -> Rc<moto_async::LocalNotify> {
+    fn failure_notify(&mut self) -> Rc<moto_sdk::async_runtime::LocalNotify> {
         self.failure_notify
-            .get_or_insert_with(|| Rc::new(moto_async::LocalNotify::new()))
+            .get_or_insert_with(|| Rc::new(moto_sdk::async_runtime::LocalNotify::new()))
             .clone()
     }
 
@@ -226,10 +226,10 @@ pub(super) struct VsockSocketState {
     tx_pages: VecDeque<TxPage>,
     subchannel_mask: u64,
     listener_id: Option<u64>,
-    connect_notify: Rc<moto_async::LocalNotify>,
-    rx_notify: Rc<moto_async::LocalNotify>,
-    state_notify: Rc<moto_async::LocalNotify>,
-    output_lock: Rc<moto_async::LocalMutex<()>>,
+    connect_notify: Rc<moto_sdk::async_runtime::LocalNotify>,
+    rx_notify: Rc<moto_sdk::async_runtime::LocalNotify>,
+    state_notify: Rc<moto_sdk::async_runtime::LocalNotify>,
+    output_lock: Rc<moto_sdk::async_runtime::LocalMutex<()>>,
     connected_observed: bool,
     client_ready: bool,
     client_gone: bool,
@@ -266,10 +266,10 @@ impl VsockSocketState {
             tx_pages,
             subchannel_mask,
             listener_id,
-            connect_notify: Rc::new(moto_async::LocalNotify::new()),
-            rx_notify: Rc::new(moto_async::LocalNotify::new()),
-            state_notify: Rc::new(moto_async::LocalNotify::new()),
-            output_lock: Rc::new(moto_async::LocalMutex::new(())),
+            connect_notify: Rc::new(moto_sdk::async_runtime::LocalNotify::new()),
+            rx_notify: Rc::new(moto_sdk::async_runtime::LocalNotify::new()),
+            state_notify: Rc::new(moto_sdk::async_runtime::LocalNotify::new()),
+            output_lock: Rc::new(moto_sdk::async_runtime::LocalMutex::new(())),
             connected_observed: false,
             client_ready: false,
             client_gone: false,
@@ -422,8 +422,8 @@ impl NetRuntime {
                 drop(inner);
                 return Err(self.fail_vsock_activation());
             }
-            inner.vsock.submit_notify = Some(Rc::new(moto_async::LocalNotify::new()));
-            inner.vsock.control_space = Some(Rc::new(moto_async::LocalNotify::new()));
+            inner.vsock.submit_notify = Some(Rc::new(moto_sdk::async_runtime::LocalNotify::new()));
+            inner.vsock.control_space = Some(Rc::new(moto_sdk::async_runtime::LocalNotify::new()));
             let DeviceState::Dormant(raw) = &mut inner.vsock.device else {
                 unreachable!()
             };
@@ -758,7 +758,7 @@ impl NetRuntime {
         }
 
         let runtime = self.clone();
-        moto_async::LocalRuntime::spawn(async move {
+        moto_sdk::async_runtime::LocalRuntime::spawn(async move {
             runtime
                 .vsock_connect_task(Rc::downgrade(&socket), request)
                 .await;
@@ -835,7 +835,7 @@ impl NetRuntime {
         self.inner.borrow().vsock.notify_submit();
         let runtime = self.clone();
         let sender = sender.clone();
-        moto_async::LocalRuntime::spawn(async move {
+        moto_sdk::async_runtime::LocalRuntime::spawn(async move {
             if runtime
                 .vsock_shutdown_task(&socket, request, &sender, flags)
                 .await
@@ -988,13 +988,19 @@ enum StreamWork {
 impl NetRuntime {
     fn spawn_vsock_pumps(&self) {
         let runtime = self.clone();
-        moto_async::LocalRuntime::spawn(async move { runtime.vsock_rx_pump().await });
+        moto_sdk::async_runtime::LocalRuntime::spawn(async move { runtime.vsock_rx_pump().await });
         let runtime = self.clone();
-        moto_async::LocalRuntime::spawn(async move { runtime.vsock_tx_submit_pump().await });
+        moto_sdk::async_runtime::LocalRuntime::spawn(async move {
+            runtime.vsock_tx_submit_pump().await
+        });
         let runtime = self.clone();
-        moto_async::LocalRuntime::spawn(async move { runtime.vsock_tx_reclaim_pump().await });
+        moto_sdk::async_runtime::LocalRuntime::spawn(async move {
+            runtime.vsock_tx_reclaim_pump().await
+        });
         let runtime = self.clone();
-        moto_async::LocalRuntime::spawn(async move { runtime.vsock_event_pump().await });
+        moto_sdk::async_runtime::LocalRuntime::spawn(
+            async move { runtime.vsock_event_pump().await },
+        );
     }
 
     async fn vsock_tx_submit_pump(&self) {
@@ -1009,7 +1015,7 @@ impl NetRuntime {
                 progressed += 1;
             }
             if progressed == PUMP_QUANTUM {
-                moto_async::yield_to_io().await;
+                moto_sdk::async_runtime::yield_to_io().await;
             } else {
                 wake.await;
             }
@@ -1262,7 +1268,7 @@ impl NetRuntime {
             progressed += 1;
             if progressed == PUMP_QUANTUM {
                 progressed = 0;
-                moto_async::yield_to_io().await;
+                moto_sdk::async_runtime::yield_to_io().await;
             }
         }
     }
@@ -1326,7 +1332,7 @@ impl NetRuntime {
             progressed += 1;
             if progressed == PUMP_QUANTUM {
                 progressed = 0;
-                moto_async::yield_to_io().await;
+                moto_sdk::async_runtime::yield_to_io().await;
             }
         }
     }
@@ -1569,7 +1575,7 @@ impl NetRuntime {
         assert!(!socket.borrow().unwrap_vsock().accept_pending);
         socket.borrow_mut().unwrap_vsock_mut().accept_pending = true;
         let runtime = self.clone();
-        moto_async::LocalRuntime::spawn(async move {
+        moto_sdk::async_runtime::LocalRuntime::spawn(async move {
             let result = runtime
                 .vsock_accept_task(
                     socket_id,
@@ -1663,7 +1669,7 @@ impl NetRuntime {
             progressed += 1;
             if progressed == PUMP_QUANTUM {
                 progressed = 0;
-                moto_async::yield_to_io().await;
+                moto_sdk::async_runtime::yield_to_io().await;
             }
         }
     }
@@ -1730,7 +1736,7 @@ impl NetRuntime {
         // Failure is permanent, so this one worker is bounded by the former
         // listener queues; no new accepts can be admitted behind it.
         let runtime = self.clone();
-        moto_async::LocalRuntime::spawn(async move {
+        moto_sdk::async_runtime::LocalRuntime::spawn(async move {
             runtime
                 .fail_vsock_accepts(accepts, moto_rt::Error::InternalError)
                 .await;
@@ -1746,7 +1752,8 @@ impl NetRuntime {
             return;
         };
         let notify = socket.borrow().unwrap_vsock().connect_notify.clone();
-        let mut deadline = core::pin::pin!(moto_async::sleep(Duration::from_secs(2)).fuse());
+        let mut deadline =
+            core::pin::pin!(moto_sdk::async_runtime::sleep(Duration::from_secs(2)).fuse());
         let was_connected = loop {
             let (connected, terminal) = {
                 let socket = socket.borrow();
@@ -1961,10 +1968,14 @@ impl NetRuntime {
     fn start_vsock_client_tasks(&self, socket: &Rc<RefCell<MotoSocket>>) {
         let runtime = self.clone();
         let weak = Rc::downgrade(socket);
-        moto_async::LocalRuntime::spawn(async move { runtime.vsock_state_task(weak).await });
+        moto_sdk::async_runtime::LocalRuntime::spawn(async move {
+            runtime.vsock_state_task(weak).await
+        });
         let runtime = self.clone();
         let weak = Rc::downgrade(socket);
-        moto_async::LocalRuntime::spawn(async move { runtime.vsock_client_rx_task(weak).await });
+        moto_sdk::async_runtime::LocalRuntime::spawn(async move {
+            runtime.vsock_client_rx_task(weak).await
+        });
         let socket = socket.borrow();
         socket.unwrap_vsock().state_notify.notify_one();
         socket.unwrap_vsock().rx_notify.notify_one();
@@ -2213,8 +2224,9 @@ impl NetRuntime {
                 socket.unwrap_vsock().connect_notify.clone(),
             )
         };
-        moto_async::LocalRuntime::spawn(async move {
-            let mut deadline = core::pin::pin!(moto_async::sleep(Duration::from_secs(8)).fuse());
+        moto_sdk::async_runtime::LocalRuntime::spawn(async move {
+            let mut deadline =
+                core::pin::pin!(moto_sdk::async_runtime::sleep(Duration::from_secs(8)).fuse());
             loop {
                 let Some(socket) = weak.upgrade() else {
                     return;

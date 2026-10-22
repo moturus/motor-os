@@ -1,5 +1,5 @@
 use super::*;
-use async_fs::FileSystem;
+use moto_sdk::async_fs::FileSystem;
 
 #[async_trait::async_trait(?Send)]
 impl FileSystem for MemFs {

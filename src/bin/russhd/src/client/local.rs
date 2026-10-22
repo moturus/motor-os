@@ -62,7 +62,7 @@ pub fn create_dir(path: &Path, mode: u32) -> io::Result<()> {
     {
         create_motor_entry(
             path,
-            moto_io::fs::EntryKind::Directory,
+            moto_sdk::io::fs::EntryKind::Directory,
             permissions(mode, true),
         )
     }
@@ -90,7 +90,7 @@ pub fn safe_identity(path: &Path) -> io::Result<()> {
     }
     #[cfg(target_os = "motor")]
     {
-        use moto_io::fs::{AccessPermissions, EntryKind, FsClient, Role};
+        use moto_sdk::io::fs::{AccessPermissions, EntryKind, FsClient, Role};
 
         let path = absolute_utf8(path)?;
         motor_io(async {
@@ -99,7 +99,11 @@ pub fn safe_identity(path: &Path) -> io::Result<()> {
             if kind != EntryKind::File {
                 return Err(moto_rt::Error::InvalidArgument);
             }
-            let permissions = client.metadata(entry).await?.permissions()?;
+            let permissions = client
+                .metadata(entry)
+                .await?
+                .permissions()
+                .map_err(|_| moto_rt::Error::InvalidData)?;
             if permissions.get(Role::None) != AccessPermissions::None {
                 return Err(moto_rt::Error::NotAllowed);
             }
@@ -118,14 +122,15 @@ pub fn file_mode(path: &Path, directory: bool) -> io::Result<u32> {
     #[cfg(target_os = "motor")]
     {
         use crate::permissions::{Access, NormalizedMode};
-        use moto_io::fs::{AccessPermissions, FsClient, Role};
+        use moto_sdk::io::fs::{AccessPermissions, FsClient, Role};
 
         let path = absolute_utf8(path)?;
         let permissions = motor_io(async {
             let client = FsClient::connect()?;
             let (entry, _) = client.stat(&path).await?;
-            client.metadata(entry).await?.permissions()
-        })?;
+            client.metadata(entry).await
+        })?
+        .permissions()?;
         let access = |value| match value {
             AccessPermissions::None => Access::None,
             AccessPermissions::R => Access::R,
@@ -156,7 +161,7 @@ pub fn set_mode(path: &Path, mode: u32, directory: bool) -> io::Result<()> {
     {
         let path = absolute_utf8(path)?;
         motor_io(async {
-            let client = moto_io::fs::FsClient::connect()?;
+            let client = moto_sdk::io::fs::FsClient::connect()?;
             let (entry, _) = client.stat(&path).await?;
             client
                 .set_all_permissions(entry, permissions(mode, directory))
@@ -166,18 +171,18 @@ pub fn set_mode(path: &Path, mode: u32, directory: bool) -> io::Result<()> {
 }
 
 #[cfg(target_os = "motor")]
-fn current_role() -> moto_io::fs::Role {
+fn current_role() -> moto_sdk::io::fs::Role {
     match moto_sys::caps::ProcessRole::from_caps(moto_sys::ProcessStaticPage::get().capabilities) {
-        moto_sys::caps::ProcessRole::System => moto_io::fs::Role::System,
-        moto_sys::caps::ProcessRole::Interactive => moto_io::fs::Role::Interactive,
-        moto_sys::caps::ProcessRole::None => moto_io::fs::Role::None,
+        moto_sys::caps::ProcessRole::System => moto_sdk::io::fs::Role::System,
+        moto_sys::caps::ProcessRole::Interactive => moto_sdk::io::fs::Role::Interactive,
+        moto_sys::caps::ProcessRole::None => moto_sdk::io::fs::Role::None,
     }
 }
 
 #[cfg(target_os = "motor")]
-fn permissions(mode: u32, directory: bool) -> moto_io::fs::RolePermissions {
+fn permissions(mode: u32, directory: bool) -> moto_sdk::io::fs::RolePermissions {
     use crate::permissions::{Access, NormalizedMode};
-    use moto_io::fs::{AccessPermissions, Role, RolePermissions};
+    use moto_sdk::io::fs::{AccessPermissions, Role, RolePermissions};
 
     let access = |access| match access {
         Access::None => AccessPermissions::None,
@@ -198,12 +203,16 @@ fn permissions(mode: u32, directory: bool) -> moto_io::fs::RolePermissions {
 
 #[cfg(target_os = "motor")]
 fn create_motor_file(path: &Path, mode: u32) -> io::Result<()> {
-    create_motor_entry(path, moto_io::fs::EntryKind::File, permissions(mode, false))
+    create_motor_entry(
+        path,
+        moto_sdk::io::fs::EntryKind::File,
+        permissions(mode, false),
+    )
 }
 
 #[cfg(target_os = "motor")]
 fn ensure_motor_dir(path: &Path) -> io::Result<()> {
-    use moto_io::fs::{EntryKind, FsClient};
+    use moto_sdk::io::fs::{EntryKind, FsClient};
 
     if !path.exists() {
         create_motor_entry(path, EntryKind::Directory, permissions(0o700, true))?;
@@ -224,10 +233,10 @@ fn ensure_motor_dir(path: &Path) -> io::Result<()> {
 #[cfg(target_os = "motor")]
 fn create_motor_entry(
     path: &Path,
-    kind: moto_io::fs::EntryKind,
-    permissions: moto_io::fs::RolePermissions,
+    kind: moto_sdk::io::fs::EntryKind,
+    permissions: moto_sdk::io::fs::RolePermissions,
 ) -> io::Result<()> {
-    use moto_io::fs::{EntryKind, FsClient};
+    use moto_sdk::io::fs::{EntryKind, FsClient};
 
     if path.exists() {
         return Err(io::ErrorKind::AlreadyExists.into());
@@ -272,7 +281,7 @@ fn absolute_utf8(path: &Path) -> io::Result<String> {
 
 #[cfg(target_os = "motor")]
 fn motor_io<T>(operation: impl Future<Output = moto_rt::Result<T>>) -> io::Result<T> {
-    moto_async::LocalRuntime::new()
+    moto_sdk::async_runtime::LocalRuntime::new()
         .block_on(operation)
         .map_err(|error| io::Error::other(error.to_string()))
 }

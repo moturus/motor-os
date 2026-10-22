@@ -124,7 +124,7 @@ fn main() {
         // right away rather than sleeping between attempts.
         let log_start = std::time::Instant::now();
         loop {
-            if moto_log::init("sys-init").is_ok() {
+            if moto_sdk::log::init("sys-init").is_ok() {
                 log::info!("Started strobe in {} us.", log_start.elapsed().as_micros());
                 break;
             }

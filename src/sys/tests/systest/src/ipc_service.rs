@@ -1,4 +1,6 @@
-use moto_ipc::sync::{ChannelSize, ClientConnection, LocalServer, RequestHeader, ResponseHeader};
+use moto_sdk::ipc::sync::{
+    ChannelSize, ClientConnection, LocalServer, RequestHeader, ResponseHeader,
+};
 use moto_sys::{SysHandle, SysObj};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdout, Command, Stdio};

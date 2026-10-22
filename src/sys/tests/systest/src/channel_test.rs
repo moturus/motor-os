@@ -1,4 +1,4 @@
-use moto_ipc::io_channel::*;
+use moto_sdk::ipc::io_channel::*;
 // use moto_runtime::io_executor;
 use moto_sys::SysHandle;
 use std::{

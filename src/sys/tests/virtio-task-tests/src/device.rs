@@ -8,12 +8,12 @@ pub struct Submission {
     pub operation: u8,
     pub sector: u64,
     pub pages: Vec<u64>,
-    pub done: Option<moto_async::oneshot::Sender<Result<()>>>,
+    pub done: Option<moto_sdk::async_runtime::oneshot::Sender<Result<()>>>,
 }
 
 pub struct BlockDevice {
     pub submissions: RefCell<Vec<Submission>>,
-    pub submitted: moto_async::LocalNotify,
+    pub submitted: moto_sdk::async_runtime::LocalNotify,
     live: Rc<Cell<usize>>,
     capacity: usize,
     seg_max: usize,
@@ -23,7 +23,7 @@ impl BlockDevice {
     pub fn new(capacity: usize, seg_max: usize) -> Self {
         Self {
             submissions: RefCell::new(Vec::new()),
-            submitted: moto_async::LocalNotify::new(),
+            submitted: moto_sdk::async_runtime::LocalNotify::new(),
             live: Rc::new(Cell::new(0)),
             capacity,
             seg_max,
@@ -44,7 +44,7 @@ impl BlockDevice {
             return None;
         }
         self.live.set(self.live.get() + 1);
-        let (sender, receiver) = moto_async::oneshot();
+        let (sender, receiver) = moto_sdk::async_runtime::oneshot();
         self.submissions.borrow_mut().push(Submission {
             operation,
             sector,
@@ -71,7 +71,7 @@ impl BlockDevice {
 
 pub struct RawCompletion {
     live: Rc<Cell<usize>>,
-    receiver: moto_async::oneshot::Receiver<Result<()>>,
+    receiver: moto_sdk::async_runtime::oneshot::Receiver<Result<()>>,
     completed: bool,
 }
 

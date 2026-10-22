@@ -4,18 +4,18 @@
 //!       to resemble dir entry or tree blocks, and then issue operations like
 //!       insert/delete. This should be fixed at a higher (OS?) level.
 
-use async_fs::Need;
-use async_fs::block_cache::BlockCache;
-use async_fs::{AsyncBlockDevice, BLOCK_SIZE, FileSystem};
-use async_fs::{EntryId, EntryKind, Role, RolePermissions};
 use async_trait::async_trait;
+use moto_sdk::async_fs::Need;
+use moto_sdk::async_fs::block_cache::BlockCache;
+use moto_sdk::async_fs::{AsyncBlockDevice, BLOCK_SIZE, FileSystem};
+use moto_sdk::async_fs::{EntryId, EntryKind, Role, RolePermissions};
 use std::io::ErrorKind;
 use std::io::Result;
 
 #[cfg(not(target_os = "motor"))]
-use fittings::iobuf::IoBuf;
+use moto_sdk::iobuf::IoBuf;
 #[cfg(target_os = "motor")]
-use moto_tooling::iobuf::IoBuf;
+use moto_sdk::iobuf::VirtioIoBuf as IoBuf;
 
 use crate::{
     DirEntryBlock, EntryIdInternal, INLINE_CAPACITY, INLINE_DATA_OFFSET, MAX_BLOCKS_IN_TXN_LOG,
@@ -38,7 +38,7 @@ pub const MAX_FLUSH_DELAY_MS: u64 = 500;
 const LOOKUP_CURSORS: usize = 4;
 
 pub struct MotorFs<BD: AsyncBlockDevice + 'static> {
-    block_cache: async_fs::block_cache::BlockCache<BD>,
+    block_cache: moto_sdk::async_fs::block_cache::BlockCache<BD>,
     error: Result<()>,
 
     txn_logger: crate::txn_log::TxnLogger,
@@ -80,7 +80,7 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
     /// generation, or a block holding something other than an entry, is
     /// caught by `validate_entry` once the block is read.
     fn internal_id(&self, entry_id: EntryId) -> Result<EntryIdInternal> {
-        if entry_id == async_fs::ROOT_ID {
+        if entry_id == moto_sdk::async_fs::ROOT_ID {
             return Ok(ROOT_DIR_ID_INTERNAL);
         }
         let id: EntryIdInternal = entry_id.into();
@@ -110,7 +110,7 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         &mut self,
         caller: Role,
         entry_id: EntryId,
-        source: &async_fs::Metadata,
+        source: &moto_sdk::async_fs::Metadata,
     ) -> Result<()> {
         self.check_err()?;
         let entry_id = self.internal_id(entry_id)?;
@@ -157,12 +157,12 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
     /// entry metadata — hot paths that hold the entry block avoid fetching it
     /// a second time.
     fn check_access(
-        metadata: &async_fs::Metadata,
+        metadata: &moto_sdk::async_fs::Metadata,
         role: Role,
         entry_id: EntryIdInternal,
         need: Need,
     ) -> Result<()> {
-        async_fs::check_access(metadata, role, need).inspect_err(|_| {
+        moto_sdk::async_fs::check_access(metadata, role, need).inspect_err(|_| {
             log::debug!("access denied: {role:?} on {entry_id:?}");
         })
     }
@@ -315,12 +315,12 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
             .await
     }
 
-    pub(crate) fn block_cache(&self) -> &async_fs::block_cache::BlockCache<BD> {
+    pub(crate) fn block_cache(&self) -> &moto_sdk::async_fs::block_cache::BlockCache<BD> {
         &self.block_cache
     }
 
     /// Block cache hit/miss/dedup counters. Diagnostics only.
-    pub fn cache_stats(&self) -> async_fs::block_cache::BlockCacheStats {
+    pub fn cache_stats(&self) -> moto_sdk::async_fs::block_cache::BlockCacheStats {
         self.block_cache.cache_stats()
     }
 
@@ -407,7 +407,7 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
 
     pub(crate) async fn log_txn(
         &mut self,
-        txn_blocks: [Option<(crate::BlockNo, async_fs::block_cache::CachedBlock)>;
+        txn_blocks: [Option<(crate::BlockNo, moto_sdk::async_fs::block_cache::CachedBlock)>;
             crate::MAX_BLOCKS_IN_TXN],
     ) -> Result<()> {
         if let Err(err) = self.txn_logger.log_txn(txn_blocks).await {
@@ -589,7 +589,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         &mut self,
         role: Role,
         parent_id: EntryId,
-        kind: async_fs::EntryKind,
+        kind: moto_sdk::async_fs::EntryKind,
         filename: &str, // Leaf name.
         permissions: RolePermissions,
     ) -> Result<EntryId> {
@@ -605,14 +605,14 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         // §6.2 -- may_set forbids *touching* a higher role even to its unchanged
         // Rwx default, which would reject a lower-privileged caller using the
         // default perms.)
-        if !async_fs::perms_monotonic(permissions) {
+        if !moto_sdk::async_fs::perms_monotonic(permissions) {
             return Err(ErrorKind::PermissionDenied.into());
         }
         for target in [Role::None, Role::Interactive, Role::System] {
             let allowed = if (role as u8) >= (target as u8) {
                 true
             } else {
-                permissions.get(target) == async_fs::AccessPermissions::Rwx
+                permissions.get(target) == moto_sdk::async_fs::AccessPermissions::Rwx
             };
             if !allowed {
                 return Err(ErrorKind::PermissionDenied.into());
@@ -641,7 +641,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         caller: Role,
         entry_id: EntryId,
         target: Role,
-        access: async_fs::AccessPermissions,
+        access: moto_sdk::async_fs::AccessPermissions,
     ) -> Result<()> {
         self.check_err()?;
         let entry_id = self.internal_id(entry_id)?;
@@ -811,7 +811,11 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         res
     }
 
-    async fn metadata(&self, _role: Role, entry_id: EntryId) -> Result<async_fs::Metadata> {
+    async fn metadata(
+        &self,
+        _role: Role,
+        entry_id: EntryId,
+    ) -> Result<moto_sdk::async_fs::Metadata> {
         self.check_err()?;
         let id = self.internal_id(entry_id)?;
         let block = self.block_cache.get_block(id.block_no()).await?;

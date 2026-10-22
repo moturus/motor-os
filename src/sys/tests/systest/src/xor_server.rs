@@ -1,4 +1,4 @@
-use moto_ipc::sync::*;
+use moto_sdk::ipc::sync::*;
 
 pub struct XorRequest {
     pub _header: RequestHeader,

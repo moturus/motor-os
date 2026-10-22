@@ -10,7 +10,7 @@ use core::sync::atomic::AtomicU64;
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering;
 
-use moto_async::SyncWaiter;
+use moto_sdk::async_runtime::SyncWaiter;
 
 use crate::posix;
 use crate::posix::PosixFile;
@@ -20,7 +20,6 @@ use alloc::collections::vec_deque::VecDeque;
 use alloc::sync::Arc;
 use alloc::sync::Weak;
 use alloc::vec::Vec;
-use moto_ipc::io_channel;
 use moto_rt::E_BAD_HANDLE;
 use moto_rt::E_INVALID_ARGUMENT;
 use moto_rt::E_OK;
@@ -32,6 +31,7 @@ use moto_rt::poll::EventBits;
 use moto_rt::poll::Interests;
 use moto_rt::poll::Token;
 use moto_rt::spinlock::SpinLock;
+use moto_sdk::ipc::io_channel;
 use moto_sys::SysHandle;
 
 /// Every event bit that could have been queued for a registration holding
@@ -350,10 +350,10 @@ impl EventSourceManaged {
 /// edges become poll-ABI event bits here, then fan out via `on_event`. This
 /// translation is deliberately outside the state machine so the latter stays
 /// poll-agnostic.
-impl moto_io::net::readiness::NetEventListener for EventSourceManaged {
-    fn on_readiness(&self, edges: moto_io::net::readiness::Readiness) {
-        use moto_io::net::readiness::Readiness;
+impl moto_sdk::io::net::readiness::NetEventListener for EventSourceManaged {
+    fn on_readiness(&self, edges: moto_sdk::io::net::readiness::Readiness) {
         use moto_rt::poll;
+        use moto_sdk::io::net::readiness::Readiness;
 
         let mut bits: EventBits = 0;
         if edges.contains(Readiness::READABLE) {
@@ -399,7 +399,7 @@ pub struct EventSourceUnmanaged {
 /// edges pushed at every registered registry (design section 4). Holds
 /// no strong ref: exits when the source dies or its handle goes bad.
 async fn unmanaged_readiness_task(source: Weak<EventSourceUnmanaged>, wait_handle: SysHandle) {
-    use moto_async::AsFuture;
+    use moto_sdk::async_runtime::AsFuture;
 
     loop {
         let result = wait_handle.as_future().await;

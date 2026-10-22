@@ -1,5 +1,5 @@
-use moto_sys_io::api_net::{self, NetCmd};
-use moto_sys_io::api_vsock::{self, VsockAddr};
+use moto_sdk::sys_io::api_net::{self, NetCmd};
+use moto_sdk::sys_io::api_vsock::{self, VsockAddr};
 
 pub fn run_wire_tests() {
     test_command_values();
@@ -26,7 +26,7 @@ fn test_command_values() {
     assert_eq!(NetCmd::VsockListenerAccept as u16, 0x111d);
     assert_eq!(NetCmd::VsockListenerDrop as u16, 0x111e);
     assert_eq!(NetCmd::VsockLocalCid as u16, 0x111f);
-    assert_eq!(moto_sys_io::api_net::CMD_MAX, 0x1120);
+    assert_eq!(moto_sdk::sys_io::api_net::CMD_MAX, 0x1120);
     assert_eq!(NetCmd::try_from(0x111e), Ok(NetCmd::VsockListenerDrop));
     assert_eq!(NetCmd::try_from(0x111f), Ok(NetCmd::VsockLocalCid));
 }
@@ -570,10 +570,10 @@ fn test_state_change_codec() {
 }
 
 fn test_page_codec() {
-    use moto_ipc::io_channel::{IoPage, PAGE_SIZE};
+    use moto_sdk::ipc::io_channel::{IoPage, PAGE_SIZE};
 
-    moto_async::LocalRuntime::new().block_on(async {
-        let (sender, _receiver) = moto_ipc::io_channel::connect("sys-io").unwrap();
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+        let (sender, _receiver) = moto_sdk::ipc::io_channel::connect("sys-io").unwrap();
 
         let page = sender.alloc_page(u64::MAX).await.unwrap();
         page.bytes_mut()[..4].copy_from_slice(b"tx-1");

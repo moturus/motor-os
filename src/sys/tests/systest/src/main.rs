@@ -95,11 +95,12 @@ pub(crate) fn none_temp_path(name: &str) -> std::path::PathBuf {
 
 pub(crate) fn set_directory_access(
     path: &std::path::Path,
-    access: moto_io::fs::AccessPermissions,
+    access: moto_sdk::io::fs::AccessPermissions,
 ) -> moto_rt::Result<()> {
-    ::moto_async::LocalRuntime::new().block_on(async {
-        let client = moto_io::fs::FsClient::connect()?;
-        let (id, moto_io::fs::EntryKind::Directory) = client.stat(path.to_str().unwrap()).await?
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+        let client = moto_sdk::io::fs::FsClient::connect()?;
+        let (id, moto_sdk::io::fs::EntryKind::Directory) =
+            client.stat(path.to_str().unwrap()).await?
         else {
             return Err(moto_rt::Error::NotADirectory);
         };
@@ -108,15 +109,15 @@ pub(crate) fn set_directory_access(
 }
 
 /// A kernel metric by its `stats get 1` name, for one scope: a pid, or
-/// `moto_stats::provider::KERNEL` for the kernel's own counters.
+/// `moto_sdk::stats::provider::KERNEL` for the kernel's own counters.
 pub(crate) fn kernel_metric(name: &str, scope: u64) -> u64 {
-    let kernel = moto_stats::Collector::kernel();
-    let metric = moto_stats::Collector::describe(&kernel)
+    let kernel = moto_sdk::stats::Collector::kernel();
+    let metric = moto_sdk::stats::Collector::describe(&kernel)
         .unwrap()
         .into_iter()
         .find(|m| m.name == name)
         .unwrap_or_else(|| panic!("no kernel metric {name}"));
-    moto_stats::Collector::read(&kernel, metric.id, scope).unwrap()
+    moto_sdk::stats::Collector::read(&kernel, metric.id, scope).unwrap()
 }
 
 pub(crate) fn ensure_temp_dir() {
@@ -263,7 +264,7 @@ fn test_halt_poll_metrics() {
         return;
     }
     const ITERS: u32 = 2000;
-    let scope = moto_stats::provider::KERNEL;
+    let scope = moto_sdk::stats::provider::KERNEL;
     let hits_0 = kernel_metric("sched.poll_hit", scope);
     let elided_0 = kernel_metric("sched.ipi_elided", scope);
 
@@ -500,7 +501,7 @@ fn test_random_bytes() {
 }
 
 fn test_ipc() {
-    use moto_ipc::sync::*;
+    use moto_sdk::ipc::sync::*;
 
     let mut xor_service = subcommand::spawn();
     xor_service.start_xor_service();

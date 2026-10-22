@@ -2,9 +2,9 @@ use std::io::ErrorKind;
 use std::rc::Weak;
 use std::{cell::RefCell, net::SocketAddr, rc::Rc, task::Poll};
 
-use moto_io_internal::udp_queues::{UdpDefragmentingQueue, UdpFragmentingQueue};
+use moto_sdk::io_internal::udp_queues::{UdpDefragmentingQueue, UdpFragmentingQueue};
+use moto_sdk::sys_io::api_net;
 use moto_sys::SysHandle;
-use moto_sys_io::api_net;
 
 use crate::runtime::channel_budget::ClientSender;
 
@@ -112,7 +112,10 @@ impl MotoSocket {
                     Poll::Ready(true)
                 } else {
                     #[cfg(debug_assertions)]
-                    log::debug!("rx empty/pending: task id: {}", moto_async::task_id(cx));
+                    log::debug!(
+                        "rx empty/pending: task id: {}",
+                        moto_sdk::async_runtime::task_id(cx)
+                    );
 
                     netstack_socket.register_recv_waker(cx.waker());
                     Poll::Pending
@@ -163,14 +166,14 @@ impl MotoSocket {
     fn spawn_udp_rx_task(weak_socket: Weak<RefCell<MotoSocket>>) {
         // Note: because the socket has been created, there is no need to sync this
         // task, as no RX packets will be losts.
-        let _ = moto_async::LocalRuntime::spawn(async move {
+        let _ = moto_sdk::async_runtime::LocalRuntime::spawn(async move {
             Self::udp_rx(weak_socket).await;
         });
     }
 
     // TODO: this message was used before async channel was a thing. Maybe we don't need it now?
-    async fn udp_tx_ack(sender: &moto_ipc::io_channel::Sender, socket_id: u64) {
-        let mut msg = moto_ipc::io_channel::Msg::new();
+    async fn udp_tx_ack(sender: &moto_sdk::ipc::io_channel::Sender, socket_id: u64) {
+        let mut msg = moto_sdk::ipc::io_channel::Msg::new();
         msg.command = api_net::NetCmd::UdpSocketTxRxAck.as_u16();
         msg.handle = socket_id;
         let _ = sender.send(msg).await;
@@ -222,7 +225,7 @@ impl MotoSocket {
     /* ----------------------------------- API calls ------------------------------------ */
     pub async fn udp_bind_for_remote(
         runtime: &NetRuntime,
-        mut msg: moto_ipc::io_channel::Msg,
+        mut msg: moto_sdk::ipc::io_channel::Msg,
         sender: &ClientSender,
     ) -> std::io::Result<()> {
         let remote_addr = api_net::get_socket_addr(&msg.payload);
@@ -246,7 +249,7 @@ impl MotoSocket {
 
     pub async fn udp_bind(
         runtime: &NetRuntime,
-        mut msg: moto_ipc::io_channel::Msg,
+        mut msg: moto_sdk::ipc::io_channel::Msg,
         sender: &ClientSender,
     ) -> std::io::Result<()> {
         let requested = api_net::get_socket_addr(&msg.payload);
@@ -289,7 +292,7 @@ impl MotoSocket {
 
     async fn udp_bind_on_device(
         runtime: &NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
+        msg: moto_sdk::ipc::io_channel::Msg,
         sender: &ClientSender,
         mut socket_addr: SocketAddr,
         device_idx: usize,
@@ -390,8 +393,8 @@ impl MotoSocket {
     /// size field, not the page index, decides whether there is one.
     fn drop_undeliverable_udp_tx(
         runtime: &NetRuntime,
-        msg: &moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        msg: &moto_sdk::ipc::io_channel::Msg,
+        sender: &moto_sdk::ipc::io_channel::Sender,
     ) {
         if msg.payload.args_16()[10] != 0 {
             let _io_page = sender.get_page(msg.payload.shared_pages()[11]);
@@ -404,8 +407,8 @@ impl MotoSocket {
 
     pub async fn udp_tx(
         runtime: &NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        msg: moto_sdk::ipc::io_channel::Msg,
+        sender: &moto_sdk::ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
         let socket_id = msg.handle;
 
@@ -527,8 +530,8 @@ impl MotoSocket {
 
     pub async fn udp_getsockopt(
         runtime: &NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        msg: moto_sdk::ipc::io_channel::Msg,
+        sender: &moto_sdk::ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
         let socket_id = msg.handle;
         let Some(moto_socket) = runtime.inner.borrow().sockets.get(&socket_id).cloned() else {
@@ -563,8 +566,8 @@ impl MotoSocket {
 
     pub async fn udp_setsockopt(
         runtime: &NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        msg: moto_sdk::ipc::io_channel::Msg,
+        sender: &moto_sdk::ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
         let socket_id = msg.handle;
         let Some(moto_socket) = runtime.inner.borrow().sockets.get(&socket_id).cloned() else {
@@ -601,8 +604,8 @@ impl MotoSocket {
 
     pub async fn udp_socket_drop(
         runtime: &NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        msg: moto_sdk::ipc::io_channel::Msg,
+        sender: &moto_sdk::ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
         let socket_id = msg.handle;
 

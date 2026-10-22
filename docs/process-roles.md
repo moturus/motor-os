@@ -19,8 +19,8 @@ stable anchors.
 
 ## 1. Problem
 
-Motor FS permissions are per-role: `async_fs::Role { None = 0, Interactive = 1,
-System = 2 }` (`src/sys/lib/async-fs/src/filesystem.rs:52`), with one
+Motor FS permissions are per-role: `moto_sdk::async_fs::Role { None = 0,
+Interactive = 1, System = 2 }` (`src/sys/lib/moto-sdk/src/async_fs/filesystem.rs:49`), with one
 permission byte per role persisted in every entry's `Metadata`. Before this
 design, the OS itself distinguished only two classes of process: "system"
 (`CAP_SYS` set) and everything else. The consequences were:

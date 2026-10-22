@@ -8,7 +8,7 @@
 //! metadata. Best effort, never precise — consistent with the rest of Motor OS
 //! stats.
 
-use moto_ipc::sync::*;
+use moto_sdk::ipc::sync::*;
 use moto_sys::SysHandle;
 
 /// This provider's service URL and registry name.
@@ -32,7 +32,7 @@ fn register_stats_provider() -> bool {
 
     let mut tries = 0u64;
     loop {
-        match moto_stats::Collector::register(PROVIDER_NAME, STATS_URL) {
+        match moto_sdk::stats::Collector::register(PROVIDER_NAME, STATS_URL) {
             Ok(()) => {
                 log::debug!("sys-io: registered stats provider after {tries} tries");
                 return true;
@@ -88,20 +88,20 @@ fn process(server: &mut LocalServer, waker: SysHandle) {
 
     let (cmd, start_index) = {
         let raw = conn.raw_channel();
-        let req = unsafe { raw.get::<moto_stats::PagedRequest>() };
+        let req = unsafe { raw.get::<moto_sdk::stats::PagedRequest>() };
         (req.header.cmd, req.start_index)
     };
 
     match cmd {
-        moto_stats::CMD_QUERY_METRICS => {
+        moto_sdk::stats::CMD_QUERY_METRICS => {
             let mut entries = crate::runtime::net::stats::query_metrics();
             entries.extend(crate::runtime::fs::stats::query_metrics());
-            moto_stats::respond_pods(conn.data_mut(), &entries, start_index);
+            moto_sdk::stats::respond_pods(conn.data_mut(), &entries, start_index);
         }
-        moto_stats::CMD_DESCRIBE => {
+        moto_sdk::stats::CMD_DESCRIBE => {
             let mut descs = crate::runtime::net::stats::descriptors();
             descs.extend(crate::runtime::fs::stats::descriptors());
-            moto_stats::respond_pods(conn.data_mut(), &descs, start_index);
+            moto_sdk::stats::respond_pods(conn.data_mut(), &descs, start_index);
         }
         _ => {
             let raw = conn.raw_channel();

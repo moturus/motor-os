@@ -38,10 +38,10 @@ mod motor {
     use std::io::Write;
     use std::time::Duration;
 
-    use moto_ipc::sync::ChannelSize;
-    use moto_ipc::sync::ClientConnection;
-    use moto_ipc::sync::RequestHeader;
-    use moto_ipc::sync::ResponseHeader;
+    use moto_sdk::ipc::sync::ChannelSize;
+    use moto_sdk::ipc::sync::ClientConnection;
+    use moto_sdk::ipc::sync::RequestHeader;
+    use moto_sdk::ipc::sync::ResponseHeader;
     use rmux::proto;
     use rmux::proto::Frames;
     use rmux::proto::ToClient;
@@ -104,7 +104,7 @@ mod motor {
     }
 
     fn errors() -> i32 {
-        use moto_ipc::sync::LocalServer;
+        use moto_sdk::ipc::sync::LocalServer;
         use moto_sys::SysHandle;
         use std::sync::mpsc::channel;
 

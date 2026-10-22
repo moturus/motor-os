@@ -195,7 +195,7 @@ pub fn is_shared_listener_child(args: &[String]) -> bool {
 }
 
 pub fn run_shared_listener_child() -> ! {
-    use moto_ipc::sync::{ChannelSize, LocalServer};
+    use moto_sdk::ipc::sync::{ChannelSize, LocalServer};
     use moto_sys::SysHandle;
     use std::io::Write;
 
@@ -208,7 +208,7 @@ pub fn run_shared_listener_child() -> ! {
 }
 
 pub fn test_shared_listener_restart() {
-    use moto_ipc::sync::{ChannelSize, ClientConnection};
+    use moto_sdk::ipc::sync::{ChannelSize, ClientConnection};
 
     let (mut first, mut first_stdout) = spawn_shared_listener();
     expect_shared_listener_ready(&mut first_stdout);

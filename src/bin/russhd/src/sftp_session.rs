@@ -28,7 +28,7 @@ pub struct SftpSession {
 struct OpenFile {
     file: tokio::fs::File,
     #[cfg(target_os = "motor")]
-    entry_id: moto_io::fs::EntryId,
+    entry_id: moto_sdk::io::fs::EntryId,
     path: String,
     writable: bool,
     pending_permissions: Option<SavedPermissions>,
@@ -38,7 +38,7 @@ struct OpenFile {
 type SavedPermissions = u32;
 
 #[cfg(target_os = "motor")]
-type SavedPermissions = moto_io::fs::RolePermissions;
+type SavedPermissions = moto_sdk::io::fs::RolePermissions;
 
 impl SftpSession {
     fn new_id(&mut self) -> u64 {
@@ -225,43 +225,43 @@ async fn handle_attributes(
 }
 
 #[cfg(target_os = "motor")]
-fn current_role() -> moto_io::fs::Role {
+fn current_role() -> moto_sdk::io::fs::Role {
     match moto_sys::caps::ProcessRole::from_caps(moto_sys::ProcessStaticPage::get().capabilities) {
-        moto_sys::caps::ProcessRole::System => moto_io::fs::Role::System,
-        moto_sys::caps::ProcessRole::Interactive => moto_io::fs::Role::Interactive,
-        moto_sys::caps::ProcessRole::None => moto_io::fs::Role::None,
+        moto_sys::caps::ProcessRole::System => moto_sdk::io::fs::Role::System,
+        moto_sys::caps::ProcessRole::Interactive => moto_sdk::io::fs::Role::Interactive,
+        moto_sys::caps::ProcessRole::None => moto_sdk::io::fs::Role::None,
     }
 }
 
 #[cfg(target_os = "motor")]
-fn to_motor_access(access: Access) -> moto_io::fs::AccessPermissions {
+fn to_motor_access(access: Access) -> moto_sdk::io::fs::AccessPermissions {
     match access {
-        Access::None => moto_io::fs::AccessPermissions::None,
-        Access::R => moto_io::fs::AccessPermissions::R,
-        Access::Rw => moto_io::fs::AccessPermissions::Rw,
-        Access::Rx => moto_io::fs::AccessPermissions::Rx,
-        Access::Rwx => moto_io::fs::AccessPermissions::Rwx,
+        Access::None => moto_sdk::io::fs::AccessPermissions::None,
+        Access::R => moto_sdk::io::fs::AccessPermissions::R,
+        Access::Rw => moto_sdk::io::fs::AccessPermissions::Rw,
+        Access::Rx => moto_sdk::io::fs::AccessPermissions::Rx,
+        Access::Rwx => moto_sdk::io::fs::AccessPermissions::Rwx,
     }
 }
 
 #[cfg(target_os = "motor")]
-fn from_motor_access(access: moto_io::fs::AccessPermissions) -> Access {
+fn from_motor_access(access: moto_sdk::io::fs::AccessPermissions) -> Access {
     match access {
-        moto_io::fs::AccessPermissions::None => Access::None,
-        moto_io::fs::AccessPermissions::R => Access::R,
-        moto_io::fs::AccessPermissions::Rw => Access::Rw,
-        moto_io::fs::AccessPermissions::Rx => Access::Rx,
-        moto_io::fs::AccessPermissions::Rwx => Access::Rwx,
+        moto_sdk::io::fs::AccessPermissions::None => Access::None,
+        moto_sdk::io::fs::AccessPermissions::R => Access::R,
+        moto_sdk::io::fs::AccessPermissions::Rw => Access::Rw,
+        moto_sdk::io::fs::AccessPermissions::Rx => Access::Rx,
+        moto_sdk::io::fs::AccessPermissions::Rwx => Access::Rwx,
     }
 }
 
 #[cfg(target_os = "motor")]
 fn translated_permissions(
-    mut permissions: moto_io::fs::RolePermissions,
+    mut permissions: moto_sdk::io::fs::RolePermissions,
     mode: u32,
     directory: bool,
-) -> moto_io::fs::RolePermissions {
-    use moto_io::fs::Role;
+) -> moto_sdk::io::fs::RolePermissions {
+    use moto_sdk::io::fs::Role;
 
     let normalized = NormalizedMode::from_posix(mode, directory);
     let owner = to_motor_access(normalized.owner);
@@ -282,17 +282,17 @@ fn translated_permissions(
 }
 
 #[cfg(target_os = "motor")]
-fn new_permissions(mode: u32, directory: bool) -> moto_io::fs::RolePermissions {
+fn new_permissions(mode: u32, directory: bool) -> moto_sdk::io::fs::RolePermissions {
     translated_permissions(
-        moto_io::fs::RolePermissions::all(moto_io::fs::AccessPermissions::Rwx),
+        moto_sdk::io::fs::RolePermissions::all(moto_sdk::io::fs::AccessPermissions::Rwx),
         mode,
         directory,
     )
 }
 
 #[cfg(target_os = "motor")]
-fn staging_permissions() -> moto_io::fs::RolePermissions {
-    use moto_io::fs::{AccessPermissions, Role, RolePermissions};
+fn staging_permissions() -> moto_sdk::io::fs::RolePermissions {
+    use moto_sdk::io::fs::{AccessPermissions, Role, RolePermissions};
 
     match current_role() {
         Role::System => RolePermissions::new(
@@ -315,9 +315,9 @@ fn staging_permissions() -> moto_io::fs::RolePermissions {
 
 #[cfg(target_os = "motor")]
 fn narrow_lower_roles(
-    mut permissions: moto_io::fs::RolePermissions,
-) -> moto_io::fs::RolePermissions {
-    use moto_io::fs::{AccessPermissions, Role};
+    mut permissions: moto_sdk::io::fs::RolePermissions,
+) -> moto_sdk::io::fs::RolePermissions {
+    use moto_sdk::io::fs::{AccessPermissions, Role};
 
     match current_role() {
         Role::System => {
@@ -334,8 +334,8 @@ fn narrow_lower_roles(
 /// from a lower role, that is, whether the file's current mode would expose
 /// the upload's contents to a role the client excluded.
 #[cfg(target_os = "motor")]
-fn would_expose_private_data(permissions: moto_io::fs::RolePermissions, mode: u32) -> bool {
-    use moto_io::fs::Role;
+fn would_expose_private_data(permissions: moto_sdk::io::fs::RolePermissions, mode: u32) -> bool {
+    use moto_sdk::io::fs::Role;
 
     let requested = translated_permissions(permissions, mode, false);
     let loses_read =
@@ -349,7 +349,7 @@ fn would_expose_private_data(permissions: moto_io::fs::RolePermissions, mode: u3
 
 #[cfg(target_os = "motor")]
 fn motor_io<T>(operation: impl Future<Output = moto_rt::Result<T>>) -> std::io::Result<T> {
-    moto_async::LocalRuntime::new()
+    moto_sdk::async_runtime::LocalRuntime::new()
         .block_on(operation)
         .map_err(|error| {
             std::io::Error::from_raw_os_error(i32::from(moto_rt::ErrorCode::from(error)))
@@ -357,18 +357,19 @@ fn motor_io<T>(operation: impl Future<Output = moto_rt::Result<T>>) -> std::io::
 }
 
 #[cfg(target_os = "motor")]
-fn path_permissions(path: &str) -> std::io::Result<moto_io::fs::RolePermissions> {
+fn path_permissions(path: &str) -> std::io::Result<moto_sdk::io::fs::RolePermissions> {
     motor_io(async {
-        let client = moto_io::fs::FsClient::connect()?;
+        let client = moto_sdk::io::fs::FsClient::connect()?;
         let (entry_id, _) = client.stat(&canonicalize_lexical(path)).await?;
-        client.metadata(entry_id).await?.permissions()
-    })
+        client.metadata(entry_id).await
+    })?
+    .permissions()
 }
 
 #[cfg(target_os = "motor")]
 async fn set_path_permissions(path: &str, permissions: SavedPermissions) -> std::io::Result<()> {
     motor_io(async {
-        let client = moto_io::fs::FsClient::connect()?;
+        let client = moto_sdk::io::fs::FsClient::connect()?;
         let (entry_id, _) = client.stat(&canonicalize_lexical(path)).await?;
         client.set_all_permissions(entry_id, permissions).await
     })
@@ -380,7 +381,7 @@ async fn set_file_permissions(
     permissions: SavedPermissions,
 ) -> std::io::Result<()> {
     motor_io(async {
-        moto_io::fs::FsClient::connect()?
+        moto_sdk::io::fs::FsClient::connect()?
             .set_all_permissions(file.entry_id, permissions)
             .await
     })
@@ -389,8 +390,8 @@ async fn set_file_permissions(
 #[cfg(target_os = "motor")]
 fn create_motor_entry(
     path: &str,
-    kind: moto_io::fs::EntryKind,
-    permissions: moto_io::fs::RolePermissions,
+    kind: moto_sdk::io::fs::EntryKind,
+    permissions: moto_sdk::io::fs::RolePermissions,
 ) -> std::io::Result<()> {
     use std::path::Path;
 
@@ -406,9 +407,9 @@ fn create_motor_entry(
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid SFTP file name")
         })?;
     motor_io(async {
-        let client = moto_io::fs::FsClient::connect()?;
+        let client = moto_sdk::io::fs::FsClient::connect()?;
         let (parent_id, parent_kind) = client.stat(parent).await?;
-        if parent_kind != moto_io::fs::EntryKind::Directory {
+        if parent_kind != moto_sdk::io::fs::EntryKind::Directory {
             return Err(moto_rt::Error::InvalidArgument);
         }
         client
@@ -439,7 +440,11 @@ async fn open_file(
     let mut actual_flags = pflags;
     if writable && original.is_none() && pflags.contains(OpenFlags::CREATE) {
         // A new upload is created private; close installs OPEN's mode.
-        match create_motor_entry(path, moto_io::fs::EntryKind::File, staging_permissions()) {
+        match create_motor_entry(
+            path,
+            moto_sdk::io::fs::EntryKind::File,
+            staging_permissions(),
+        ) {
             Ok(()) => {}
             Err(_error)
                 if !pflags.contains(OpenFlags::EXCLUDE) && std::path::Path::new(path).exists() =>
@@ -519,7 +524,7 @@ async fn open_file(
 async fn create_directory(path: &str, mode: Option<u32>) -> std::io::Result<()> {
     create_motor_entry(
         path,
-        moto_io::fs::EntryKind::Directory,
+        moto_sdk::io::fs::EntryKind::Directory,
         new_permissions(mode.unwrap_or(0o700), true),
     )
 }
@@ -549,10 +554,10 @@ async fn handle_attributes(
 
 #[cfg(target_os = "motor")]
 fn role_attributes(
-    permissions: moto_io::fs::RolePermissions,
+    permissions: moto_sdk::io::fs::RolePermissions,
     metadata: &std::fs::Metadata,
 ) -> FileAttributes {
-    use moto_io::fs::Role;
+    use moto_sdk::io::fs::Role;
 
     let directory = metadata.is_dir();
     let (owner, public) = match current_role() {
@@ -597,11 +602,11 @@ async fn installed_permissions(file: &OpenFile) -> std::io::Result<SavedPermissi
 #[cfg(target_os = "motor")]
 async fn installed_permissions(file: &OpenFile) -> std::io::Result<SavedPermissions> {
     motor_io(async {
-        moto_io::fs::FsClient::connect()?
+        moto_sdk::io::fs::FsClient::connect()?
             .metadata(file.entry_id)
-            .await?
-            .permissions()
-    })
+            .await
+    })?
+    .permissions()
 }
 
 #[cfg(unix)]
@@ -617,7 +622,7 @@ fn upload_permissions(
     mut current: SavedPermissions,
     requested: SavedPermissions,
 ) -> std::io::Result<SavedPermissions> {
-    use moto_io::fs::Role;
+    use moto_sdk::io::fs::Role;
     // A writable caller is at Rw or Rwx, from which every normalized file
     // mode is permitted. Check the higher-role ceiling before deferring it.
     if !current.get(current_role()).can_write()
@@ -932,7 +937,7 @@ impl russh_sftp::server::Handler for SftpSession {
         };
         #[cfg(target_os = "motor")]
         let entry_id = motor_io(async {
-            moto_io::fs::FsClient::connect()?
+            moto_sdk::io::fs::FsClient::connect()?
                 .stat(&canonicalize_lexical(&path))
                 .await
                 .map(|(id, _)| id)

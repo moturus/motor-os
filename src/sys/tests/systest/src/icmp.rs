@@ -1,7 +1,7 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use moto_sys_io::icmp::IcmpEchoClient;
+use moto_sdk::sys_io::icmp::IcmpEchoClient;
 
 pub fn run_all_tests() {
     let mut client = IcmpEchoClient::connect().unwrap();

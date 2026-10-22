@@ -332,9 +332,9 @@ impl TerminalMode {
         };
         let mut mode = Self { output };
         mode.write(&[
-            moto_tooling::mode2048::DECRQM,
-            moto_tooling::mode2048::ENABLE,
-            moto_tooling::mode2048::TEXT_AREA_QUERY,
+            moto_sdk::tooling::mode2048::DECRQM,
+            moto_sdk::tooling::mode2048::ENABLE,
+            moto_sdk::tooling::mode2048::TEXT_AREA_QUERY,
         ])?;
         Ok(mode)
     }
@@ -344,7 +344,7 @@ impl TerminalMode {
     }
 
     fn disable(&mut self) {
-        let _ = self.write(&[moto_tooling::mode2048::DISABLE]);
+        let _ = self.write(&[moto_sdk::tooling::mode2048::DISABLE]);
         self.output = None;
     }
 

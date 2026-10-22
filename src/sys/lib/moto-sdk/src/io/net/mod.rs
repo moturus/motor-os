@@ -1,0 +1,28 @@
+//! Motor OS native networking client (design section 5).
+//!
+//! Sibling of [`crate::io::fs`]: the TCP/UDP channel runtime and socket state
+//! machines, plus an async-first API. Unlike `fs`, the net stack is
+//! multi-threaded (thread-per-channel, caller-thread copies), so it uses
+//! `Arc`/`Mutex`/atomics rather than the single-threaded `Rc`/`Cell` of `fs`.
+//!
+//! The Stage-F extraction moves the pieces here in dependency order; the vdso
+//! keeps a thin veneer (poll-registry synthesis, the FD table, ABI shims).
+
+pub mod channel;
+pub(crate) mod inner_rx_stream;
+mod pending_stream_tx;
+pub mod readiness;
+pub mod tcp;
+pub mod udp;
+pub mod vsock;
+mod wait;
+
+pub use channel::{NetClient, NetDriver, Reservation, ReserveError, connect};
+
+/// Which half of a native byte stream to shut down.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Shutdown {
+    Read,
+    Write,
+    Both,
+}

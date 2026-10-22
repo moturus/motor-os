@@ -309,11 +309,14 @@ else
   cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/moto-sys/Cargo.toml"
 fi
 
-# Platform wire helpers are no_std in the image and unit-tested on the host.
+# The SDK's portable modules, host-tested with and without std; the rest of
+# the SDK is Motor-only and tested natively by full-test-dev.sh.
 if [ "$BUILD" = "release" ]; then
-  cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/lib/moto-tooling/Cargo.toml"
+  cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/lib/moto-sdk/Cargo.toml"
+  cargo test --quiet --release --no-default-features --manifest-path "$ROOT_DIR/src/sys/lib/moto-sdk/Cargo.toml"
 else
-  cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/moto-tooling/Cargo.toml"
+  cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/moto-sdk/Cargo.toml"
+  cargo test --quiet --no-default-features --manifest-path "$ROOT_DIR/src/sys/lib/moto-sdk/Cargo.toml"
 fi
 
 # The allocator crate (kernel heap and runtime) is host-tested. Release

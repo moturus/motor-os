@@ -1,4 +1,4 @@
-use async_fs::BLOCK_SIZE;
+use moto_sdk::async_fs::BLOCK_SIZE;
 use std::cell::RefCell;
 use std::io::{ErrorKind, Result};
 use std::ptr::NonNull;

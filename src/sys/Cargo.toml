@@ -1,32 +1,21 @@
 [workspace]
 members = [
   # system libraries (legacy, to be refactored)
-  "lib/async-fs",
   "lib/memfs",
-  "lib/moto-async",
   "lib/moto-dns",
-  "lib/moto-io-internal",
-  "lib/moto-ipc",
-  "lib/moto-log",
-  "lib/moto-mpmc",
-  "lib/moto-sys-io",
   "lib/motor-fs",
   "lib/timeq",
   "lib/virtio-async",
 
   # various generic tools (not Motor OS specific)
-  "lib/fittings",
   "lib/frusa",
 
   # system libraries
   "lib/moto-rt",
   "lib/moto-rt-cabi",
-  "lib/moto-stats",
+  "lib/moto-sdk",
   "lib/moto-sys",
   "lib/rt.vdso",
-
-  # various higher-level tools (Motor OS specific)
-  "lib/moto-tooling",
 
   # system binaries
   "dns-resolver",
@@ -51,11 +40,8 @@ members = [
 resolver = "2"
 
 [patch.crates-io]
-moto-ipc     = { path = "lib/moto-ipc"        }
-moto-log     = { path = "lib/moto-log"        }
 moto-rt      = { path = "lib/moto-rt"         }
 moto-sys     = { path = "lib/moto-sys"        }
-moto-sys-io  = { path = "lib/moto-sys-io"     }
 
 crossterm    = { git = "https://github.com/moturus/crossterm.git", branch = "motor-os-support" }
 mio          = { git = "https://github.com/moturus/mio.git", branch = "mio-motor-v1.0.4_2025-10-07" }

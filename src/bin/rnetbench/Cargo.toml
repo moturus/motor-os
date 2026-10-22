@@ -11,8 +11,8 @@ clap = { version = "4.5.4", default-features = false, features = ["derive", "err
 
 # Per-phase perf metric reports (src/stats.rs); Motor-only.
 [target.'cfg(target_os = "motor")'.dependencies]
-moto-stats = { path = "../../sys/lib/moto-stats" }
-moto-sys   = { path = "../../sys/lib/moto-sys"   }
+moto-sdk = { path = "../../sys/lib/moto-sdk" }
+moto-sys = { path = "../../sys/lib/moto-sys" }
 
 [profile.dev]
 panic = "abort"

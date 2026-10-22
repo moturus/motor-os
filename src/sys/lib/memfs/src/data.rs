@@ -1,5 +1,5 @@
 use super::*;
-use async_fs::BLOCK_SIZE;
+use moto_sdk::async_fs::BLOCK_SIZE;
 const BLOCK_BYTES: u64 = BLOCK_SIZE as u64;
 
 fn end_offset(offset: u64, len: u64) -> Result<u64> {

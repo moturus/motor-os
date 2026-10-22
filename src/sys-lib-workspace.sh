@@ -4,10 +4,12 @@
 # that the developer image stages under /devtools/src/motor-os/sys/lib.
 #
 # The crates are the source_dirs of src/imager/motor-os-dev.yaml below that
-# path; the workspace manifest is the image's static file. Cargo.lock is
-# derived from src/sys/Cargo.lock, so native tests use the dependency versions
-# of the in-tree build. src/build-motor-os.sh vendors the workspace's
-# dependencies, and src/prepare-dev-image.sh installs its Cargo.lock.
+# path. The workspace manifest, and the empty tokio placeholder that fills the
+# lock entry of moto-sdk's Unix-only tokio, are the image's static files.
+# Cargo.lock is derived from src/sys/Cargo.lock, so native tests use the
+# dependency versions of the in-tree build. src/build-motor-os.sh vendors the
+# workspace's dependencies, and src/prepare-dev-image.sh installs its
+# Cargo.lock.
 
 set -euo pipefail
 
@@ -48,7 +50,7 @@ for entry in "${crates[@]}"; do
 		--exclude=__pycache__ --exclude=target -cf - "${source##*/}" |
 		tar -C "$destination" -xf -
 done
-cp "$ROOT_DIR/img_files/motor-os-dev$STAGED/Cargo.toml" "$destination/Cargo.toml"
+cp -R "$ROOT_DIR/img_files/motor-os-dev$STAGED/." "$destination/"
 cp "$ROOT_DIR/src/sys/Cargo.lock" "$destination/Cargo.lock"
 
 # Cargo keeps the locked versions and drops the packages this workspace does

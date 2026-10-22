@@ -75,7 +75,7 @@ struct ImageFile {
     source: PathBuf,
     destination: PathBuf,
     class: permissions::FileClass,
-    permissions: async_fs::RolePermissions,
+    permissions: moto_sdk::async_fs::RolePermissions,
 }
 
 async fn create_motorfs_partition_async(
@@ -85,11 +85,11 @@ async fn create_motorfs_partition_async(
     policy: &permissions::PermissionPolicy,
     data_partition_size_mb: u64,
 ) -> io::Result<()> {
-    use async_fs::FileSystem;
+    use moto_sdk::async_fs::FileSystem;
 
     let data_partition_size = data_partition_size_mb * 1024 * 1024;
 
-    let bd = async_fs::file_block_device::AsyncFileBlockDevice::create(
+    let bd = moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice::create(
         result_path.to_str().unwrap().into(),
         data_partition_size / 4096,
     )
@@ -98,7 +98,7 @@ async fn create_motorfs_partition_async(
     println!("creating Motor FS in {:?}", result_path);
 
     fs.set_all_permissions_image_admin(
-        async_fs::Role::System,
+        moto_sdk::async_fs::Role::System,
         motor_fs::ROOT_DIR_ID,
         policy.directory_permissions(Path::new("/")),
     )
@@ -116,19 +116,19 @@ async fn create_motorfs_partition_async(
         let initial_permissions = if final_permissions.system.can_write() {
             final_permissions
         } else {
-            async_fs::RolePermissions::new(
-                async_fs::AccessPermissions::Rw,
-                async_fs::AccessPermissions::None,
-                async_fs::AccessPermissions::None,
+            moto_sdk::async_fs::RolePermissions::new(
+                moto_sdk::async_fs::AccessPermissions::Rw,
+                moto_sdk::async_fs::AccessPermissions::None,
+                moto_sdk::async_fs::AccessPermissions::None,
             )
         };
 
         let parent_id = util::motor_fs_create_dir_all(&mut fs, parent, policy).await?;
         let new_file_id = fs
             .create_entry(
-                async_fs::Role::System,
+                moto_sdk::async_fs::Role::System,
                 parent_id,
-                async_fs::EntryKind::File,
+                moto_sdk::async_fs::EntryKind::File,
                 filename,
                 initial_permissions,
             )
@@ -153,15 +153,20 @@ async fn create_motorfs_partition_async(
 
             assert_eq!(
                 sz,
-                fs.write(async_fs::Role::System, new_file_id, offset, &buf[..sz])
-                    .await?
+                fs.write(
+                    moto_sdk::async_fs::Role::System,
+                    new_file_id,
+                    offset,
+                    &buf[..sz]
+                )
+                .await?
             );
             offset += sz as u64;
         }
 
         if initial_permissions != final_permissions {
             fs.set_all_permissions_image_admin(
-                async_fs::Role::System,
+                moto_sdk::async_fs::Role::System,
                 new_file_id,
                 final_permissions,
             )
@@ -925,7 +930,7 @@ fn set_raw_output(config: &mut Config, output: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_fs::FileSystem;
+    use moto_sdk::async_fs::FileSystem;
 
     #[test]
     fn production_image_requires_ripgrep() {
@@ -1117,7 +1122,7 @@ mod tests {
             .directories
             .iter()
             .any(|path| path == "/devtools/tests/gears"));
-        assert_eq!(config.source_dirs.len(), 8);
+        assert_eq!(config.source_dirs.len(), 6);
         for (source, destination) in [
             ("src/bin/red", "/devtools/src/motor-os/bin/red"),
             ("src/bin/lorry", "/devtools/src/motor-os/bin/lorry"),
@@ -1144,10 +1149,7 @@ mod tests {
             })
             .collect();
         library_sources.sort_unstable();
-        assert_eq!(
-            library_sources,
-            ["moto-async", "moto-ipc", "moto-mpmc", "moto-rt", "moto-sys"]
-        );
+        assert_eq!(library_sources, ["moto-rt", "moto-sdk", "moto-sys"]);
     }
 
     #[test]
@@ -1509,23 +1511,25 @@ entries: []
         tokio::runtime::LocalRuntime::new()
             .unwrap()
             .block_on(async {
-                let device = async_fs::file_block_device::AsyncFileBlockDevice::open(
+                let device = moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice::open(
                     camino::Utf8Path::from_path(&partition).unwrap(),
                 )
                 .await?;
                 let fs = motor_fs::MotorFs::open(Box::new(device)).await?;
 
                 async fn entry(
-                    fs: &motor_fs::MotorFs<async_fs::file_block_device::AsyncFileBlockDevice>,
+                    fs: &motor_fs::MotorFs<
+                        moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice,
+                    >,
                     path: &Path,
-                ) -> io::Result<async_fs::EntryId> {
+                ) -> io::Result<moto_sdk::async_fs::EntryId> {
                     let mut id = motor_fs::ROOT_DIR_ID;
                     for component in path.components() {
                         let Component::Normal(name) = component else {
                             continue;
                         };
                         id = fs
-                            .stat(async_fs::Role::System, id, name.to_str().unwrap())
+                            .stat(moto_sdk::async_fs::Role::System, id, name.to_str().unwrap())
                             .await?
                             .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
                             .0;
@@ -1541,7 +1545,7 @@ entries: []
                 ] {
                     let id = entry(&fs, Path::new(path)).await?;
                     let mode = fs
-                        .metadata(async_fs::Role::System, id)
+                        .metadata(moto_sdk::async_fs::Role::System, id)
                         .await?
                         .permissions()?;
                     assert_eq!(permissions::mode_string(mode), expected, "{path}");

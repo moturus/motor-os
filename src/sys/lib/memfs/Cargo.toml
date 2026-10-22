@@ -5,8 +5,8 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-async-fs = { path = "../async-fs" }
 async-trait = "0.1.88"
+moto-sdk = { path = "../moto-sdk" }
 
 [target.'cfg(target_os = "motor")'.dependencies]
 moto-sys = { path = "../moto-sys" }

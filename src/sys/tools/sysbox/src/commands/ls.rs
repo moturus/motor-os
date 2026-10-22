@@ -82,11 +82,13 @@ fn permission_chars(permission: PermissionTriplet) -> [char; 3] {
 
 fn detailed_entry(
     name: String,
-    metadata: &moto_io::fs::Metadata,
+    metadata: &moto_sdk::io::fs::Metadata,
 ) -> moto_rt::Result<DetailedEntry> {
-    use moto_io::fs::{EntryKind, Role};
+    use moto_sdk::io::fs::{EntryKind, Role};
 
-    let kind = match metadata.try_kind()? {
+    // Std builds of the SDK report a corrupt metadata byte as a std error.
+    let corrupt = |_| moto_rt::Error::InvalidData;
+    let kind = match metadata.try_kind().map_err(corrupt)? {
         EntryKind::Directory => DetailedEntryKind::Directory,
         EntryKind::File => DetailedEntryKind::File,
     };
@@ -99,7 +101,7 @@ fn detailed_entry(
         .into_iter()
         .enumerate()
     {
-        let (read, write, execute) = metadata.access(role)?.triple();
+        let (read, write, execute) = metadata.access(role).map_err(corrupt)?.triple();
         permissions[idx] = PermissionTriplet {
             read,
             write,
@@ -128,8 +130,8 @@ fn entry_vanished(err: moto_rt::Error) -> bool {
 /// are skipped; an entry removed before that strands the cursor, and the
 /// error it produced is returned.
 async fn walk_dir(
-    client: &std::rc::Rc<moto_io::fs::FsClient>,
-    dir: moto_io::fs::EntryId,
+    client: &std::rc::Rc<moto_sdk::io::fs::FsClient>,
+    dir: moto_sdk::io::fs::EntryId,
 ) -> moto_rt::Result<Vec<DetailedEntry>> {
     let mut entries = Vec::new();
     let mut entry_id = client.get_first_entry(dir).await?;
@@ -153,7 +155,7 @@ async fn walk_dir(
 }
 
 fn read_entries(operand: &str, path: &Path) -> moto_rt::Result<Vec<DetailedEntry>> {
-    use moto_io::fs::{EntryKind, FsClient};
+    use moto_sdk::io::fs::{EntryKind, FsClient};
 
     let path = path
         .to_str()
@@ -161,7 +163,7 @@ fn read_entries(operand: &str, path: &Path) -> moto_rt::Result<Vec<DetailedEntry
         .to_owned();
     let operand = operand.to_owned();
 
-    moto_async::LocalRuntime::new().block_on(async move {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
         let client = FsClient::connect()?;
         let (id, kind) = client.stat(&path).await?;
         // A file operand lists itself, named as it was typed, as ls(1) does.

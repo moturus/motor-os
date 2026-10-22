@@ -5,7 +5,7 @@ use crate::permissions::{FileClass, PermissionPolicy};
 use crate::set::credentials::{self, Credentials};
 use crate::set::image::{self, Fs};
 use crate::set::{invalid, Input};
-use async_fs::{
+use moto_sdk::async_fs::{
     AccessPermissions, EntryId, EntryKind, FileSystem, Role, RolePermissions, BLOCK_SIZE,
 };
 use std::ffi::OsString;

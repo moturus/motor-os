@@ -15,14 +15,14 @@ use ipnetwork::IpNetwork;
 use virtio_async::virtio_net::NetDevice;
 use virtio_async::virtio_net::RxMeta;
 
-use moto_tooling::iobuf::IoBuf;
+use moto_sdk::iobuf::VirtioIoBuf;
 
 // Received frames travel with the per-frame metadata their virtio-net header
 // carried; today that is the L4 checksum verdict the netstack honors.
-type RxQueue = Rc<RefCell<VecDeque<(IoBuf, RxMeta)>>>;
+type RxQueue = Rc<RefCell<VecDeque<(VirtioIoBuf, RxMeta)>>>;
 // Egress packets travel with their TSO segment size (0 = a regular
 // MTU-bounded packet; nonzero = a TCP super-segment the device splits).
-type TxWork = (IoBuf, u16);
+type TxWork = (VirtioIoBuf, u16);
 
 /// Bytes owned by one admitted TX token before its packet size is known.
 /// [`BIG_BUF_SIZE`] is the largest buffer the token can consume.
@@ -59,7 +59,7 @@ impl TxQueueState {
         self.bytes -= TX_RESERVATION;
     }
 
-    fn push_packet(&mut self, packet: IoBuf, tso_seg_size: u16) {
+    fn push_packet(&mut self, packet: VirtioIoBuf, tso_seg_size: u16) {
         debug_assert!(packet.capacity() <= TX_RESERVATION);
         self.bytes -= TX_RESERVATION - packet.capacity();
         self.work.push_back((packet, tso_seg_size));
@@ -95,15 +95,15 @@ const BIG_BUF_SIZE: usize = 65536; // TSO TX super-segments.
 
 #[derive(Default, Clone)]
 struct BufCache {
-    small: Rc<RefCell<Vec<IoBuf>>>,
-    big: Rc<RefCell<Vec<IoBuf>>>,
+    small: Rc<RefCell<Vec<VirtioIoBuf>>>,
+    big: Rc<RefCell<Vec<VirtioIoBuf>>>,
 }
 
 impl BufCache {
     /// `None` when `len` exceeds the largest pooled buffer, or when the
     /// allocation fails. Both are for the caller to recover from: a device
     /// buffer is not worth aborting every connection on the machine for.
-    fn pop_buf(&self, len: usize) -> Option<IoBuf> {
+    fn pop_buf(&self, len: usize) -> Option<VirtioIoBuf> {
         let (pool, size) = if len <= SMALL_BUF_SIZE {
             (&self.small, SMALL_BUF_SIZE)
         } else if len <= BIG_BUF_SIZE {
@@ -117,10 +117,10 @@ impl BufCache {
                 buf.set_len(size);
                 buf
             })
-            .or_else(|| IoBuf::new_from_size_align(size))
+            .or_else(|| VirtioIoBuf::new_from_size_align(size))
     }
 
-    fn push_buf(&self, buf: IoBuf) {
+    fn push_buf(&self, buf: VirtioIoBuf) {
         if buf.capacity() <= SMALL_BUF_SIZE {
             self.small.borrow_mut().push(buf);
         } else {
@@ -145,9 +145,9 @@ pub(super) struct VirtioDevice {
     tx_queue: TxQueue,
 
     // The device will notify rx_notify when it updates rx_queue.
-    rx_notify: Rc<moto_async::LocalNotify>,
+    rx_notify: Rc<moto_sdk::async_runtime::LocalNotify>,
     // The device will listen on tx_notify for tx_queue updates.
-    tx_notify: Rc<moto_async::LocalNotify>,
+    tx_notify: Rc<moto_sdk::async_runtime::LocalNotify>,
     /// Largest Ethernet frame this device carries, headers included, which is
     /// what moto-netstack means by `max_transmission_unit`. See [`frame_mtu`].
     frame_mtu: usize,
@@ -245,14 +245,14 @@ impl VirtioDevice {
             stats: stats.clone(),
         };
 
-        let _ = moto_async::LocalRuntime::spawn(Self::rx_task(
+        let _ = moto_sdk::async_runtime::LocalRuntime::spawn(Self::rx_task(
             this.inner.clone(),
             this.rx_queue.clone(),
             this.rx_notify.clone(),
             this.buf_cache.clone(),
             stats.clone(),
         ));
-        let _ = moto_async::LocalRuntime::spawn(Self::tx_task(
+        let _ = moto_sdk::async_runtime::LocalRuntime::spawn(Self::tx_task(
             this.inner.clone(),
             this.tx_queue.clone(),
             this.tx_notify.clone(),
@@ -271,7 +271,7 @@ impl VirtioDevice {
     async fn rx_task(
         net_dev: Rc<NetDevice>,
         rx_queue: RxQueue,
-        rx_notify: Rc<moto_async::LocalNotify>,
+        rx_notify: Rc<moto_sdk::async_runtime::LocalNotify>,
         buf_cache: BufCache,
         stats: Rc<NetStats>,
     ) {
@@ -298,9 +298,9 @@ impl VirtioDevice {
         {
             log::debug!(
                 "\n\nNET: RX: current task: {}",
-                moto_async::current_task_id()
+                moto_sdk::async_runtime::current_task_id()
             );
-            moto_async::debug_current_task(true);
+            moto_sdk::async_runtime::debug_current_task(true);
         }
 
         loop {
@@ -365,8 +365,8 @@ impl VirtioDevice {
     async fn tx_task(
         net_dev: Rc<NetDevice>,
         tx_queue: TxQueue,
-        tx_notify: Rc<moto_async::LocalNotify>,
-        capacity_notify: Rc<moto_async::LocalNotify>,
+        tx_notify: Rc<moto_sdk::async_runtime::LocalNotify>,
+        capacity_notify: Rc<moto_sdk::async_runtime::LocalNotify>,
         buf_cache: BufCache,
         stats: Rc<NetStats>,
     ) {
@@ -418,7 +418,7 @@ impl VirtioDevice {
 }
 
 pub struct VirtioRxToken {
-    buf: ManuallyDrop<IoBuf>,
+    buf: ManuallyDrop<VirtioIoBuf>,
     buf_cache: BufCache,
     // The device vouched for this frame's L4 checksum, so the netstack must
     // not verify it (see RxMeta::l4_csum_vouched).
@@ -449,7 +449,7 @@ impl moto_netstack::phy::RxToken for VirtioRxToken {
 
 pub struct VirtioTxToken {
     tx_queue: TxQueue,
-    tx_notify: Rc<moto_async::LocalNotify>,
+    tx_notify: Rc<moto_sdk::async_runtime::LocalNotify>,
     buf_cache: BufCache,
     stats: Rc<NetStats>,
     // From PacketMeta::tso_seg_size via set_meta (the iface calls it just
@@ -857,8 +857,8 @@ pub(super) struct NetDev<'a> {
     icmp_identifiers_in_use: std::collections::HashSet<u16>,
 
     // This is the notify that drives the netstack device runtime in net.rs.
-    pub(super) device_runtime_notify: Rc<moto_async::LocalNotify>,
-    poll_waiters: Vec<moto_async::oneshot::Sender<()>>,
+    pub(super) device_runtime_notify: Rc<moto_sdk::async_runtime::LocalNotify>,
+    poll_waiters: Vec<moto_sdk::async_runtime::oneshot::Sender<()>>,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -1002,7 +1002,7 @@ impl<'a> NetDev<'a> {
                     moto_netstack::time::Instant::now(),
                 ),
                 // The loopback device has a self-contained runtime notify.
-                Rc::new(moto_async::LocalNotify::default()),
+                Rc::new(moto_sdk::async_runtime::LocalNotify::default()),
             ),
         };
         // The clock behind the cookie SYN|ACK's timestamp: the same one every
@@ -1072,8 +1072,8 @@ impl<'a> NetDev<'a> {
 
     /// Complete after one interface poll has attempted all currently ready
     /// egress. This deliberately says nothing about device completion.
-    pub(super) fn poll_completion(&mut self) -> moto_async::oneshot::Receiver<()> {
-        let (waiter, completion) = moto_async::oneshot();
+    pub(super) fn poll_completion(&mut self) -> moto_sdk::async_runtime::oneshot::Receiver<()> {
+        let (waiter, completion) = moto_sdk::async_runtime::oneshot();
         self.poll_waiters.push(waiter);
         self.device_runtime_notify.notify_one();
         completion
@@ -1575,7 +1575,7 @@ pub(crate) mod self_test {
 
         for _ in 0..2 {
             st_assert!(queue.reserve());
-            let packet = IoBuf::new_from_size_align(BIG_BUF_SIZE)
+            let packet = VirtioIoBuf::new_from_size_align(BIG_BUF_SIZE)
                 .ok_or_else(|| "could not allocate TX self-test buffer".to_owned())?;
             queue.push_packet(packet, 0);
         }

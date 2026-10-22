@@ -19,15 +19,15 @@ pub(crate) struct ChannelBudget {
 impl ChannelBudget {
     pub(crate) fn admit_net(
         &self,
-        sender: moto_ipc::io_channel::Sender,
-    ) -> Result<ClientSender, moto_ipc::io_channel::Sender> {
+        sender: moto_sdk::ipc::io_channel::Sender,
+    ) -> Result<ClientSender, moto_sdk::ipc::io_channel::Sender> {
         Self::admit(sender, &self.net, &self.fs)
     }
 
     pub(crate) fn admit_fs(
         &self,
-        sender: moto_ipc::io_channel::Sender,
-    ) -> Result<ClientSender, moto_ipc::io_channel::Sender> {
+        sender: moto_sdk::ipc::io_channel::Sender,
+    ) -> Result<ClientSender, moto_sdk::ipc::io_channel::Sender> {
         Self::admit(sender, &self.fs, &self.net)
     }
 
@@ -40,10 +40,10 @@ impl ChannelBudget {
     }
 
     fn admit(
-        sender: moto_ipc::io_channel::Sender,
+        sender: moto_sdk::ipc::io_channel::Sender,
         own: &Rc<Cell<usize>>,
         peer: &Cell<usize>,
-    ) -> Result<ClientSender, moto_ipc::io_channel::Sender> {
+    ) -> Result<ClientSender, moto_sdk::ipc::io_channel::Sender> {
         if !can_admit(own.get(), peer.get()) {
             return Err(sender);
         }
@@ -70,12 +70,12 @@ impl Drop for ChannelSlot {
 /// A sender whose shared slot lives until its last clone is dropped.
 #[derive(Clone)]
 pub(crate) struct ClientSender {
-    sender: moto_ipc::io_channel::Sender,
+    sender: moto_sdk::ipc::io_channel::Sender,
     _slot: Rc<ChannelSlot>,
 }
 
 impl Deref for ClientSender {
-    type Target = moto_ipc::io_channel::Sender;
+    type Target = moto_sdk::ipc::io_channel::Sender;
 
     fn deref(&self) -> &Self::Target {
         &self.sender

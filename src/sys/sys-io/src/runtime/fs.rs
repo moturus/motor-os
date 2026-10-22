@@ -1,12 +1,12 @@
-use async_fs::AccessPermissions;
-use async_fs::EntryId;
-use async_fs::Role;
-use async_fs::RolePermissions;
-use async_fs::{EntryKind, FileSystem};
 use async_trait::async_trait;
-use moto_async::AsFuture;
-use moto_sys_io::api_fs;
-use moto_sys_io::api_fs::FS_URL;
+use moto_sdk::async_fs::AccessPermissions;
+use moto_sdk::async_fs::EntryId;
+use moto_sdk::async_fs::Role;
+use moto_sdk::async_fs::RolePermissions;
+use moto_sdk::async_fs::{EntryKind, FileSystem};
+use moto_sdk::async_runtime::AsFuture;
+use moto_sdk::sys_io::api_fs;
+use moto_sdk::sys_io::api_fs::FS_URL;
 use std::cell::RefCell;
 use std::io::ErrorKind;
 use std::io::Result;
@@ -64,7 +64,7 @@ fn block_cache_blocks() -> usize {
     } else {
         (ram_mib / 32).max(1)
     };
-    ((cache_mib << 20) / async_fs::BLOCK_SIZE as u64) as usize
+    ((cache_mib << 20) / moto_sdk::async_fs::BLOCK_SIZE as u64) as usize
 }
 
 const _: () = {
@@ -111,7 +111,7 @@ impl FS {
     }
 
     /// Block cache hit/miss/dedup counters. Diagnostics only.
-    fn cache_stats(&self) -> Option<async_fs::block_cache::BlockCacheStats> {
+    fn cache_stats(&self) -> Option<moto_sdk::async_fs::block_cache::BlockCacheStats> {
         match self {
             FS::MotorFs(motor_fs) => Some(motor_fs.cache_stats()),
             FS::MemFs(_) => None,
@@ -275,7 +275,11 @@ impl FileSystem for FS {
     }
 
     /// The metadata of the directory entry.
-    async fn metadata(&self, role: Role, entry_id: EntryId) -> Result<async_fs::Metadata> {
+    async fn metadata(
+        &self,
+        role: Role,
+        entry_id: EntryId,
+    ) -> Result<moto_sdk::async_fs::Metadata> {
         match self {
             FS::MotorFs(motor_fs) => motor_fs.metadata(role, entry_id).await,
             FS::MemFs(fs) => fs.metadata_sync(role, entry_id),
@@ -385,7 +389,7 @@ pub(crate) struct RootFs(Rc<RefCell<mounts::MountTable>>);
 
 impl RootFs {
     pub(crate) fn root(&self) -> Result<mounts::Resolved> {
-        mounts::Resolved::on_mount(&self.0, 0, async_fs::ROOT_ID)
+        mounts::Resolved::on_mount(&self.0, 0, moto_sdk::async_fs::ROOT_ID)
     }
 
     pub(crate) async fn read_root_file(&self, path: &str) -> Result<Option<Vec<u8>>> {
@@ -448,7 +452,7 @@ struct PendingLockResponse {
     connection_id: u64,
     open_id: u64,
     sender: channel_budget::ClientSender,
-    response: moto_ipc::io_channel::Msg,
+    response: moto_sdk::ipc::io_channel::Msg,
 }
 
 pub(super) async fn init(
@@ -460,7 +464,7 @@ pub(super) async fn init(
 
     use zerocopy::FromZeros;
 
-    let first_block = moto_tooling::iobuf::IoBuf::new_from_size_align(4096).unwrap();
+    let first_block = moto_sdk::iobuf::VirtioIoBuf::new_from_size_align(4096).unwrap();
     let (first_block, res) =
         virtio_async::BlockDevice::post_read(block_device.clone(), 0, first_block)
             .await
@@ -473,8 +477,12 @@ pub(super) async fn init(
     })?;
 
     // The boot-time MBR read has completed; all later I/O shares this owner.
-    let (block_io, inbox) = moto_async::channel::channel(64);
-    moto_async::LocalRuntime::spawn(block_io::run(block_device.clone(), inbox, fs_stats.clone()));
+    let (block_io, inbox) = moto_sdk::async_runtime::channel::channel(64);
+    moto_sdk::async_runtime::LocalRuntime::spawn(block_io::run(
+        block_device.clone(),
+        inbox,
+        fs_stats.clone(),
+    ));
     let mut fs: Option<FS> = None;
     for pte in &mbr.entries {
         log::trace!("MBR PTE: {pte:?}");
@@ -544,7 +552,7 @@ pub(super) async fn init(
         spawn_stats: Default::default(),
         pager: Rc::new(spawn::pager::Pager::new(exec_locks)),
     };
-    moto_async::LocalRuntime::spawn(spawn::pager::run(runtime.clone(), pager_notify));
+    moto_sdk::async_runtime::LocalRuntime::spawn(spawn::pager::run(runtime.clone(), pager_notify));
 
     spawn_fs_listeners(runtime.clone()).await;
     stats::spawn_stats_responder(runtime.clone());
@@ -562,9 +570,9 @@ async fn spawn_fs_listeners(runtime: FsRuntime) {
 
 async fn spawn_new_listener(runtime: FsRuntime) {
     use std::sync::atomic::*;
-    let (started_tx, started_rx) = moto_async::oneshot();
+    let (started_tx, started_rx) = moto_sdk::async_runtime::oneshot();
 
-    moto_async::LocalRuntime::spawn(async move {
+    moto_sdk::async_runtime::LocalRuntime::spawn(async move {
         if let Err(err) = fs_listener(runtime.clone(), started_tx).await {
             log::debug!("fs_listener() failed: {err:?}");
             spawn_new_listener(runtime).await;
@@ -578,9 +586,9 @@ async fn spawn_new_listener(runtime: FsRuntime) {
 
 async fn fs_listener(
     runtime: FsRuntime,
-    started_tx: moto_async::oneshot::Sender<()>,
+    started_tx: moto_sdk::async_runtime::oneshot::Sender<()>,
 ) -> Result<()> {
-    let mut listener = core::pin::pin!(moto_ipc::io_channel::listen(FS_URL));
+    let mut listener = core::pin::pin!(moto_sdk::ipc::io_channel::listen(FS_URL));
 
     // Do a poll to ensure the listener has started listening.
     let (sender, mut receiver) = {
@@ -649,7 +657,7 @@ async fn fs_listener(
     //
     // So we are using mpsc to implement "tickets".
 
-    let (ticket_tx, mut ticket_rx) = moto_async::channel(MAX_IN_FLIGHT);
+    let (ticket_tx, mut ticket_rx) = moto_sdk::async_runtime::channel(MAX_IN_FLIGHT);
     // Pre-populate.
     for _ in 0..MAX_IN_FLIGHT {
         let _ = ticket_tx.send(()).await;
@@ -663,7 +671,7 @@ async fn fs_listener(
         // Now that we have a ticket, we can poll for msg.
         match receiver.recv().await {
             Ok(msg) => {
-                moto_async::LocalRuntime::spawn(request_task(
+                moto_sdk::async_runtime::LocalRuntime::spawn(request_task(
                     msg,
                     sender.clone(),
                     runtime.clone(),
@@ -677,7 +685,7 @@ async fn fs_listener(
                     requests_since_io = 0;
                     // Shared-memory replies can keep this client runnable forever.
                     // Poll kernel wakes so listeners and other clients also progress.
-                    moto_async::yield_to_io().await;
+                    moto_sdk::async_runtime::yield_to_io().await;
                 }
             }
             Err(_) => {
@@ -696,13 +704,13 @@ async fn fs_listener(
 /// larger task is mapped and unmapped for every request, so handler futures
 /// must not hold big buffers across awaits (checked by a self-test).
 async fn request_task(
-    msg: moto_ipc::io_channel::Msg,
+    msg: moto_sdk::ipc::io_channel::Msg,
     sender: channel_budget::ClientSender,
     runtime: FsRuntime,
     role: Role,
     can_write: bool,
     can_spawn: bool,
-    ticket_tx: moto_async::channel::Sender<()>,
+    ticket_tx: moto_sdk::async_runtime::channel::Sender<()>,
 ) {
     on_msg(msg, sender, runtime, role, can_write, can_spawn).await;
     let _ = ticket_tx.send(()).await;
@@ -710,7 +718,7 @@ async fn request_task(
 
 /// Freeing a held memfs ID is allowed under pressure. Resize's size-dependent
 /// check happens under the very guard used to mutate, in its handler.
-fn served_under_pressure(msg: &moto_ipc::io_channel::Msg, runtime: &FsRuntime) -> bool {
+fn served_under_pressure(msg: &moto_sdk::ipc::io_channel::Msg, runtime: &FsRuntime) -> bool {
     // The decoder owns the operation-byte layout (it is infallible and
     // allocation-free); reading the byte directly here would be a second
     // copy of that layout.
@@ -730,7 +738,7 @@ fn served_under_pressure(msg: &moto_ipc::io_channel::Msg, runtime: &FsRuntime) -
 }
 
 async fn on_msg(
-    msg: moto_ipc::io_channel::Msg,
+    msg: moto_sdk::ipc::io_channel::Msg,
     sender: channel_budget::ClientSender,
     runtime: FsRuntime,
     role: Role,
@@ -774,49 +782,59 @@ async fn on_msg(
     }
 
     if let Err(err) = match msg.command {
-        moto_sys_io::api_fs::CMD_STAT => on_cmd_stat(msg, &sender, runtime, role).await,
-        moto_sys_io::api_fs::CMD_STAT_PATH => on_cmd_stat_path(msg, &sender, runtime, role).await,
-        moto_sys_io::api_fs::CMD_CREATE_FILE => {
+        moto_sdk::sys_io::api_fs::CMD_STAT => on_cmd_stat(msg, &sender, runtime, role).await,
+        moto_sdk::sys_io::api_fs::CMD_STAT_PATH => {
+            on_cmd_stat_path(msg, &sender, runtime, role).await
+        }
+        moto_sdk::sys_io::api_fs::CMD_CREATE_FILE => {
             on_cmd_create_file(msg, &sender, runtime, role).await
         }
-        moto_sys_io::api_fs::CMD_CREATE_DIR => on_cmd_create_dir(msg, &sender, runtime, role).await,
-        moto_sys_io::api_fs::CMD_CREATE_WITH_PERMISSIONS => {
+        moto_sdk::sys_io::api_fs::CMD_CREATE_DIR => {
+            on_cmd_create_dir(msg, &sender, runtime, role).await
+        }
+        moto_sdk::sys_io::api_fs::CMD_CREATE_WITH_PERMISSIONS => {
             on_cmd_create_with_permissions(msg, &sender, runtime, role).await
         }
-        moto_sys_io::api_fs::CMD_WRITE => on_cmd_write(msg, &sender, runtime, role).await,
-        moto_sys_io::api_fs::CMD_READ => on_cmd_read(msg, &sender, runtime, role).await,
-        moto_sys_io::api_fs::CMD_METADATA => on_cmd_metadata(msg, &sender, runtime, role).await,
-        moto_sys_io::api_fs::CMD_SET_PERMISSIONS => {
+        moto_sdk::sys_io::api_fs::CMD_WRITE => on_cmd_write(msg, &sender, runtime, role).await,
+        moto_sdk::sys_io::api_fs::CMD_READ => on_cmd_read(msg, &sender, runtime, role).await,
+        moto_sdk::sys_io::api_fs::CMD_METADATA => {
+            on_cmd_metadata(msg, &sender, runtime, role).await
+        }
+        moto_sdk::sys_io::api_fs::CMD_SET_PERMISSIONS => {
             on_cmd_set_permissions(msg, &sender, runtime, role).await
         }
-        moto_sys_io::api_fs::CMD_SET_ALL_PERMISSIONS => {
+        moto_sdk::sys_io::api_fs::CMD_SET_ALL_PERMISSIONS => {
             on_cmd_set_all_permissions(msg, &sender, runtime, role).await
         }
-        moto_sys_io::api_fs::CMD_RESIZE => {
+        moto_sdk::sys_io::api_fs::CMD_RESIZE => {
             on_cmd_resize(msg, &sender, runtime, role, pressured).await
         }
-        moto_sys_io::api_fs::CMD_DELETE_ENTRY => {
+        moto_sdk::sys_io::api_fs::CMD_DELETE_ENTRY => {
             on_cmd_delete_entry(msg, &sender, runtime, role, pressured).await
         }
-        moto_sys_io::api_fs::CMD_FLUSH => on_cmd_flush(msg, &sender, runtime).await,
-        moto_sys_io::api_fs::CMD_GET_FIRST_ENTRY => {
+        moto_sdk::sys_io::api_fs::CMD_FLUSH => on_cmd_flush(msg, &sender, runtime).await,
+        moto_sdk::sys_io::api_fs::CMD_GET_FIRST_ENTRY => {
             on_cmd_get_first_entry(msg, &sender, runtime, role).await
         }
-        moto_sys_io::api_fs::CMD_GET_NEXT_ENTRY => {
+        moto_sdk::sys_io::api_fs::CMD_GET_NEXT_ENTRY => {
             on_cmd_get_next_entry(msg, &sender, runtime, role).await
         }
-        moto_sys_io::api_fs::CMD_GET_NAME => on_cmd_get_name(msg, &sender, runtime, role).await,
-        moto_sys_io::api_fs::CMD_MOVE_ENTRY => {
+        moto_sdk::sys_io::api_fs::CMD_GET_NAME => {
+            on_cmd_get_name(msg, &sender, runtime, role).await
+        }
+        moto_sdk::sys_io::api_fs::CMD_MOVE_ENTRY => {
             on_cmd_move_entry(msg, &sender, runtime, role, true).await
         }
-        moto_sys_io::api_fs::CMD_MOVE_NOREPLACE => {
+        moto_sdk::sys_io::api_fs::CMD_MOVE_NOREPLACE => {
             on_cmd_move_entry(msg, &sender, runtime, role, false).await
         }
-        moto_sys_io::api_fs::CMD_COPY_FILE_RANGE => {
+        moto_sdk::sys_io::api_fs::CMD_COPY_FILE_RANGE => {
             on_cmd_copy_file_range(msg, &sender, runtime, role).await
         }
-        moto_sys_io::api_fs::CMD_FILE_LOCK => on_cmd_file_lock(msg, &sender, runtime).await,
-        moto_sys_io::api_fs::CMD_SPAWN => spawn::on_cmd_spawn(msg, &sender, runtime, role).await,
+        moto_sdk::sys_io::api_fs::CMD_FILE_LOCK => on_cmd_file_lock(msg, &sender, runtime).await,
+        moto_sdk::sys_io::api_fs::CMD_SPAWN => {
+            spawn::on_cmd_spawn(msg, &sender, runtime, role).await
+        }
         api_fs::CMD_GET_MOUNTS => on_cmd_get_mounts(msg, &sender, runtime).await,
 
         cmd => {
@@ -855,7 +873,7 @@ fn evict_disconnected_connections(
         if !grants.is_empty() {
             // A try-lock request must not wait for another client to read its grant.
             let runtime = runtime.clone();
-            moto_async::LocalRuntime::spawn(async move {
+            moto_sdk::async_runtime::LocalRuntime::spawn(async move {
                 send_lock_grants(grants, &runtime).await;
             });
         }
@@ -863,7 +881,7 @@ fn evict_disconnected_connections(
 }
 
 async fn on_cmd_file_lock(
-    msg: moto_ipc::io_channel::Msg,
+    msg: moto_sdk::ipc::io_channel::Msg,
     sender: &channel_budget::ClientSender,
     runtime: FsRuntime,
 ) -> Result<()> {
@@ -968,8 +986,8 @@ async fn send_lock_grants(mut grants: Vec<PendingLockResponse>, runtime: &FsRunt
 }
 
 async fn on_cmd_stat(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
 ) -> Result<()> {
@@ -998,8 +1016,8 @@ async fn on_cmd_stat(
 // The per-component permission checks are the same `fs.stat` calls the
 // client would issue one round trip at a time.
 async fn on_cmd_stat_path(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
 ) -> Result<()> {
@@ -1011,8 +1029,8 @@ async fn on_cmd_stat_path(
 }
 
 async fn on_cmd_create_file(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
 ) -> Result<()> {
@@ -1045,8 +1063,8 @@ async fn on_cmd_create_file(
 }
 
 async fn on_cmd_create_with_permissions(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
 ) -> Result<()> {
@@ -1075,8 +1093,8 @@ async fn on_cmd_create_with_permissions(
 }
 
 async fn on_cmd_create_dir(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
 ) -> Result<()> {
@@ -1149,8 +1167,8 @@ fn default_directory_permissions(role: Role) -> RolePermissions {
 }
 
 async fn on_cmd_write(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
 ) -> Result<()> {
@@ -1166,7 +1184,7 @@ async fn on_cmd_write(
 
     // `len` comes from the (untrusted) client; reject anything that does not
     // fit into an io_page instead of panicking on the slice below.
-    if len as usize > moto_ipc::io_channel::PAGE_SIZE {
+    if len as usize > moto_sdk::ipc::io_channel::PAGE_SIZE {
         return Err(std::io::Error::from(ErrorKind::InvalidInput));
     }
 
@@ -1196,8 +1214,8 @@ async fn on_cmd_write(
 /// bytes actually written; a short count means a later chunk was cut short
 /// or failed after earlier chunks were written.
 async fn on_cmd_write_multi(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
 ) -> Result<()> {
@@ -1248,8 +1266,8 @@ async fn on_cmd_write_multi(
 }
 
 async fn on_cmd_read(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
 ) -> Result<()> {
@@ -1259,7 +1277,7 @@ async fn on_cmd_read(
 
     // Requests spanning more than one io_page get a multi-page response;
     // see `api_fs::READ_MAX_PAGES`.
-    if len as usize > moto_ipc::io_channel::PAGE_SIZE {
+    if len as usize > moto_sdk::ipc::io_channel::PAGE_SIZE {
         return on_cmd_read_multi(msg, sender, runtime, role, file, offset, len).await;
     }
 
@@ -1305,8 +1323,8 @@ async fn on_cmd_read(
 /// reassembles without extra metadata. On early EOF the response carries
 /// fewer pages than requested; `total_len` is authoritative.
 async fn on_cmd_read_multi(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
     file: mounts::Resolved,
@@ -1387,8 +1405,8 @@ async fn on_cmd_read_multi(
     // end of this message's window (the cursor + cached-window probe make
     // the per-message trigger cheap).
     let end = offset + total as u64;
-    if total == len as u32 && end.is_multiple_of(async_fs::BLOCK_SIZE as u64) {
-        spawn_readahead(runtime, file, end / async_fs::BLOCK_SIZE as u64);
+    if total == len as u32 && end.is_multiple_of(moto_sdk::async_fs::BLOCK_SIZE as u64) {
+        spawn_readahead(runtime, file, end / moto_sdk::async_fs::BLOCK_SIZE as u64);
     }
     Ok(())
 }
@@ -1402,10 +1420,12 @@ async fn on_cmd_read_multi(
 fn maybe_readahead(runtime: FsRuntime, file: mounts::Resolved, offset: u64, read: usize) {
     const TRIGGER_WINDOW: u64 = 16; // Matches the moto-io read batch size.
 
-    if read != async_fs::BLOCK_SIZE || !offset.is_multiple_of(async_fs::BLOCK_SIZE as u64) {
+    if read != moto_sdk::async_fs::BLOCK_SIZE
+        || !offset.is_multiple_of(moto_sdk::async_fs::BLOCK_SIZE as u64)
+    {
         return;
     }
-    let block_key = offset / (async_fs::BLOCK_SIZE as u64);
+    let block_key = offset / (moto_sdk::async_fs::BLOCK_SIZE as u64);
     if !block_key.is_multiple_of(TRIGGER_WINDOW) {
         return;
     }
@@ -1421,7 +1441,7 @@ fn spawn_readahead(runtime: FsRuntime, file: mounts::Resolved, first: u64) {
         .fs_stats
         .readahead_spawns
         .set(runtime.fs_stats.readahead_spawns.get() + 1);
-    moto_async::LocalRuntime::spawn(async move {
+    moto_sdk::async_runtime::LocalRuntime::spawn(async move {
         let Ok(fs) = file.read().await else {
             return;
         };
@@ -1430,8 +1450,8 @@ fn spawn_readahead(runtime: FsRuntime, file: mounts::Resolved, first: u64) {
 }
 
 async fn on_cmd_metadata(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
 ) -> Result<()> {
@@ -1452,8 +1472,8 @@ async fn on_cmd_metadata(
 }
 
 async fn on_cmd_set_permissions(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
 ) -> Result<()> {
@@ -1476,8 +1496,8 @@ async fn on_cmd_set_permissions(
 }
 
 async fn on_cmd_set_all_permissions(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
 ) -> Result<()> {
@@ -1504,8 +1524,8 @@ async fn on_cmd_set_all_permissions(
 }
 
 async fn on_cmd_resize(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
     pressured: bool,
@@ -1536,8 +1556,8 @@ async fn on_cmd_resize(
 }
 
 async fn on_cmd_delete_entry(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
     pressured: bool,
@@ -1563,8 +1583,8 @@ async fn on_cmd_delete_entry(
 }
 
 async fn on_cmd_flush(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
 ) -> Result<()> {
     let resp = api_fs::empty_resp_encode(
@@ -1579,8 +1599,8 @@ async fn on_cmd_flush(
 }
 
 async fn on_cmd_get_first_entry(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
 ) -> Result<()> {
@@ -1601,8 +1621,8 @@ async fn on_cmd_get_first_entry(
 }
 
 async fn on_cmd_get_next_entry(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
 ) -> Result<()> {
@@ -1625,8 +1645,8 @@ async fn on_cmd_get_next_entry(
 }
 
 async fn on_cmd_get_name(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
 ) -> Result<()> {
@@ -1651,8 +1671,8 @@ async fn on_cmd_get_name(
 }
 
 async fn on_cmd_move_entry(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
     replace: bool,
@@ -1725,8 +1745,8 @@ async fn move_entry(
 }
 
 async fn on_cmd_copy_file_range(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
 ) -> Result<()> {
@@ -1768,8 +1788,8 @@ async fn copy_file_range(
             .await;
     }
     // On the heap: a stack buffer would grow every request's task.
-    let mut buffer = spawn::try_zeroed(async_fs::BLOCK_SIZE)?;
-    let block = async_fs::BLOCK_SIZE as u64;
+    let mut buffer = spawn::try_zeroed(moto_sdk::async_fs::BLOCK_SIZE)?;
+    let block = moto_sdk::async_fs::BLOCK_SIZE as u64;
     let mut copied = 0;
     while copied < size {
         let src = from_offset + copied;
@@ -1811,8 +1831,8 @@ async fn copy_file_range(
 }
 
 async fn on_cmd_get_mounts(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
 ) -> Result<()> {
     let cursor = api_fs::get_mounts_req_decode(msg).map_err(map_native_error)?;

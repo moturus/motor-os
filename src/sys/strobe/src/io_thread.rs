@@ -1,5 +1,5 @@
 use crate::logging::{LogRecord, RawLogRecord};
-use moto_io::fs::{AccessPermissions, EntryKind, FsClient, RolePermissions};
+use moto_sdk::io::fs::{AccessPermissions, EntryKind, FsClient, RolePermissions};
 use moto_sys::SysHandle;
 use std::{
     collections::{HashMap, VecDeque},
@@ -30,12 +30,12 @@ const LOG_FILE_PERMISSIONS: RolePermissions = RolePermissions::new(
 );
 
 fn available_bytes() -> Option<u64> {
-    let provider = moto_stats::Collector::provider_by_name("sys-io")?;
-    let metric = moto_stats::Collector::describe(&provider)
+    let provider = moto_sdk::stats::Collector::provider_by_name("sys-io")?;
+    let metric = moto_sdk::stats::Collector::describe(&provider)
         .ok()?
         .into_iter()
         .find(|metric| metric.name == "fs.available_bytes")?;
-    moto_stats::Collector::read(&provider, metric.id, moto_stats::SCOPE_GLOBAL).ok()
+    moto_sdk::stats::Collector::read(&provider, metric.id, moto_sdk::stats::SCOPE_GLOBAL).ok()
 }
 
 fn oldest_previous_log() -> Option<PathBuf> {
@@ -73,7 +73,7 @@ fn reclaim_previous_logs() {
 /// connection that pressure refuses like any request.
 fn create_log_file(name: &str) -> std::io::Result<()> {
     reclaim_previous_logs();
-    moto_async::LocalRuntime::new()
+    moto_sdk::async_runtime::LocalRuntime::new()
         .block_on(async {
             let client = FsClient::connect()?;
             let (parent_id, kind) = client.stat(LOG_DIR_PATH).await?;

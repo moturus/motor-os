@@ -4,8 +4,8 @@ use std::cell::{Cell, RefCell};
 use std::io::{ErrorKind, Result as IoResult};
 use std::rc::Rc;
 
+use moto_sdk::iobuf::VirtioIoBuf;
 use moto_sys::sys_mem::PAGE_SIZE_SMALL;
-use moto_tooling::iobuf::IoBuf;
 
 use crate::WriteCompletion;
 use crate::virtio_device::{
@@ -302,8 +302,9 @@ fn validate_tx_header(raw: RawHeader, payload_len: u32) -> IoResult<()> {
 pub(crate) fn try_post_tx(
     queue: Rc<RefCell<Virtqueue>>,
     raw: RawHeader,
-    payload: Option<IoBuf>,
-) -> std::result::Result<WriteCompletion<Option<IoBuf>>, (std::io::Error, Option<IoBuf>)> {
+    payload: Option<VirtioIoBuf>,
+) -> std::result::Result<WriteCompletion<Option<VirtioIoBuf>>, (std::io::Error, Option<VirtioIoBuf>)>
+{
     let payload_data = match payload.as_ref() {
         Some(bytes) => {
             validate_payload_dma(bytes.capacity(), bytes.len(), bytes.phys_addr() as u64).map(
@@ -360,8 +361,8 @@ pub(crate) fn try_post_tx(
 /// pool until every published DMA chain has completed.
 pub(crate) struct TxPool {
     queue: Rc<RefCell<Virtqueue>>,
-    pages: Vec<IoBuf>,
-    completions: Vec<WriteCompletion<Option<IoBuf>>>,
+    pages: Vec<VirtioIoBuf>,
+    completions: Vec<WriteCompletion<Option<VirtioIoBuf>>>,
     drainer_waker: Option<std::task::LocalWaker>,
 }
 
@@ -383,7 +384,7 @@ impl TxPool {
             .try_reserve_exact(queue_size)
             .map_err(|_| ErrorKind::OutOfMemory)?;
         for _ in 0..page_count {
-            let page = IoBuf::new_from_size_align(PAGE_SIZE_SMALL as usize)
+            let page = VirtioIoBuf::new_from_size_align(PAGE_SIZE_SMALL as usize)
                 .ok_or(ErrorKind::OutOfMemory)?;
             validate_payload_dma(page.capacity(), page.capacity(), page.phys_addr() as u64)?;
             pages.push(page);
@@ -397,7 +398,7 @@ impl TxPool {
     }
 
     #[cfg(feature = "test-support")]
-    pub(crate) fn pages(&self) -> &[IoBuf] {
+    pub(crate) fn pages(&self) -> &[VirtioIoBuf] {
         &self.pages
     }
 
@@ -415,7 +416,7 @@ impl TxPool {
         } else {
             let mut page = self.pages.pop().ok_or(ErrorKind::WouldBlock)?;
             page.set_len(bytes.len());
-            <IoBuf as AsMut<[u8]>>::as_mut(&mut page).copy_from_slice(bytes);
+            <VirtioIoBuf as AsMut<[u8]>>::as_mut(&mut page).copy_from_slice(bytes);
             Some(page)
         };
         let completion = match try_post_tx(self.queue.clone(), raw, payload) {
@@ -466,7 +467,7 @@ impl TxPool {
 }
 
 pub(crate) struct RxCompletion {
-    completion: VqCompletion<IoBuf>,
+    completion: VqCompletion<VirtioIoBuf>,
 }
 
 impl RxCompletion {
@@ -479,7 +480,7 @@ impl RxCompletion {
     pub(crate) fn finish_ordered(
         mut self,
         ordered_head: u16,
-    ) -> (IoBuf, Result<PacketHeader, DecodeError>) {
+    ) -> (VirtioIoBuf, Result<PacketHeader, DecodeError>) {
         assert_eq!(self.head(), ordered_head, "ordered vsock RX head mismatch");
         let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
         let std::task::Poll::Ready((mut payload, used_len)) = self.completion.do_poll(&mut cx)
@@ -500,15 +501,15 @@ impl RxCompletion {
 /// and queue unchanged; successful publication exposes no old payload bytes.
 pub(crate) fn try_post_rx(
     queue: Rc<RefCell<Virtqueue>>,
-    payload: IoBuf,
-) -> std::result::Result<RxCompletion, (std::io::Error, IoBuf)> {
+    payload: VirtioIoBuf,
+) -> std::result::Result<RxCompletion, (std::io::Error, VirtioIoBuf)> {
     try_post_rx_with_notification::<true>(queue, payload)
 }
 
 fn try_post_rx_with_notification<const NOTIFY: bool>(
     queue: Rc<RefCell<Virtqueue>>,
-    mut payload: IoBuf,
-) -> std::result::Result<RxCompletion, (std::io::Error, IoBuf)> {
+    mut payload: VirtioIoBuf,
+) -> std::result::Result<RxCompletion, (std::io::Error, VirtioIoBuf)> {
     let payload_data = match validate_payload_dma(
         payload.capacity(),
         payload.capacity(),
@@ -560,7 +561,7 @@ fn try_post_rx_with_notification<const NOTIFY: bool>(
 
 pub(crate) struct PreparedRxPool {
     queue: Rc<RefCell<Virtqueue>>,
-    pages: Vec<IoBuf>,
+    pages: Vec<VirtioIoBuf>,
     completions: Vec<RxCompletion>,
 }
 
@@ -581,7 +582,7 @@ impl PreparedRxPool {
             .try_reserve_exact(count)
             .map_err(|_| ErrorKind::OutOfMemory)?;
         for _ in 0..count {
-            let page = IoBuf::new_from_size_align(PAGE_SIZE_SMALL as usize)
+            let page = VirtioIoBuf::new_from_size_align(PAGE_SIZE_SMALL as usize)
                 .ok_or(ErrorKind::OutOfMemory)?;
             validate_payload_dma(page.capacity(), page.capacity(), page.phys_addr() as u64)?;
             pages.push(page);
@@ -594,7 +595,7 @@ impl PreparedRxPool {
     }
 
     #[cfg(feature = "test-support")]
-    pub(crate) fn pages(&self) -> &[IoBuf] {
+    pub(crate) fn pages(&self) -> &[VirtioIoBuf] {
         &self.pages
     }
 

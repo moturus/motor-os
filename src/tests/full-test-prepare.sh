@@ -72,7 +72,8 @@ cargo build --quiet --locked "${profile_args[@]}" \
   --manifest-path "$ROOT_DIR/src/bin/gears-mock-provider/Cargo.toml"
 host_build --manifest-path "$ROOT_DIR/src/sys/sys-init/Cargo.toml"
 host_build --manifest-path "$ROOT_DIR/src/sys/lib/moto-sys/Cargo.toml"
-host_build --manifest-path "$ROOT_DIR/src/sys/lib/moto-tooling/Cargo.toml"
+host_build --manifest-path "$ROOT_DIR/src/sys/lib/moto-sdk/Cargo.toml"
+host_build --no-default-features --manifest-path "$ROOT_DIR/src/sys/lib/moto-sdk/Cargo.toml"
 host_build --manifest-path "$ROOT_DIR/src/sys/lib/frusa/Cargo.toml"
 # The same feature closure full-test.sh tests the netstack under: a different
 # one compiles different code, and would be built again by the suite.

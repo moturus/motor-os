@@ -10,9 +10,9 @@ pub(super) mod self_test;
 mod vdso;
 
 use super::FsRuntime;
-use async_fs::{AccessPermissions, EntryId, EntryKind, FileSystem, Role};
+use moto_sdk::async_fs::{AccessPermissions, EntryId, EntryKind, FileSystem, Role};
+use moto_sdk::sys_io::api_fs;
 use moto_sys::{SysHandle, SysMem, SysObj, syscalls::RaiiHandle};
-use moto_sys_io::api_fs;
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::io::{ErrorKind, Result};
@@ -111,7 +111,7 @@ async fn read_exact_at(
     mut offset: u64,
     mut dst: &mut [u8],
 ) -> Result<()> {
-    let block = async_fs::BLOCK_SIZE as u64;
+    let block = moto_sdk::async_fs::BLOCK_SIZE as u64;
     let fs = entry.read().await?;
     while !dst.is_empty() {
         entry.healthy()?;
@@ -137,7 +137,7 @@ async fn read_range(
     dst: &mut [u8],
 ) -> Result<()> {
     const BATCH: usize = 64 * 4096;
-    let block = async_fs::BLOCK_SIZE as u64;
+    let block = moto_sdk::async_fs::BLOCK_SIZE as u64;
     let entry = runtime.resolve(entry)?;
     let mut done = 0;
     while done < dst.len() {
@@ -567,8 +567,8 @@ async fn load_image(
 }
 
 pub(super) async fn on_cmd_spawn(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
 ) -> Result<()> {

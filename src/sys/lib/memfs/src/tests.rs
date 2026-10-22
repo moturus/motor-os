@@ -1,5 +1,5 @@
 use super::*;
-use async_fs::{BLOCK_SIZE, FileSystem, ROOT_ID};
+use moto_sdk::async_fs::{BLOCK_SIZE, FileSystem, ROOT_ID};
 use std::future::Future;
 
 const MODE: RolePermissions = RolePermissions::all(AccessPermissions::Rwx);

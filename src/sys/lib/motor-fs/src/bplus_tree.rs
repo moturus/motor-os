@@ -9,9 +9,9 @@ use crate::BlockType;
 use crate::DirEntryBlock;
 use crate::Superblock;
 use crate::Txn;
-use async_fs::AsyncBlockDevice;
-use async_fs::BLOCK_SIZE;
 use bytemuck::Pod;
+use moto_sdk::async_fs::AsyncBlockDevice;
+use moto_sdk::async_fs::BLOCK_SIZE;
 use std::io::ErrorKind;
 use std::io::Result;
 

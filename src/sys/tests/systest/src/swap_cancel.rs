@@ -55,7 +55,7 @@ fn run_worker(swap: bool) -> ! {
     let token = Arc::new(AtomicU64::new(0));
     let peer_handle = Arc::new(AtomicU64::new(0));
     let main_handle = moto_sys::current_thread();
-    let before = crate::kernel_metric("direct_switch", moto_stats::provider::KERNEL);
+    let before = crate::kernel_metric("direct_switch", moto_sdk::stats::provider::KERNEL);
     let peer_token = token.clone();
     let published_handle = peer_handle.clone();
     std::thread::spawn(move || {
@@ -83,7 +83,8 @@ fn run_worker(swap: bool) -> ! {
         if index == ready_index {
             if swap {
                 assert!(
-                    crate::kernel_metric("direct_switch", moto_stats::provider::KERNEL) > before,
+                    crate::kernel_metric("direct_switch", moto_sdk::stats::provider::KERNEL)
+                        > before,
                     "worker never entered the direct-switch path"
                 );
             }

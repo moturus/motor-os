@@ -2,8 +2,8 @@ use std::collections::VecDeque;
 use std::mem::size_of;
 use std::sync::{Arc, Condvar, Mutex};
 
-use moto_ipc::sync::{ChannelSize, ClientConnection, ResponseHeader};
-use moto_log::implementation::{ConnectRequest, ConnectResponse, RawLogRequest};
+use moto_sdk::ipc::sync::{ChannelSize, ClientConnection, ResponseHeader};
+use moto_sdk::log::implementation::{ConnectRequest, ConnectResponse, RawLogRequest};
 
 use crate::output::Output;
 

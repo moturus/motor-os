@@ -201,8 +201,8 @@ for normal cleanup. The limit bounds server work, not client-side rollback.
 | [virtio-async/virtio_vsock.rs](../src/sys/lib/virtio-async/src/virtio_vsock.rs) | Device initialization, bounded DMA pools, ordered packet/event reception, and TX submission. |
 | [sys-io/runtime/vsock/](../src/sys/sys-io/src/runtime/vsock/) | `Connection` owns protocol phase, RX storage/credit, and shutdown flags; helpers manage buffers, tuple admission, and listener backlog. |
 | [sys-io/runtime/net/vsock.rs](../src/sys/sys-io/src/runtime/net/vsock.rs) | Protocol pumps, native IPC, client ownership, pending accepts/shutdowns, and cleanup. |
-| [moto-sys-io/api_vsock.rs](../src/sys/lib/moto-sys-io/src/api_vsock.rs) | Native control-message layouts and checked codecs. |
-| [moto-io/net/vsock.rs](../src/sys/lib/moto-io/src/net/vsock.rs) | Native streams/listeners, application waits, and client IPC resources within moto-io's `no_std` boundary. |
+| [moto-sdk/sys_io/api_vsock.rs](../src/sys/lib/moto-sdk/src/sys_io/api_vsock.rs) | Native control-message layouts and checked codecs. |
+| [moto-sdk/io/net/vsock.rs](../src/sys/lib/moto-sdk/src/io/net/vsock.rs) | Native streams/listeners, application waits, and client IPC resources within the SDK's `no_std` boundary. |
 
 Vsock reuses the NET endpoint, channel budget, socket IDs, reservations,
 shared pages, and cancellation. Its protocol is independent of Ethernet, IP,

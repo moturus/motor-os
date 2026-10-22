@@ -3,9 +3,11 @@
 use super::{ConstructionLock, FsRuntime};
 use crate::runtime::fs;
 use crate::self_test::st_assert_eq;
-use async_fs::{AccessPermissions, EntryId, EntryKind, FileSystem, Role, RolePermissions};
-use moto_ipc::io_channel;
-use moto_sys_io::api_fs;
+use moto_sdk::async_fs::{
+    AccessPermissions, EntryId, EntryKind, FileSystem, Role, RolePermissions,
+};
+use moto_sdk::ipc::io_channel;
+use moto_sdk::sys_io::api_fs;
 use std::task::Poll;
 
 /// A construction reference on an executable for tests outside this module,

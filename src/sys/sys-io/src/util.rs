@@ -1,4 +1,4 @@
-use async_fs::FileSystem;
+use moto_sdk::async_fs::FileSystem;
 use std::rc::Rc;
 
 pub fn map_err_into_native(err: std::io::Error) -> moto_rt::Error {
@@ -51,9 +51,9 @@ pub fn map_native_error(err: moto_rt::Error) -> std::io::Error {
 
 #[allow(unused)]
 pub async fn stat(
-    fs: Rc<moto_async::LocalMutex<crate::runtime::fs::FS>>,
+    fs: Rc<moto_sdk::async_runtime::LocalMutex<crate::runtime::fs::FS>>,
     filename: &str,
-) -> std::io::Result<Option<(async_fs::EntryId, async_fs::EntryKind)>> {
+) -> std::io::Result<Option<(moto_sdk::async_fs::EntryId, moto_sdk::async_fs::EntryKind)>> {
     if !filename.starts_with('/') {
         return Err(std::io::ErrorKind::InvalidFilename.into());
     }
@@ -62,8 +62,8 @@ pub async fn stat(
 
     let mut fs_mut = fs.lock().await;
 
-    let mut parent_id = async_fs::ROOT_ID;
-    let mut entry_kind = async_fs::EntryKind::File;
+    let mut parent_id = moto_sdk::async_fs::ROOT_ID;
+    let mut entry_kind = moto_sdk::async_fs::EntryKind::File;
 
     for &path in &paths[1..] {
         let trimmed = path.trim();
@@ -71,7 +71,9 @@ pub async fn stat(
             return Err(std::io::ErrorKind::InvalidFilename.into());
         }
 
-        let Some((entry_id, kind)) = fs_mut.stat(async_fs::Role::System, parent_id, path).await?
+        let Some((entry_id, kind)) = fs_mut
+            .stat(moto_sdk::async_fs::Role::System, parent_id, path)
+            .await?
         else {
             return Ok(None);
         };
@@ -85,9 +87,9 @@ pub async fn stat(
 
 #[allow(unused)]
 pub async fn create_file(
-    fs: Rc<moto_async::LocalMutex<crate::runtime::fs::FS>>,
+    fs: Rc<moto_sdk::async_runtime::LocalMutex<crate::runtime::fs::FS>>,
     filename: &str,
-) -> std::io::Result<async_fs::EntryId> {
+) -> std::io::Result<moto_sdk::async_fs::EntryId> {
     let Some((dir, file)) = filename.rsplit_once('/') else {
         return Err(std::io::ErrorKind::InvalidFilename.into());
     };
@@ -96,26 +98,26 @@ pub async fn create_file(
         return Err(std::io::ErrorKind::InvalidFilename.into());
     };
 
-    if !matches!(entry_kind, async_fs::EntryKind::Directory) {
+    if !matches!(entry_kind, moto_sdk::async_fs::EntryKind::Directory) {
         return Err(std::io::ErrorKind::InvalidFilename.into());
     };
 
     let mut fs_mut = fs.lock().await;
     fs_mut
         .create_entry(
-            async_fs::Role::System,
+            moto_sdk::async_fs::Role::System,
             dir_id,
-            async_fs::EntryKind::File,
+            moto_sdk::async_fs::EntryKind::File,
             file,
-            async_fs::RolePermissions::all(async_fs::AccessPermissions::Rwx),
+            moto_sdk::async_fs::RolePermissions::all(moto_sdk::async_fs::AccessPermissions::Rwx),
         )
         .await
 }
 
 #[allow(unused)]
 pub async fn write_file(
-    fs: &Rc<moto_async::LocalMutex<crate::runtime::fs::FS>>,
-    file_id: async_fs::EntryId,
+    fs: &Rc<moto_sdk::async_runtime::LocalMutex<crate::runtime::fs::FS>>,
+    file_id: moto_sdk::async_fs::EntryId,
     offset: u64,
     bytes: &[u8],
 ) -> std::io::Result<usize> {
@@ -131,7 +133,7 @@ pub async fn write_file(
         first_len as usize,
         fs_mut
             .write(
-                async_fs::Role::System,
+                moto_sdk::async_fs::Role::System,
                 file_id,
                 offset,
                 &bytes[..(first_len as usize)]
@@ -145,7 +147,7 @@ pub async fn write_file(
             second_len as usize,
             fs_mut
                 .write(
-                    async_fs::Role::System,
+                    moto_sdk::async_fs::Role::System,
                     file_id,
                     offset + first_len,
                     &bytes[(first_len as usize)..]

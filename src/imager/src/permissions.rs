@@ -1,4 +1,4 @@
-use async_fs::{AccessPermissions, RolePermissions};
+use moto_sdk::async_fs::{AccessPermissions, RolePermissions};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};

@@ -158,7 +158,7 @@ impl Pressure {
 /// every [`RECOVERY_POLL`] until the kernel clears it, re-arms what was
 /// parked, and parks itself again.
 pub(super) fn spawn_recovery(runtime: super::NetRuntime) {
-    moto_async::LocalRuntime::spawn(async move {
+    moto_sdk::async_runtime::LocalRuntime::spawn(async move {
         let pressure = runtime.pressure.clone();
         loop {
             core::future::poll_fn(|cx| {
@@ -172,7 +172,7 @@ pub(super) fn spawn_recovery(runtime: super::NetRuntime) {
             .await;
 
             while active() {
-                moto_async::sleep(RECOVERY_POLL).await;
+                moto_sdk::async_runtime::sleep(RECOVERY_POLL).await;
             }
 
             // Reset the edge before re-arming: an episode starting mid-rearm

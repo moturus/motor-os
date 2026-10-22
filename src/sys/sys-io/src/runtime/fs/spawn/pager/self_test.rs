@@ -2,7 +2,7 @@
 
 use super::{FsRuntime, Mapping, PAGE, PageBuf, elf, serve};
 use crate::self_test::{st_assert, st_assert_eq};
-use async_fs::{AccessPermissions, EntryKind, FileSystem, Role, RolePermissions};
+use moto_sdk::async_fs::{AccessPermissions, EntryKind, FileSystem, Role, RolePermissions};
 use moto_sys::{SysHandle, SysMem, SysObj, syscalls::RaiiHandle};
 use std::task::Poll;
 
@@ -16,7 +16,10 @@ pub(in crate::runtime::fs) async fn coalesced_windows(runtime: &FsRuntime) -> Re
     Ok(())
 }
 
-async fn check_mount(runtime: &FsRuntime, parent: async_fs::EntryId) -> Result<(), String> {
+async fn check_mount(
+    runtime: &FsRuntime,
+    parent: moto_sdk::async_fs::EntryId,
+) -> Result<(), String> {
     let name = format!(
         ".pager-window-test-{}",
         moto_rt::time::Instant::now().as_u64()
@@ -42,7 +45,7 @@ async fn check_mount(runtime: &FsRuntime, parent: async_fs::EntryId) -> Result<(
     let entry = parent.export(local).map_err(|err| err.to_string())?;
 
     let result = async {
-        let bytes = vec![b'x'; async_fs::BLOCK_SIZE];
+        let bytes = vec![b'x'; moto_sdk::async_fs::BLOCK_SIZE];
         {
             let mut fs = parent.write().await.map_err(|err| err.to_string())?;
             for offset in (0..8 * PAGE).step_by(bytes.len()) {
@@ -101,7 +104,7 @@ async fn check_mount(runtime: &FsRuntime, parent: async_fs::EntryId) -> Result<(
 async fn check_windows(
     runtime: &FsRuntime,
     id: u64,
-    entry: async_fs::EntryId,
+    entry: moto_sdk::async_fs::EntryId,
 ) -> Result<(), String> {
     serve(runtime.clone(), id, PAGE).await;
     serve(runtime.clone(), id, 2 * PAGE).await;
@@ -135,7 +138,7 @@ async fn check_windows(
 async fn check_skips(
     runtime: &FsRuntime,
     id: u64,
-    entry: async_fs::EntryId,
+    entry: moto_sdk::async_fs::EntryId,
     pages: &[u64],
 ) -> Result<(), String> {
     let resolved = runtime.resolve(entry).map_err(|err| err.to_string())?;

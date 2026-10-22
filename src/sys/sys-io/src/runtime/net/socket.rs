@@ -70,7 +70,7 @@ pub(super) struct SocketBase {
 
 pub(super) struct IpSocketBackend {
     device_idx: usize,
-    device_notify: Rc<moto_async::LocalNotify>,
+    device_notify: Rc<moto_sdk::async_runtime::LocalNotify>,
     local_addr: SocketAddr,
 }
 
@@ -183,7 +183,7 @@ impl IpSocketBackend {
         socket_id.into()
     }
 
-    pub(super) fn device_notify(&self) -> Rc<moto_async::LocalNotify> {
+    pub(super) fn device_notify(&self) -> Rc<moto_sdk::async_runtime::LocalNotify> {
         self.device_notify.clone()
     }
 }

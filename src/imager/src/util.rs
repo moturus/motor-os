@@ -2,9 +2,9 @@
 
 use std::path::Path;
 
-use async_fs::file_block_device::AsyncFileBlockDevice;
-use async_fs::EntryId;
-use async_fs::FileSystem;
+use moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice;
+use moto_sdk::async_fs::EntryId;
+use moto_sdk::async_fs::FileSystem;
 use motor_fs::MotorFs;
 
 pub async fn motor_fs_create_dir_all(
@@ -24,14 +24,16 @@ pub async fn motor_fs_create_dir_all(
         }
         destination.push(filename);
 
-        let stat_result = fs.stat(async_fs::Role::System, parent_id, filename).await?;
+        let stat_result = fs
+            .stat(moto_sdk::async_fs::Role::System, parent_id, filename)
+            .await?;
         parent_id = if let Some((entry_id, _)) = stat_result {
             entry_id
         } else {
             fs.create_entry(
-                async_fs::Role::System,
+                moto_sdk::async_fs::Role::System,
                 parent_id,
-                async_fs::EntryKind::Directory,
+                moto_sdk::async_fs::EntryKind::Directory,
                 filename,
                 policy.directory_permissions(&destination),
             )

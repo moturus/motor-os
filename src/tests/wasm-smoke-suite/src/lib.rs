@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use moto_stats::Collector;
+use moto_sdk::stats::Collector;
 use moto_sys::stats::{MemoryStats, ProcessInfoV1};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;

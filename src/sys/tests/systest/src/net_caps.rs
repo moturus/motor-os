@@ -30,8 +30,8 @@ fn with_deadline<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + '
 
 /// A raw client's first RPC ends in a channel error, not a response.
 async fn raw_denied_rpc() {
-    let (sender, mut receiver) = moto_ipc::io_channel::connect("sys-io").unwrap();
-    let mut request = moto_sys_io::api_vsock::availability_request();
+    let (sender, mut receiver) = moto_sdk::ipc::io_channel::connect("sys-io").unwrap();
+    let mut request = moto_sdk::sys_io::api_vsock::availability_request();
     request.id = 1;
     // The peer may already be gone; the receive below reports that either way.
     let _ = sender.send(request).await;
@@ -46,7 +46,7 @@ async fn raw_denied_rpc() {
 
 /// Sys-io drops an idle denied peer without waiting for a request.
 async fn raw_denied_idle() {
-    let (_sender, mut receiver) = moto_ipc::io_channel::connect("sys-io").unwrap();
+    let (_sender, mut receiver) = moto_sdk::ipc::io_channel::connect("sys-io").unwrap();
     let response = bounded_output(receiver.recv(), DEADLINE_SECS)
         .await
         .expect("idle denied peer was not dropped");
@@ -64,12 +64,16 @@ pub fn check_denied(port: u16) {
     });
     assert_eq!(std::io::ErrorKind::NotConnected, error.kind(), "{error:?}");
 
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         // The native connect returns before sys-io's decision; its RPCs fail.
         let (client, driver_task) = host_channel().await;
         assert_eq!(
             Some(Err(moto_rt::Error::NotConnected)),
-            bounded_output(moto_io::net::vsock::availability(&client), DEADLINE_SECS).await
+            bounded_output(
+                moto_sdk::io::net::vsock::availability(&client),
+                DEADLINE_SECS
+            )
+            .await
         );
         drop(client);
         assert!(bounded(driver_task, DEADLINE_SECS).await);
@@ -108,11 +112,15 @@ pub fn run_without_vsock_child(args: &[String]) -> ! {
         stream.read_exact(&mut byte).unwrap();
         assert_eq!(b"v", &byte);
     });
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = host_channel().await;
         assert_eq!(
             Some(Err(moto_rt::Error::NotAllowed)),
-            bounded_output(moto_io::net::vsock::availability(&client), DEADLINE_SECS).await
+            bounded_output(
+                moto_sdk::io::net::vsock::availability(&client),
+                DEADLINE_SECS
+            )
+            .await
         );
         drain_host_channel(client, driver_task).await;
     });

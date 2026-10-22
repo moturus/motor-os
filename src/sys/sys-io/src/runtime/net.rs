@@ -1,7 +1,7 @@
 use ipnetwork::IpNetwork;
 use moto_netstack::wire::{IpCidr, IpEndpoint, Ipv4Cidr, Ipv6Cidr};
+use moto_sdk::sys_io::api_net::{self, NetCmd};
 use moto_sys::SysHandle;
-use moto_sys_io::api_net::{self, NetCmd};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -41,7 +41,7 @@ pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
 
 /// What a deferred listening-pool replenishment needs to resume: the oneshot
 /// the replacement task is parked on (see `socket/tcp.rs`).
-type HalfOpenBudget = half_open::HalfOpenBudget<moto_async::oneshot::Sender<()>>;
+type HalfOpenBudget = half_open::HalfOpenBudget<moto_sdk::async_runtime::oneshot::Sender<()>>;
 
 struct ClientConnection {
     sender: channel_budget::ClientSender,
@@ -153,7 +153,7 @@ struct NetRuntime {
 
     // A fixed temporary filename is safe only while resolver publications are
     // serialized; the newest waiter recomputes the aggregate after acquiring.
-    dns_write_lock: Rc<moto_async::LocalMutex<()>>,
+    dns_write_lock: Rc<moto_sdk::async_runtime::LocalMutex<()>>,
 
     channel_budget: Rc<channel_budget::ChannelBudget>,
 }
@@ -170,7 +170,7 @@ impl NetRuntime {
     fn vsock_availability_status(
         &self,
         handle: SysHandle,
-        msg: &moto_ipc::io_channel::Msg,
+        msg: &moto_sdk::ipc::io_channel::Msg,
     ) -> moto_rt::ErrorCode {
         let inner = self.inner.borrow();
         if inner.clients.get(&handle).unwrap().capabilities & moto_sys::caps::CAP_VSOCK == 0 {
@@ -187,7 +187,7 @@ impl NetRuntime {
 
     async fn vsock_availability(
         &self,
-        mut msg: moto_ipc::io_channel::Msg,
+        mut msg: moto_sdk::ipc::io_channel::Msg,
         sender: &channel_budget::ClientSender,
     ) {
         msg.status = self.vsock_availability_status(sender.remote_handle(), &msg);
@@ -217,7 +217,7 @@ impl NetRuntime {
     fn spawn_device_runtime(&self, device_idx: usize) {
         let this = self.clone();
 
-        let _ = moto_async::LocalRuntime::spawn(async move {
+        let _ = moto_sdk::async_runtime::LocalRuntime::spawn(async move {
             let notify = this.inner.borrow().devices[device_idx]
                 .device_runtime_notify
                 .clone();
@@ -227,7 +227,7 @@ impl NetRuntime {
             // load the notify branch below wins nearly every time, so arming a
             // fresh timer per iteration would queue -- and immediately cancel
             // -- ~80K timers/sec.
-            let mut timer: Option<moto_async::Sleep> = None;
+            let mut timer: Option<moto_sdk::async_runtime::Sleep> = None;
 
             loop {
                 this.stats.poll_runs.set(this.stats.poll_runs.get() + 1);
@@ -256,7 +256,7 @@ impl NetRuntime {
                         this.inner.borrow_mut().devices[device_idx].take_tcp_cookie_restores();
                     for restore in restores {
                         let runtime = this.clone();
-                        moto_async::LocalRuntime::spawn(async move {
+                        moto_sdk::async_runtime::LocalRuntime::spawn(async move {
                             socket::MotoSocket::create_tcp_restored_socket(
                                 &runtime, device_idx, restore,
                             )
@@ -288,13 +288,13 @@ impl NetRuntime {
                             // measured from now, an unchanged delay moves the
                             // deadline *later* every iteration, which is
                             // exactly the case this keeps out of the queue.
-                            let now = moto_async::Instant::now();
+                            let now = moto_sdk::async_runtime::Instant::now();
                             let deadline = now + delay;
                             let reusable = timer.as_ref().is_some_and(|armed| {
                                 armed.deadline() > now && armed.deadline() <= deadline
                             });
                             if !reusable {
-                                timer = Some(moto_async::sleep_until(deadline));
+                                timer = Some(moto_sdk::async_runtime::sleep_until(deadline));
                             }
 
                             // Dropping the select! only drops the borrow, so
@@ -311,7 +311,7 @@ impl NetRuntime {
                     moto_netstack::iface::PollResult::SocketStateChanged => {
                         // Yield back to the executor: this allows the awakened socket tasks
                         // to run and read their data.
-                        moto_async::yield_now().await;
+                        moto_sdk::async_runtime::yield_now().await;
                     }
                 }
             }
@@ -319,10 +319,10 @@ impl NetRuntime {
     }
 
     async fn spawn_new_listener(&self) {
-        let (started_tx, started_rx) = moto_async::oneshot();
+        let (started_tx, started_rx) = moto_sdk::async_runtime::oneshot();
 
         let this = self.clone();
-        moto_async::LocalRuntime::spawn(async move {
+        moto_sdk::async_runtime::LocalRuntime::spawn(async move {
             // net_listener() replenishes the accept pool itself once a client
             // connects (before serving it), so a consumed listener is replaced
             // at connect time rather than at disconnect time. An Err is a
@@ -339,7 +339,10 @@ impl NetRuntime {
                     Ok(()) => return,
                     Err(err) => {
                         log::debug!("net_listener() failed: {err:?}");
-                        moto_async::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                        moto_sdk::async_runtime::sleep(std::time::Duration::from_millis(
+                            backoff_ms,
+                        ))
+                        .await;
                         backoff_ms = (backoff_ms * 10).min(1000);
                     }
                 }
@@ -358,13 +361,14 @@ impl NetRuntime {
     /// channel closes; the wait is bounded so a client that never sends
     /// cannot pin the slot.
     async fn refuse_client(
-        sender: moto_ipc::io_channel::Sender,
-        mut receiver: moto_ipc::io_channel::Receiver,
+        sender: moto_sdk::ipc::io_channel::Sender,
+        mut receiver: moto_sdk::ipc::io_channel::Receiver,
     ) {
         use futures::FutureExt;
 
-        let mut deadline =
-            core::pin::pin!(moto_async::sleep(std::time::Duration::from_secs(2)).fuse());
+        let mut deadline = core::pin::pin!(
+            moto_sdk::async_runtime::sleep(std::time::Duration::from_secs(2)).fuse()
+        );
         let mut first_rpc = core::pin::pin!(receiver.recv().fuse());
         futures::select! {
             msg = first_rpc => {
@@ -380,9 +384,9 @@ impl NetRuntime {
 
     async fn net_listener(
         &self,
-        started_tx: Option<moto_async::oneshot::Sender<()>>,
+        started_tx: Option<moto_sdk::async_runtime::oneshot::Sender<()>>,
     ) -> Result<()> {
-        let mut listener = core::pin::pin!(moto_ipc::io_channel::listen("sys-io"));
+        let mut listener = core::pin::pin!(moto_sdk::ipc::io_channel::listen("sys-io"));
 
         // Do a poll to ensure the listener has started listening.
         let (sender, mut receiver) = {
@@ -498,7 +502,7 @@ impl NetRuntime {
         const MAX_IN_FLIGHT: usize = 64;
         const INLINE_DATA_YIELD_BUDGET: u8 = 32;
 
-        let (ticket_tx, mut ticket_rx) = moto_async::channel(MAX_IN_FLIGHT);
+        let (ticket_tx, mut ticket_rx) = moto_sdk::async_runtime::channel(MAX_IN_FLIGHT);
         // Pre-populate.
         for _ in 0..MAX_IN_FLIGHT {
             let _ = ticket_tx.send(()).await;
@@ -527,7 +531,7 @@ impl NetRuntime {
                             // A client can keep this ring permanently ready.
                             // Poll kernel I/O and put this task behind work
                             // discovered there before draining another batch.
-                            moto_async::yield_to_io().await;
+                            moto_sdk::async_runtime::yield_to_io().await;
                         }
                         continue;
                     }
@@ -539,7 +543,7 @@ impl NetRuntime {
                     let sender = sender.clone();
                     let this = self.clone();
                     let ticket_tx = ticket_tx.clone();
-                    moto_async::LocalRuntime::spawn(async move {
+                    moto_sdk::async_runtime::LocalRuntime::spawn(async move {
                         let remote_handle = sender.remote_handle();
                         if this.client_is_active(remote_handle) {
                             this.on_msg(msg, sender).await;
@@ -765,7 +769,7 @@ impl NetRuntime {
         }
 
         let this = self.clone();
-        moto_async::LocalRuntime::spawn(async move {
+        moto_sdk::async_runtime::LocalRuntime::spawn(async move {
             let _writer = this.dns_write_lock.lock().await;
             let servers = {
                 let inner = this.inner.borrow();
@@ -807,7 +811,11 @@ impl NetRuntime {
         }))
     }
 
-    async fn on_msg(&self, msg: moto_ipc::io_channel::Msg, sender: channel_budget::ClientSender) {
+    async fn on_msg(
+        &self,
+        msg: moto_sdk::ipc::io_channel::Msg,
+        sender: channel_budget::ClientSender,
+    ) {
         let Ok(net_cmd) = NetCmd::try_from(msg.command) else {
             let remote_handle = sender.remote_handle();
 
@@ -1016,7 +1024,7 @@ pub(super) async fn init(
         )),
         orphan_lingers: Rc::new(Cell::new(0)),
         fs: fs.root_fs(),
-        dns_write_lock: Rc::new(moto_async::LocalMutex::new(())),
+        dns_write_lock: Rc::new(moto_sdk::async_runtime::LocalMutex::new(())),
         channel_budget,
     };
 

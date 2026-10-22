@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use moto_io::net::udp::UdpSocket as NativeUdpSocket;
-use moto_ipc::io_channel;
+use moto_sdk::io::net::udp::UdpSocket as NativeUdpSocket;
+use moto_sdk::ipc::io_channel;
 
 fn test_udp_basic() {
     let a1 = std::net::SocketAddr::parse_ascii(b"127.0.0.1:1234").unwrap();
@@ -57,7 +57,7 @@ fn test_udp_wildcard_bind_selects_address() {
 }
 
 fn test_native_udp_ttl() {
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = crate::net_harness::host_channel().await;
         {
             let socket = NativeUdpSocket::bind_reserved(
@@ -85,7 +85,7 @@ fn test_native_udp_ttl() {
 }
 
 fn test_native_udp_size_limit() {
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = crate::net_harness::host_channel().await;
         {
             let socket = NativeUdpSocket::bind_reserved(
@@ -403,7 +403,7 @@ fn test_cancelled_native_io_waiters_are_removed() {
     }
 
     let addr = std::net::SocketAddr::parse_ascii(b"127.0.0.1:0").unwrap();
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = crate::net_harness::host_channel().await;
         let socket = NativeUdpSocket::bind_reserved(client.try_reserve().unwrap(), &addr, None)
             .await
@@ -479,7 +479,7 @@ fn test_native_udp_tx_byte_limit() {
     let destination = std::net::SocketAddr::parse_ascii(b"127.0.0.1:9").unwrap();
     let datagram = vec![0_u8; moto_rt::net::MAX_UDP_PAYLOAD];
 
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = crate::net_harness::host_channel().await;
         let socket = NativeUdpSocket::bind_reserved(client.try_reserve().unwrap(), &addr, None)
             .await
@@ -508,7 +508,7 @@ fn test_native_udp_tx_byte_limit() {
 fn test_native_udp_rx_queue_limit() {
     let addr = std::net::SocketAddr::parse_ascii(b"127.0.0.1:0").unwrap();
 
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = crate::net_harness::host_channel().await;
         let socket = NativeUdpSocket::bind_reserved(client.try_reserve().unwrap(), &addr, None)
             .await
@@ -556,7 +556,7 @@ fn test_native_close_ends_udp_io() {
 
     let addr = std::net::SocketAddr::parse_ascii(b"127.0.0.1:0").unwrap();
     let destination = std::net::SocketAddr::parse_ascii(b"127.0.0.1:9").unwrap();
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = crate::net_harness::host_channel().await;
         let socket = NativeUdpSocket::bind_reserved(client.try_reserve().unwrap(), &addr, None)
             .await
@@ -660,7 +660,7 @@ fn test_udp_tx_progresses_after_page_free() {
     receiver.set_nonblocking(true).unwrap();
     let destination = receiver.local_addr().unwrap();
 
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = crate::net_harness::host_channel().await;
         let queued_socket = NativeUdpSocket::bind_reserved(
             client.try_reserve().unwrap(),
@@ -881,12 +881,19 @@ fn send_fragment(
     destination: std::net::SocketAddr,
 ) {
     let msg = if size == 0 {
-        let mut msg = moto_sys_io::api_net::udp_socket_tx_rx_empty_msg(socket_id, &destination);
+        let mut msg =
+            moto_sdk::sys_io::api_net::udp_socket_tx_rx_empty_msg(socket_id, &destination);
         msg.payload.args_16_mut()[9] = fragment_id;
         msg
     } else {
         let page = connection.alloc_page(u64::MAX).unwrap();
-        moto_sys_io::api_net::udp_socket_tx_rx_msg(socket_id, page, fragment_id, size, &destination)
+        moto_sdk::sys_io::api_net::udp_socket_tx_rx_msg(
+            socket_id,
+            page,
+            fragment_id,
+            size,
+            &destination,
+        )
     };
     connection.send(msg).unwrap();
 }
@@ -907,7 +914,7 @@ fn send_valid_fragment(
     let ack = recv_raw(connection);
     assert_eq!(
         ack.command,
-        moto_sys_io::api_net::NetCmd::UdpSocketTxRxAck as u16
+        moto_sdk::sys_io::api_net::NetCmd::UdpSocketTxRxAck as u16
     );
 }
 
@@ -917,7 +924,9 @@ pub(crate) fn run_malformed_fragment_child(kind: &str) {
     let connection = io_channel::ClientConnection::connect("sys-io").unwrap();
     let bind_addr = "127.0.0.1:0".parse().unwrap();
     connection
-        .send(moto_sys_io::api_net::bind_udp_socket_request(&bind_addr, 0))
+        .send(moto_sdk::sys_io::api_net::bind_udp_socket_request(
+            &bind_addr, 0,
+        ))
         .unwrap();
     let response = recv_raw(&connection);
     response.status().unwrap();

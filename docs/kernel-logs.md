@@ -477,8 +477,8 @@ successful-write diagnostics on that path originally fed back into the next
   (`src/sys/lib/motor-fs/src/txn_log.rs:251`);
 - a write that no flush follows commits on the timeout path, which records
   `committing batch {txn_id} on timeout` (`txn_log.rs:189`);
-- async-fs records `BD: flushed.` after a successful block-device flush
-  (`src/sys/lib/async-fs/src/block_cache.rs:554`).
+- moto-sdk's `async_fs` records `BD: flushed.` after a successful
+  block-device flush (`src/sys/lib/moto-sdk/src/async_fs/block_cache.rs:539`).
 
 Left alone, every flush of `kernel.log` produces a debug line, which becomes
 the content of the next flush: the file never stops growing. All three lines

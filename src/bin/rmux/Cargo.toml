@@ -25,12 +25,12 @@ crossterm = { version = "0.29", default-features = false, features = [
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# Motor only: the client and server meet over `moto-ipc`, which tells each
+# Motor only: the client and server meet over the SDK's IPC, which tells each
 # end the other's capabilities (src/sys/ipc.rs). moto-rt is the path copy that
-# moto-ipc uses; crossterm keeps its own from crates.io, as in rush.
+# moto-sdk uses; crossterm keeps its own from crates.io, as in rush.
 [target.'cfg(not(unix))'.dependencies]
-moto-ipc = { path = "../../sys/lib/moto-ipc" }
 moto-rt = { path = "../../sys/lib/moto-rt" }
+moto-sdk = { path = "../../sys/lib/moto-sdk" }
 moto-sys = { path = "../../sys/lib/moto-sys" }
 
 # The Motor OS backend of crossterm, as `src/sys/Cargo.toml` patches it for the

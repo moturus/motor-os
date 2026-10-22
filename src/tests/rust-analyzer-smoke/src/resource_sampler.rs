@@ -15,7 +15,7 @@ mod native {
     use std::sync::mpsc::{self, TryRecvError};
     use std::time::{Duration, Instant};
 
-    use moto_stats::{Collector, MetricEntry};
+    use moto_sdk::stats::{Collector, MetricEntry};
     use moto_sys::stats::{MemoryStats, ProcessInfoV1};
     use rust_analyzer_smoke::transport::write_frame;
     use serde_json::json;

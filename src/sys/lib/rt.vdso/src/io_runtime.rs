@@ -17,7 +17,7 @@ type LocalBoxFuture = Pin<Box<dyn Future<Output = ()> + 'static>>;
 type TaskConstructor = Box<dyn FnOnce() -> LocalBoxFuture + Send + 'static>;
 
 struct Spawner {
-    tasks_tx: moto_async::channel::Sender<TaskConstructor>,
+    tasks_tx: moto_sdk::async_runtime::channel::Sender<TaskConstructor>,
 }
 
 static SPAWNER: AtomicUsize = AtomicUsize::new(SPAWNER_NONE);
@@ -36,7 +36,7 @@ where
 {
     let ctor: TaskConstructor = Box::new(move || Box::pin(make_task()));
     let spawner = get_spawner();
-    moto_async::block_on_sync(async {
+    moto_sdk::async_runtime::block_on_sync(async {
         let _ = spawner.tasks_tx.send(ctor).await;
     });
 }
@@ -71,7 +71,7 @@ fn get_spawner() -> &'static Spawner {
 }
 
 fn create_spawner() -> &'static Spawner {
-    let (tasks_tx, tasks_rx) = moto_async::channel(8);
+    let (tasks_tx, tasks_rx) = moto_sdk::async_runtime::channel(8);
     let spawner: &'static Spawner = Box::leak(Box::new(Spawner { tasks_tx }));
 
     let thread_param = Box::into_raw(Box::new(tasks_rx));
@@ -90,21 +90,23 @@ fn create_spawner() -> &'static Spawner {
 extern "C" fn runtime_thread(param: u64) {
     // Safety: uniquely owned; see create_spawner().
     let mut tasks_rx = *unsafe {
-        Box::from_raw(param as usize as *mut moto_async::channel::Receiver<TaskConstructor>)
+        Box::from_raw(
+            param as usize as *mut moto_sdk::async_runtime::channel::Receiver<TaskConstructor>,
+        )
     };
     moto_sys::set_current_thread_name("rt::io_runtime").unwrap();
 
-    moto_async::LocalRuntime::new().block_on(async move {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
         // The allocator's housekeeping rides the IO runtime thread: it
         // returns slab slack to the kernel (see rt_alloc.rs).
-        core::mem::drop(moto_async::LocalRuntime::spawn(
+        core::mem::drop(moto_sdk::async_runtime::LocalRuntime::spawn(
             crate::rt_alloc::reclaim_resident(),
         ));
         loop {
             let ctor = tasks_rx.recv().await.unwrap();
             // Residents run detached; dropping the JoinHandle does not
             // cancel the task.
-            core::mem::drop(moto_async::LocalRuntime::spawn(ctor()));
+            core::mem::drop(moto_sdk::async_runtime::LocalRuntime::spawn(ctor()));
         }
     });
 }

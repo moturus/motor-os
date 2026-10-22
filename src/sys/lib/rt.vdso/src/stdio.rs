@@ -5,11 +5,11 @@ use alloc::sync::Arc;
 use alloc::{boxed::Box, vec::Vec};
 use core::any::Any;
 use core::sync::atomic::*;
-use moto_ipc::stdio_pipe::StdioPipe;
 use moto_rt::poll::Interests;
 use moto_rt::poll::Token;
 use moto_rt::spinlock::SpinLock;
 use moto_rt::{E_BAD_HANDLE, E_INVALID_ARGUMENT, ErrorCode, RtFd};
+use moto_sdk::ipc::stdio_pipe::StdioPipe;
 use moto_sys::SysHandle;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -136,7 +136,7 @@ fn open_pipe(kind: StdioKind, data: &StdioData) -> Result<(StdioPipe, bool, bool
         }
         return Err(moto_rt::E_INVALID_ARGUMENT);
     };
-    let raw = moto_ipc::stdio_pipe::RawPipeData {
+    let raw = moto_sdk::ipc::stdio_pipe::RawPipeData {
         buf_addr: pipe_addr as usize,
         buf_size: pipe_size as usize,
         ipc_handle: handle,
@@ -444,7 +444,7 @@ impl PosixFile for SelfStdio {
 /// stream has been created and one completion group can cover them all.
 struct InheritedRelayTask {
     from: StdioKind,
-    to: moto_ipc::stdio_pipe::RawPipeData,
+    to: moto_sdk::ipc::stdio_pipe::RawPipeData,
     ctrl_c_process: Option<moto_sys::syscalls::RaiiHandle>,
 }
 
@@ -453,7 +453,7 @@ fn prepare_inherited_relay(
     to: *const u8,
     remote_process: SysHandle,
 ) -> Result<InheritedRelayTask, ErrorCode> {
-    use moto_ipc::stdio_pipe::RawPipeData;
+    use moto_sdk::ipc::stdio_pipe::RawPipeData;
 
     let from = match from {
         moto_rt::FD_STDIN => StdioKind::Stdin,
@@ -502,7 +502,7 @@ impl InheritedRelayTask {
 
 struct CtrlCRelay {
     source: Arc<StdioPipe>,
-    route: moto_ipc::stdio_pipe::CtrlCForwardRoute,
+    route: moto_sdk::ipc::stdio_pipe::CtrlCForwardRoute,
     child_process: moto_sys::syscalls::RaiiHandle,
     seen: u32,
 }
@@ -549,9 +549,9 @@ fn raise_child_ctrl_c(child_input: &StdioPipe, child_process: SysHandle) {
 fn apply_child_ctrl_c(
     child_input: &StdioPipe,
     child_process: SysHandle,
-    action: moto_ipc::stdio_pipe::CtrlCAction,
+    action: moto_sdk::ipc::stdio_pipe::CtrlCAction,
 ) {
-    use moto_ipc::stdio_pipe::CtrlCAction;
+    use moto_sdk::ipc::stdio_pipe::CtrlCAction;
 
     match action {
         CtrlCAction::Default => {
@@ -570,11 +570,11 @@ fn apply_child_ctrl_c(
 /// stream via the overflow stash.
 async fn relay_in(
     stdio: Arc<SelfStdio>,
-    to: moto_ipc::stdio_pipe::RawPipeData,
+    to: moto_sdk::ipc::stdio_pipe::RawPipeData,
     ctrl_c_process: Option<moto_sys::syscalls::RaiiHandle>,
 ) {
     use futures::future::Either;
-    use moto_async::AsFuture;
+    use moto_sdk::async_runtime::AsFuture;
 
     // Safety: the pair was made for this process; see make_pair().
     let dest = unsafe { StdioPipe::new_writer(to) };
@@ -601,7 +601,9 @@ async fn relay_in(
                 .reset_interest(moto_rt::poll::POLL_READABLE);
             break owned;
         }
-        let nap = core::pin::pin!(moto_async::sleep(core::time::Duration::from_millis(1)));
+        let nap = core::pin::pin!(moto_sdk::async_runtime::sleep(
+            core::time::Duration::from_millis(1)
+        ));
         dest_signal.rearm();
         if let Either::Right((result, _)) = futures::future::select(nap, &mut dest_signal).await
             && result.is_err()
@@ -717,7 +719,7 @@ async fn relay_in(
 /// own, as a task on the relay runtime. Exits when either pipe dies,
 /// draining what the child wrote first.
 async fn relay_out(stdio: Arc<SelfStdio>, dest: StdioPipe) {
-    use moto_async::AsFuture;
+    use moto_sdk::async_runtime::AsFuture;
 
     let mut buf = [0_u8; 80];
     let mut dest_dead = false;
@@ -729,7 +731,7 @@ async fn relay_out(stdio: Arc<SelfStdio>, dest: StdioPipe) {
     // signals, and could take the drain wake that a thread of this process
     // is about to wait for in a blocking write: wakes are per process.
     let mut dest_signal = dest.handle().as_future();
-    let mut room = moto_async::SysHandleFuture::new_disarmed(stdio.pipe.handle());
+    let mut room = moto_sdk::async_runtime::SysHandleFuture::new_disarmed(stdio.pipe.handle());
     loop {
         match dest.nonblocking_read(&mut buf) {
             Ok(sz) => {
@@ -754,7 +756,7 @@ async fn relay_out(stdio: Arc<SelfStdio>, dest: StdioPipe) {
 /// false if the pipe is gone.
 async fn relay_write(
     stdio: &SelfStdio,
-    room: &mut moto_async::SysHandleFuture,
+    room: &mut moto_sdk::async_runtime::SysHandleFuture,
     mut buf: &[u8],
 ) -> bool {
     // Claim per write instead of using with_impl: a user thread may
@@ -765,7 +767,7 @@ async fn relay_write(
             if let Some(owned) = stdio.inner.lock().take() {
                 break owned;
             }
-            moto_async::sleep(core::time::Duration::from_millis(1)).await;
+            moto_sdk::async_runtime::sleep(core::time::Duration::from_millis(1)).await;
         };
         let result = owned.pipe.nonblocking_write(buf);
         stdio.return_impl(owned);
@@ -827,8 +829,8 @@ enum PeerWait {
 /// `peer` is the future on the pipe's handle, kept by the relay for its
 /// lifetime (see relay_in) and re-armed here.
 async fn wait_for_peer(
-    peer: &mut moto_async::SysHandleFuture,
-    shutdown: &mut moto_async::oneshot::Receiver<()>,
+    peer: &mut moto_sdk::async_runtime::SysHandleFuture,
+    shutdown: &mut moto_sdk::async_runtime::oneshot::Receiver<()>,
 ) -> PeerWait {
     use futures::future::Either;
 
@@ -846,7 +848,7 @@ async fn wait_for_peer(
 async fn relay_file_output(
     claim: &FileRelayClaim,
     pipe: StdioPipe,
-    mut shutdown: moto_async::oneshot::Receiver<()>,
+    mut shutdown: moto_sdk::async_runtime::oneshot::Receiver<()>,
 ) -> Result<(), ErrorCode> {
     let result = transfer_file_output(claim, &pipe, &mut shutdown).await;
     claim.source.file().cancel_output_relay();
@@ -860,9 +862,9 @@ async fn relay_file_output(
 async fn transfer_file_output(
     claim: &FileRelayClaim,
     pipe: &StdioPipe,
-    shutdown: &mut moto_async::oneshot::Receiver<()>,
+    shutdown: &mut moto_sdk::async_runtime::oneshot::Receiver<()>,
 ) -> Result<(), ErrorCode> {
-    use moto_async::AsFuture;
+    use moto_sdk::async_runtime::AsFuture;
 
     let mut buf = alloc::vec![0; FILE_RELAY_BUFFER_SIZE];
     let mut peer = pipe.handle().as_future();
@@ -916,7 +918,7 @@ async fn transfer_file_output(
 async fn relay_file_input(
     claim: &FileRelayClaim,
     pipe: StdioPipe,
-    mut shutdown: moto_async::oneshot::Receiver<()>,
+    mut shutdown: moto_sdk::async_runtime::oneshot::Receiver<()>,
 ) -> Result<(), ErrorCode> {
     let FileRelayKind::Input { start } = claim.kind else {
         unreachable!();
@@ -937,9 +939,9 @@ async fn transfer_file_input(
     claim: &FileRelayClaim,
     pipe: &StdioPipe,
     start: u64,
-    shutdown: &mut moto_async::oneshot::Receiver<()>,
+    shutdown: &mut moto_sdk::async_runtime::oneshot::Receiver<()>,
 ) -> Result<(), ErrorCode> {
-    use moto_async::AsFuture;
+    use moto_sdk::async_runtime::AsFuture;
 
     let mut buf = alloc::vec![0; FILE_RELAY_BUFFER_SIZE];
     let mut peer = pipe.handle().as_future();
@@ -994,8 +996,8 @@ async fn transfer_file_input(
 
 async fn wait_for_input_drain(
     pipe: &StdioPipe,
-    peer: &mut moto_async::SysHandleFuture,
-    shutdown: &mut moto_async::oneshot::Receiver<()>,
+    peer: &mut moto_sdk::async_runtime::SysHandleFuture,
+    shutdown: &mut moto_sdk::async_runtime::oneshot::Receiver<()>,
 ) -> Result<(), ErrorCode> {
     loop {
         match pipe.flush_nonblocking() {
@@ -1403,7 +1405,7 @@ pub fn create_child_stdio(
     )?;
     let terminal_theirs = if let Some(source) = terminal_source {
         let (local_data, remote_data) =
-            moto_ipc::stdio_pipe::make_pair(moto_sys::SysHandle::SELF, remote_process)?;
+            moto_sdk::ipc::stdio_pipe::make_pair(moto_sys::SysHandle::SELF, remote_process)?;
         let pdata = &local_data as *const _ as usize as *const u8;
         inherited_tasks.push(prepare_inherited_relay(source, pdata, remote_process)?);
         StdioData::pipe(
@@ -1460,7 +1462,7 @@ fn create_stdio_pipes(
         }
         PreparedStdio::Relay(_) => {
             let claim = relay_claim.cloned().unwrap();
-            let (local_data, remote_data) = moto_ipc::stdio_pipe::make_pair_with_page_count(
+            let (local_data, remote_data) = moto_sdk::ipc::stdio_pipe::make_pair_with_page_count(
                 moto_sys::SysHandle::SELF,
                 remote_process,
                 FILE_RELAY_PIPE_PAGES,
@@ -1489,7 +1491,7 @@ fn create_stdio_pipes(
         }
         PreparedStdio::Inherit(source) => {
             let (local_data, remote_data) =
-                moto_ipc::stdio_pipe::make_pair(moto_sys::SysHandle::SELF, remote_process)?;
+                moto_sdk::ipc::stdio_pipe::make_pair(moto_sys::SysHandle::SELF, remote_process)?;
 
             let pdata = &local_data as *const _ as usize as *const u8;
             // TODO: remote shutdowns are now detected via bad remote handle IPCs.
@@ -1514,7 +1516,7 @@ fn create_stdio_pipes(
         }
         PreparedStdio::MakePipe => {
             let (local_data, remote_data) =
-                moto_ipc::stdio_pipe::make_pair(moto_sys::SysHandle::SELF, remote_process)?;
+                moto_sdk::ipc::stdio_pipe::make_pair(moto_sys::SysHandle::SELF, remote_process)?;
             // A captured stream is a pipe to this process, which is a
             // terminal for the child only if this process said it will act
             // as one. The parent-side `ChildStdio` below stays non-terminal

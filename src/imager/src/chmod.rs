@@ -1,6 +1,6 @@
-use async_fs::file_block_device::AsyncFileBlockDevice;
-use async_fs::{AccessPermissions, EntryId, FileSystem, Role, RolePermissions};
 use camino::Utf8Path;
+use moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice;
+use moto_sdk::async_fs::{AccessPermissions, EntryId, FileSystem, Role, RolePermissions};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read};
@@ -178,8 +178,8 @@ pub fn chmod_image(image: &Path, path: &Path, permissions: RolePermissions) -> i
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_fs::{EntryKind, Metadata};
     use mbrman::{MBRPartitionEntry, BOOT_INACTIVE, CHS};
+    use moto_sdk::async_fs::{EntryKind, Metadata};
     use std::io::{Seek, SeekFrom, Write};
     use std::sync::atomic::{AtomicU64, Ordering};
 

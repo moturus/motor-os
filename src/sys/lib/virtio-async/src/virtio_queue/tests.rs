@@ -7,7 +7,7 @@ use std::task::{Context, ContextBuilder, LocalWake, LocalWaker, Poll, Waker};
 struct Device {
     queue: Rc<RefCell<Virtqueue>>,
     // Keep the ring storage alive until after the queue and its references drop.
-    _memory: IoBuf,
+    _memory: VirtioIoBuf,
 }
 
 impl Device {
@@ -23,7 +23,7 @@ impl Device {
             .unwrap()
             .next_power_of_two()
             .max(4096);
-        let memory = IoBuf::new_from_size_align(allocation_size).unwrap();
+        let memory = VirtioIoBuf::new_from_size_align(allocation_size).unwrap();
         let addr = memory.raw_ptr() as u64;
         // SAFETY: the owned, aligned allocation contains all three
         // non-overlapping rings and outlives every completion.
@@ -265,7 +265,7 @@ fn test_notifications() {
         (1, true, true),
         (2, true, false),
     ] {
-        let mut notify_memory = IoBuf::new_from_size_align(16).unwrap();
+        let mut notify_memory = VirtioIoBuf::new_from_size_align(16).unwrap();
         // SAFETY: initialize the bytes observed below before constructing the
         // test BAR; the allocation remains owned through every volatile access.
         unsafe { notify_memory.raw_ptr_mut().write_bytes(0xa5, 16) };
@@ -324,7 +324,7 @@ fn test_notifications() {
         (2, true, false, u16::MAX - 1),
         (1, true, true, u16::MAX - 1),
     ] {
-        let mut notify_memory = IoBuf::new_from_size_align(16).unwrap();
+        let mut notify_memory = VirtioIoBuf::new_from_size_align(16).unwrap();
         // SAFETY: the allocation remains live through all volatile accesses.
         unsafe { notify_memory.raw_ptr_mut().write_bytes(0xa5, 16) };
         // SAFETY: the owned allocation is aligned, mapped, writable, and
@@ -515,7 +515,7 @@ fn test_queue_task_start() {
     first.complete(first_completion.chain_head, 9, 0);
     assert_eq!(first.queue.borrow().next_used_idx, 0);
 
-    let mut runtime = moto_async::LocalRuntime::new();
+    let mut runtime = moto_sdk::async_runtime::LocalRuntime::new();
     runtime.block_on(async {
         Virtqueue::start_tasks(&queues).unwrap();
         assert_eq!(
@@ -525,7 +525,7 @@ fn test_queue_task_start() {
         let (value, used_len) = std::future::poll_fn(|cx| first_completion.do_poll(cx)).await;
         assert_eq!((value, used_len.unwrap()), (7, 9));
 
-        moto_async::yield_now().await;
+        moto_sdk::async_runtime::yield_now().await;
         let mut signaled = first.submit(ready_head(&first, 1), 1, 11);
         first.complete(signaled.chain_head, 13, 0);
         SysCpu::wake(wake_first).unwrap();
@@ -1029,9 +1029,9 @@ fn test_vsock_rx() {
             scratch[..crate::virtio_vsock::HEADER_LEN].fill(0xa5);
         }
     }
-    let mut payload = IoBuf::new_from_size_align(4096).unwrap();
+    let mut payload = VirtioIoBuf::new_from_size_align(4096).unwrap();
     payload.set_len(3);
-    <IoBuf as AsMut<[u8]>>::as_mut(&mut payload).fill(0xaa);
+    <VirtioIoBuf as AsMut<[u8]>>::as_mut(&mut payload).fill(0xaa);
     let payload_ptr = payload.raw_ptr_mut();
     let payload_phys = payload.phys_addr() as u64;
     let rx = try_post_rx(device.queue.clone(), payload)
@@ -1061,7 +1061,7 @@ fn test_vsock_rx() {
     device.reclaim();
     let (payload, decoded) = rx.finish_ordered(head);
     assert_eq!(payload.raw_ptr(), payload_ptr);
-    assert_eq!(<IoBuf as AsRef<[u8]>>::as_ref(&payload), &[7, 8, 9]);
+    assert_eq!(<VirtioIoBuf as AsRef<[u8]>>::as_ref(&payload), &[7, 8, 9]);
     assert_eq!(
         decoded.unwrap(),
         PacketHeader {
@@ -1078,9 +1078,9 @@ fn test_vsock_rx() {
         }
     );
 
-    let mut full_payload = IoBuf::new_from_size_align(4096).unwrap();
+    let mut full_payload = VirtioIoBuf::new_from_size_align(4096).unwrap();
     full_payload.set_len(4096);
-    <IoBuf as AsMut<[u8]>>::as_mut(&mut full_payload).fill(0x55);
+    <VirtioIoBuf as AsMut<[u8]>>::as_mut(&mut full_payload).fill(0x55);
     let full_ptr = full_payload.raw_ptr_mut();
     let full = try_post_rx(device.queue.clone(), full_payload)
         .unwrap_or_else(|(err, _)| panic!("full-capacity RX buffer rejected: {err}"));
@@ -1101,7 +1101,7 @@ fn test_vsock_rx() {
 
     let control = try_post_rx(
         device.queue.clone(),
-        IoBuf::new_from_size_align(4096).unwrap(),
+        VirtioIoBuf::new_from_size_align(4096).unwrap(),
     )
     .unwrap_or_else(|(err, _)| panic!("control RX buffer rejected: {err}"));
     let head = control.head();
@@ -1128,9 +1128,9 @@ fn test_vsock_rx() {
         ),
         (3, 46, DecodeErrorKind::TruncatedPayload, Some(3)),
     ] {
-        let mut payload = IoBuf::new_from_size_align(4096).unwrap();
+        let mut payload = VirtioIoBuf::new_from_size_align(4096).unwrap();
         payload.set_len(3);
-        <IoBuf as AsMut<[u8]>>::as_mut(&mut payload)[..3].copy_from_slice(&[4, 5, 6]);
+        <VirtioIoBuf as AsMut<[u8]>>::as_mut(&mut payload)[..3].copy_from_slice(&[4, 5, 6]);
         let ptr = payload.raw_ptr();
         let rx = try_post_rx(device.queue.clone(), payload)
             .unwrap_or_else(|(err, _)| panic!("malformed RX fixture rejected: {err}"));
@@ -1147,9 +1147,9 @@ fn test_vsock_rx() {
     }
 
     let before = unsafe { *device.queue.borrow().available_ring.next_available_idx };
-    let mut invalid = IoBuf::new_from_size_align(64).unwrap();
+    let mut invalid = VirtioIoBuf::new_from_size_align(64).unwrap();
     invalid.set_len(3);
-    <IoBuf as AsMut<[u8]>>::as_mut(&mut invalid)[..3].copy_from_slice(&[1, 2, 3]);
+    <VirtioIoBuf as AsMut<[u8]>>::as_mut(&mut invalid)[..3].copy_from_slice(&[1, 2, 3]);
     let invalid_ptr = invalid.raw_ptr();
     let (error, invalid) = match try_post_rx(device.queue.clone(), invalid) {
         Err(rejected) => rejected,
@@ -1157,16 +1157,16 @@ fn test_vsock_rx() {
     };
     assert_eq!(error.kind(), ErrorKind::InvalidInput);
     assert_eq!(invalid.raw_ptr(), invalid_ptr);
-    assert_eq!(<IoBuf as AsRef<[u8]>>::as_ref(&invalid), &[1, 2, 3]);
+    assert_eq!(<VirtioIoBuf as AsRef<[u8]>>::as_ref(&invalid), &[1, 2, 3]);
     assert_eq!(
         unsafe { *device.queue.borrow().available_ring.next_available_idx },
         before
     );
 
     let blocker = device.submit(ready_head(&device, 8), 8, 0);
-    let mut rejected = IoBuf::new_from_size_align(4096).unwrap();
+    let mut rejected = VirtioIoBuf::new_from_size_align(4096).unwrap();
     rejected.set_len(1);
-    <IoBuf as AsMut<[u8]>>::as_mut(&mut rejected)[0] = 9;
+    <VirtioIoBuf as AsMut<[u8]>>::as_mut(&mut rejected)[0] = 9;
     let rejected_ptr = rejected.raw_ptr();
     let before = unsafe { *device.queue.borrow().available_ring.next_available_idx };
     let (error, rejected) = match try_post_rx(device.queue.clone(), rejected) {
@@ -1175,7 +1175,7 @@ fn test_vsock_rx() {
     };
     assert_eq!(error.kind(), ErrorKind::WouldBlock);
     assert_eq!(rejected.raw_ptr(), rejected_ptr);
-    assert_eq!(<IoBuf as AsRef<[u8]>>::as_ref(&rejected), &[9]);
+    assert_eq!(<VirtioIoBuf as AsRef<[u8]>>::as_ref(&rejected), &[9]);
     assert_eq!(
         unsafe { *device.queue.borrow().available_ring.next_available_idx },
         before
@@ -1367,7 +1367,7 @@ fn test_vsock_events() {
 
     let device = Device::new(crate::VirtioDeviceKind::Vsock);
     for header in &mut device.queue.borrow_mut().header_buffers {
-        <IoBuf as AsMut<[u8]>>::as_mut(&mut header.buf)[..8].fill(0xa5);
+        <VirtioIoBuf as AsMut<[u8]>>::as_mut(&mut header.buf)[..8].fill(0xa5);
     }
     let completion = try_post_event(device.queue.clone()).unwrap();
     let head = completion.head();
@@ -1380,7 +1380,7 @@ fn test_vsock_events() {
             (scratch.phys_addr() as u64, 4, VIRTQ_DESC_F_WRITE)
         );
         assert_eq!(
-            &<IoBuf as AsRef<[u8]>>::as_ref(scratch)[..8],
+            &<VirtioIoBuf as AsRef<[u8]>>::as_ref(scratch)[..8],
             &[0, 0, 0, 0, 0xa5, 0xa5, 0xa5, 0xa5]
         );
     }
@@ -1534,7 +1534,7 @@ fn test_vsock_tx() {
     assert_eq!(descriptor.len, 44);
     assert_eq!(descriptor.flags, 0);
     assert_eq!(
-        &<IoBuf as AsRef<[u8]>>::as_ref(&queue.header_buffers[head as usize].buf)[..44],
+        &<VirtioIoBuf as AsRef<[u8]>>::as_ref(&queue.header_buffers[head as usize].buf)[..44],
         &[
             0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 0,
             0, 0, 0, 1, 2, 3, 0, 0, 0, 0, 0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
@@ -1557,9 +1557,9 @@ fn test_vsock_tx() {
         drop(completion);
     }
 
-    let mut payload = IoBuf::new_from_size_align(4096).unwrap();
+    let mut payload = VirtioIoBuf::new_from_size_align(4096).unwrap();
     payload.set_len(3);
-    <IoBuf as AsMut<[u8]>>::as_mut(&mut payload)[..3].copy_from_slice(&[7, 8, 9]);
+    <VirtioIoBuf as AsMut<[u8]>>::as_mut(&mut payload)[..3].copy_from_slice(&[7, 8, 9]);
     let payload_ptr = payload.raw_ptr();
     let payload_phys = payload.phys_addr() as u64;
     let mut data_header = reset;
@@ -1594,12 +1594,15 @@ fn test_vsock_tx() {
     let returned = returned.unwrap();
     assert!(result.is_ok());
     assert_eq!(returned.raw_ptr(), payload_ptr);
-    assert_eq!(&<IoBuf as AsRef<[u8]>>::as_ref(&returned)[..3], &[7, 8, 9]);
+    assert_eq!(
+        &<VirtioIoBuf as AsRef<[u8]>>::as_ref(&returned)[..3],
+        &[7, 8, 9]
+    );
     drop(completion);
 
     let blocker = device.submit(ready_head(&device, 8), 8, 0);
     let before = unsafe { *device.queue.borrow().available_ring.next_available_idx };
-    let mut rejected = IoBuf::new_from_size_align(4096).unwrap();
+    let mut rejected = VirtioIoBuf::new_from_size_align(4096).unwrap();
     rejected.set_len(3);
     let rejected_ptr = rejected.raw_ptr();
     let error = match try_post_tx(device.queue.clone(), data_header, Some(rejected)) {
@@ -1673,7 +1676,7 @@ fn test_vsock_tx() {
     assert!(validate_payload_dma(4096, 1, 1).is_err());
     assert!(validate_payload_dma(4096, 0, 0).is_err());
     assert!(validate_payload_dma(4096, 4097, 0).is_err());
-    let mut invalid = IoBuf::new_from_size_align(64).unwrap();
+    let mut invalid = VirtioIoBuf::new_from_size_align(64).unwrap();
     invalid.set_len(3);
     let error = match try_post_tx(device.queue.clone(), data_header, Some(invalid)) {
         Err(error) => error,
@@ -1681,7 +1684,7 @@ fn test_vsock_tx() {
     };
     assert_eq!(error.0.kind(), ErrorKind::InvalidInput);
     assert_eq!(error.1.unwrap().capacity(), 64);
-    let mut empty = IoBuf::new_from_size_align(4096).unwrap();
+    let mut empty = VirtioIoBuf::new_from_size_align(4096).unwrap();
     empty.set_len(0);
     data_header.len = 0;
     let error = match try_post_tx(device.queue.clone(), data_header, Some(empty)) {
@@ -1692,7 +1695,7 @@ fn test_vsock_tx() {
     assert_eq!(error.1.unwrap().len(), 0);
     data_header.operation = 1;
     data_header.len = 4096;
-    let payload = IoBuf::new_from_size_align(4096).unwrap();
+    let payload = VirtioIoBuf::new_from_size_align(4096).unwrap();
     let payload_ptr = payload.raw_ptr();
     let error = match try_post_tx(device.queue.clone(), data_header, Some(payload)) {
         Err(error) => error,
@@ -1904,7 +1907,7 @@ fn test_vsock_pool_preparation() {
                 .read_volatile()
         }
     };
-    let mut notify_memory = IoBuf::new_from_size_align(16).unwrap();
+    let mut notify_memory = VirtioIoBuf::new_from_size_align(16).unwrap();
     // SAFETY: this initialized mapping outlives every queue and BAR access.
     unsafe { notify_memory.raw_ptr_mut().write_bytes(0xa5, 16) };
     let notify_bar =

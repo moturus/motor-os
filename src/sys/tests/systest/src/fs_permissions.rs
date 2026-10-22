@@ -1,4 +1,4 @@
-use moto_io::fs::{AccessPermissions, EntryId, EntryKind, FsClient, Role, RolePermissions};
+use moto_sdk::io::fs::{AccessPermissions, EntryId, EntryKind, FsClient, Role, RolePermissions};
 
 const NONE_CHILD: &str = "fs-permissions-none-child";
 
@@ -35,7 +35,7 @@ pub fn run_none_child(args: &[String]) -> ! {
     let destination_denied_file = parse_entry_id(&args[11]);
     let destination_denied_dst = parse_entry_id(&args[12]);
 
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().unwrap();
         let mut buf = [0_u8; 16];
 
@@ -148,7 +148,7 @@ pub fn run_all_tests() {
     ));
     std::fs::create_dir(&root).unwrap();
 
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().unwrap();
         let (root_id, EntryKind::Directory) = client.stat(root.to_str().unwrap()).await.unwrap()
         else {
@@ -197,7 +197,7 @@ pub fn run_all_tests() {
     std::fs::set_permissions(&sealed, permissions.clone()).unwrap();
     assert!(std::fs::metadata(&sealed).unwrap().permissions().readonly());
 
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().unwrap();
         let (sealed_id, EntryKind::File) = client.stat(sealed.to_str().unwrap()).await.unwrap()
         else {
@@ -244,7 +244,7 @@ pub fn run_all_tests() {
         .unwrap();
     assert_eq!(b"sealed!", std::fs::read(&sealed).unwrap().as_slice());
 
-    let ids = moto_async::LocalRuntime::new().block_on(async {
+    let ids = moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().unwrap();
         let (root_id, EntryKind::Directory) = client.stat(root.to_str().unwrap()).await.unwrap()
         else {
@@ -563,8 +563,8 @@ async fn write_requests(client: &std::rc::Rc<FsClient>, root: &str, allowed: boo
 /// since a leaked page makes the next allocation wait forever.
 async fn donated_pages_released(client: &std::rc::Rc<FsClient>, root: &str) {
     use futures::FutureExt;
-    use moto_ipc::io_channel::CHANNEL_PAGE_COUNT;
-    use moto_sys_io::api_fs::{WRITE_MAX_BYTES, WRITE_MAX_PAGES};
+    use moto_sdk::ipc::io_channel::CHANNEL_PAGE_COUNT;
+    use moto_sdk::sys_io::api_fs::{WRITE_MAX_BYTES, WRITE_MAX_PAGES};
 
     let requests = async {
         let (root_id, _) = client.stat(root).await.unwrap();
@@ -594,7 +594,7 @@ async fn donated_pages_released(client: &std::rc::Rc<FsClient>, root: &str) {
     };
     let mut requests = core::pin::pin!(requests.fuse());
     let mut deadline =
-        core::pin::pin!(moto_async::sleep(std::time::Duration::from_secs(10)).fuse());
+        core::pin::pin!(moto_sdk::async_runtime::sleep(std::time::Duration::from_secs(10)).fuse());
     futures::select! {
         () = requests => {}
         () = deadline => panic!("denied requests leaked donated pages"),
@@ -647,7 +647,7 @@ pub fn run_write_cap_child(args: &[String]) -> ! {
         moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_FS_WRITE != 0
     );
     let root = &args[3];
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().unwrap();
         write_requests(&client, root, allowed).await;
         if !allowed {
@@ -665,7 +665,7 @@ fn write_cap_snapshot(root: &std::path::Path) -> Vec<(String, Vec<u8>, RolePermi
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect();
     names.sort();
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().unwrap();
         let mut snapshot = Vec::new();
         for name in names {

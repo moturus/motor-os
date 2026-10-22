@@ -103,9 +103,9 @@ migration or superblock version bump is required.
 
 Permissions live in the existing `Metadata` struct, which is embedded in every
 `DirEntryBlock` and already returned to callers by `MotorFs::metadata()`. The
-struct is defined in the **`async-fs`** crate:
+struct is defined in moto-sdk's **`async_fs`** module:
 
-- File: `src/sys/lib/async-fs/src/filesystem.rs`
+- File: `src/sys/lib/moto-sdk/src/async_fs/filesystem.rs`
 - Struct: `Metadata` (currently around line 112), `#[repr(C, align(8))]`, `Pod`,
   pinned to **128 bytes** by `const _: () = assert!(128 == size_of::<Metadata>())`.
 

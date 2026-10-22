@@ -1,0 +1,834 @@
+//! Asynchronous file operations.
+//!
+//! This module contains utility methods for working with the file system
+//! asynchronously. This includes reading/writing to files, and working with
+//! directories. Key differences from a standard async fs API (e.g. tokio):
+//!    (a) moto-io API is no-std
+//!    (b) moto-io API is somewhat simpler than that of Tokio, which in some
+//!        areas appears to be too complex/over-engineered
+//!    (c) moto-io API is "local" (current thread only)
+#![allow(unused)]
+extern crate alloc;
+
+use crate::ipc::io_channel::Msg;
+use crate::sys_io::api_fs;
+pub use crate::sys_io::api_fs::{MountInfo, MountKind};
+use alloc::boxed::Box;
+use alloc::collections::btree_map::BTreeMap;
+use alloc::rc::Rc;
+use alloc::rc::Weak;
+use alloc::string::String;
+use async_trait::async_trait;
+use core::pin::Pin;
+use core::{
+    cell::{Cell, RefCell},
+    task::{Poll, Waker},
+};
+use moto_rt::Result;
+
+use crate::async_fs::BLOCK_SIZE;
+pub use crate::async_fs::{
+    AccessPermissions, EntryId, EntryKind, Metadata, ROOT_ID, Role, RolePermissions,
+    perms_monotonic,
+};
+
+pub struct FsClient {
+    io_sender: crate::ipc::io_channel::Sender,
+    io_receiver: RefCell<crate::ipc::io_channel::Receiver>,
+
+    // Because FsClient is single-threaded, we use Cell<>, not AtomicU64.
+    request_counter: Cell<u64>,
+
+    responses: RefCell<BTreeMap<u64, ResponseWaiter>>,
+    response_pump: Cell<bool>,
+    response_error: Cell<Option<moto_rt::Error>>,
+}
+
+enum ResponseWaiter {
+    Waker(Waker),
+    Msg(Msg),
+}
+
+pub struct ResponseFuture {
+    request_id: u64,
+    fs_client: Weak<FsClient>,
+}
+
+impl Future for ResponseFuture {
+    type Output = Result<Msg>;
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        let Some(fs_client) = self.fs_client.upgrade() else {
+            return Poll::Ready(Err(moto_rt::Error::NotConnected));
+        };
+
+        let mut responses = fs_client.responses.borrow_mut();
+        match responses.entry(self.request_id) {
+            alloc::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(ResponseWaiter::Waker(cx.waker().clone()));
+            }
+            alloc::collections::btree_map::Entry::Occupied(mut entry) => match entry.get_mut() {
+                ResponseWaiter::Waker(local_waker) => {
+                    *local_waker = cx.waker().clone();
+                }
+                ResponseWaiter::Msg(msg) => {
+                    let msg = *msg;
+                    let _ = entry.remove_entry();
+                    return Poll::Ready(Ok(msg));
+                }
+            },
+        }
+        core::mem::drop(responses);
+
+        if fs_client.response_pump.get() {
+            if let Some(err) = fs_client.response_error.get() {
+                fs_client.responses.borrow_mut().remove(&self.request_id);
+                return Poll::Ready(Err(err));
+            }
+            return Poll::Pending;
+        }
+
+        let result = loop {
+            match fs_client.io_receiver.borrow_mut().poll_recv(cx) {
+                Poll::Ready(Err(err)) => {
+                    break Err(err);
+                }
+                Poll::Ready(Ok(msg)) => {
+                    if msg.id == self.request_id {
+                        break Ok(msg);
+                    } else {
+                        let mut responses = fs_client.responses.borrow_mut();
+                        match responses.entry(msg.id) {
+                            alloc::collections::btree_map::Entry::Vacant(entry) => {
+                                entry.insert_entry(ResponseWaiter::Msg(msg));
+                            }
+                            alloc::collections::btree_map::Entry::Occupied(mut entry) => {
+                                match entry.get_mut() {
+                                    ResponseWaiter::Waker(local_waker) => {
+                                        let mut val = ResponseWaiter::Msg(msg);
+                                        core::mem::swap(&mut val, entry.get_mut());
+                                        let ResponseWaiter::Waker(waker) = val else {
+                                            panic!();
+                                        };
+                                        waker.wake();
+                                        continue;
+                                    }
+                                    ResponseWaiter::Msg(msg) => todo!(),
+                                }
+                            }
+                        }
+                    }
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        };
+
+        fs_client.responses.borrow_mut().remove(&self.request_id);
+        Poll::Ready(result)
+    }
+}
+
+impl FsClient {
+    /// All boot mounts in table order, with per-mount sampled statistics.
+    pub async fn mounts(self: &Rc<Self>) -> Result<alloc::vec::Vec<MountInfo>> {
+        let mut mounts = alloc::vec::Vec::new();
+        let mut cursor = 0;
+        loop {
+            let mut request = api_fs::get_mounts_req_encode(cursor);
+            request.id = self.new_request_id();
+            let response = self.clone().send_recv(request).await?;
+            let (mount, next) = api_fs::get_mounts_resp_decode(response, &self.io_sender)?;
+            mounts.push(mount);
+            if next == api_fs::MOUNTS_END {
+                return Ok(mounts);
+            }
+            if next != cursor + 1 || next >= 256 {
+                return Err(moto_rt::Error::InvalidData);
+            }
+            cursor = next;
+        }
+    }
+
+    fn new_request_id(&self) -> u64 {
+        self.request_counter.update(|id| id + 1);
+        self.request_counter.get()
+    }
+
+    async fn send_recv(self: Rc<Self>, msg: Msg) -> Result<Msg> {
+        self.clone().send(msg).await?;
+        self.recv(msg.id).await
+    }
+
+    async fn send(self: Rc<Self>, msg: Msg) -> Result<()> {
+        self.io_sender.send(msg).await
+    }
+
+    async fn recv(self: Rc<Self>, msg_id: u64) -> Result<Msg> {
+        ResponseFuture {
+            request_id: msg_id,
+            fs_client: Rc::downgrade(&self),
+        }
+        .await
+    }
+
+    async fn recv_any(self: Rc<Self>, msg_ids: &[u64]) -> Result<(usize, Msg)> {
+        debug_assert!(msg_ids.iter().any(|id| *id != 0));
+        core::future::poll_fn(|cx| {
+            {
+                let mut responses = self.responses.borrow_mut();
+                for (idx, &msg_id) in msg_ids.iter().enumerate() {
+                    if msg_id == 0 {
+                        continue;
+                    }
+                    match responses.entry(msg_id) {
+                        alloc::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(ResponseWaiter::Waker(cx.waker().clone()));
+                        }
+                        alloc::collections::btree_map::Entry::Occupied(mut entry) => {
+                            match entry.get_mut() {
+                                ResponseWaiter::Waker(local_waker) => {
+                                    *local_waker = cx.waker().clone();
+                                }
+                                ResponseWaiter::Msg(msg) => {
+                                    let msg = *msg;
+                                    let _ = entry.remove_entry();
+                                    return Poll::Ready(Ok((idx, msg)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if self.response_pump.get() {
+                if let Some(err) = self.response_error.get() {
+                    let mut responses = self.responses.borrow_mut();
+                    for &msg_id in msg_ids {
+                        if msg_id != 0 {
+                            responses.remove(&msg_id);
+                        }
+                    }
+                    return Poll::Ready(Err(err));
+                }
+                return Poll::Pending;
+            }
+
+            loop {
+                match self.io_receiver.borrow_mut().poll_recv(cx) {
+                    Poll::Ready(Err(err)) => {
+                        let mut responses = self.responses.borrow_mut();
+                        for &msg_id in msg_ids {
+                            if msg_id != 0 {
+                                responses.remove(&msg_id);
+                            }
+                        }
+                        return Poll::Ready(Err(err));
+                    }
+                    Poll::Ready(Ok(msg)) => {
+                        if let Some(idx) = msg_ids.iter().position(|id| *id == msg.id) {
+                            self.responses.borrow_mut().remove(&msg.id);
+                            return Poll::Ready(Ok((idx, msg)));
+                        }
+
+                        let mut responses = self.responses.borrow_mut();
+                        match responses.entry(msg.id) {
+                            alloc::collections::btree_map::Entry::Vacant(entry) => {
+                                entry.insert(ResponseWaiter::Msg(msg));
+                            }
+                            alloc::collections::btree_map::Entry::Occupied(mut entry) => {
+                                match entry.get_mut() {
+                                    ResponseWaiter::Waker(local_waker) => {
+                                        let waker = local_waker.clone();
+                                        entry.insert(ResponseWaiter::Msg(msg));
+                                        waker.wake();
+                                    }
+                                    ResponseWaiter::Msg(_) => {
+                                        panic!("duplicate filesystem response")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+        })
+        .await
+    }
+
+    pub fn connect() -> Result<Rc<Self>> {
+        let (io_sender, io_receiver) =
+            crate::ipc::io_channel::connect(crate::sys_io::api_fs::FS_URL)?;
+        Ok(Rc::new(Self {
+            io_sender,
+            io_receiver: RefCell::new(io_receiver),
+            request_counter: Cell::new(0),
+            responses: Default::default(),
+            response_pump: Cell::new(false),
+            response_error: Cell::new(None),
+        }))
+    }
+
+    pub fn enable_response_pump(&self) {
+        assert!(!self.response_pump.replace(true));
+    }
+
+    #[allow(clippy::await_holding_refcell_ref)] // This task is the receiver's sole borrower.
+    pub async fn run_response_pump(self: Rc<Self>) {
+        assert!(self.response_pump.get());
+        loop {
+            match self.io_receiver.borrow_mut().recv().await {
+                Ok(msg) => {
+                    let mut responses = self.responses.borrow_mut();
+                    match responses.entry(msg.id) {
+                        alloc::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(ResponseWaiter::Msg(msg));
+                        }
+                        alloc::collections::btree_map::Entry::Occupied(mut entry) => {
+                            let ResponseWaiter::Waker(waker) =
+                                entry.insert(ResponseWaiter::Msg(msg))
+                            else {
+                                panic!("duplicate filesystem response");
+                            };
+                            waker.wake();
+                        }
+                    }
+                }
+                Err(err) => {
+                    self.response_error.set(Some(err));
+                    let mut responses = self.responses.borrow_mut();
+                    for waiter in responses.values_mut() {
+                        if let ResponseWaiter::Waker(waker) = waiter {
+                            waker.wake_by_ref();
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Find a file or directory by its full path.
+    pub async fn stat(self: &Rc<Self>, path: &str) -> Result<(EntryId, EntryKind)> {
+        if path.len() > moto_rt::fs::MAX_PATH_LEN || path.is_empty() {
+            return Err(moto_rt::Error::InvalidArgument);
+        }
+        if path == "/" {
+            return Ok((ROOT_ID, EntryKind::Directory));
+        }
+
+        if !path.starts_with('/') {
+            return Err(moto_rt::Error::InvalidArgument);
+        }
+
+        // The server walks the whole path: one round trip instead of one
+        // per component.
+        let io_page = self.io_sender.alloc_page(u64::MAX).await?;
+        let mut msg = api_fs::stat_path_msg_encode(path, io_page);
+        msg.id = self.new_request_id();
+        let resp = self.clone().send_recv(msg).await?;
+        api_fs::stat_resp_decode(resp)
+    }
+
+    /// Create a file or directory.
+    pub async fn create_entry(
+        self: &Rc<Self>,
+        parent_id: EntryId,
+        kind: EntryKind,
+        name: &str, // Leaf name.
+    ) -> Result<EntryId> {
+        let io_page = self.io_sender.alloc_page(u64::MAX).await?;
+        let mut msg = api_fs::create_entry_msg_encode(
+            parent_id,
+            kind == EntryKind::Directory, /* is_dir */
+            name,
+            io_page,
+        );
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        let entry_id = api_fs::create_entry_resp_decode(resp, kind)?;
+        Ok(entry_id)
+    }
+
+    /// Create a file or directory atomically with complete permissions.
+    pub async fn create_entry_with_permissions(
+        self: &Rc<Self>,
+        parent_id: EntryId,
+        kind: EntryKind,
+        name: &str,
+        permissions: RolePermissions,
+    ) -> Result<EntryId> {
+        let io_page = self.io_sender.alloc_page(u64::MAX).await?;
+        let mut msg =
+            api_fs::create_with_permissions_msg_encode(parent_id, kind, name, permissions, io_page);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        let entry_id = api_fs::create_entry_resp_decode(resp, kind)?;
+        Ok(entry_id)
+    }
+
+    /// Write bytes to a file.
+    pub async fn write(
+        self: &Rc<Self>,
+        file_id: EntryId,
+        offset: u64,
+        buf: &[u8],
+    ) -> Result<usize> {
+        // Multi-block writes: each request carries up to WRITE_MAX_PAGES
+        // io_pages of data (32K); see api_fs::write_multi_msg_encode.
+        // A request whose data fits the first (boundary-limited) chunk uses
+        // the classic single-page format. WINDOW requests in flight bound
+        // transient page usage to WINDOW * WRITE_MAX_PAGES = 32 of the
+        // channel's 64 client pages, leaving slack for concurrent
+        // stat/create requests.
+        const WINDOW: usize = 4;
+
+        let mut buf_running = buf;
+
+        let mut written = 0_usize;
+        let mut send_offset = offset;
+        let mut error = None;
+        let mut short_write = false;
+
+        while error.is_none() && !short_write && !buf_running.is_empty() {
+            // (msg id, request len, multi format) of the in-flight batch.
+            let mut batch = [(0_u64, 0_u32, false); WINDOW];
+            let mut batch_idx = 0;
+            while batch_idx < WINDOW && !buf_running.is_empty() {
+                // The first chunk runs to a page boundary, so the request
+                // spans at most WRITE_MAX_PAGES pages and no chunk crosses
+                // an FS block boundary.
+                let first_chunk =
+                    ((BLOCK_SIZE as u64) - (send_offset & (BLOCK_SIZE as u64 - 1))) as usize;
+                let req_len = buf_running
+                    .len()
+                    .min(first_chunk + (api_fs::WRITE_MAX_PAGES - 1) * BLOCK_SIZE)
+                    as u32;
+                debug_assert!(req_len as usize <= api_fs::WRITE_MAX_BYTES);
+                let multi = req_len as usize > first_chunk;
+
+                // Allocate and fill the data pages: page i holds chunk i.
+                // On any failure the pages collected so far drop, freeing
+                // them.
+                let mut pages = alloc::vec::Vec::new();
+                let mut filled = 0_usize;
+                for chunk in api_fs::io_chunks(send_offset, req_len) {
+                    match self.io_sender.alloc_page(u64::MAX).await {
+                        Ok(io_page) => {
+                            io_page.bytes_mut()[..chunk]
+                                .clone_from_slice(&buf_running[filled..(filled + chunk)]);
+                            filled += chunk;
+                            pages.push(io_page);
+                        }
+                        Err(err) => {
+                            error = Some(err);
+                            break;
+                        }
+                    }
+                }
+                if error.is_some() {
+                    break;
+                }
+
+                let mut msg = if multi {
+                    api_fs::write_multi_msg_encode(file_id, send_offset, req_len, pages)
+                } else {
+                    api_fs::write_msg_encode(
+                        file_id,
+                        send_offset,
+                        req_len as u16,
+                        pages.pop().unwrap(),
+                    )
+                };
+                let msg_id = self.new_request_id();
+                msg.id = msg_id;
+                if let Err(err) = self.clone().send(msg).await {
+                    error = Some(err);
+                    break;
+                }
+
+                batch[batch_idx] = (msg_id, req_len, multi);
+                batch_idx += 1;
+                send_offset += req_len as u64;
+                buf_running = &buf_running[(req_len as usize)..];
+            }
+
+            // Always receive the response of every sent message, even after
+            // an error: abandoned responses would leak in self.responses
+            // forever. Responses are processed in send order, so `written`
+            // counts a contiguous prefix; after an error or a short write,
+            // later responses are drained but not counted (like any
+            // pipelined write, file content past the reported prefix is
+            // unspecified after a failure).
+            for &(msg_id, req_len, multi) in batch.iter().take(batch_idx) {
+                let resp = match self.clone().recv(msg_id).await {
+                    Ok(resp) => resp,
+                    Err(err) => {
+                        if error.is_none() {
+                            error = Some(err);
+                        }
+                        continue;
+                    }
+                };
+                if error.is_some() || short_write {
+                    continue;
+                }
+
+                // The response format follows the request format we chose:
+                // the classic response is status-only (a full write).
+                let done = if multi {
+                    api_fs::write_multi_resp_decode(resp)
+                } else {
+                    resp.status().map(|_| req_len)
+                };
+                match done {
+                    Ok(n) if n > req_len => error = Some(moto_rt::Error::InvalidData),
+                    Ok(n) => {
+                        written += n as usize;
+                        if n < req_len {
+                            short_write = true;
+                        }
+                    }
+                    Err(err) => error = Some(err),
+                }
+            }
+        }
+
+        if written > 0 {
+            Ok(written)
+        } else if let Some(err) = error {
+            Err(err)
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// Read bytes from a file.
+    /// Note that cross-block reads may not be supported.
+    pub async fn read(
+        self: &Rc<Self>,
+        file_id: EntryId,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> Result<usize> {
+        // Multi-block reads: each request asks for up to READ_MAX_PAGES
+        // io_pages of data (48K) and gets one multi-page response (or the
+        // classic single-page response when the request fits one page).
+        // WINDOW requests in flight bound transient page usage to
+        // WINDOW * READ_MAX_PAGES = 48 of the channel's 64 server pages,
+        // leaving slack for concurrent stat/metadata responses.
+        const WINDOW: usize = 4;
+
+        let mut buf_running = buf;
+
+        let mut actual_read = 0_usize;
+        let mut send_offset = offset;
+        let mut remaining_len = buf_running.len();
+        let mut error = None;
+        let mut eof = false;
+
+        while error.is_none() && !eof && remaining_len > 0 {
+            // (msg id, request offset, request len) of the in-flight batch.
+            let mut batch = [(0_u64, 0_u64, 0_u32); WINDOW];
+            let mut batch_idx = 0;
+            while batch_idx < WINDOW && remaining_len > 0 {
+                // The first chunk runs to a page boundary, so the whole
+                // request spans at most READ_MAX_PAGES pages.
+                let first_chunk =
+                    ((BLOCK_SIZE as u64) - (send_offset & (BLOCK_SIZE as u64 - 1))) as usize;
+                let mut req_len = remaining_len
+                    .min(first_chunk + (api_fs::READ_MAX_PAGES - 1) * BLOCK_SIZE)
+                    as u32;
+                // The server picks the single-page format for any request of
+                // at most one page, but a single-page read may not cross a
+                // block boundary. Without this, a short read starting near
+                // the end of a block (say 128 bytes at offset 4088) is sent
+                // as one sub-page request spanning two blocks and comes back
+                // InvalidArgument. Stop such a request at the boundary; the
+                // loop picks the remainder up next time round.
+                if req_len as usize > first_chunk && req_len as usize <= BLOCK_SIZE {
+                    req_len = first_chunk as u32;
+                }
+                debug_assert!(req_len as usize <= api_fs::READ_MAX_BYTES);
+
+                let mut msg = api_fs::read_msg_encode(file_id, send_offset, req_len as u16);
+                let msg_id = self.new_request_id();
+                msg.id = msg_id;
+                if let Err(err) = self.clone().send(msg).await {
+                    error = Some(err);
+                    break;
+                }
+
+                batch[batch_idx] = (msg_id, send_offset, req_len);
+                batch_idx += 1;
+                send_offset += req_len as u64;
+                remaining_len -= req_len as usize;
+            }
+
+            // Consume replies in arrival order. Waiting in request order can
+            // deadlock: later replies may hold nearly all server pages while
+            // every reader waits for an earlier reply that needs more pages.
+            let mut pending_ids = batch.map(|entry| entry.0);
+            let mut batch_results = [None; WINDOW];
+            let batch_offset = batch[0].1;
+            for _ in 0..batch_idx {
+                let (idx, resp) = match self.clone().recv_any(&pending_ids).await {
+                    Ok(response) => response,
+                    Err(err) => {
+                        for idx in 0..batch_idx {
+                            if pending_ids[idx] != 0 {
+                                pending_ids[idx] = 0;
+                                batch_results[idx] = Some(Err(err));
+                            }
+                        }
+                        break;
+                    }
+                };
+                pending_ids[idx] = 0;
+                let (_, req_offset, req_len) = batch[idx];
+
+                // The response format follows the request length we chose:
+                // one page carries it => single-page format.
+                let decoded = if req_len as usize <= BLOCK_SIZE {
+                    api_fs::read_resp_decode(resp, &self.io_sender)
+                        .map(|(len, io_page)| (len as u32, alloc::vec![io_page]))
+                } else {
+                    api_fs::read_multi_resp_decode(resp, &self.io_sender)
+                };
+                let (total, pages) = match decoded {
+                    Ok(decoded) => decoded,
+                    Err(err) => {
+                        batch_results[idx] = Some(Err(err));
+                        continue;
+                    }
+                };
+
+                // Reassemble into this request's part of the caller's buffer.
+                let dst_start = (req_offset - batch_offset) as usize;
+                let mut copied = 0_usize;
+                let mut valid = total <= req_len;
+                if valid {
+                    for (io_page, chunk) in pages.iter().zip(api_fs::io_chunks(req_offset, total)) {
+                        let start = dst_start + copied;
+                        buf_running[start..(start + chunk)]
+                            .clone_from_slice(&io_page.bytes()[..chunk]);
+                        copied += chunk;
+                    }
+                    // Fewer pages than chunks => a malformed response.
+                    valid = copied == total as usize;
+                }
+                batch_results[idx] = Some(if valid {
+                    Ok(copied)
+                } else {
+                    Err(moto_rt::Error::InvalidData)
+                });
+            }
+
+            // Replies arrived out of order, but only a contiguous successful
+            // prefix counts toward Read's result.
+            let mut batch_read = 0_usize;
+            for idx in 0..batch_idx {
+                match batch_results[idx].expect("sent read request has a response") {
+                    Ok(copied) if error.is_none() && !eof => {
+                        actual_read += copied;
+                        batch_read += copied;
+                        if copied < batch[idx].2 as usize {
+                            eof = true;
+                        }
+                    }
+                    Err(err) if error.is_none() && !eof => error = Some(err),
+                    _ => {}
+                }
+            }
+            buf_running = &mut buf_running[batch_read..];
+        }
+
+        if actual_read > 0 {
+            Ok(actual_read)
+        } else if let Some(err) = error {
+            if err == moto_rt::Error::UnexpectedEof {
+                Ok(0)
+            } else {
+                Err(err)
+            }
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// Copy up to `size` bytes from file `from` to file `to`, both at `offset`.
+    /// Returns the number of bytes actually copied, which may be less than
+    /// `size` if the end of the source file is reached.
+    pub async fn copy_file_range(
+        self: &Rc<Self>,
+        from: EntryId,
+        to: EntryId,
+        offset: u64,
+        size: u64,
+    ) -> Result<u64> {
+        let mut msg = api_fs::copy_file_range_req_encode(from, to, offset, size);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        api_fs::copy_file_range_resp_decode(resp)
+    }
+
+    /// Ask sys-io to build a stopped child from an executable; returns the
+    /// child's process handle in this process's handle table.
+    pub async fn spawn(self: &Rc<Self>, req: &api_fs::SpawnRequest) -> Result<u64> {
+        let io_page = self.io_sender.alloc_page(u64::MAX).await?;
+        let mut msg = api_fs::spawn_msg_encode(req, io_page);
+        msg.id = self.new_request_id();
+        let resp = self.clone().send_recv(msg).await?;
+        api_fs::spawn_resp_decode(resp)
+    }
+
+    /// The metadata of the directory entry.
+    pub async fn metadata(self: &Rc<Self>, entry_id: EntryId) -> Result<Metadata> {
+        let mut msg = api_fs::metadata_msg_encode(entry_id);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        let metadata = api_fs::metadata_resp_decode(resp, &self.io_sender)?;
+        Ok(metadata)
+    }
+
+    /// Change the calling process role's permissions for a directory entry.
+    pub async fn set_permissions(
+        self: &Rc<Self>,
+        entry_id: EntryId,
+        access: AccessPermissions,
+    ) -> Result<()> {
+        let mut msg = api_fs::set_permissions_msg_encode(entry_id, access);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        resp.status()
+    }
+
+    /// Atomically set the permissions for all three process roles.
+    pub async fn set_all_permissions(
+        self: &Rc<Self>,
+        entry_id: EntryId,
+        permissions: RolePermissions,
+    ) -> Result<()> {
+        let mut msg = api_fs::set_all_permissions_msg_encode(entry_id, permissions);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        resp.status()
+    }
+
+    /// Resize the file.
+    pub async fn resize(self: &Rc<Self>, file_id: EntryId, new_size: u64) -> Result<()> {
+        let mut msg = api_fs::resize_msg_encode(file_id, new_size);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        resp.status()
+    }
+
+    /// Delete the file or directory.
+    pub async fn delete_entry(self: &Rc<Self>, entry_id: EntryId) -> Result<()> {
+        let mut msg = api_fs::delete_entry_msg_encode(entry_id);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        resp.status()
+    }
+
+    pub async fn flush(self: &Rc<Self>) -> Result<()> {
+        let mut msg = api_fs::flush_msg_encode();
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        resp.status()
+    }
+
+    pub async fn file_lock(
+        self: &Rc<Self>,
+        entry_id: EntryId,
+        open_id: u64,
+        operation: u8,
+    ) -> Result<()> {
+        let mut msg = api_fs::file_lock_msg_encode(entry_id, open_id, operation);
+        msg.id = self.new_request_id();
+        self.clone().send_recv(msg).await?.status()
+    }
+
+    /// Rename and/or move the file or directory.
+    pub async fn move_entry(
+        self: &Rc<Self>,
+        entry_id: EntryId,
+        new_parent_id: EntryId,
+        new_name: &str,
+    ) -> Result<()> {
+        let io_page = self.io_sender.alloc_page(u64::MAX).await?;
+        let mut msg = api_fs::move_entry_req_encode(entry_id, new_parent_id, new_name, io_page);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        resp.status()
+    }
+
+    /// Rename and/or move the file or directory. Fail if the destination exists.
+    pub async fn move_noreplace(
+        self: &Rc<Self>,
+        entry_id: EntryId,
+        new_parent_id: EntryId,
+        new_name: &str,
+    ) -> Result<()> {
+        let io_page = self.io_sender.alloc_page(u64::MAX).await?;
+        let mut msg = api_fs::move_noreplace_req_encode(entry_id, new_parent_id, new_name, io_page);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        resp.status()
+    }
+
+    /// Get the first entry in a directory.
+    pub async fn get_first_entry(self: &Rc<Self>, parent_id: EntryId) -> Result<Option<EntryId>> {
+        let mut msg = api_fs::get_first_entry_req_encode(parent_id);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        api_fs::get_first_entry_resp_decode(resp)
+    }
+
+    /// Get the next entry in a directory.
+    pub async fn get_next_entry(self: &Rc<Self>, entry_id: EntryId) -> Result<Option<EntryId>> {
+        let mut msg = api_fs::get_next_entry_req_encode(entry_id);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        api_fs::get_next_entry_resp_decode(resp)
+    }
+
+    /// Get the parent of the entry.
+    async fn get_parent(&mut self, entry_id: EntryId) -> Result<Option<EntryId>> {
+        todo!()
+    }
+
+    /// Filename of the entry, without parent directories.
+    pub async fn name(self: &Rc<Self>, entry_id: EntryId) -> Result<String> {
+        let mut msg = api_fs::get_name_req_encode(entry_id);
+        msg.id = self.new_request_id();
+
+        let resp = self.clone().send_recv(msg).await?;
+        api_fs::get_name_resp_decode(resp, &self.io_sender)
+    }
+
+    /// The total number of blocks in the FS.
+    fn num_blocks(&self) -> u64 {
+        todo!()
+    }
+
+    async fn empty_blocks(&mut self) -> Result<u64> {
+        todo!()
+    }
+}

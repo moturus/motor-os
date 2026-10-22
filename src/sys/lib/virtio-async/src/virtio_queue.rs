@@ -6,10 +6,10 @@ use super::{le16, le32, le64};
 use crate::pci::PciBar;
 use crate::virtio_device::mapper;
 
-use moto_async::AsFuture;
+use moto_sdk::async_runtime::AsFuture;
+use moto_sdk::iobuf::VirtioIoBuf;
 use moto_sys::SysHandle;
 use moto_sys::syscalls::RaiiHandle;
-use moto_tooling::iobuf::IoBuf;
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -122,7 +122,7 @@ impl VirtqUsed {
 }
 
 struct HeaderBuffer {
-    buf: IoBuf,
+    buf: VirtioIoBuf,
     consumed: u32,
     in_use_by_device: bool,
     in_use_by_completion: bool,
@@ -135,7 +135,7 @@ impl HeaderBuffer {
             _ => 16,
         };
         Ok(Self {
-            buf: IoBuf::new_from_size_align(size).ok_or(ErrorKind::OutOfMemory)?,
+            buf: VirtioIoBuf::new_from_size_align(size).ok_or(ErrorKind::OutOfMemory)?,
             consumed: 0,
             in_use_by_device: false,
             in_use_by_completion: false,
@@ -359,7 +359,7 @@ impl Virtqueue {
         }
         for queue in queues {
             let reclaim_queue = queue.clone();
-            moto_async::LocalRuntime::spawn(async move {
+            moto_sdk::async_runtime::LocalRuntime::spawn(async move {
                 Self::reclaim_task(reclaim_queue).await;
             });
             #[cfg(debug_assertions)]
@@ -370,15 +370,15 @@ impl Virtqueue {
 
     #[cfg(debug_assertions)]
     fn spawn_monitoring_task(this: Rc<RefCell<Self>>) {
-        moto_async::LocalRuntime::spawn(async move {
+        moto_sdk::async_runtime::LocalRuntime::spawn(async move {
             log::warn!("VirtQ monitoring thread started");
             let mut errors = 0;
             let mut prev_used = 0;
             loop {
                 if errors == 0 {
-                    moto_async::sleep(std::time::Duration::from_secs(1)).await;
+                    moto_sdk::async_runtime::sleep(std::time::Duration::from_secs(1)).await;
                 } else {
-                    moto_async::sleep(std::time::Duration::from_millis(10)).await;
+                    moto_sdk::async_runtime::sleep(std::time::Duration::from_millis(10)).await;
                 }
                 let vq = this.borrow();
 
@@ -1088,12 +1088,12 @@ impl<T: Unpin> Future for WriteCompletion<T> {
     }
 }
 
-pub struct ReadCompletion<T: AsMut<IoBuf> + Unpin> {
+pub struct ReadCompletion<T: AsMut<VirtioIoBuf> + Unpin> {
     pub(crate) vq_completion: VqCompletion<T>,
     pub(crate) size_adjustor: fn(u32) -> u32,
 }
 
-impl<T: AsMut<IoBuf> + Unpin> Future for ReadCompletion<T> {
+impl<T: AsMut<VirtioIoBuf> + Unpin> Future for ReadCompletion<T> {
     type Output = (T, Result<()>);
 
     fn poll(

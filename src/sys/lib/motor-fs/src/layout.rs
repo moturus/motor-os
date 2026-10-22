@@ -21,17 +21,17 @@ use crate::Txn;
 use crate::bplus_tree;
 use crate::bplus_tree::Node;
 use crate::bplus_tree::RootNode;
-use async_fs::AsyncBlockDevice;
-pub use async_fs::BLOCK_SIZE;
-use async_fs::Block;
-pub use async_fs::EntryId;
-pub use async_fs::EntryKind;
-use async_fs::Metadata;
-use async_fs::Timestamp;
 use bytemuck::Pod;
+use moto_sdk::async_fs::AsyncBlockDevice;
+pub use moto_sdk::async_fs::BLOCK_SIZE;
+use moto_sdk::async_fs::Block;
+pub use moto_sdk::async_fs::EntryId;
+pub use moto_sdk::async_fs::EntryKind;
+use moto_sdk::async_fs::Metadata;
+use moto_sdk::async_fs::Timestamp;
 use std::io::Result;
 
-pub use async_fs::{MAX_FILENAME_LEN, validate_filename};
+pub use moto_sdk::async_fs::{MAX_FILENAME_LEN, validate_filename};
 pub const RESERVED_BLOCKS: usize = MAX_BLOCKS_IN_TXN_LOG + 2;
 
 pub(crate) const MAX_BLOCKS_IN_TXN: usize = 16;
@@ -841,9 +841,9 @@ impl DirEntryBlock {
         txn: &'b mut Txn<'a, BD>,
         parent_id: EntryIdInternal,
         entry_id: EntryIdInternal,
-        kind: async_fs::EntryKind,
+        kind: moto_sdk::async_fs::EntryKind,
         filename: &str,
-        permissions: async_fs::RolePermissions,
+        permissions: moto_sdk::async_fs::RolePermissions,
     ) {
         let mut child_block = txn.get_empty_block_mut(entry_id.block_no);
         let mut child_block_ref = child_block.block_mut();

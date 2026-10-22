@@ -7,7 +7,7 @@ edition = "2024"
 env_logger   = "=0.11.8"
 hex          = "0.4.3"
 log          = "=0.4.28"
-moto-tooling = { path = "../../sys/lib/moto-tooling", features = ["std"] }
+moto-sdk     = { path = "../../sys/lib/moto-sdk" }
 rand         = "0.10"
 russh        = { git = "https://github.com/moturus/russh.git", branch = "server-window", default-features = false, features = ["flate2", "ring", "rsa"] }
 russh-sftp   = "=2.1.1"
@@ -21,9 +21,6 @@ libc = "=0.2.189"
 
 [target.'cfg(target_os = "motor")'.dependencies]
 getrandom    = { version = "=0.2.17", features = ["custom"] }
-moto-log     = { path = "../../sys/lib/moto-log" }
-moto-async   = { path = "../../sys/lib/moto-async" }
-moto-io      = { path = "../../sys/lib/moto-io" }
 moto-rt      = { path = "../../sys/lib/moto-rt"  }
 moto-sys     = { path = "../../sys/lib/moto-sys" }
 

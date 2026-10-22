@@ -87,9 +87,9 @@ use std::rc::Weak;
 use std::{cell::RefCell, net::SocketAddr, rc::Rc, task::Poll};
 
 use moto_netstack::socket::tcp::State as NetstackTcpState;
+use moto_sdk::sys_io::api_net;
+use moto_sdk::sys_io::stats::TcpProtocolState;
 use moto_sys::SysHandle;
-use moto_sys_io::api_net;
-use moto_sys_io::stats::TcpProtocolState;
 
 use crate::runtime::channel_budget::ClientSender;
 use crate::runtime::net::tcp_listener::TcpListener;
@@ -148,7 +148,9 @@ impl TcpBufferSizes {
     /// bounds the per-socket worst case (affirmed in design review).
     const CAP: usize = 8 * 1024 * 1024;
 
-    pub(in crate::runtime::net) fn from_payload(payload: &moto_ipc::io_channel::Payload) -> Self {
+    pub(in crate::runtime::net) fn from_payload(
+        payload: &moto_sdk::ipc::io_channel::Payload,
+    ) -> Self {
         let size = |pos: usize| match api_net::tcp_buf_size_from_code(payload.args_8()[pos]) {
             None => Self::default_size(),
             Some(bytes) => (bytes as usize).clamp(Self::FLOOR, Self::CAP),
@@ -291,12 +293,12 @@ pub struct TcpState {
     ephemeral_port: Option<Rc<EphemeralTcpPort>>,
     subchannel_mask: u64,
     tcp_listener: Option<Weak<RefCell<TcpListener>>>,
-    connect_req: Option<moto_ipc::io_channel::Msg>,
+    connect_req: Option<moto_sdk::ipc::io_channel::Msg>,
 
     remote_addr: Option<SocketAddr>,
 
     tx_queue: VecDeque<TcpTxBuf>,
-    tx_queue_notify: Rc<moto_async::LocalNotify>,
+    tx_queue_notify: Rc<moto_sdk::async_runtime::LocalNotify>,
 
     stat_tx_bytes: u64,
     stat_rx_bytes: u64,
@@ -311,7 +313,7 @@ pub struct TcpState {
     // a remote connection, and the client delays processing
     // the accept, the client won't know which connection the
     // incoming RX bytes should be routed to...
-    rx_ready: Rc<moto_async::LocalNotify>,
+    rx_ready: Rc<moto_sdk::async_runtime::LocalNotify>,
 
     // The client has closed its TX (in posix sense).
     // The TX queue above may still have bytes to send.
@@ -320,10 +322,10 @@ pub struct TcpState {
 
     // See SO_LINGER in Linux and TcpStream::set_linger() in Rust.
     linger_secs: Option<u32>,
-    lingerer: Option<moto_async::oneshot::Sender<()>>,
-    linger_cancel: Option<moto_async::oneshot::Sender<()>>,
+    lingerer: Option<moto_sdk::async_runtime::oneshot::Sender<()>>,
+    linger_cancel: Option<moto_sdk::async_runtime::oneshot::Sender<()>>,
     orphan_linger: bool,
-    shutdown_waiters: Vec<moto_async::oneshot::Sender<()>>,
+    shutdown_waiters: Vec<moto_sdk::async_runtime::oneshot::Sender<()>>,
 }
 
 impl TcpState {
@@ -458,8 +460,8 @@ impl MotoSocket {
     /// `sys-io-stats-service` socket listing (see [`crate::runtime::net::stats`]).
     pub(crate) fn collect_tcp_stats(
         moto_socket: &Rc<RefCell<Self>>,
-    ) -> moto_sys_io::stats::TcpSocketStatsV1 {
-        use moto_sys_io::stats::TcpSocketStatsV1;
+    ) -> moto_sdk::sys_io::stats::TcpSocketStatsV1 {
+        use moto_sdk::sys_io::stats::TcpSocketStatsV1;
 
         // Read the netstack state first: with_tcp_netstack_socket() borrows both the
         // socket and the runtime inner, so we must not hold a borrow across it.
@@ -584,8 +586,8 @@ impl MotoSocket {
                 connect_req: None,
                 remote_addr: None,
                 tx_queue: VecDeque::new(),
-                tx_queue_notify: Rc::new(moto_async::LocalNotify::new()),
-                rx_ready: Rc::new(moto_async::LocalNotify::new()),
+                tx_queue_notify: Rc::new(moto_sdk::async_runtime::LocalNotify::new()),
+                rx_ready: Rc::new(moto_sdk::async_runtime::LocalNotify::new()),
                 stat_tx_bytes: 0,
                 stat_rx_bytes: 0,
                 rx_closed: false,
@@ -689,13 +691,13 @@ impl MotoSocket {
         // Allocate both lifecycle tasks while this socket's pressure check is
         // still current. Deferring the waiter until the listen task's first
         // poll let a large new pool queue heap growth past that boundary.
-        let (connected_tx, connected_rx) = moto_async::oneshot();
-        moto_async::LocalRuntime::spawn(async move {
+        let (connected_tx, connected_rx) = moto_sdk::async_runtime::oneshot();
+        moto_sdk::async_runtime::LocalRuntime::spawn(async move {
             let _ = connected_rx.await;
             replenish_pool(runtime, weak_listener, device_idx, socket_addr, key);
         });
 
-        moto_async::LocalRuntime::spawn(Self::tcp_listen_task(
+        moto_sdk::async_runtime::LocalRuntime::spawn(Self::tcp_listen_task(
             connected_tx,
             weak_socket,
             device_idx,
@@ -795,7 +797,7 @@ impl MotoSocket {
     }
 
     async fn tcp_listen_task(
-        connected_tx: moto_async::oneshot::Sender<()>,
+        connected_tx: moto_sdk::async_runtime::oneshot::Sender<()>,
         weak_socket: Weak<RefCell<Self>>, // Weak because called asynchronously.
         device_idx: usize,
         key: super::super::backlog::PoolKey,
@@ -826,7 +828,7 @@ impl MotoSocket {
                         #[cfg(debug_assertions)]
                         log::debug!(
                             "Socket 0x{socket_id:x} in state Listen: task_id: {}",
-                            moto_async::task_id(cx)
+                            moto_sdk::async_runtime::task_id(cx)
                         );
                         netstack_socket.register_recv_waker(cx.waker());
                         Poll::Pending
@@ -1014,10 +1016,10 @@ impl MotoSocket {
             return;
         };
 
-        let (accepted_tx, accepted_rx) = moto_async::oneshot();
+        let (accepted_tx, accepted_rx) = moto_sdk::async_runtime::oneshot();
         TcpListener::on_socket_connected(tcp_listener, moto_socket, accepted_tx).await;
 
-        let _ = moto_async::LocalRuntime::spawn(async move {
+        let _ = moto_sdk::async_runtime::LocalRuntime::spawn(async move {
             // We don't do I/O on the socket until it is accepted by the client.
             accepted_rx.await;
             Self::tcp_read_task(weak_socket).await
@@ -1131,13 +1133,14 @@ impl MotoSocket {
         };
 
         let _ = sender.send(msg).await;
-        let _ =
-            moto_async::LocalRuntime::spawn(async move { Self::tcp_read_task(weak_socket).await });
+        let _ = moto_sdk::async_runtime::LocalRuntime::spawn(async move {
+            Self::tcp_read_task(weak_socket).await
+        });
     }
 
     async fn tcp_read_task(weak_socket: Weak<RefCell<Self>>) {
         let weak_socket_cloned = weak_socket.clone();
-        let _ = moto_async::LocalRuntime::spawn(async move {
+        let _ = moto_sdk::async_runtime::LocalRuntime::spawn(async move {
             Self::tcp_write_task(weak_socket_cloned).await
         });
 
@@ -1273,7 +1276,8 @@ impl MotoSocket {
                 let (io_page, sz) = (rx_buf.page, rx_buf.consumed);
                 stats.tcp_rx_msgs.set(stats.tcp_rx_msgs.get() + 1);
                 stats.tcp_rx_bytes.set(stats.tcp_rx_bytes.get() + sz as u64);
-                let mut msg = moto_sys_io::api_net::tcp_stream_rx_msg(socket_id, io_page, sz, 0);
+                let mut msg =
+                    moto_sdk::sys_io::api_net::tcp_stream_rx_msg(socket_id, io_page, sz, 0);
                 msg.status = moto_rt::E_OK;
                 let _ = sender.send(msg).await;
             }
@@ -1505,7 +1509,7 @@ impl MotoSocket {
             (socket_ref.base.socket_id, sender)
         };
 
-        let mut msg = moto_ipc::io_channel::Msg::new();
+        let mut msg = moto_sdk::ipc::io_channel::Msg::new();
         msg.command = api_net::NetCmd::EvtTcpStreamStateChanged as u16;
         msg.handle = socket_id;
         msg.payload.args_32_mut()[0] = new_state.into();
@@ -1640,7 +1644,7 @@ impl MotoSocket {
     // The socket may become detached.
     pub async fn close_tcp_socket_inner(
         moto_socket: Rc<RefCell<MotoSocket>>,
-        mut close_req: Option<moto_ipc::io_channel::Msg>,
+        mut close_req: Option<moto_sdk::ipc::io_channel::Msg>,
     ) {
         let socket_id = moto_socket.borrow().socket_id();
 
@@ -1726,7 +1730,7 @@ impl MotoSocket {
                 let mut socket_ref = moto_socket.borrow_mut();
                 socket_ref.base.lingering = true;
 
-                let (cancel_sender, cancel_receiver) = moto_async::oneshot();
+                let (cancel_sender, cancel_receiver) = moto_sdk::async_runtime::oneshot();
                 socket_ref.unwrap_tcp_mut().linger_cancel = Some(cancel_sender);
 
                 // Only a close that still has writes to hand over waits for the
@@ -1736,7 +1740,7 @@ impl MotoSocket {
                 // shutdown(WRITE) followed by a close, say -- since the signal
                 // below is sent exactly once, when that task ends.
                 let lingerer = if action == CloseAction::DrainThenFinish {
-                    let (sender, receiver) = moto_async::oneshot();
+                    let (sender, receiver) = moto_sdk::async_runtime::oneshot();
                     socket_ref.unwrap_tcp_mut().lingerer = Some(sender);
                     Some(receiver)
                 } else {
@@ -1753,9 +1757,9 @@ impl MotoSocket {
             };
 
             log::debug!("TCP socket 0x{socket_id:x}: lingering for {linger_secs} seconds.");
-            let deadline =
-                moto_async::Instant::now() + std::time::Duration::from_secs(linger_secs as u64);
-            moto_async::LocalRuntime::spawn(async move {
+            let deadline = moto_sdk::async_runtime::Instant::now()
+                + std::time::Duration::from_secs(linger_secs as u64);
+            moto_sdk::async_runtime::LocalRuntime::spawn(async move {
                 Self::tcp_linger_task(socket_clone, deadline, linger_cancel, lingerer, close_req)
                     .await
             });
@@ -1777,10 +1781,10 @@ impl MotoSocket {
     /// by [`Self::drop_tcp_socket`].
     async fn tcp_linger_task(
         moto_socket: Rc<RefCell<Self>>,
-        deadline: moto_async::Instant,
-        linger_cancel: moto_async::oneshot::Receiver<()>,
-        lingerer: Option<moto_async::oneshot::Receiver<()>>,
-        close_req: Option<moto_ipc::io_channel::Msg>,
+        deadline: moto_sdk::async_runtime::Instant,
+        linger_cancel: moto_sdk::async_runtime::oneshot::Receiver<()>,
+        lingerer: Option<moto_sdk::async_runtime::oneshot::Receiver<()>>,
+        close_req: Option<moto_sdk::ipc::io_channel::Msg>,
     ) {
         use futures::FutureExt;
 
@@ -1815,9 +1819,9 @@ impl MotoSocket {
 
     async fn tcp_linger_inner(
         moto_socket: Rc<RefCell<Self>>,
-        deadline: moto_async::Instant,
-        lingerer: Option<moto_async::oneshot::Receiver<()>>,
-        close_req: Option<moto_ipc::io_channel::Msg>,
+        deadline: moto_sdk::async_runtime::Instant,
+        lingerer: Option<moto_sdk::async_runtime::oneshot::Receiver<()>>,
+        close_req: Option<moto_sdk::ipc::io_channel::Msg>,
     ) {
         use futures::FutureExt;
 
@@ -1832,7 +1836,7 @@ impl MotoSocket {
                 log::debug!("Lingering socket 0x{socket_id:x}: TX done.");
                 true
             },
-            _ = moto_async::sleep_until(deadline.into()).fuse() => {
+            _ = moto_sdk::async_runtime::sleep_until(deadline.into()).fuse() => {
                 log::debug!("Lingering socket 0x{socket_id:x}: TX timed out.");
                 false
             },
@@ -1869,7 +1873,7 @@ impl MotoSocket {
                 log::debug!("Lingering socket 0x{socket_id:x}: close handshake complete.");
                 true
             },
-            _ = moto_async::sleep_until(deadline.into()).fuse() => {
+            _ = moto_sdk::async_runtime::sleep_until(deadline.into()).fuse() => {
                 log::debug!("Lingering socket 0x{socket_id:x}: close timed out.");
                 false
             },
@@ -1891,7 +1895,7 @@ impl MotoSocket {
             // owed nothing more, so drop its channel now: otherwise the
             // channel's shared pages outlive the client for those seconds.
             moto_socket.borrow_mut().base.release_client_sender();
-            let protocol_deadline = moto_async::Instant::now()
+            let protocol_deadline = moto_sdk::async_runtime::Instant::now()
                 + std::time::Duration::from_secs(DEFAULT_LINGER_SECS as u64);
             let closed = std::future::poll_fn(|cx| {
                 let (close_complete, release_orphan_slot) =
@@ -1926,7 +1930,7 @@ impl MotoSocket {
             _ = closed.fuse() => {
                 log::debug!("Lingering socket 0x{socket_id:x}: closed.");
             },
-            _ = moto_async::sleep_until(protocol_deadline.into()).fuse() => {
+            _ = moto_sdk::async_runtime::sleep_until(protocol_deadline.into()).fuse() => {
                 log::debug!("Lingering socket 0x{socket_id:x}: protocol close timed out.");
             },
             }
@@ -1988,7 +1992,7 @@ impl MotoSocket {
     /* ----------------------------------- API calls ------------------------------------ */
     pub async fn tcp_connect(
         runtime: &NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
+        msg: moto_sdk::ipc::io_channel::Msg,
         sender: &ClientSender,
     ) -> std::io::Result<()> {
         let subchannel_idx = msg.payload.args_8()[23];
@@ -2087,7 +2091,7 @@ impl MotoSocket {
 
         // Spawn the socket task.
 
-        moto_async::LocalRuntime::spawn(async move {
+        moto_sdk::async_runtime::LocalRuntime::spawn(async move {
             Self::tcp_connect_task(weak_socket).await;
         });
 
@@ -2096,22 +2100,22 @@ impl MotoSocket {
 
     pub async fn tcp_tx(
         runtime: &NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        msg: moto_sdk::ipc::io_channel::Msg,
+        sender: &moto_sdk::ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
         // Recover the page(s) first, before any validation, so that they are
         // freed on every return path. `flags` distinguishes the two request
         // formats: zero = classic single page (size in args_64[1]), nonzero =
         // multi-page (flags = total size, pages full except the last) — see
         // api_net::tcp_stream_tx_multi_msg.
-        let mut pages: Vec<(moto_ipc::io_channel::IoPage, usize)> = if msg.flags == 0 {
+        let mut pages: Vec<(moto_sdk::ipc::io_channel::IoPage, usize)> = if msg.flags == 0 {
             let page_idx = msg.payload.shared_pages()[0];
             let Ok(page) = sender.get_page(page_idx) else {
                 return Err(ErrorKind::InvalidInput.into());
             };
 
             let sz = msg.payload.args_64()[1] as usize;
-            if sz > moto_ipc::io_channel::PAGE_SIZE {
+            if sz > moto_sdk::ipc::io_channel::PAGE_SIZE {
                 // TODO: drop the connection?
                 return Err(ErrorKind::InvalidInput.into());
             }
@@ -2125,7 +2129,7 @@ impl MotoSocket {
             pages
                 .into_iter()
                 .map(|page| {
-                    let sz = remaining.min(moto_ipc::io_channel::PAGE_SIZE);
+                    let sz = remaining.min(moto_sdk::ipc::io_channel::PAGE_SIZE);
                     remaining -= sz;
                     (page, sz)
                 })
@@ -2182,8 +2186,8 @@ impl MotoSocket {
 
     pub async fn tcp_rx_ack_received(
         runtime: &NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        msg: moto_sdk::ipc::io_channel::Msg,
+        sender: &moto_sdk::ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
         let socket_id = msg.handle;
         runtime
@@ -2214,8 +2218,8 @@ impl MotoSocket {
 
     pub async fn tcp_getsockopt(
         runtime: &NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        msg: moto_sdk::ipc::io_channel::Msg,
+        sender: &moto_sdk::ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
         let socket_id = msg.handle;
         let Some(moto_socket) = runtime.inner.borrow().sockets.get(&socket_id).cloned() else {
@@ -2297,8 +2301,8 @@ impl MotoSocket {
 
     pub async fn tcp_setsockopt(
         runtime: &NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        msg: moto_sdk::ipc::io_channel::Msg,
+        sender: &moto_sdk::ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
         let socket_id = msg.handle;
         let Some(moto_socket) = runtime.inner.borrow().sockets.get(&socket_id).cloned() else {
@@ -2415,7 +2419,7 @@ impl MotoSocket {
                             // Always let the TX task establish that boundary:
                             // even an empty staging queue can be a transient
                             // observation during its handoff to the netstack.
-                            let (sender, receiver) = moto_async::oneshot();
+                            let (sender, receiver) = moto_sdk::async_runtime::oneshot();
                             state.shutdown_waiters.push(sender);
                             Some(receiver)
                         } else {
@@ -2441,8 +2445,8 @@ impl MotoSocket {
 
     pub async fn tcp_close(
         runtime: &NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        msg: moto_sdk::ipc::io_channel::Msg,
+        sender: &moto_sdk::ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
         // Explicit positive SO_LINGER defers the response until the linger
         // resolves. Other successful closes respond after handing cleanup to
@@ -2505,7 +2509,7 @@ pub(in crate::runtime::net) fn replenish_pool(
 }
 
 /// Convert a socket address into the IPv6 (IPv4-mapped) octets + port form used
-/// by [`moto_sys_io::stats::TcpSocketStatsV1`].
+/// by [`moto_sdk::sys_io::stats::TcpSocketStatsV1`].
 fn addr_to_octets(addr: &SocketAddr) -> ([u8; 16], u16) {
     match addr {
         SocketAddr::V4(v4) => (v4.ip().to_ipv6_mapped().octets(), v4.port()),
@@ -2616,18 +2620,18 @@ fn api_tcp_state(
 }
 
 struct TcpRxBuf {
-    page: moto_ipc::io_channel::IoPage,
+    page: moto_sdk::ipc::io_channel::IoPage,
     consumed: usize,
 }
 
 impl TcpRxBuf {
-    fn new(page: moto_ipc::io_channel::IoPage) -> Self {
+    fn new(page: moto_sdk::ipc::io_channel::IoPage) -> Self {
         Self { page, consumed: 0 }
     }
 
     fn consume(&mut self, sz: usize) {
         self.consumed += sz;
-        assert!(self.consumed <= moto_ipc::io_channel::PAGE_SIZE);
+        assert!(self.consumed <= moto_sdk::ipc::io_channel::PAGE_SIZE);
     }
 
     fn bytes_mut(&self) -> &mut [u8] {
@@ -2636,7 +2640,7 @@ impl TcpRxBuf {
 }
 
 struct TcpTxBuf {
-    page: moto_ipc::io_channel::IoPage,
+    page: moto_sdk::ipc::io_channel::IoPage,
     len: usize,
     consumed: usize,
 }

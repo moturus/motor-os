@@ -10,12 +10,14 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 "$ROOT_DIR/src/sys-lib-workspace.sh" --offline "$work/lib"
-for crate in moto-rt moto-sys moto-mpmc moto-async moto-ipc; do
+for crate in moto-rt moto-sys moto-sdk; do
 	[ -f "$work/lib/$crate/Cargo.toml" ] || fail "the workspace lacks $crate"
 done
-cmp -s "$work/lib/Cargo.toml" \
-	"$ROOT_DIR/img_files/motor-os-dev/devtools/src/motor-os/sys/lib/Cargo.toml" ||
-	fail "the workspace manifest is not the image's"
+# The manifest and the tokio placeholder are the image's static files.
+static="$ROOT_DIR/img_files/motor-os-dev/devtools/src/motor-os/sys/lib"
+while read -r file; do
+	cmp -s "$static/$file" "$work/lib/$file" || fail "$file is not the image's"
+done < <(cd "$static" && find . -type f)
 [ -z "$(find "$work/lib" \( -name target -o -name .lorry \) -print)" ] ||
 	fail "the workspace contains build outputs"
 
@@ -28,6 +30,8 @@ registry_packages() {
 		/^checksum = / && source != "" { print name, version, source, $3 }
 	' "$1" | LC_ALL=C sort
 }
+# src/sys locks tokio from Git, so a crates.io tokio in place of the
+# placeholder fails here.
 locked="$(registry_packages "$work/lib/Cargo.lock")"
 [ -n "$locked" ] || fail "the workspace locks no registry package"
 different="$(LC_ALL=C comm -23 <(printf '%s\n' "$locked") \

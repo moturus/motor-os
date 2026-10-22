@@ -1,4 +1,4 @@
-use moto_stats::{Collector, MetricEntry, ProviderInfo};
+use moto_sdk::stats::{Collector, MetricEntry, ProviderInfo};
 use moto_sys::caps::ProcessRole;
 use moto_sys::stats::{ProcessInfoV1, PID_KERNEL, PID_SYSTEM};
 

@@ -32,8 +32,8 @@ const TX_WRITE_YIELDS: usize = 100;
 /// extract partial progress.
 fn block_on_deadline<F: Future + Unpin>(fut: F, deadline: Option<Instant>) -> Result<F::Output, F> {
     match deadline {
-        None => Ok(moto_async::block_on_sync(fut)),
-        Some(d) => moto_async::block_on_sync_deadline(fut, d),
+        None => Ok(moto_sdk::async_runtime::block_on_sync(fut)),
+        Some(d) => moto_sdk::async_runtime::block_on_sync_deadline(fut, d),
     }
 }
 

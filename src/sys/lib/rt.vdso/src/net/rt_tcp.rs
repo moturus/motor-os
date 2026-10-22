@@ -16,14 +16,14 @@ use crate::runtime::EventSourceManaged;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::time::Duration;
-use moto_io::net::tcp::Shutdown;
-use moto_io::net::tcp::TcpListener;
-use moto_io::net::tcp::TcpStream;
 use moto_rt::RtFd;
 use moto_rt::poll::Interests;
 use moto_rt::poll::Token;
+use moto_sdk::io::net::tcp::Shutdown;
+use moto_sdk::io::net::tcp::TcpListener;
+use moto_sdk::io::net::tcp::TcpStream;
+use moto_sdk::sys_io::api_net::TcpState;
 use moto_sys::ErrorCode;
-use moto_sys_io::api_net::TcpState;
 
 /// A connected-TCP descriptor: the native stream plus the POSIX state a native
 /// caller does not have. Because the wrapper is the shared
@@ -122,7 +122,7 @@ impl RtTcpStream {
                     (false, true) => Shutdown::Write,
                     (false, false) => return moto_rt::E_INVALID_ARGUMENT,
                 };
-                into_error_code(moto_async::block_on_sync(
+                into_error_code(moto_sdk::async_runtime::block_on_sync(
                     self.inner.shutdown_async(shutdown),
                 ))
             }
@@ -132,14 +132,16 @@ impl RtTcpStream {
                 if nodelay > 1 {
                     return moto_rt::E_INVALID_ARGUMENT;
                 }
-                into_error_code(moto_async::block_on_sync(
+                into_error_code(moto_sdk::async_runtime::block_on_sync(
                     self.inner.set_nodelay_async(nodelay == 1),
                 ))
             }
             moto_rt::net::SO_TTL => {
                 assert_eq!(len, 4);
                 let ttl = unsafe { *(ptr as *const u32) };
-                into_error_code(moto_async::block_on_sync(self.inner.set_ttl_async(ttl)))
+                into_error_code(moto_sdk::async_runtime::block_on_sync(
+                    self.inner.set_ttl_async(ttl),
+                ))
             }
             moto_rt::net::SO_LINGER => {
                 assert_eq!(len, core::mem::size_of::<u64>());
@@ -149,7 +151,7 @@ impl RtTcpStream {
                 } else {
                     Some(Duration::from_millis(millis))
                 };
-                into_error_code(moto_async::block_on_sync(
+                into_error_code(moto_sdk::async_runtime::block_on_sync(
                     self.inner.set_linger_async(duration),
                 ))
             }
@@ -157,7 +159,9 @@ impl RtTcpStream {
                 assert_eq!(len, core::mem::size_of::<u64>());
                 let bytes = unsafe { *(ptr as *const u64) };
                 let rcv = option == moto_rt::net::SO_RCVBUF;
-                match moto_async::block_on_sync(self.inner.set_buffer_size_async(rcv, bytes)) {
+                match moto_sdk::async_runtime::block_on_sync(
+                    self.inner.set_buffer_size_async(rcv, bytes),
+                ) {
                     Ok(_effective) => moto_rt::E_OK,
                     Err(err) => err,
                 }
@@ -184,7 +188,7 @@ impl RtTcpStream {
             }
             moto_rt::net::SO_NODELAY => {
                 assert_eq!(len, 1);
-                match moto_async::block_on_sync(self.inner.nodelay_async()) {
+                match moto_sdk::async_runtime::block_on_sync(self.inner.nodelay_async()) {
                     Ok(nodelay) => {
                         unsafe { *(ptr as *mut u8) = nodelay as u8 };
                         moto_rt::E_OK
@@ -194,7 +198,7 @@ impl RtTcpStream {
             }
             moto_rt::net::SO_TTL => {
                 assert_eq!(len, 4);
-                match moto_async::block_on_sync(self.inner.ttl_async()) {
+                match moto_sdk::async_runtime::block_on_sync(self.inner.ttl_async()) {
                     Ok(ttl) => {
                         unsafe { *(ptr as *mut u32) = ttl };
                         moto_rt::E_OK
@@ -204,7 +208,7 @@ impl RtTcpStream {
             }
             moto_rt::net::SO_LINGER => {
                 assert_eq!(len, core::mem::size_of::<u64>());
-                match moto_async::block_on_sync(self.inner.linger_async()) {
+                match moto_sdk::async_runtime::block_on_sync(self.inner.linger_async()) {
                     Ok(duration) => {
                         unsafe {
                             *(ptr as *mut u64) = duration
@@ -224,7 +228,7 @@ impl RtTcpStream {
             moto_rt::net::SO_RCVBUF | moto_rt::net::SO_SNDBUF => {
                 assert_eq!(len, core::mem::size_of::<u64>());
                 let rcv = option == moto_rt::net::SO_RCVBUF;
-                match moto_async::block_on_sync(self.inner.buffer_size_async(rcv)) {
+                match moto_sdk::async_runtime::block_on_sync(self.inner.buffer_size_async(rcv)) {
                     Ok(bytes) => {
                         unsafe { *(ptr as *mut u64) = bytes };
                         moto_rt::E_OK
@@ -388,10 +392,10 @@ impl ListenerEvents {
     }
 }
 
-impl moto_io::net::readiness::NetEventListener for ListenerEvents {
-    fn on_readiness(&self, edges: moto_io::net::readiness::Readiness) {
+impl moto_sdk::io::net::readiness::NetEventListener for ListenerEvents {
+    fn on_readiness(&self, edges: moto_sdk::io::net::readiness::Readiness) {
         self.events.on_readiness(edges);
-        if edges.contains(moto_io::net::readiness::Readiness::READABLE)
+        if edges.contains(moto_sdk::io::net::readiness::Readiness::READABLE)
             && let Some(pump) = &*self.pump.lock()
         {
             pump.poke();
@@ -514,7 +518,9 @@ impl RtTcpListener {
             moto_rt::net::SO_TTL => {
                 assert_eq!(len, 4);
                 let ttl = unsafe { *(ptr as *const u32) };
-                into_error_code(moto_async::block_on_sync(self.inner.set_ttl_async(ttl)))
+                into_error_code(moto_sdk::async_runtime::block_on_sync(
+                    self.inner.set_ttl_async(ttl),
+                ))
             }
             moto_rt::net::SO_ONLY_IPV6 => {
                 assert_eq!(len, 1);
@@ -522,7 +528,7 @@ impl RtTcpListener {
                 if only_v6 > 1 {
                     return moto_rt::E_INVALID_ARGUMENT;
                 }
-                into_error_code(moto_async::block_on_sync(
+                into_error_code(moto_sdk::async_runtime::block_on_sync(
                     self.inner.set_only_v6_async(only_v6 != 0),
                 ))
             }
@@ -530,7 +536,7 @@ impl RtTcpListener {
                 assert_eq!(len, core::mem::size_of::<u64>());
                 let bytes = unsafe { *(ptr as *const u64) };
                 let rcv = option == moto_rt::net::SO_RCVBUF;
-                into_error_code(moto_async::block_on_sync(
+                into_error_code(moto_sdk::async_runtime::block_on_sync(
                     self.inner.set_buffer_size_async(rcv, bytes),
                 ))
             }
@@ -546,7 +552,7 @@ impl RtTcpListener {
         match option {
             moto_rt::net::SO_TTL => {
                 assert_eq!(len, 4);
-                match moto_async::block_on_sync(self.inner.ttl_async()) {
+                match moto_sdk::async_runtime::block_on_sync(self.inner.ttl_async()) {
                     Ok(ttl) => {
                         unsafe { *(ptr as *mut u32) = ttl };
                         moto_rt::E_OK
@@ -563,7 +569,7 @@ impl RtTcpListener {
             }
             moto_rt::net::SO_ONLY_IPV6 => {
                 assert_eq!(len, 1);
-                match moto_async::block_on_sync(self.inner.only_v6_async()) {
+                match moto_sdk::async_runtime::block_on_sync(self.inner.only_v6_async()) {
                     Ok(only_v6) => {
                         unsafe { *(ptr as *mut u8) = only_v6 as u8 };
                         moto_rt::E_OK
@@ -574,7 +580,7 @@ impl RtTcpListener {
             moto_rt::net::SO_RCVBUF | moto_rt::net::SO_SNDBUF => {
                 assert_eq!(len, core::mem::size_of::<u64>());
                 let rcv = option == moto_rt::net::SO_RCVBUF;
-                match moto_async::block_on_sync(self.inner.buffer_size_async(rcv)) {
+                match moto_sdk::async_runtime::block_on_sync(self.inner.buffer_size_async(rcv)) {
                     Ok(bytes) => {
                         unsafe { *(ptr as *mut u64) = bytes };
                         moto_rt::E_OK

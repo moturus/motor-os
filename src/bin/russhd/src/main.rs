@@ -22,7 +22,7 @@ async fn main() {
             // .filter_level(log::LevelFilter::Debug)
             .init();
     } else {
-        moto_log::init("russhd").unwrap();
+        moto_sdk::log::init("russhd").unwrap();
         log::set_max_level(log::LevelFilter::Info);
     }
 
@@ -200,8 +200,8 @@ impl ConnectionHandler {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
                 // The kernel stops at once, so persist what sys-io still holds.
-                if let Err(err) = moto_async::LocalRuntime::new()
-                    .block_on(async { moto_io::fs::FsClient::connect()?.flush().await })
+                if let Err(err) = moto_sdk::async_runtime::LocalRuntime::new()
+                    .block_on(async { moto_sdk::io::fs::FsClient::connect()?.flush().await })
                 {
                     log::error!("shutdown: filesystem flush failed: {err:?}");
                 }

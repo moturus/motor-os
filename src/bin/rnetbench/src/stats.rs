@@ -28,7 +28,7 @@ mod imp {
 mod imp {
     use std::time::Instant;
 
-    use moto_stats::{Collector, MetricEntry, ProviderInfo};
+    use moto_sdk::stats::{Collector, MetricEntry, ProviderInfo};
 
     // Kernel per-process metrics sampled for sys-io and for this process.
     const KERNEL_METRICS: [&str; 3] = ["cpu_usage", "sys_cpu_waits", "sys_cpu_wakes"];

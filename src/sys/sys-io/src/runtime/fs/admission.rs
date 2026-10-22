@@ -1,6 +1,6 @@
 //! Reactive reclamation only: never drain caches on an admitted fast path.
 use memfs::FreeBlockCache;
-use moto_sys_io::api_fs::{self, MountKind};
+use moto_sdk::sys_io::api_fs::{self, MountKind};
 use std::cell::RefCell;
 use std::io::{ErrorKind, Result};
 
@@ -132,16 +132,18 @@ pub(super) mod self_test {
         };
         let entry = fs
             .create_entry_sync(
-                async_fs::Role::None,
+                moto_sdk::async_fs::Role::None,
                 0,
-                async_fs::EntryKind::File,
+                moto_sdk::async_fs::EntryKind::File,
                 "cache",
-                async_fs::RolePermissions::all(async_fs::AccessPermissions::Rwx),
+                moto_sdk::async_fs::RolePermissions::all(
+                    moto_sdk::async_fs::AccessPermissions::Rwx,
+                ),
             )
             .map_err(|err| err.to_string())?;
-        fs.write_sync(async_fs::Role::None, entry, 0, &[42; 4096])
+        fs.write_sync(moto_sdk::async_fs::Role::None, entry, 0, &[42; 4096])
             .map_err(|err| err.to_string())?;
-        fs.delete_entry_sync(async_fs::Role::None, entry)
+        fs.delete_entry_sync(moto_sdk::async_fs::Role::None, entry)
             .map_err(|err| err.to_string())?;
         let caches = FreeCaches::default();
         caches.add(fs.free_block_cache());

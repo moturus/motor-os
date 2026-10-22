@@ -277,9 +277,9 @@ impl BacklogBudget {
 /// Started by the growth that first charges the global bound (see
 /// [`BacklogBudget::left_listen`]), so an idle VM arms no timer.
 pub(super) fn spawn_sweeper(runtime: super::NetRuntime) {
-    moto_async::LocalRuntime::spawn(async move {
+    moto_sdk::async_runtime::LocalRuntime::spawn(async move {
         loop {
-            moto_async::sleep(SWEEP_INTERVAL).await;
+            moto_sdk::async_runtime::sleep(SWEEP_INTERVAL).await;
             let (drops, more) = runtime.backlog.sweep();
             for (key, count) in drops {
                 super::tcp_listener::TcpListener::shrink_pool(&runtime, key, count);

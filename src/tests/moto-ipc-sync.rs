@@ -118,7 +118,7 @@ impl SysCpu {
 }
 
 #[allow(dead_code)]
-#[path = "../sys/lib/moto-ipc/src/sync.rs"]
+#[path = "../sys/lib/moto-sdk/src/ipc/sync.rs"]
 mod sync;
 use sync::{ChannelSize, LocalServer};
 

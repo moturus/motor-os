@@ -6,8 +6,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-moto-ipc = { path = "../lib/moto-ipc" }
-moto-log = { path = "../lib/moto-log" }
 moto-rt  = { path = "../lib/moto-rt"  }
+moto-sdk = { path = "../lib/moto-sdk" }
 moto-sys = { path = "../lib/moto-sys" }
 x86_64   = { path = "../../third_party/x86_64"}  # Used for port I/O.

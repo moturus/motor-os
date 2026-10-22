@@ -1,0 +1,36 @@
+[package]
+name = "moto-sdk"
+version = "0.1.0"
+authors = ["The Motor OS Project Developers", "crossbeam-channel Developers"]
+license = "MIT OR Apache-2.0"
+keywords = ["motor", "motor-os"]
+readme = "README.md"
+repository = "https://github.com/moturus/motor-os"
+description = "Motor OS userspace SDK: IPC, async runtime, I/O, logging, and stats."
+edition = "2024"
+
+[features]
+default = ["std"]
+std = []
+# Hooks for systest only; production builds never enable it.
+test-support = []
+
+[dependencies]
+async-trait = "0.1.88"
+bytemuck = { version = "1.24", features = ["latest_stable_rust"] }
+log = "0.4.28"
+lru = "0.14.0"
+
+[target.'cfg(target_os = "motor")'.dependencies]
+crossbeam = { version = "0.8.4", default-features = false, features = ["alloc", "crossbeam-queue"] }
+crossbeam-utils = { version = "0.8.18", default-features = false }
+moto-rt = { version = "0.17.9", path = "../moto-rt" }
+moto-sys = { version = "0.3.2", path = "../moto-sys" }
+
+# The std filesystem implementation off Motor OS. Motor OS never builds tokio:
+# in the native test workspace that the developer image stages, an empty
+# placeholder fills tokio's Cargo.lock entry (see
+# img_files/motor-os-dev/devtools/src/motor-os/sys/lib/tokio-placeholder).
+[target.'cfg(unix)'.dependencies]
+camino = "1.1.10"
+tokio = { version = "1.44.2", default-features = false, features = ["fs", "io-util", "rt", "sync", "time"] }

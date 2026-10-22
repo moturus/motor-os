@@ -1,6 +1,8 @@
 //! Bounded boot configuration, fully validated before applying any mount.
 use super::{FS, admission, mounts};
-use async_fs::{AccessPermissions, EntryKind, FileSystem, ROOT_ID, Role, RolePermissions};
+use moto_sdk::async_fs::{
+    AccessPermissions, EntryKind, FileSystem, ROOT_ID, Role, RolePermissions,
+};
 use serde::Deserialize;
 use std::cell::RefCell;
 use std::io::{ErrorKind, Result};
@@ -84,7 +86,7 @@ fn mode(text: &str) -> Result<RolePermissions> {
         triplet(&bytes[3..6])?,
         triplet(&bytes[6..])?,
     );
-    if !async_fs::perms_monotonic(permissions) {
+    if !moto_sdk::async_fs::perms_monotonic(permissions) {
         return Err(invalid("non-monotonic mode"));
     }
     Ok(permissions)
@@ -170,7 +172,8 @@ pub(crate) async fn read_root_file(
     let mut done = 0;
     while done < bytes.len() {
         root.healthy()?;
-        let end = (done + async_fs::BLOCK_SIZE - done % async_fs::BLOCK_SIZE).min(bytes.len());
+        let end = (done + moto_sdk::async_fs::BLOCK_SIZE - done % moto_sdk::async_fs::BLOCK_SIZE)
+            .min(bytes.len());
         let count = fs
             .read(Role::System, id, done as u64, &mut bytes[done..end])
             .await?;
@@ -329,7 +332,7 @@ pub(super) mod self_test {
                 .is_ok()
         );
 
-        moto_async::LocalRuntime::new().block_on(async {
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
             let runtime = super::super::self_test::runtime().map_err(|err| err.to_string())?;
             load(&runtime.mounts, &runtime.free_caches)
                 .await

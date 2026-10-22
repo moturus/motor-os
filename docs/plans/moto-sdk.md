@@ -1,7 +1,8 @@
 # moto-sdk: one published crate for Motor OS userspace services
 
-Status: plan, revised 2026-10-21. Preparatory steps (a), (b), and (c) are
-committed. SDK consolidation has not started.
+Status: plan, revised 2026-10-22. Preparatory steps (a), (b), and (c) are
+committed. The merge (step 3) is done in the working tree and passed its gate
+(2026-10-22); it is not committed.
 Owner rulings of 2026-10-20:
 crates under `src/sys` reference each other by path; every other crate (in
 `src/bin`, `src/tests`, the forks, the toolchain) takes Motor OS crates from
@@ -107,8 +108,10 @@ dead and go with the merge. `moto-sdk` is free on crates.io.
 - moto-async's API moves under `moto_sdk::async_runtime`. Rust module names
   use underscores rather than hyphens; this is the requested `async-runtime`
   name, not a separately published crate.
-- Motor-only dependencies: `moto-rt = { version = "0.17", path = "../moto-rt" }`
-  and `moto-sys = { version = "0.3.2", path = "../moto-sys" }`. Keep external
+- Motor-only dependencies: `moto-rt = { version = "0.17.9", path = "../moto-rt" }`
+  and `moto-sys = { version = "0.3.2", path = "../moto-sys" }`. The floors are
+  the versions the SDK needs: moto-rt 0.17.8 lacks `CrossesDevices`, so a
+  cross-mount move would decode as `Unknown`. Keep external
   dependencies where their modules need them: crossbeam/crossbeam-utils for
   the Motor-only code; log, async-trait, lru and bytemuck for the filesystem
   code; tokio and camino for the Unix `std` filesystem implementation.
@@ -284,6 +287,13 @@ As built for step (c):
 - After the merge the same flow covers `moto-sdk`. Its closure adds proc
   macros (async-trait, bytemuck_derive), which Lorry caches, and build
   scripts (proc-macro2, quote, syn), which compile in the test step.
+- moto-sdk depends on tokio only on Unix, but Cargo.lock covers every
+  target, and Lorry rejects a lock without a tokio entry. Owner ruling of
+  2026-10-22: the staged workspace patches tokio to an empty placeholder
+  (`img_files/.../sys/lib/tokio-placeholder`), so no tokio sources reach the
+  image. The Git fork that `src/sys` patches would ship a whole repository
+  snapshot, and a crates.io tokio would either follow the host's index cache
+  or, pinned to 1.47.1, add 17 never-built packages.
 
 ## Publication and versioning
 

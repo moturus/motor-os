@@ -15,7 +15,7 @@ pub(crate) const DRIFT_TOLERANCE_PAGES: u64 = 256; // 1M.
 /// Reads a system-wide kernel metric by name. Metric ids are provider-private,
 /// so nothing here is hardcoded to a number.
 pub(crate) fn kernel_metric(name: &str) -> u64 {
-    use moto_stats::Collector;
+    use moto_sdk::stats::Collector;
 
     let kernel = Collector::kernel();
     let descs = Collector::describe(&kernel).unwrap();
@@ -26,7 +26,7 @@ pub(crate) fn kernel_metric(name: &str) -> u64 {
     Collector::query(&kernel)
         .unwrap()
         .iter()
-        .find(|e| e.metric == desc.id && e.scope == moto_stats::SCOPE_GLOBAL)
+        .find(|e| e.metric == desc.id && e.scope == moto_sdk::stats::SCOPE_GLOBAL)
         .map(|e| e.value)
         .unwrap_or_else(|| panic!("kernel metric '{name}' not reported"))
 }
@@ -34,7 +34,7 @@ pub(crate) fn kernel_metric(name: &str) -> u64 {
 /// A kernel metric at a PID scope; the kernel's own per-CPU counters live
 /// under `PID_KERNEL`.
 pub(crate) fn kernel_metric_at(name: &str, scope: u64) -> u64 {
-    use moto_stats::Collector;
+    use moto_sdk::stats::Collector;
 
     let kernel = Collector::kernel();
     let descs = Collector::describe(&kernel).unwrap();

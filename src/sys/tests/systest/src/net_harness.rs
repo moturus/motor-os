@@ -6,15 +6,15 @@ use core::future::Future;
 use core::task::Poll;
 use std::time::Duration;
 
-use moto_io::net::NetClient;
+use moto_sdk::io::net::NetClient;
 
 /// Connect a host-owned channel and drive it on the current `LocalRuntime`.
 /// Must be called from task context (inside `block_on`).
-pub async fn host_channel() -> (NetClient, moto_async::JoinHandle<()>) {
-    let (client, driver) = moto_io::net::connect()
+pub async fn host_channel() -> (NetClient, moto_sdk::async_runtime::JoinHandle<()>) {
+    let (client, driver) = moto_sdk::io::net::connect()
         .await
         .expect("async connect to sys-io failed");
-    let driver_task = moto_async::LocalRuntime::spawn(driver.run());
+    let driver_task = moto_sdk::async_runtime::LocalRuntime::spawn(driver.run());
     (client, driver_task)
 }
 
@@ -26,7 +26,7 @@ pub async fn bounded<F: Future>(fut: F, secs: u64) -> bool {
 /// Await `fut`, bounded; its output, or `None` on timeout.
 pub async fn bounded_output<F: Future>(fut: F, secs: u64) -> Option<F::Output> {
     let mut fut = core::pin::pin!(fut);
-    let mut deadline = core::pin::pin!(moto_async::sleep(Duration::from_secs(secs)));
+    let mut deadline = core::pin::pin!(moto_sdk::async_runtime::sleep(Duration::from_secs(secs)));
     core::future::poll_fn(|cx| {
         if let Poll::Ready(out) = fut.as_mut().poll(cx) {
             return Poll::Ready(Some(out));
@@ -48,8 +48,8 @@ pub async fn bounded_output<F: Future>(fut: F, secs: u64) -> Option<F::Output> {
 pub fn host_channel_on_thread() -> (NetClient, std::thread::JoinHandle<()>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let driver_thread = std::thread::spawn(move || {
-        moto_async::LocalRuntime::new().block_on(async {
-            let (client, driver) = moto_io::net::connect()
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+            let (client, driver) = moto_sdk::io::net::connect()
                 .await
                 .expect("async connect to sys-io failed");
             tx.send(client).expect("harness receiver gone");
@@ -72,12 +72,15 @@ pub async fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
             std::time::Instant::now() < deadline,
             "timed out waiting for {what}"
         );
-        moto_async::sleep(Duration::from_millis(10)).await;
+        moto_sdk::async_runtime::sleep(Duration::from_millis(10)).await;
     }
 }
 
 /// Shut the client down and require the driver to drain promptly.
-pub async fn drain_host_channel(client: NetClient, driver_task: moto_async::JoinHandle<()>) {
+pub async fn drain_host_channel(
+    client: NetClient,
+    driver_task: moto_sdk::async_runtime::JoinHandle<()>,
+) {
     client.request_shutdown();
     assert!(
         bounded(driver_task, 5).await,

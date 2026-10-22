@@ -47,13 +47,13 @@ struct Probe {
     fs: [u64; 12],
 }
 
-fn probe(fs_provider: &moto_stats::ProviderInfo) -> Probe {
-    let kernel = moto_stats::Collector::kernel();
+fn probe(fs_provider: &moto_sdk::stats::ProviderInfo) -> Probe {
+    let kernel = moto_sdk::stats::Collector::kernel();
     let me_pid = moto_sys::current_pid();
     let rd = |scope: u64| -> [u64; 10] {
         let mut out = [0_u64; 10];
         for (i, (m, _)) in KM.iter().enumerate() {
-            out[i] = moto_stats::Collector::read(&kernel, *m, scope).unwrap_or(0);
+            out[i] = moto_sdk::stats::Collector::read(&kernel, *m, scope).unwrap_or(0);
         }
         out
     };
@@ -205,7 +205,7 @@ fn read_rand(path: &str, file_len: usize, chunk: usize, count: usize, seed: u64)
 pub fn run(args: &[String]) {
     let dir = std::env::temp_dir();
     let p = |n: &str| format!("{}/fsbench-{n}", dir.display());
-    let fs_provider = moto_stats::Collector::providers()
+    let fs_provider = moto_sdk::stats::Collector::providers()
         .into_iter()
         .find(|p| p.id == 2)
         .unwrap();

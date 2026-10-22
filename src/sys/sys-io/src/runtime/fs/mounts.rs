@@ -1,17 +1,17 @@
 //! Internal mount-qualified identities. No table borrow survives a lock await.
 
 use super::FS;
-use async_fs::{EntryId, EntryKind, FileSystem, ROOT_ID, Role};
-use moto_async::{LocalRwLock, LocalRwLockReadGuard, LocalRwLockWriteGuard};
-use moto_sys_io::api_fs::{MountInfo, MountKind};
+use moto_sdk::async_fs::{EntryId, EntryKind, FileSystem, ROOT_ID, Role};
+use moto_sdk::async_runtime::{LocalRwLock, LocalRwLockReadGuard, LocalRwLockWriteGuard};
+use moto_sdk::sys_io::api_fs::{MountInfo, MountKind};
 use std::cell::RefCell;
 use std::io::{ErrorKind, Result};
 use std::rc::Rc;
 
 pub(super) type MountId = u32;
 const MAX_MOUNT_ID: MountId = (1 << 24) - 1;
-const LOCAL_MASK: u128 =
-    (async_fs::MAX_FS_BLOCKS - 1) as u128 | (((async_fs::MAX_FS_GENERATIONS - 1) as u128) << 64);
+const LOCAL_MASK: u128 = (moto_sdk::async_fs::MAX_FS_BLOCKS - 1) as u128
+    | (((moto_sdk::async_fs::MAX_FS_GENERATIONS - 1) as u128) << 64);
 
 pub(super) fn split(id: EntryId) -> (MountId, EntryId) {
     (
@@ -354,7 +354,7 @@ pub(super) async fn info(table: &Rc<RefCell<MountTable>>, cursor: u32) -> Result
                 FS::MotorFs(fs) => {
                     let blocks = fs.num_blocks();
                     info.used = disk_usage(blocks, fs.empty_blocks().await?);
-                    info.cap = blocks.checked_mul(async_fs::BLOCK_SIZE as u64);
+                    info.cap = blocks.checked_mul(moto_sdk::async_fs::BLOCK_SIZE as u64);
                 }
                 FS::MemFs(fs) => {
                     info.used = Some(fs.used_bytes());
@@ -387,13 +387,13 @@ pub(super) async fn info(table: &Rc<RefCell<MountTable>>, cursor: u32) -> Result
 fn disk_usage(blocks: u64, free: u64) -> Option<u64> {
     blocks
         .checked_sub(free)
-        .and_then(|used| used.checked_mul(async_fs::BLOCK_SIZE as u64))
+        .and_then(|used| used.checked_mul(moto_sdk::async_fs::BLOCK_SIZE as u64))
 }
 
 /// Free bytes from the device's block count and the superblock's free count.
 /// A corrupt free count yields an unknown value instead of an overflow.
 pub(super) fn disk_free(blocks: u64, free: u64) -> Option<u64> {
-    free.checked_mul(async_fs::BLOCK_SIZE as u64)
+    free.checked_mul(moto_sdk::async_fs::BLOCK_SIZE as u64)
         .filter(|_| free <= blocks)
 }
 
@@ -406,7 +406,7 @@ pub(super) mod self_test {
     pub(in crate::runtime::fs) const TESTS: &[crate::self_test::SelfTest] = &[("fs::mounts", run)];
 
     fn run() -> std::result::Result<(), String> {
-        moto_async::LocalRuntime::new()
+        moto_sdk::async_runtime::LocalRuntime::new()
             .block_on(check())
             .map_err(|err| err.to_string())
     }
@@ -436,7 +436,9 @@ pub(super) mod self_test {
                     ROOT_ID,
                     EntryKind::Directory,
                     "mounted",
-                    async_fs::RolePermissions::all(async_fs::AccessPermissions::Rwx),
+                    moto_sdk::async_fs::RolePermissions::all(
+                        moto_sdk::async_fs::AccessPermissions::Rwx,
+                    ),
                 )
                 .await?;
             root.check_local(shadowed)?;

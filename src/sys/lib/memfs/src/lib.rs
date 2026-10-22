@@ -9,10 +9,10 @@
 //! byte length of each shared name, charged once. Logical file length and holes
 //! are free. Entry counts include the root.
 
-use async_fs::{
+use moto_sdk::async_fs::{
     AccessPermissions, EntryId, EntryKind, Metadata, Need, Role, RolePermissions, Timestamp,
 };
-use async_fs::{check_access, may_set, perms_monotonic, validate_filename};
+use moto_sdk::async_fs::{check_access, may_set, perms_monotonic, validate_filename};
 use std::collections::BTreeMap;
 use std::io::{ErrorKind, Result};
 use std::ops::Bound::{Excluded, Unbounded};
@@ -30,8 +30,8 @@ pub use blocks::FreeBlockCache;
 // Name bytes are added once, without charging holes or allocator slack.
 const ENTRY_CHARGE: u64 = 512;
 const DIR_LINK_CHARGE: u64 = 128;
-const BLOCK_CHARGE: u64 = async_fs::BLOCK_SIZE as u64 + 64;
-const LOW_ID_MASK: u64 = async_fs::MAX_FS_BLOCKS - 1;
+const BLOCK_CHARGE: u64 = moto_sdk::async_fs::BLOCK_SIZE as u64 + 64;
+const LOW_ID_MASK: u64 = moto_sdk::async_fs::MAX_FS_BLOCKS - 1;
 const ROLES: [Role; 3] = [Role::None, Role::Interactive, Role::System];
 
 pub struct MemFsConfig {
@@ -159,10 +159,10 @@ impl MemFs {
         self.cap
     }
     pub fn num_blocks(&self) -> u64 {
-        self.cap / async_fs::BLOCK_SIZE as u64
+        self.cap / moto_sdk::async_fs::BLOCK_SIZE as u64
     }
     pub fn empty_blocks_sync(&self) -> Result<u64> {
-        Ok((self.cap - self.used) / async_fs::BLOCK_SIZE as u64)
+        Ok((self.cap - self.used) / moto_sdk::async_fs::BLOCK_SIZE as u64)
     }
     pub fn cached_free_bytes(&self) -> u64 {
         self.cache.cached_free_bytes()

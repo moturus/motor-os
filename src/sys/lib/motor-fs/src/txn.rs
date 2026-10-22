@@ -24,7 +24,7 @@ use crate::{
     BlockNo, DirEntryBlock, EntryIdInternal, INLINE_CAPACITY, INLINE_DATA_OFFSET,
     MAX_BLOCKS_IN_TXN, MotorFs, Superblock, dir_entry,
 };
-use async_fs::{
+use moto_sdk::async_fs::{
     AccessPermissions, AsyncBlockDevice, BLOCK_SIZE, EntryKind, Role, RolePermissions, Timestamp,
     block_cache::{BlockCache, CachedBlock},
 };
@@ -238,7 +238,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
 
         // Authorize, then cap: the new value may not exceed the ceiling.
         let old = dir_entry!(entry_block).metadata().access(target)?;
-        if !async_fs::may_set(caller, target, old, access) {
+        if !moto_sdk::async_fs::may_set(caller, target, old, access) {
             return Err(ErrorKind::PermissionDenied.into());
         }
         if let Some(ceiling_role) = ceiling_role {
@@ -958,7 +958,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
                     let old_access = old.get(role);
                     let new_access = permissions.get(role);
                     if old_access != new_access
-                        && !async_fs::may_set(caller, role, old_access, new_access)
+                        && !moto_sdk::async_fs::may_set(caller, role, old_access, new_access)
                     {
                         return Err(ErrorKind::PermissionDenied.into());
                     }
@@ -971,7 +971,7 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
                 }
             }
         }
-        if !async_fs::perms_monotonic(permissions) {
+        if !moto_sdk::async_fs::perms_monotonic(permissions) {
             return Err(ErrorKind::PermissionDenied.into());
         }
         drop(entry_block);
@@ -995,10 +995,10 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         fs: &'a mut MotorFs<BD>,
         caller: Role,
         entry_id: EntryIdInternal,
-        source: &async_fs::Metadata,
+        source: &moto_sdk::async_fs::Metadata,
     ) -> Result<()> {
         let permissions = source.permissions()?;
-        if caller != Role::System || !async_fs::perms_monotonic(permissions) {
+        if caller != Role::System || !moto_sdk::async_fs::perms_monotonic(permissions) {
             return Err(ErrorKind::PermissionDenied.into());
         }
 
