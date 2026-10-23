@@ -179,7 +179,10 @@ impl ConnectionHandler {
     async fn exec(&mut self, cmdline: &str) -> Result<(), russh::Error> {
         #[cfg(target_os = "motor")]
         if cmdline == "shutdown" {
-            if moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_SHUTDOWN == 0 {
+            if moto_sdk::sys::ProcessStaticPage::get().capabilities
+                & moto_sdk::sys::caps::CAP_SHUTDOWN
+                == 0
+            {
                 log::info!("`shutdown`: no CAP_SHUTDOWN.");
                 return Err(russh::Error::RequestDenied);
             }
@@ -206,7 +209,7 @@ impl ConnectionHandler {
                     log::error!("shutdown: filesystem flush failed: {err:?}");
                 }
 
-                if moto_sys::SysCpu::kill(moto_sys::SysHandle::KERNEL).is_err() {
+                if moto_sdk::sys::SysCpu::kill(moto_sdk::sys::SysHandle::KERNEL).is_err() {
                     log::error!("shutdown failed");
                 } else {
                     unreachable!()

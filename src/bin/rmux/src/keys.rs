@@ -1,7 +1,7 @@
 //! Keys: what rmux calls them, how they arrive, and how they are passed on.
 //!
 //! The bytes are crossterm's now. Its Motor OS backend reads the console
-//! through `moto_rt::poll`, holds a half-arrived escape sequence for as long as
+//! through `moto_sdk::rt::poll`, holds a half-arrived escape sequence for as long as
 //! a serial line that delivers one byte at a time needs to finish it, coalesces
 //! the CR LF that one Enter arrives as, and asks the console how big it is with
 //! `ESC[6n` — the three things §8.3 and §3.2 are about, in one place that every

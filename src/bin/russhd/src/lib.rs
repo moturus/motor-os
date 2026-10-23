@@ -11,7 +11,7 @@ pub mod sftp_session;
 // source in the library so every binary in this package carries the hook.
 #[cfg(target_os = "motor")]
 fn motor_getrandom(dest: &mut [u8]) -> Result<(), getrandom::Error> {
-    moto_rt::fill_random_bytes(dest);
+    moto_sdk::rt::fill_random_bytes(dest);
     Ok(())
 }
 

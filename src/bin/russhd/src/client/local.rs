@@ -97,15 +97,15 @@ pub fn safe_identity(path: &Path) -> io::Result<()> {
             let client = FsClient::connect()?;
             let (entry, kind) = client.stat(&path).await?;
             if kind != EntryKind::File {
-                return Err(moto_rt::Error::InvalidArgument);
+                return Err(moto_sdk::rt::Error::InvalidArgument);
             }
             let permissions = client
                 .metadata(entry)
                 .await?
                 .permissions()
-                .map_err(|_| moto_rt::Error::InvalidData)?;
+                .map_err(|_| moto_sdk::rt::Error::InvalidData)?;
             if permissions.get(Role::None) != AccessPermissions::None {
-                return Err(moto_rt::Error::NotAllowed);
+                return Err(moto_sdk::rt::Error::NotAllowed);
             }
             Ok(())
         })
@@ -172,10 +172,12 @@ pub fn set_mode(path: &Path, mode: u32, directory: bool) -> io::Result<()> {
 
 #[cfg(target_os = "motor")]
 fn current_role() -> moto_sdk::io::fs::Role {
-    match moto_sys::caps::ProcessRole::from_caps(moto_sys::ProcessStaticPage::get().capabilities) {
-        moto_sys::caps::ProcessRole::System => moto_sdk::io::fs::Role::System,
-        moto_sys::caps::ProcessRole::Interactive => moto_sdk::io::fs::Role::Interactive,
-        moto_sys::caps::ProcessRole::None => moto_sdk::io::fs::Role::None,
+    match moto_sdk::sys::caps::ProcessRole::from_caps(
+        moto_sdk::sys::ProcessStaticPage::get().capabilities,
+    ) {
+        moto_sdk::sys::caps::ProcessRole::System => moto_sdk::io::fs::Role::System,
+        moto_sdk::sys::caps::ProcessRole::Interactive => moto_sdk::io::fs::Role::Interactive,
+        moto_sdk::sys::caps::ProcessRole::None => moto_sdk::io::fs::Role::None,
     }
 }
 
@@ -222,7 +224,7 @@ fn ensure_motor_dir(path: &Path) -> io::Result<()> {
         let client = FsClient::connect()?;
         let (entry, kind) = client.stat(&path).await?;
         if kind != EntryKind::Directory {
-            return Err(moto_rt::Error::InvalidArgument);
+            return Err(moto_sdk::rt::Error::InvalidArgument);
         }
         client
             .set_all_permissions(entry, permissions(0o700, true))
@@ -258,7 +260,7 @@ fn create_motor_entry(
         let client = FsClient::connect()?;
         let (parent, parent_kind) = client.stat(&parent).await?;
         if parent_kind != EntryKind::Directory {
-            return Err(moto_rt::Error::InvalidArgument);
+            return Err(moto_sdk::rt::Error::InvalidArgument);
         }
         client
             .create_entry_with_permissions(parent, kind, name, permissions)
@@ -280,7 +282,7 @@ fn absolute_utf8(path: &Path) -> io::Result<String> {
 }
 
 #[cfg(target_os = "motor")]
-fn motor_io<T>(operation: impl Future<Output = moto_rt::Result<T>>) -> io::Result<T> {
+fn motor_io<T>(operation: impl Future<Output = moto_sdk::rt::Result<T>>) -> io::Result<T> {
     moto_sdk::async_runtime::LocalRuntime::new()
         .block_on(operation)
         .map_err(|error| io::Error::other(error.to_string()))

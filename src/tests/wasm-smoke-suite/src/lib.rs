@@ -11,7 +11,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use moto_sdk::stats::Collector;
-use moto_sys::stats::{MemoryStats, ProcessInfoV1};
+use moto_sdk::sys::stats::{MemoryStats, ProcessInfoV1};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const DEADLINE: Duration = Duration::from_secs(120);
@@ -94,7 +94,7 @@ impl Suite {
             .stdout(fs::File::create(&stdout_path)?)
             .stderr(fs::File::create(&stderr_path)?);
         if terminal {
-            rush.env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true");
+            rush.env(moto_sdk::rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true");
         }
         let mut child = rush.spawn()?;
         Ok(Job {
@@ -309,7 +309,7 @@ fn admission_refusals() -> Result<u64> {
     let kernel = Collector::kernel();
     let catalog = Collector::describe(&kernel).map_err(|e| format!("metric catalog: {e:?}"))?;
     // Refusals are counted on the kernel's own process stats.
-    let values = Collector::query_scoped(&kernel, moto_sys::stats::PID_KERNEL)
+    let values = Collector::query_scoped(&kernel, moto_sdk::sys::stats::PID_KERNEL)
         .map_err(|e| format!("kernel metrics: {e:?}"))?;
     let mut total = 0;
     for name in ["mem.admission_refused_user", "mem.admission_refused_sys_io"] {

@@ -379,15 +379,17 @@ impl Drop for TerminalMode {
 
 #[cfg(target_os = "motor")]
 fn start_ctrl_c(input: tokio::sync::mpsc::Sender<Vec<u8>>) -> std::io::Result<()> {
+    use moto_sdk::rt::process::{ctrl_c_register_handler, ctrl_c_wait};
+
     let (setup_tx, setup_rx) = std::sync::mpsc::sync_channel(0);
     std::thread::Builder::new()
         .name("ssh-ctrl-c".to_owned())
-        .spawn(move || match moto_rt::process::ctrl_c_register_handler() {
+        .spawn(move || match ctrl_c_register_handler() {
             Ok(mut last) => {
                 if setup_tx.send(Ok(())).is_err() {
                     return;
                 }
-                while let Ok(next) = moto_rt::process::ctrl_c_wait(last) {
+                while let Ok(next) = ctrl_c_wait(last) {
                     for _ in last..next {
                         if input.blocking_send(vec![3]).is_err() {
                             return;

@@ -1,8 +1,9 @@
 # moto-sdk: one published crate for Motor OS userspace services
 
-Status: plan, revised 2026-10-22. Preparatory steps (a), (b), and (c) and the
-merge (step 3) are committed. The package gate (step 4) is in the working
-tree; it is not committed.
+Status: plan, revised 2026-10-22. Preparatory steps (a), (b), and (c), the
+merge (step 3) and the package gate (step 4) are committed. moto-sdk 0.1.0 is
+published (step 5). The switch (step 6) is in the working tree; it is not
+committed.
 Owner rulings of 2026-10-20:
 crates under `src/sys` reference each other by path; every other crate (in
 `src/bin`, `src/tests`, the forks, the toolchain) takes Motor OS crates from
@@ -480,6 +481,11 @@ seven seconds; the image build's preparation takes about ten more.
    dependency remains outside `src/sys` except the imager's. Repeat the gates with the
    actual registry consumers. No changes to repositories outside the main
    Motor OS tree are planned; any newly required changes must be discussed.
+   Done for rmux, rnetbench, russhd, rust-analyzer-smoke and
+   wasm-smoke-suite: each depends on `moto-sdk = "0.1"` alone, and russhd
+   drops its moto-rt patch. Their locks, javy-smoke's, wasmtime-smoke's and
+   the Lorry editor fixture's now take moto-sdk, moto-rt and moto-sys from
+   crates.io; rmux had two moto-rt copies and now has one.
 7. **Docs:** update current crate/module references in `docs/*.md`; document
    the dependency rules, imager exception and versioning policy. The
    dependency rules go into `AGENTS.md` (owner). Previously published crates,

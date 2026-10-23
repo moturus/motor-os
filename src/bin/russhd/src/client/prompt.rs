@@ -27,7 +27,7 @@ fn clear_bytes(value: &mut [u8]) {
 fn prompt(message: &str, echo: bool) -> io::Result<String> {
     let stdin_terminal = io::stdin().is_terminal();
     #[cfg(target_os = "motor")]
-    let fallback_terminal = moto_rt::fs::is_terminal(moto_rt::FD_TERMINAL);
+    let fallback_terminal = moto_sdk::rt::fs::is_terminal(moto_sdk::rt::FD_TERMINAL);
     #[cfg(not(target_os = "motor"))]
     let fallback_terminal = false;
     if !stdin_terminal && !fallback_terminal {
@@ -72,7 +72,7 @@ fn read_edited_line_motor(output: &mut impl Write, echo: bool) -> io::Result<Str
     read_edited_line_with(
         || {
             let mut byte = [0_u8; 1];
-            moto_rt::fs::read(moto_rt::FD_TERMINAL, &mut byte)
+            moto_sdk::rt::fs::read(moto_sdk::rt::FD_TERMINAL, &mut byte)
                 .map(|read| (read != 0).then_some(byte[0]))
                 .map_err(|error| io::Error::other(error.to_string()))
         },

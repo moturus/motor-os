@@ -16,7 +16,7 @@ mod native {
     use std::time::{Duration, Instant};
 
     use moto_sdk::stats::{Collector, MetricEntry};
-    use moto_sys::stats::{MemoryStats, ProcessInfoV1};
+    use moto_sdk::sys::stats::{MemoryStats, ProcessInfoV1};
     use rust_analyzer_smoke::transport::write_frame;
     use serde_json::json;
 

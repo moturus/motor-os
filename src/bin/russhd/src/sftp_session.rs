@@ -113,12 +113,14 @@ fn rename_noreplace(oldpath: &str, newpath: &str) -> Result<(), StatusCode> {
 
 #[cfg(target_os = "motor")]
 fn rename_noreplace(oldpath: &str, newpath: &str) -> Result<(), StatusCode> {
-    moto_rt::fs::move_noreplace(oldpath, newpath).map_err(|error| match error {
+    moto_sdk::rt::fs::move_noreplace(oldpath, newpath).map_err(|error| match error {
         // rt.vdso reports a missing source or destination parent as
         // InvalidFilename (rt_fs.rs move_path), not NotFound.
-        moto_rt::Error::NotFound | moto_rt::Error::InvalidFilename => StatusCode::NoSuchFile,
-        moto_rt::Error::NotAllowed => StatusCode::PermissionDenied,
-        moto_rt::Error::NotImplemented => StatusCode::OpUnsupported,
+        moto_sdk::rt::Error::NotFound | moto_sdk::rt::Error::InvalidFilename => {
+            StatusCode::NoSuchFile
+        }
+        moto_sdk::rt::Error::NotAllowed => StatusCode::PermissionDenied,
+        moto_sdk::rt::Error::NotImplemented => StatusCode::OpUnsupported,
         _ => StatusCode::Failure,
     })
 }
@@ -226,10 +228,12 @@ async fn handle_attributes(
 
 #[cfg(target_os = "motor")]
 fn current_role() -> moto_sdk::io::fs::Role {
-    match moto_sys::caps::ProcessRole::from_caps(moto_sys::ProcessStaticPage::get().capabilities) {
-        moto_sys::caps::ProcessRole::System => moto_sdk::io::fs::Role::System,
-        moto_sys::caps::ProcessRole::Interactive => moto_sdk::io::fs::Role::Interactive,
-        moto_sys::caps::ProcessRole::None => moto_sdk::io::fs::Role::None,
+    match moto_sdk::sys::caps::ProcessRole::from_caps(
+        moto_sdk::sys::ProcessStaticPage::get().capabilities,
+    ) {
+        moto_sdk::sys::caps::ProcessRole::System => moto_sdk::io::fs::Role::System,
+        moto_sdk::sys::caps::ProcessRole::Interactive => moto_sdk::io::fs::Role::Interactive,
+        moto_sdk::sys::caps::ProcessRole::None => moto_sdk::io::fs::Role::None,
     }
 }
 
@@ -348,11 +352,11 @@ fn would_expose_private_data(permissions: moto_sdk::io::fs::RolePermissions, mod
 }
 
 #[cfg(target_os = "motor")]
-fn motor_io<T>(operation: impl Future<Output = moto_rt::Result<T>>) -> std::io::Result<T> {
+fn motor_io<T>(operation: impl Future<Output = moto_sdk::rt::Result<T>>) -> std::io::Result<T> {
     moto_sdk::async_runtime::LocalRuntime::new()
         .block_on(operation)
         .map_err(|error| {
-            std::io::Error::from_raw_os_error(i32::from(moto_rt::ErrorCode::from(error)))
+            std::io::Error::from_raw_os_error(i32::from(moto_sdk::rt::ErrorCode::from(error)))
         })
 }
 
@@ -410,7 +414,7 @@ fn create_motor_entry(
         let client = moto_sdk::io::fs::FsClient::connect()?;
         let (parent_id, parent_kind) = client.stat(parent).await?;
         if parent_kind != moto_sdk::io::fs::EntryKind::Directory {
-            return Err(moto_rt::Error::InvalidArgument);
+            return Err(moto_sdk::rt::Error::InvalidArgument);
         }
         client
             .create_entry_with_permissions(parent_id, kind, name, permissions)
@@ -466,7 +470,8 @@ async fn open_file(
     let (file, entry_id) = tokio::task::spawn_blocking(move || {
         use std::os::fd::AsRawFd;
         let file = options.open(path_owned)?;
-        let entry_id = motor_io(async { moto_rt::fs::get_file_attr(file.as_raw_fd()) })?.entry_id;
+        let entry_id =
+            motor_io(async { moto_sdk::rt::fs::get_file_attr(file.as_raw_fd()) })?.entry_id;
         Ok::<_, std::io::Error>((tokio::fs::File::from_std(file), entry_id))
     })
     .await

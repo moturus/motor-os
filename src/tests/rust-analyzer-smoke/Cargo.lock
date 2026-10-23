@@ -139,10 +139,14 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "moto-rt"
 version = "0.17.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d8ec4efe5d19efe27a3457f7fabf6a9a68f4ea51b8bc21f7ec494f27e74d1ec"
 
 [[package]]
 name = "moto-sdk"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ae39b1639527731b4f8cb7f762f68d959ab746791a4f88999d52abf08a3a996"
 dependencies = [
  "async-trait",
  "bytemuck",
@@ -159,6 +163,8 @@ dependencies = [
 [[package]]
 name = "moto-sys"
 version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c345df997a770a2935df31acc3532aae239b26915800064b0d10d954956ce22b"
 dependencies = [
  "moto-rt",
 ]
@@ -192,7 +198,6 @@ name = "rust-analyzer-smoke"
 version = "0.1.0"
 dependencies = [
  "moto-sdk",
- "moto-sys",
  "serde_json",
 ]
 

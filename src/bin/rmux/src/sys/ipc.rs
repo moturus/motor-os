@@ -31,18 +31,18 @@ use std::sync::mpsc::channel;
 use std::time::Duration;
 use std::time::Instant;
 
-use moto_rt::ErrorCode;
 use moto_sdk::ipc::sync::ChannelSize;
 use moto_sdk::ipc::sync::ClientConnection;
 use moto_sdk::ipc::sync::LocalServer;
 use moto_sdk::ipc::sync::RequestHeader;
 use moto_sdk::ipc::sync::ResponseHeader;
-use moto_sys::SysCpu;
-use moto_sys::SysHandle;
-use moto_sys::SysObj;
-use moto_sys::caps::CAP_SPAWN;
-use moto_sys::caps::CAP_SPAWN_DETACHED;
-use moto_sys::caps::default_child_capabilities;
+use moto_sdk::rt::ErrorCode;
+use moto_sdk::sys::SysCpu;
+use moto_sdk::sys::SysHandle;
+use moto_sdk::sys::SysObj;
+use moto_sdk::sys::caps::CAP_SPAWN;
+use moto_sdk::sys::caps::CAP_SPAWN_DETACHED;
+use moto_sdk::sys::caps::default_child_capabilities;
 
 use crate::proto;
 use crate::proto::Frames;
@@ -75,7 +75,7 @@ const MAX_CONNECTIONS: u64 = 64;
 const MAX_LISTENERS: u64 = 4;
 
 fn own_capabilities() -> u64 {
-    moto_sys::ProcessStaticPage::get().capabilities
+    moto_sdk::sys::ProcessStaticPage::get().capabilities
 }
 
 /// The mask of the server this process would start, which is the key it
@@ -163,7 +163,7 @@ fn request(
 ) -> std::io::Result<()> {
     // Check before touching the page: a timed-out peer may still be reading it.
     if conn.rpc_pending() {
-        return Err(os_error(moto_rt::E_TIMED_OUT));
+        return Err(os_error(moto_sdk::rt::E_TIMED_OUT));
     }
     let header = conn.req::<RequestHeader>();
     header.cmd = cmd;
@@ -173,10 +173,10 @@ fn request(
     put_u64(page, TOKEN_AT, token);
     put_len(page, data.len());
     page[DATA_AT..DATA_AT + data.len()].copy_from_slice(data);
-    conn.do_rpc(timeout.map(|timeout| moto_rt::time::Instant::now() + timeout))
+    conn.do_rpc(timeout.map(|timeout| moto_sdk::rt::time::Instant::now() + timeout))
         .map_err(os_error)?;
     match conn.resp::<ResponseHeader>().result {
-        moto_rt::E_OK => Ok(()),
+        moto_sdk::rt::E_OK => Ok(()),
         err => Err(os_error(err)),
     }
 }
@@ -189,10 +189,10 @@ fn open(name: &str, profile: u64) -> std::io::Result<Option<ClientConnection>> {
     loop {
         match conn.connect(name) {
             Ok(()) => break,
-            Err(moto_rt::E_NOT_FOUND) => return Ok(None),
+            Err(moto_sdk::rt::E_NOT_FOUND) => return Ok(None),
             // Connect notifications let the server refill the pool. A busy
             // live service must never be mistaken for one we need to start.
-            Err(moto_rt::E_NOT_READY) => {
+            Err(moto_sdk::rt::E_NOT_READY) => {
                 if Instant::now() >= deadline {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
@@ -309,7 +309,7 @@ impl Write for Writer {
             Some(INPUT_TIMEOUT),
         ) {
             Ok(()) => Ok(len),
-            Err(err) if err.raw_os_error() == Some(moto_rt::E_TIMED_OUT as i32) => {
+            Err(err) if err.raw_os_error() == Some(moto_sdk::rt::E_TIMED_OUT as i32) => {
                 Err(std::io::ErrorKind::TimedOut.into())
             }
             Err(err) => Err(err),
@@ -333,7 +333,7 @@ impl Read for Reader {
         if self.at == self.held.len() {
             match request(&mut self.conn, CMD_POLL, 0, &[], self.timeout) {
                 Ok(()) => {}
-                Err(err) if err.raw_os_error() == Some(moto_rt::E_TIMED_OUT as i32) => {
+                Err(err) if err.raw_os_error() == Some(moto_sdk::rt::E_TIMED_OUT as i32) => {
                     return Err(std::io::ErrorKind::TimedOut.into());
                 }
                 // do_rpc disconnects on peer closure. A completed error reply
@@ -473,7 +473,7 @@ impl Ipc {
                 SysObj::get_capabilities(handle).is_ok_and(|client| may_use(client, self.caps));
             if !allowed {
                 if conn.have_req() {
-                    self.refuse(handle, moto_rt::E_NOT_ALLOWED);
+                    self.refuse(handle, moto_sdk::rt::E_NOT_ALLOWED);
                 } else {
                     conn.disconnect();
                 }
@@ -503,13 +503,13 @@ impl Ipc {
                     outbox.awaiting = true;
                 }
             }
-            _ => self.refuse(handle, moto_rt::E_INVALID_ARGUMENT),
+            _ => self.refuse(handle, moto_sdk::rt::E_INVALID_ARGUMENT),
         }
     }
 
     fn open_output(&mut self, handle: SysHandle) {
         let Ok(pid) = SysObj::get_pid(handle) else {
-            return self.refuse(handle, moto_rt::E_NOT_ALLOWED);
+            return self.refuse(handle, moto_sdk::rt::E_NOT_ALLOWED);
         };
         let id = self.ids.allocate();
         self.peers.insert(
@@ -527,7 +527,7 @@ impl Ipc {
             .lock()
             .unwrap()
             .insert(id, Outbox::default());
-        self.reply(handle, moto_rt::E_OK, id, &[]);
+        self.reply(handle, moto_sdk::rt::E_OK, id, &[]);
     }
 
     /// Pair an input connection with the output connection `token` names.
@@ -535,10 +535,10 @@ impl Ipc {
     fn open_input(&mut self, handle: SysHandle, token: u64) {
         let pid = SysObj::get_pid(handle).ok();
         let Some(peer) = self.peers.get_mut(&token) else {
-            return self.refuse(handle, moto_rt::E_NOT_ALLOWED);
+            return self.refuse(handle, moto_sdk::rt::E_NOT_ALLOWED);
         };
         if peer.input.is_some() || pid != Some(peer.pid) {
-            return self.refuse(handle, moto_rt::E_NOT_ALLOWED);
+            return self.refuse(handle, moto_sdk::rt::E_NOT_ALLOWED);
         }
         peer.input = Some(handle);
         self.conns.insert(handle, Some(token));
@@ -552,7 +552,7 @@ impl Ipc {
             out,
             farewell,
         }));
-        self.reply(handle, moto_rt::E_OK, 0, &[]);
+        self.reply(handle, moto_sdk::rt::E_OK, 0, &[]);
     }
 
     fn input(&mut self, handle: SysHandle, id: ClientId, data: &[u8]) {
@@ -564,9 +564,9 @@ impl Ipc {
             }
         }
         if peer.frames.is_broken() {
-            self.refuse(handle, moto_rt::E_INVALID_ARGUMENT);
+            self.refuse(handle, moto_sdk::rt::E_INVALID_ARGUMENT);
         } else {
-            self.reply(handle, moto_rt::E_OK, 0, &[]);
+            self.reply(handle, moto_sdk::rt::E_OK, 0, &[]);
         }
     }
 
@@ -635,7 +635,7 @@ impl Ipc {
                         failed.push(output);
                         continue;
                     };
-                    conn.resp::<ResponseHeader>().result = moto_rt::E_OK;
+                    conn.resp::<ResponseHeader>().result = moto_sdk::rt::E_OK;
                     let page = conn.data_mut();
                     put_len(page, chunk.len());
                     page[DATA_AT..DATA_AT + chunk.len()].copy_from_slice(&chunk);
