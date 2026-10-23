@@ -529,8 +529,9 @@ All three run from `src/tests/full-test.sh`.
 `src/sys/tests/systest/src/ctrl_c.rs` provides the focused runtime and
 terminal-chain probes. Lower-level atomic classification, route generation,
 batch scanning, and fixed-status process interruption are covered in their
-own moto-ipc, rt.vdso, moto-rt, and kernel tests, all reached transitively by
-`full-test.sh`.
+own tests: moto-sdk's `ipc::stdio_pipe` tests run natively under
+`full-test-dev.sh`, and the rt.vdso, moto-rt, and kernel tests are reached
+transitively by `full-test.sh`.
 
 Redirection has its own set, also run from `full-test.sh`:
 

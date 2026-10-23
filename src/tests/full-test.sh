@@ -1165,7 +1165,7 @@ out="$(vm_ssh "TMPDIR='$RMUX_ESCAPES' /user/bin/rmux ls")"
 vm_ssh "TMPDIR='$RMUX_DELIMITERS' /user/bin/rmux kill-session -t delimiters"
 vm_ssh "TMPDIR='$RMUX_ESCAPES' /user/bin/rmux kill-session -t escapes"
 
-# rmux's client and server meet over moto-ipc, and a server serves only
+# rmux's client and server meet over moto_sdk::ipc, and a server serves only
 # clients that hold every capability it holds (src/bin/rmux/details.md §4.2.1).
 # rmux-probe is a hand-written client that can name any server, so these
 # checks do not rely on rmux's own client choosing the right one.

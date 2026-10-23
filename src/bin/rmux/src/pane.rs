@@ -370,8 +370,9 @@ fn pump(
     events: Sender<Event>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
-        // A page. Motor's pipe ring is 2 KiB (`moto-ipc/src/stdio_pipe.rs:46`),
-        // so one read empties a full one and the writer never stays blocked.
+        // A page. Motor's pipe ring is 2 KiB
+        // (`moto-sdk/src/ipc/stdio_pipe.rs:51`), so one read empties a full
+        // one and the writer never stays blocked.
         // A pty master reports the child's exit as EIO rather than as EOF,
         // which the error arm below already treats as the end.
         let mut buf = [0_u8; 4096];

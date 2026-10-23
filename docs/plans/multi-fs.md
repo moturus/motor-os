@@ -78,8 +78,8 @@ type = "memfs"
 ### memfs
 
 - A standalone crate, `src/sys/lib/memfs`. It shares its permission and
-  filename checks with Motor FS through `async-fs`, so the permission rules
-  are the same.
+  filename checks with Motor FS through moto-sdk's `async_fs`, so the
+  permission rules are the same.
 - Files are truly sparse: holes cost nothing. Reads and writes go one 4 KiB
   block at a time; a failed block-bounded write changes nothing. Multi-block
   writes and copies may commit a prefix and return a short count. A later

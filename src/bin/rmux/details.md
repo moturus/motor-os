@@ -12,7 +12,7 @@ README, so a section here is the long answer to a comment there.
 
 It was written first as a plan, and it is left standing because the reasoning
 outlived the planning: §3 is the argument that a multiplexer needs no pty, §4.2
-is why the transport was loopback TCP (on Motor it is `moto-ipc` now), §9 is why conformance is measured against
+is why the transport was loopback TCP (on Motor it is `moto_sdk::ipc` now), §9 is why conformance is measured against
 tmux rather than asserted, and §10 is what each phase actually cost — including
 the things that turned out not to be true. Everything in it is built, with the
 exceptions listed under §10's last entry.
@@ -501,14 +501,14 @@ planned.
 of its client, not what that client may do. Once processes had capability
 masks, a restricted program could connect to a more privileged rmux server
 and run commands with the server's authority. On Motor the client and server
-now meet over `moto-ipc` instead (`src/sys/ipc.rs`), which lets each end ask
+now meet over `moto_sdk::ipc` instead (`src/sys/ipc.rs`), which lets each end ask
 the kernel for the other's mask; §4.2.1 is the design. The Linux host keeps
 the TCP transport described below, and the protocol itself is unchanged.
 
 The client and server are unrelated processes, so they need a rendezvous. The
-constraint is *standard Rust only*, which rules out `moto-ipc`'s `io_channel`
-and `sync` channels (Motor-specific), and Unix domain sockets (Motor sets no
-target family, so `std::os::unix::net` does not exist there).
+constraint is *standard Rust only*, which rules out `moto_sdk::ipc`'s
+`io_channel` and `sync` channels (Motor-specific), and Unix domain sockets
+(Motor sets no target family, so `std::os::unix::net` does not exist there).
 
 That leaves `std::net`. The server binds `127.0.0.1:0`, writes the port it got to
 a file, and the client reads the file and connects. Identical code on Linux and
@@ -568,17 +568,17 @@ private server — one `sys::` function. **Correction, measured in M4:**
 contains no tracked files. Rmux only chooses the port-file path; image
 construction owns directory materialization.
 
-#### 4.2.1 Motor: capability-checked `moto-ipc` (2026-09-26)
+#### 4.2.1 Motor: capability-checked `moto_sdk::ipc` (2026-09-26)
 
 The problem: a server often has more capabilities than a client, and over TCP
 it cannot tell who is connecting. A restricted program could skip `rmux new`,
 speak the protocol directly, and type into a session with the server's
-authority. `moto-ipc` connections are bound to their peer process, and
+authority. `moto_sdk::ipc` connections are bound to their peer process, and
 `SysObj::get_capabilities(handle)` tells each end the other's mask.
 `docs/caps.md` ("Named IPC services") has the kernel's side of this.
 
 **Two connections per client.** The protocol is full duplex, but a
-`moto-ipc::sync` connection carries one request at a time. So a client holds
+`moto_sdk::ipc::sync` connection carries one request at a time. So a client holds
 two small (4 KiB) connections, both carrying raw bytes rather than messages;
 `Frames` reassembles any split.
 
@@ -646,9 +646,9 @@ closing earlier can discard a reply the client has not read.
 
 **Rejected.** One connection polled on a timer (latency, idle CPU); one
 connection with out-of-band wakes (not the standard channel); a 2 MiB
-mid-page channel per client (memory, for rare repaints). `moto-ipc::io_channel`
-is full duplex and would need one connection, but it is async and manages
-shared pages explicitly.
+mid-page channel per client (memory, for rare repaints).
+`moto_sdk::ipc::io_channel` is full duplex and would need one connection, but
+it is async and manages shared pages explicitly.
 
 **Tests.** `src/bin/rmux-probe.rs` is a hand-written client that can name any
 server. `src/tests/full-test.sh` uses it to show that clients with a minimal
@@ -750,7 +750,7 @@ A pane under `llvm` output would drown in that. rmux's pumps send
 rendering once (§6.4).
 
 Pane pipes are **2 KiB and simplex** — a 4 KiB page halved
-(`moto-ipc/src/stdio_pipe.rs:46`, `work_buf_len = buf_size >> 1`). A pane
+(`moto-sdk/src/ipc/stdio_pipe.rs:51`, `work_buf_len = buf_size >> 1`). A pane
 blasting output fills the ring and blocks in `write`, so the pumps must drain
 continuously and must never be stalled behind rendering. This is why the pumps
 are threads and the renderer is not on their path.

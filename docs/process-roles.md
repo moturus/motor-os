@@ -198,8 +198,8 @@ implemented design.)
 
 ### Two enums, same discriminants — deliberately
 
-`async-fs` must keep building on the host (the imager links motor-fs/async-fs
-natively) and therefore cannot depend on `moto-sys`. So
+moto-sdk's `async_fs` must keep building on the host (the imager links
+motor-fs and moto-sdk natively), where moto-sdk has no `moto-sys`. So
 `moto_sys::caps::ProcessRole` and `async_fs::Role` remain distinct types with
 identical discriminants. Convert with an exhaustive three-arm match rather than
 an integer cast; a `const` assert in sys-io still pins the intentional wire/disk
@@ -382,7 +382,7 @@ is a policy statement, so the demotion path must not fail open.
 `CAP_LOG` admits its holder to both the kernel log syscall and strobe's
 `sys-log` record channel. Strobe checks the connection-bound peer capability
 word before accepting a tag. The bit does not grant access to
-`/system/logs`; lower-role holders submit records through `moto_log` while
+`/system/logs`; lower-role holders submit records through `moto_sdk::log` while
 System-role strobe alone creates and rotates the files. The `kernel` tag and
 its byte-preserving raw operation additionally require `CAP_IO_MANAGER`.
 Interactive sys-tty holds both bits and submits the kernel ring through this

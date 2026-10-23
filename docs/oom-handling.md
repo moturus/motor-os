@@ -5,7 +5,7 @@ open. The implementation lives in `kernel/src/mm/admission.rs` (floors,
 charges, reservations, the pressure flag), `sys-io`'s
 `runtime/net/pressure.rs` (net-side service refusals) and `runtime/fs.rs`
 (the FS-side gate in `on_msg` and the accept-time client drop, with
-`moto-sys-io`'s `api_fs::release_donated_pages` freeing refused requests'
+moto-sdk's `sys_io::api_fs::release_donated_pages` freeing refused requests'
 pages), and rt.vdso's `spawn_impl` (spawn refusals). Regressions are in
 `systest` (`admission.rs`, `pressure.rs`).
 

@@ -60,7 +60,7 @@ declared in `src/build-addon-sources.sh`, in `$MOTORH/javy` and
 `$MOTORH/wasmtime`: a clean checkout is moved to that revision, and commits
 that are not on the fork's branch are never left behind. Everything the forks
 depend on — Wasmi, Wizer, Tokio, Mio and target-lexicon by git, and the Motor
-OS crates by git (Javy) or from crates.io (Wasmtime: `moto-rt`, `moto-sys`) —
+OS crates `moto-rt` and `moto-sys` from crates.io —
 is pinned by the forks' lockfiles, which Cargo fetches; no fork refers to a sibling checkout, and this tree's
 `src/sys/lib` is not an input of the add-ons.
 

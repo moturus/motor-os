@@ -381,7 +381,7 @@ the RPCs; nothing else blocks on strobe.
 - **Disk-space rule.** Whenever strobe creates a log file -- at connection start
   and at rotation -- it first reads the filesystem's available bytes the way
   `df` does: sys-io's `fs.available_bytes` metric through
-  `moto_stats::Collector` (`src/sys/strobe/src/io_thread.rs:32-70`). If fewer
+  `moto_sdk::stats::Collector` (`src/sys/strobe/src/io_thread.rs:32-70`). If fewer
   than 50 MiB are available, strobe deletes `.prev` files in
   `/system/logs`, oldest first by the `modified` time `FsClient::metadata`
   reports, until 50 MiB are available or none remain. A live `.log` is never

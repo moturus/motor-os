@@ -337,7 +337,7 @@ absent.
   linked with their final mode.
 - Runtime logs are created atomically as `rw-r-----` by System-role strobe via
   the exact-permissions API. Rotation renames the current file to `.prev`,
-  preserving its mode. Authorized lower-role processes use `moto_log`;
+  preserving its mode. Authorized lower-role processes use `moto_sdk::log`;
   `CAP_LOG` admits a peer to strobe but does not grant direct filesystem
   access.
 - The remaining `/system/cfg` content, including `sys-init.cfg` and
@@ -411,7 +411,7 @@ after they are accepted.
    boundaries and functional access checks, avoiding a brittle duplicate of
    the complete image manifest.
 9. **`rmux` creates `$TMPDIR` only when it is absent.** On Motor, rmux's
-   client and server meet over `moto-ipc` and need no port file. The client
+   client and server meet over the SDK's IPC (`moto_sdk::ipc`) and need no port file. The client
    still creates a caller-selected, absent `TMPDIR` before it starts a server,
    because panes inherit it and Rush stages pipelines there. Blindly calling
    `create_dir_all` on an existing directory first asks Motor FS to create

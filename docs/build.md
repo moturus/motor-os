@@ -122,7 +122,9 @@ see [Building the complete toolchain](build-motor-os.md). The LLVM/C++ and
 native Rust components are described in [build-llvm.md](build-llvm.md) and
 [build-rustc.md](build-rustc.md); they are not separate build entry points.
 How ordinary builds find the assembly is documented in
-[Resolving the toolchain assembly](assembly-resolution.md).
+[Resolving the toolchain assembly](assembly-resolution.md). Which Motor OS
+crates are published, and how programs depend on them, is in
+[Motor OS crates](crates.md).
 
 ## Run Motor OS
 

@@ -472,7 +472,7 @@ and no notion of users, links, or numeric Unix modes.</p>
   ACLs, sticky directories, numeric modes, and recursive chmod.</li>
 </ul>
 <p>The implementation is <code>src/sys/lib/motor-fs</code> (about 10,000 lines) on top
-of <code>async-fs</code>, an abstraction that also runs on a Linux host so that images
+of moto-sdk's <code>async_fs</code>, an abstraction that also runs on a Linux host so that images
 can be built and tested there. Rust's <code>std::fs</code> works as expected on top of it,
 with the permission model below showing through <code>Permissions</code>.</p>
 

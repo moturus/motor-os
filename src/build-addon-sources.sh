@@ -6,7 +6,7 @@
 # was gated with. To take new fork work: push the fork, then set its revision
 # (an exported MOTOR_<ADDON>_REV wins, for a build before the pin is committed).
 # What the forks depend on — Tokio, Mio, target-lexicon, Wasmi and Wizer by git,
-# the Motor OS crates by git (Javy) or from crates.io (Wasmtime) — is pinned by
+# the Motor OS crates from crates.io — is pinned by
 # the add-ons' lockfiles; the tree keeps no sibling checkout of them.
 MOTOR_JAVY_BRANCH=motor-9.1.0
 MOTOR_JAVY_REV="${MOTOR_JAVY_REV:-12a6c52d7dbd62056ead74d8ddea3f8a235f278f}"

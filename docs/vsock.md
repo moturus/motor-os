@@ -1,8 +1,8 @@
 # Native virtio-vsock API
 
-Motor OS exposes virtio-vsock streams through `moto_io::net::vsock`. This is
-a native Rust API. It does not provide libc, Rust `std::net`, mio, or Tokio
-vsock sockets.
+Motor OS exposes virtio-vsock streams through `moto_sdk::io::net::vsock`.
+This is a native Rust API. It does not provide libc, Rust `std::net`, mio, or
+Tokio vsock sockets.
 
 The process must have both `CAP_VSOCK` (bit 7) and `CAP_NET` (bit 8), granted
 by an authorized parent. Even a System parent must own each capability to
@@ -14,24 +14,25 @@ injection.
 
 ## Driver lifetime and a listener
 
-`moto_io::net::connect()` returns a `NetClient` and its `NetDriver`. The
-driver must be continuously polled on a `moto_async::LocalRuntime` while any
-operation or socket on that channel is live. Run only one network driver on a
-given local runtime. This example gives the listener and accepted stream
+`moto_sdk::io::net::connect()` returns a `NetClient` and its `NetDriver`.
+The driver must be continuously polled on a
+`moto_sdk::async_runtime::LocalRuntime` while any operation or socket on that
+channel is live. Run only one network driver on a given local runtime. This example gives the listener and accepted stream
 different channels and drives each on its own thread/runtime:
 
 ```rust
-use moto_io::net::vsock::VsockListener;
-use moto_io::net::{NetDriver, connect};
+use moto_sdk::async_runtime::LocalRuntime;
+use moto_sdk::io::net::vsock::VsockListener;
+use moto_sdk::io::net::{NetDriver, connect};
 
 fn drive(driver: NetDriver) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        moto_async::LocalRuntime::new().block_on(driver.run());
+        LocalRuntime::new().block_on(driver.run());
     })
 }
 
 fn main() {
-    moto_async::LocalRuntime::new().block_on(async {
+    LocalRuntime::new().block_on(async {
         let (listener_client, listener_driver) = connect().await.unwrap();
         let listener_thread = drive(listener_driver);
         let listener = VsockListener::bind_reserved(

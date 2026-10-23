@@ -570,8 +570,8 @@ axum-server converts to Tokio; its asynchronous traffic follows this path.
 No reservation/activation/bound-connect APIs, vtable/IPC additions or sys-io
 states are added; do not tunnel them through existing entries. Native bind
 already starts listening (`src/sys/sys-io/src/runtime/net/tcp_listener.rs`),
-and `moto-io` rejects a wildcard address with port zero
-(`src/sys/lib/moto-io/src/net/tcp.rs`).
+and moto-sdk's `io::net` rejects a wildcard address with port zero
+(`src/sys/lib/moto-sdk/src/io/net/tcp.rs`).
 
 | Accepted TCP behavior | Required coverage |
 | --- | --- |
@@ -801,23 +801,22 @@ crates.io. A path dependency pins the sibling's version in the fork's
 lockfile, so one tree branch's moto-rt bump broke `cargo build --locked` of
 the fork for every other branch.
 
-The scheme now:
+The scheme as of 2026-10-22:
 
 | Dependency | Declared as | Pinned by |
 | --- | --- | --- |
-| Motor OS crates | Javy: `moto-rt` and `moto-sys` by `git = "https://github.com/moturus/motor-os", branch = "main"`, one revision for both; Wasmtime (since the update below): `moto-rt = "0.17"` and `moto-sys = "0.3.2"` from crates.io, which Tokio's and Mio's `moto-rt = "0.17"` share | the fork's lockfiles |
+| Motor OS crates | Javy and Wasmtime: `moto-rt = "0.17"` and `moto-sys = "0.3.2"` from crates.io, which Tokio's and Mio's `moto-rt = "0.17"` share | the fork's lockfiles |
 | Fork-to-fork (Wasmtime → Tokio, Mio, target-lexicon; Javy → Wasmi, Wizer in `moturus/wasmtime`) | `[patch.crates-io]` entries with `git = "https://github.com/moturus/<repo>", branch = "motor-<version>"` | the fork's lockfiles |
 | Ring | unchanged: git, exact rev | the fork's lockfiles |
 | Javy and Wasmtime themselves | `src/build-addon-sources.sh`: branch and full revision, like `src/toolchain-versions.sh` | the tree branch |
 | Toolchain and sysroot for the fork scripts | `RUSTUP_TOOLCHAIN` and `MOTOR_SYSROOT` in the environment, exported by `build-motor-os.sh`; the scripts no longer read `../motor-os` | the tree branch |
 
-Cargo accepts a lockfile pinned to a commit that is not on the declared
-branch (`cargo update -p moto-rt --precise <rev>` fetches it by hash, as does
-a fresh `cargo fetch --locked`), so the forks name `main` and today pin
-`fc48f27d` (the `dev` head, which has `F_GUARDED` and the same `src/sys/lib`
-as `wasm`). Once `main` carries it, plain `cargo update -p moto-rt` suffices.
-Measured: resolving the Motor OS crates from GitHub takes 4 s and the repository
-is 22 MiB in Cargo's git cache; Javy's Wizer dependency clones `moturus/wasmtime`
+**Historical Git scheme:** before the registry switch, the forks named
+`main` but pinned `fc48f27d`, then the `dev` head, which had `F_GUARDED` and
+the same `src/sys/lib` as `wasm`. Cargo fetched that commit by hash even
+though it was not on the declared branch. At that stage, resolving the
+Motor OS crates from GitHub took 4 s and the repository occupied 22 MiB in
+Cargo's git cache; Javy's Wizer dependency cloned `moturus/wasmtime`
 (140 MiB) once per machine.
 
 **Update, later on 2026-10-20:** the owner published `moto-rt` 0.17.9,
@@ -827,11 +826,11 @@ is 22 MiB in Cargo's git cache; Javy's Wizer dependency clones `moturus/wasmtime
 `08a09edea` declares `moto-rt = "0.17"` and `moto-sys = "0.3.2"` in its four
 workspaces, patches no Motor OS crate by git any more, and dropped `moto-io`,
 `moto-async`, `moto-ipc` and `moto-sys-io` with the adapter rewrite, so
-nothing it needs is unpublished. Javy still takes `moto-rt` and `moto-sys` by
-git at `fc48f27d`; both are published, so switching it is the same two-line
-change per manifest plus `cargo update --workspace`. The "publish" alternative
-below is therefore taken for the two crates every consumer needs; the other
-nine are needed by nothing outside the tree.
+nothing it needs is unpublished. At that point, Javy still took `moto-rt`
+and `moto-sys` by git at `fc48f27d`; Javy `12a6c52d` also uses crates.io.
+The "publish" alternative below was therefore taken for the
+two crates every consumer needed; the other nine were needed by nothing
+outside the tree.
 
 **Tree-wide, same day:** the owner first ruled that everything takes
 `moto-rt` from crates.io. The build showed the limit of that: a crate outside
@@ -840,25 +839,27 @@ moto-ipc, russhd with moto-io) then links two copies of moto-rt and moto-sys
 and fails on mismatched types. The final ruling is therefore: crates under
 `src/sys` reference each other by path (moto-sys keeps `version = "0.17"` next
 to `path`, so the published crate asks crates.io), and every crate outside
-`src/sys` takes Motor OS crates from crates.io only, which needs the remaining
-libraries published as one crate, `moto-api`; see
-[docs/plans/moto-api.md](moto-api.md). Its interim step 1 is in place: rmux,
-russhd, rnetbench and the smoke suites keep path dependencies on moto-rt and
-moto-sys until moto-api exists, rush moved to crates.io, and ten lockfiles
-record the owner's moto-sys 0.3.2 bump (`32756ef6`). Open points for the
-owner: the in-tree moto-rt source is 0.17.8 while crates.io has 0.17.9, and
+`src/sys` takes Motor OS crates from crates.io only, which required the
+remaining libraries to be published as one crate, `moto-sdk` (planned as
+`moto-api`); see [Motor OS crates](../crates.md). During the transition,
+rmux, russhd, rnetbench and the smoke suites kept path dependencies on
+moto-rt and moto-sys until SDK publication. Rush moved to crates.io, and ten
+lockfiles recorded the owner's moto-sys 0.3.2 bump (`32756ef6`).
+
+**Update 2026-10-22:** moto-sdk 0.1.0 is published, and rmux, russhd, rnetbench
+and the smoke suites take it from crates.io. The in-tree moto-rt is 0.17.9.
 `src/toolchain-runtime.sh` still describes the pre-ruling layout.
 
 What a human does:
 
 - **Advance a tree branch's toolchain or `src/sys/lib`:** nothing in the
-  forks. Their locks keep their Motor OS revision and crates.io versions.
-- **Use a new kernel or sys-io feature in a fork:** for Javy, push the tree
-  commit and `cargo update -p moto-rt [--precise <rev>]`; for Wasmtime, publish
-  the crate and `cargo update -p moto-sys` (or `moto-rt`); in each workspace with a
-  lockfile (Wasmtime: root, `motor-runtime`, `motor-tests`, `motor-host-tests`;
-  Javy: root, `motor-tests`), commit, push; then set the fork's `MOTOR_*_REV`
-  in `src/build-addon-sources.sh` and gate.
+  forks. Their locks keep their Motor OS crate versions.
+- **Use a new kernel or sys-io feature in a fork:** for both Javy and
+  Wasmtime, publish the required crate version, raise the manifest requirement
+  where needed, and run `cargo update -p moto-sys` (or `moto-rt`). In each
+  workspace with a lockfile (Wasmtime: root, `motor-runtime`, `motor-tests`,
+  `motor-host-tests`; Javy: root, `motor-tests`), commit, push; then set the
+  fork's `MOTOR_*_REV` in `src/build-addon-sources.sh` and gate.
 - **Change Mio, Tokio, target-lexicon or Wasmi:** push the fork; in Wasmtime
   or Javy `cargo update -p <crate>`; then as above.
 - **Switch tree branches:** `build-motor-os.sh` moves a clean `../javy` or
@@ -1553,8 +1554,8 @@ kills the thread.
   add-ons rebuilt from the pinned revisions through `src/build-motor-os.sh
   --javy-only` and `--wasmtime-only`; the wasm matrices passed under QEMU and
   Cloud Hypervisor with wasmtime `08a09edea`, so 3a closes once the owner's
-  commit lands; 3b and 3f follow the moto-api merge
-  ([docs/plans/moto-api.md](moto-api.md)).
+  commit lands; 3b and 3f follow the moto-sdk merge
+  ([Motor OS crates](../crates.md)).
 
 1. **3a — HTTP resource defaults.** Extend milestone 2's finite command defaults
    with request, body/buffer and serving-concurrency limits; size the stack pool

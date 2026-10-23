@@ -149,8 +149,8 @@ the Linux `host-lorry` build stay on Cargo.
    and cache them under an identity that covers rustc, rust-src, the target
    file, and the features.
 2. **The imager does not build for Motor.** This is a source problem. It
-   uses `async_fs::file_block_device`, which `async-fs` builds only for
-   other targets. Its manifest takes Tokio from crates.io, not the Motor
+   uses moto-sdk's `async_fs::file_block_device`, which the SDK builds only
+   for other targets. Its manifest takes Tokio from crates.io, not the Motor
    Tokio patch that `src/sys` uses.
 3. **Admission state.** Only Lorry's own tree commits
    `.lorry/dependencies-v2.toml`. Every other root needs one networked

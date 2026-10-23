@@ -304,7 +304,7 @@ authorization.
 ## Named IPC services
 
 A server registers a service name by creating a `shared:url=...` listener,
-usually through `moto_ipc::sync::LocalServer`. The kernel gives each name one
+usually through `moto_sdk::ipc::sync::LocalServer`. The kernel gives each name one
 owner process:
 
 - The first process to register a name owns it. Its later listeners for the

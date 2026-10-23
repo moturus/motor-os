@@ -1,4 +1,4 @@
-//! The Motor OS transport: `moto-ipc` connections instead of loopback TCP.
+//! The Motor OS transport: `moto_sdk::ipc` connections instead of loopback TCP.
 //!
 //! A server often holds more capabilities than its clients, and TCP tells it
 //! only an address. An IPC connection is bound to the process on the other
@@ -59,7 +59,7 @@ pub const CMD_OPEN_INPUT: u16 = 2;
 pub const CMD_INPUT: u16 = 3;
 pub const CMD_POLL: u16 = 4;
 
-// The page after moto-ipc's 16-byte header: a token, a length, then data.
+// The page after moto_sdk::ipc's 16-byte header: a token, a length, then data.
 pub const TOKEN_AT: usize = 16;
 pub const LEN_AT: usize = 24;
 pub const DATA_AT: usize = 32;

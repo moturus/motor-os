@@ -463,7 +463,7 @@ stdout and stderr to a file for long runs, and enable serial console capture on 
 provider before first boot.</p>
 
 <h2>Service logs</h2>
-<p>Services log through <code>moto-log</code>, a <code>log</code>-crate facade that sends
+<p>Services log through moto-sdk's <code>log</code> module, a <code>log</code>-crate facade that sends
 records over IPC to <code>strobe</code>. strobe writes one file per registered tag,
 <code>/system/logs/TAG.log</code>, and rotates it to <code>TAG.log.prev</code>. The
 directory is <code>rwxr-x---</code> and the files <code>rw-r-----</code>: strobe, running

@@ -169,7 +169,7 @@ features, performance work, and cleanup.
 - Fix `close()` in SYN-RECEIVED mistaking the SYN's ACK for the FIN's ACK
   (`sent_syn` is derived from the current state). Latent: sys-io aborts pool
   sockets rather than closing them.
-- Make `moto-async` oneshot `send` observe a concurrent receiver drop
+- Make the SDK async runtime's oneshot `send` observe a concurrent receiver drop
   atomically; it can return `Ok` after the receiver is gone. Benign today
   because every dropped payload self-heals.
 - Allow sockets as child stdio and across spawn, or document that they are
@@ -218,7 +218,7 @@ features, performance work, and cleanup.
 - Remove `src/sys/sys-io/Cargo.lock`; Cargo uses the workspace lock at
   `src/sys/Cargo.lock`.
 - Client UDP receive-queue overflow has no reason-specific counter
-  (`moto-io/src/net/udp.rs` discards the `dropped` result); the UDP TX bounds
+  (`moto-sdk/src/io/net/udp.rs` discards the `dropped` result); the UDP TX bounds
   are fixed constants rather than charged to the channel-page budget. Either
   add the counter and the charge, or amend the intent.
 
@@ -234,7 +234,7 @@ features, performance work, and cleanup.
 
 These need scope/design decisions before implementation.
 
-- Add multicast support through the netstack, sys-io, moto-io, rt.vdso, and std
+- Add multicast support through the netstack, sys-io, moto-sdk, rt.vdso, and std
   entry points.
 - Decide whether and how to expose raw sockets securely, then enable them if
   approved.

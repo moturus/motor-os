@@ -186,7 +186,7 @@ Check what Rush's `kill` and gears need before choosing.
 process instead. rt.vdso's `rt_net::bind` (`src/sys/lib/rt.vdso/src/net/rt_net.rs`)
 makes several infallible allocations before sys-io is asked: the event
 source, the listener observer, and the RPC state in `NetChannel::rpc_bind`
-(`src/sys/lib/moto-io/src/net/channel.rs`: a `oneshot` `Arc` and an
+(`src/sys/lib/moto-sdk/src/io/net/channel.rs`: a `oneshot` `Arc` and an
 `rpc_map` `BTreeMap` insert). If the process heap has no slack left, one of
 them fails and rt.vdso aborts.
 
@@ -203,7 +203,7 @@ Log: `/tmp/claude-1000/-home-posk-motor-dev-motor-os/44e5b204-1009-467e-bf8e-bab
 
 A fix makes the bind path allocate fallibly, or reserve what it needs before
 admission, as `57796b3d` did for network teardown. It touches rt.vdso and
-moto-io, so it needs its own reviewed patch. Until then the test can flake.
+moto-sdk, so it needs its own reviewed patch. Until then the test can flake.
 
 ## IPC listener is published before its missed-wake snapshot (2026-09-26)
 
@@ -331,7 +331,7 @@ must update those assertions.
 
 ## Any process can use up a sync IPC service's listeners (2026-09-26)
 
-A process can connect to a `moto-ipc::sync` service and never send a request.
+A process can connect to a `moto_sdk::ipc::sync` service and never send a request.
 The kernel has then handed out a listener that the server does not know is
 taken, because a server learns of a connection only from its first request.
 Enough such connections leave no free listener, and other clients get
@@ -613,7 +613,7 @@ The former sys-tty/kernel-log interleaving item is complete; see
    trigger with Ctrl+C on a session.
 
 8. **sys-io's statistics provider is absent for a moment after boot.**
-   `moto_stats::Collector::providers()` does not list sys-io (provider 2)
+   `moto_sdk::stats::Collector::providers()` does not list sys-io (provider 2)
    for a short window after boot: `systest fs-bench` started ~2 s after ssh
    came up panicked on the lookup, and two places in the suite retry around
    it. Fix: register with the stats registry before sys-io accepts its
@@ -762,7 +762,7 @@ the ruling; nothing here should be picked up without a fresh call.
   (the structural fix). Beyond the cap, the current shape is O(n) per park: every SysCpu::wait
   re-validates and re-registers all ~1024 objects (the loop in sys_cpu.rs:78-121), on every one of sys-io's ~130k waits in this run. An
   epoll-like kernel object — register a handle once into a wait set, block on the set's single handle — removes both the cliff and the
-  per-wait linear cost. This fits the netstack-scalability trajectory, but it's a significant kernel + moto-async project.
+  per-wait linear cost. This fits the netstack-scalability trajectory, but it's a significant kernel + async-runtime project.
 
 - **virtio queue: allocation-waiter hygiene and wakeups** (recorded 2026-09-08).
   Releasing a descriptor chain wakes at most two queued allocation waiters,
