@@ -10,7 +10,7 @@ The current beta tuple is declared in `src/toolchain-versions.sh`:
 
 - upstream Rust LLVM base `21cf28432798952d942bacc6bcee3a328faa3638`;
 - Motor LLVM `7c2a7b21e3dc7be1f0c41d443bc420bcc774b1d4`;
-- Motor mlibc `52bed56cdb3c192d4f05900df0b0bc38ff0ae757`.
+- Motor mlibc `9abf5139f8948020ffd8b96f0ad22c8247818b27`, including its C-ABI shim and lockfile.
 
 The Motor Rust revision's `src/llvm-project` gitlink must equal the declared
 Motor LLVM revision. The standalone host compiler and rustc's host/native LLVM
@@ -27,6 +27,7 @@ copied build scripts may become non-executable.
 mlibc `39d67d64` leaves main-executable relocation to Motor's loader, avoiding
 redundant startup passes that would make lazily relocated pages resident.
 Commit `52bed56c` additionally maps Motor's `CrossesDevices` error to `EXDEV`.
+Commit `9abf5139` hosts the `moto-rt-cabi` shim crate and its lockfile.
 Rebuild the assembly and relink native tools when changing the mlibc revision.
 
 LLVM changes are tested through the Rust checkout that owns the submodule:
@@ -48,7 +49,10 @@ The unified workflow builds this closure in dependency order:
 
 1. Standalone Linux-host Clang, LLD, and LLVM utilities for the Motor target.
 2. `libmoto_rt_cabi.a`, the Rust C-ABI shim over Motor's RT.VDSO, including the
-   emulated-TLS runtime.
+   emulated-TLS runtime. Its crate and `moto_rt.h` come from
+   `sysdeps/motor/moto-rt-cabi` in the pinned mlibc snapshot. Cargo fetches
+   the locked registry dependencies, then builds offline with `core` and
+   `alloc` using the crate's abort profiles.
 3. compiler-rt builtins, with the shim remaining the sole emulated-TLS owner.
 4. mlibc headers, `crt1.o`, `libc.a`, and companion libraries.
 5. libunwind, libc++abi, and libc++, with exceptions enabled.

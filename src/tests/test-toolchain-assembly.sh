@@ -7,14 +7,14 @@ fail() { echo "test-toolchain-assembly: $*" >&2; exit 1; }
 temporary="$(mktemp -d)"
 trap 'rm -rf "$temporary"' EXIT
 root="$temporary/motor"; mlibc="$temporary/mlibc"
-mkdir -p "$root/src/sys/lib/moto-rt-cabi/src" "$root/src/sys/lib/moto-rt/src" \
-	"$root/src/sys/lib/moto-sys/src" "$mlibc"
+mkdir -p "$root/src/sys/lib/moto-rt/src" "$root/src/sys/lib/moto-sys/src" \
+	"$mlibc/sysdeps/motor/moto-rt-cabi/src"
 for repo in "$root" "$mlibc"; do
 	git -C "$repo" init -q
 	git -C "$repo" config user.email test@example.com
 	git -C "$repo" config user.name Test
 done
-for package in moto-rt moto-rt-cabi moto-sys; do
+for package in moto-rt moto-sys; do
 	version=0.1.0
 	printf '[package]\nname = "%s"\nversion = "%s"\n' "$package" "$version" > \
 		"$root/src/sys/lib/$package/Cargo.toml"
@@ -29,10 +29,6 @@ name = "moto-rt"
 version = "0.1.0"
 
 [[package]]
-name = "moto-rt-cabi"
-version = "0.1.0"
-
-[[package]]
 name = "moto-sys"
 version = "0.1.0"
 
@@ -41,8 +37,10 @@ name = "unrelated"
 version = "1.0.0"
 EOF
 printf 'mlibc\n' > "$mlibc/source"
+printf 'shim\n' > "$mlibc/sysdeps/motor/moto-rt-cabi/src/lib.rs"
 git -C "$root" add . && git -C "$root" commit -qm motor
 git -C "$mlibc" add . && git -C "$mlibc" commit -qm mlibc
+MOTOR_MLIBC_REV="$(git -C "$mlibc" rev-parse HEAD)"
 
 MOTOR_TOOLCHAIN_KEY="$(printf toolchain | sha256sum | awk '{print $1}')"
 MOTOR_ASSEMBLY_STATE=clean
@@ -70,7 +68,7 @@ printf 'unrelated\n' > "$root/README"
 toolchain_derive_assembly_identity "$root" "$mlibc"
 [ "$MOTOR_ASSEMBLY_KEY" = "$first_key" ] || fail "unrelated source changed assembly"
 
-# No file of this checkout is keyed. A shim edit only marks the producer dirty.
+# Motor OS sources are not inputs to the mlibc-owned shim.
 printf 'script edit\n' > "$root/src/build-motor-os.sh"
 git -C "$root" add src/build-motor-os.sh
 toolchain_derive_assembly_identity "$root" "$mlibc"
@@ -78,8 +76,20 @@ toolchain_derive_assembly_identity "$root" "$mlibc"
 [ "$MOTOR_ASSEMBLY_STATE" = clean ] || fail "build script edit was marked dirty"
 printf 'runtime edit\n' >> "$root/src/sys/lib/moto-rt/src/lib.rs"
 toolchain_derive_assembly_identity "$root" "$mlibc"
-[ "$MOTOR_ASSEMBLY_KEY" = "$first_key" ] || fail "shim source edit re-keyed assembly"
-[ "$MOTOR_ASSEMBLY_STATE" = development-dirty ] || fail "shim source edit was not marked dirty"
+[ "$MOTOR_ASSEMBLY_KEY" = "$first_key" ] || fail "local runtime edit re-keyed assembly"
+[ "$MOTOR_ASSEMBLY_STATE" = clean ] || fail "local runtime edit marked the assembly dirty"
+
+# The shim is now covered by mlibc's tree state and pinned revision.
+printf 'shim edit\n' >> "$mlibc/sysdeps/motor/moto-rt-cabi/src/lib.rs"
+toolchain_derive_assembly_identity "$root" "$mlibc"
+[ "$MOTOR_ASSEMBLY_KEY" != "$first_key" ] || fail "mlibc shim edit did not re-key assembly"
+[ "$MOTOR_ASSEMBLY_STATE" = development-dirty ] || fail "mlibc shim edit was not marked dirty"
+git -C "$mlibc" commit -qam 'update shim'
+MOTOR_MLIBC_REV="$(git -C "$mlibc" rev-parse HEAD)"
+MOTOR_ASSEMBLY_STATE=clean
+toolchain_derive_assembly_identity "$root" "$mlibc"
+[ "$MOTOR_ASSEMBLY_KEY" != "$first_key" ] || fail "new mlibc revision did not re-key assembly"
+[ "$MOTOR_ASSEMBLY_STATE" = clean ] || fail "committed mlibc shim was not clean"
 
 # A complete keyed assembly is reusable; partial or changed staging is not.
 MOTOR_RUSTUP_TOOLCHAIN=motor-test
@@ -138,13 +148,13 @@ toolchain_claim_assembly
 [ "$TOOLCHAIN_ASSEMBLY_REUSED" = true ] ||
 	fail "unkeyed Motor OS revision prevented assembly reuse"
 
-# Committing the shim sources changes the current state, not the producer's record.
+# Committing Motor OS sources does not change the producer's record.
 printf changed >> "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/clippy-driver"
 if toolchain_claim_assembly 2>/dev/null; then fail "changed Clippy driver was accepted"; fi
 printf clippy > "$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/clippy-driver"
 producer_key="$MOTOR_ASSEMBLY_KEY"
 producer_manifest_sha256="$(sha256sum "$ASSEMBLY_ROOT/MOTOR-ASSEMBLY-MANIFEST")"
-git -C "$root" add . && git -C "$root" commit -qm 'commit shim sources'
+git -C "$root" add . && git -C "$root" commit -qm 'commit Motor OS sources'
 MOTOR_ASSEMBLY_STATE=clean
 toolchain_derive_assembly_identity "$root" "$mlibc"
 [ "$MOTOR_ASSEMBLY_KEY" = "$producer_key" ] || fail "committing inputs re-keyed assembly"

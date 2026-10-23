@@ -134,7 +134,7 @@ The workflow performs these stages:
 5. Register that prefix under its exact rustup name and validate every
    component, source commit, sysroot, lock hash, and both host/target compile
    probes.
-6. Derive an assembly key and build the C-ABI shim, compiler-rt builtins, mlibc,
+6. Derive an assembly key and build mlibc's C-ABI shim, compiler-rt builtins, mlibc,
    libc++/libc++abi/libunwind, native LLVM, and native rustc in that
    assembly's private directories. Then build the userspace add-ons (Lua,
    ripgrep, Helix, sed, Javy/Wasmi, Wasmtime) with that toolchain; they are no part of its identity
@@ -156,9 +156,10 @@ $MOTORH/assemblies/<assembly-key>/
     ADDON-*      the source each add-on was built from
 ```
 
-An mlibc change selects a new assembly without pretending to be a different
-compiler lineage. Edits to this repository, build scripts and local runtime
-crates included, select nothing new. A changed add-on source rebuilds that
+An mlibc change, including its shim and locked Rust dependencies, selects a
+new assembly without changing the compiler lineage. Edits to this repository,
+build scripts and local runtime crates included, select nothing new. A changed
+add-on source rebuilds that
 add-on alone inside that assembly. A Rust or LLVM commit, bootstrap
 configuration, or host LLVM configuration change selects a new host toolchain
 prefix as well; Cargo and the Rust lockfiles change only with the Rust commit.

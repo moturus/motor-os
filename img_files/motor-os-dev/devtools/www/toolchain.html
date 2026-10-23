@@ -460,7 +460,7 @@ mlibc.</p>
   <tr><td>Rust</td><td><a href="https://github.com/moturus/rust">moturus/rust</a>, based on the upcoming Rust release (1.99 at the time of writing) with LLVM 23</td><td>The <code>x86_64-unknown-motor</code> target, a Tier-3 target upstream; the standard library's Motor OS layer, which calls the <code>moto-rt</code> crate (0.17.x); a few compiler patches, all on one development branch per upstream baseline (<code>motor-os-1.99.0-beta-f47d5bb</code> today), from which both the cross and the native toolchain are built.</td></tr>
   <tr><td>Cargo, Clippy, rustfmt</td><td>Upstream, at the revisions the Rust fork specifies</td><td>Nothing. Cargo runs on Linux only. Clippy's driver and rustfmt are also built natively for the developer image, where <code>lorry clippy</code> and Helix use them.</td></tr>
   <tr><td>LLVM</td><td><a href="https://github.com/moturus/llvm-project">moturus/llvm-project</a>, LLVM 23</td><td>A Motor OS target in Clang: the driver knows the link line, the defaults (emulated TLS, static PIE, lld, compiler-rt, libc++), and the sysroot layout. Built twice: for the Linux host, and natively for Motor OS.</td></tr>
-  <tr><td>mlibc</td><td><a href="https://github.com/moturus/mlibc">moturus/mlibc</a></td><td>The Motor OS sysdeps and a build configuration that reads its runtime files from <code>/system/cfg/libc</code>. It sits on <code>moto-rt-cabi</code>, a C ABI over the Motor runtime (see <a href="c-cpp.html">C/C++ on Motor OS</a>).</td></tr>
+  <tr><td>mlibc</td><td><a href="https://github.com/moturus/mlibc">moturus/mlibc</a></td><td>The Motor OS sysdeps and a build configuration that reads its runtime files from <code>/system/cfg/libc</code>. The fork also owns <code>sysdeps/motor/moto-rt-cabi</code>, a C ABI over the published Motor runtime crates (see <a href="c-cpp.html">C/C++ on Motor OS</a>).</td></tr>
   <tr><td>Small crate forks</td><td><code>moturus/libc</code>, <code>moturus/stacker</code>, <code>moturus/rust_libloading</code>, <code>moturus/rust-ctrlc</code></td><td>Patched into the Rust fork's own dependency graph; Cargo fetches them, nothing is cloned by hand.</td></tr>
   <tr><td>Lua, ripgrep, Helix, sed</td><td>Lua 5.4.8 from lua.org, unmodified; <code>moturus/ripgrep</code>; <code>moturus/helix</code>; <code>moturus/sed</code> (uutils sed)</td><td>Userspace add-ons, not parts of the toolchain: built with the finished toolchain and rebuilt alone when their source changes. Lua was the first real C program and ripgrep the first large Rust program; they ship as <code>/devtools/bin/lua</code>, <code>/system/bin/rg</code>, <code>/devtools/helix/hx</code>, and <code>/devtools/bin/sed</code>.</td></tr>
 </table>
@@ -620,7 +620,8 @@ the one before it:</p>
   rustc, rustdoc, Cargo, Clippy, rustfmt, both standard libraries, and the library sources,
   into an immutable directory named by its key, which is registered with rustup. Every
   later step and every Motor OS component uses it.</li>
-  <li>The runtime shim (<code>moto-rt-cabi</code>) is built with the cross toolchain, then
+  <li>The runtime shim (<code>moto-rt-cabi</code>) is built from the pinned mlibc source
+  with the cross toolchain and its locked registry dependencies, then
   the compiler-rt builtins, then mlibc against the shim, then libunwind, libc++abi, and
   libc++ against mlibc.</li>
   <li>The native LLVM multicall binary is built for Motor OS against that sysroot.</li>

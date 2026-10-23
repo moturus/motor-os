@@ -12,7 +12,6 @@ members = [
 
   # system libraries
   "lib/moto-rt",
-  "lib/moto-rt-cabi",
   "lib/moto-sdk",
   "lib/moto-sys",
   "lib/rt.vdso",

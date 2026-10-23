@@ -112,9 +112,9 @@ The normal metadata and save-check commands use the configured settings.
 The Motor OS checkout's `.helix/languages.toml` sets `check.workspace = false`
 because `src/sys` has member-specific compiler requirements. This exception
 belongs to that checkout. Saving a file outside its members, including files
-under `src/third_party`, starts no member check. The editable members
-`moto-netstack` and `moto-rt-cabi` have build scripts. Without Cargo's cache,
-Lorry runs one only with a rule in your own configuration, under the
+under `src/third_party`, starts no member check. The editable member
+`moto-netstack` has a build script. Without Cargo's cache,
+Lorry runs it only with a rule in your own configuration, under the
 checkout's `src/sys` workspace table, for example
 `[workspaces."/home/me/motor-os/src/sys".policy.rules.moto-netstack]` with
 `action = "allow"`, `source = "path"`, `name = "moto-netstack"`, and

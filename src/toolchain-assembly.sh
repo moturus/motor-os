@@ -81,11 +81,6 @@ toolchain_assembly_key() {
 		native_configuration_digest "$NATIVE_CONFIGURATION_DIGEST"
 }
 
-# The C ABI shim is built from this checkout. Its sources stay out of the key;
-# uncommitted changes to them only mark the producer as development-dirty.
-MOTOR_SHIM_SOURCES=(src/sys/Cargo.toml src/sys/Cargo.lock src/sys/lib/moto-rt
-	src/sys/lib/moto-sys src/sys/lib/moto-rt-cabi)
-
 toolchain_derive_assembly_identity() {
 	local root="$1" mlibc="$2"
 	STANDALONE_LLVM_CONFIG_DIGEST="$(
@@ -93,9 +88,7 @@ toolchain_derive_assembly_identity() {
 	)" || return
 	MOTOR_OS_REV="$(git -C "$root" rev-parse HEAD)" || return
 	MOTOR_MLIBC_TREE_STATE="$(toolchain_worktree_digest "$mlibc" mlibc)" || return
-	if [ -n "$(git -C "$root" status --porcelain=v1 -- \
-		"${MOTOR_SHIM_SOURCES[@]}")" ] ||
-		[ "$MOTOR_MLIBC_TREE_STATE" != clean ]; then
+	if [ "$MOTOR_MLIBC_TREE_STATE" != clean ]; then
 		MOTOR_ASSEMBLY_STATE=development-dirty
 	fi
 	NATIVE_CONFIGURATION_DIGEST="$(toolchain_native_configuration_digest)"

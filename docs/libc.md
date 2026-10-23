@@ -25,9 +25,10 @@ From the application down:
 | `moto-rt-cabi` (`libmoto_rt_cabi.a`) | the C-ABI shim over the RT.VDSO |
 | RT.VDSO / `moto-rt` | the same process runtime Rust std uses |
 
-The shim (`src/sys/lib/moto-rt-cabi`) is the single bridge between C-world and
-the Motor runtime. It owns emulated TLS — `__emutls_get_address` implemented
-directly over the VDSO TLS API — and `__cxa_thread_atexit`, which clang emits
+The shim lives in the mlibc fork at `sysdeps/motor/moto-rt-cabi` and is the
+single bridge between C-world and the Motor runtime. It owns emulated TLS —
+`__emutls_get_address` implemented directly over the VDSO TLS API — and
+`__cxa_thread_atexit`, which clang emits
 calls to under emulated TLS as well. compiler-rt's stock `emutls.c` is removed
 from the builtins so the shim is the sole emulated-TLS owner; the kernel
 reserves the `libc_tcb` UTCB field for it. Because C and Rust share one
@@ -92,7 +93,7 @@ suites:
 - `__cxa_thread_atexit` destructors run at *thread* exit. `main` returning
   can end the process via `proc_exit` without draining the main thread's
   destructor list; the caveat is recorded at the implementation,
-  `src/sys/lib/moto-rt-cabi/src/cxa.rs`.
+  mlibc's `sysdeps/motor/moto-rt-cabi/src/cxa.rs`.
 - Executable-permission support is a cross-repository compatibility boundary
   between the fd wrapper, mlibc, and LLVM revisions; never mix components
   across assembly tuples ([build-llvm.md](build-llvm.md), "Source identity").
@@ -135,6 +136,9 @@ anything:
 
 The mlibc commit is declared as `MOTOR_MLIBC_REV` in `src/toolchain-versions.sh`, which
 enters `MOTOR_ASSEMBLY_KEY`, so a libc change selects a new assembly rather
-than mutating an existing one. The shim's sources (`moto-rt`, `moto-sys`,
-`moto-rt-cabi`) are not keyed. The rules and procedures are in
+than mutating an existing one. That commit also fixes the shim, its C header,
+and its `Cargo.lock`, which selects published `moto-rt` and `moto-sys` crates.
+Building the shim requires no Motor OS source checkout. A compile-time
+assertion checks the header's `MOTO_RT_VERSION` against the selected
+`moto-rt::RT_VERSION`. The rules and procedures are in
 [toolchain.md](toolchain.md).

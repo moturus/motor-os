@@ -8,8 +8,10 @@ Motor OS publishes three Rust libraries on crates.io:
 - `moto-sdk`: userspace services: IPC, the async runtime, the sys-io clients
   and wire formats, the filesystem traits, logging, and metrics.
 
-`moto-rt-cabi`, the C ABI shim under the C library, is published separately.
-The toolchain builds it from the tree.
+`moto-rt-cabi`, the C ABI shim under the C library, lives in the mlibc fork at
+`sysdeps/motor/moto-rt-cabi`. The toolchain builds it from the pinned mlibc
+revision, using its lockfile and the published `moto-rt` and `moto-sys` crates.
+The shim itself is not published to crates.io.
 
 The other libraries in `src/sys/lib` are internal and not published:
 `motor-fs`, `memfs`, `virtio-async`, `timeq`, `frusa`, `moto-dns` and

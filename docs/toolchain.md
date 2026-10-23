@@ -43,7 +43,9 @@ The declaration is data only. The values that matter most:
   `MOTOR_RUST_ANALYZER_LOCK_SHA256`: hashes of the three Cargo lockfiles at
   `MOTOR_RUST_REV`. A checkout whose lockfiles differ, or a bootstrap run
   that rewrites one, is rejected. They are checks, not key inputs.
-- `MOTOR_MLIBC_REV`: the libc commit.
+- `MOTOR_MLIBC_REV`: the libc commit, including `sysdeps/motor/moto-rt-cabi`
+  and its Cargo lockfile. The shim uses published `moto-rt` and `moto-sys`
+  crates selected by that lockfile.
 - No runtime crate version is declared. Rust std links the `moto-rt` that the
   Rust fork's library lock selects, which the lock hash above covers. The
   local `moto-rt` only has to share its major version (`0.17` for `0.17.9`);
@@ -101,11 +103,11 @@ selector names the declared tuple without building anything.
 **Assembly key.** Hash of the toolchain key, the mlibc commit and tree state,
 and the native configuration digest (the recipes for native LLVM, rustc,
 rustfmt, and rust-analyzer). Editing `src/build-motor-os.sh`, a toolchain
-script, moto-rt, moto-sys, or the shim keeps the same assembly, and so does a
-version bump of the local runtime crates. The C ABI shim inside an assembly
-is the one built when the assembly was produced; to rebuild it, remove
-`$MOTORH/assemblies/<assembly key>` and run the producer. The assembly root
-and each toolchain overlay carry `MOTOR-ASSEMBLY-MANIFEST`; the developer
+script, moto-rt, or moto-sys keeps the same assembly, and so does a version
+bump of the local runtime crates. The C ABI shim belongs to mlibc; changing
+it or its locked dependencies requires a new `MOTOR_MLIBC_REV` and selects a
+new assembly. The assembly root and each toolchain overlay carry
+`MOTOR-ASSEMBLY-MANIFEST`; the developer
 image exposes it as `/devtools/toolchain/manifest`.
 
 **Add-ons.** Lua, ripgrep, Helix, and sed are userspace programs built with
@@ -116,9 +118,10 @@ Lua is a release version; ripgrep, Helix, and sed follow one branch of their
 fork (sed is uutils sed, from `moturus/sed`). Each
 records the source it was built from in `ADDON-<name>` inside the assembly,
 and the producer rebuilds that add-on alone when the source differs.
-The manifest's `motor_os_rev` and `assembly_state` record the producer's Git
-revision and whether the shim sources had uncommitted changes. Neither is
-keyed, so a later checkout reuses the assembly with its original provenance.
+The manifest's `motor_os_rev` and `assembly_state` record the producer's
+Motor OS Git revision and whether its external source inputs were dirty.
+Motor OS edits do not mark the assembly dirty. A later checkout reuses the
+assembly with its original provenance.
 
 ## 3. How everyday commands select the toolchain
 
@@ -300,6 +303,11 @@ Rust std moves to a newer `moto-rt` the same way: publish the crate, select
 it in the fork's `library/Cargo.lock`, commit that on the fork branch, and
 declare the new Rust commit and lock hash. The local `moto-rt` may run ahead
 of std within one major version without any of this.
+
+For a shim-only change, commit and push `sysdeps/motor/moto-rt-cabi` in the
+mlibc fork, update `MOTOR_MLIBC_REV`, and run the producer to build the new
+assembly. Dependency updates belong in the shim's `Cargo.toml` and
+`Cargo.lock`; local Motor OS runtime edits do not change what it links.
 
 The stable release converts `MOTOR_TOOLCHAIN_MATURITY` to `stable`,
 `UPSTREAM_RUST_REF` to the `1.99.0` tag, and the id to `1.99.0-motor.1`,

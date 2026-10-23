@@ -340,6 +340,13 @@ update_addon_source() {
 }
 
 # --- stage 2: the C-ABI shim (libmoto_rt_cabi.a) ----------------------------
+prepare_mlibc_source() {
+	[ ! -e "$MLIBC_SOURCE" ] ||
+		die "mlibc assembly source snapshot already exists: $MLIBC_SOURCE"
+	mkdir -p "$MLIBC_SOURCE"
+	git -C "$MLIBC" archive "$MOTOR_MLIBC_REV" | tar -x -C "$MLIBC_SOURCE"
+}
+
 build_shim() {
 	log "stage 2: building the moto-rt-cabi shim"
 	local rustlibs=("$RUSTLIB_SRC"/*.rlib) symbol
@@ -350,9 +357,10 @@ build_shim() {
 		fi
 	done
 	mkdir -p "$SYSROOT/$TOOLS/lib" "$SYSROOT/$TOOLS/include"
-	( cd "$MOTOR/src/sys/lib/moto-rt-cabi" \
+	( cd "$MLIBC_SOURCE/sysdeps/motor/moto-rt-cabi" \
+		&& run_motor_cargo fetch --locked \
 		&& CARGO_TARGET_DIR="$SHIM_TARGET_DIR" \
-		run_motor_cargo build --target x86_64-unknown-motor --release \
+		run_motor_cargo build --locked --offline --target x86_64-unknown-motor --release \
 			-Zbuild-std=core,alloc )
 	cp "$SHIM_TARGET_DIR/x86_64-unknown-motor/release/libmoto_rt_cabi.a" \
 		"$SYSROOT/$TOOLS/lib/"
@@ -370,7 +378,7 @@ build_shim() {
 			die "moto-rt-cabi defines strong $symbol; mixed Rust+C links are unsafe"
 		fi
 	done
-	cp "$MOTOR/src/sys/lib/moto-rt-cabi/moto_rt.h" "$SYSROOT/$TOOLS/include/"
+	cp "$MLIBC_SOURCE/sysdeps/motor/moto-rt-cabi/moto_rt.h" "$SYSROOT/$TOOLS/include/"
 }
 
 # --- stage 3: compiler-rt builtins (emutls excluded) ------------------------
@@ -434,10 +442,6 @@ build_builtins() {
 # --- stage 4: mlibc ---------------------------------------------------------
 build_mlibc() {
 	log "stage 4: building mlibc"
-	[ ! -e "$MLIBC_SOURCE" ] ||
-		die "mlibc assembly source snapshot already exists: $MLIBC_SOURCE"
-	mkdir -p "$MLIBC_SOURCE"
-	git -C "$MLIBC" archive "$MOTOR_MLIBC_REV" | tar -x -C "$MLIBC_SOURCE"
 	# Meson cross file with this machine's absolute paths (kept out of the repos).
 	# MLIBC_SYSCONFDIR repoints mlibc's runtime config lookups (resolv.conf,
 	# hosts, passwd, ...) from /etc to /system/cfg/libc.
@@ -1119,6 +1123,7 @@ main() {
 		log "building assembly $MOTOR_ASSEMBLY_KEY"
 		toolchain_generate_cross_wrappers "$SYSROOT" "$B"
 		configure_exact_cross_driver
+		prepare_mlibc_source
 		build_shim
 		build_builtins
 		build_mlibc

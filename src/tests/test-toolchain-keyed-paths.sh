@@ -61,9 +61,18 @@ for producer in build_mlibc build_cxx_runtimes build_native_llvm; do
 			fail "$producer still wipes or uses source-relative build output" ;;
 	esac
 done
-case "$(declare -f build_mlibc)" in
+case "$(declare -f prepare_mlibc_source build_mlibc)" in
 	*'git -C "$MLIBC" archive "$MOTOR_MLIBC_REV"'*'cd "$MLIBC_SOURCE"'*) ;;
 	*) fail "mlibc does not build from an exact isolated source snapshot" ;;
+esac
+case "$(declare -f main)" in
+	*'prepare_mlibc_source'*'build_shim'*'build_mlibc'*) ;;
+	*) fail "the shim and libc do not share the mlibc source snapshot" ;;
+esac
+case "$(declare -f build_shim)" in
+	*'cd "$MLIBC_SOURCE/sysdeps/motor/moto-rt-cabi"'*'fetch --locked'*\
+*'build --locked --offline'*'cp "$MLIBC_SOURCE/sysdeps/motor/moto-rt-cabi/moto_rt.h"'*) ;;
+	*) fail "the shim does not use mlibc's locked crate and matching header" ;;
 esac
 case "$(declare -f build_lua llvm_stage_image)" in
 	*'rm -rf'*|*'$MOTORH/lua-$LUA_VER/src/lua'*|*'$LLVM/build-motor-native'*)
@@ -79,5 +88,26 @@ case "$(declare -f rebuild_shim rustc_stage_image build_ripgrep build_helix buil
 	*'cargo +dev-x86_64-unknown-motor'*|*'rm -rf'*|*'src/sys/target'*|*'build/native-toolchain'*)
 		fail "later producers still wipe or consume legacy Cargo output" ;;
 esac
+
+# The snapshot must include the shim at the pin, even when HEAD has moved.
+temporary="$(mktemp -d)"
+trap 'rm -rf "$temporary"' EXIT
+MLIBC="$temporary/mlibc"
+MLIBC_SOURCE="$temporary/snapshot"
+mkdir -p "$MLIBC/sysdeps/motor/moto-rt-cabi"
+git -C "$MLIBC" init -q
+git -C "$MLIBC" config user.email test@example.com
+git -C "$MLIBC" config user.name Test
+printf 'pinned header\n' > "$MLIBC/sysdeps/motor/moto-rt-cabi/moto_rt.h"
+git -C "$MLIBC" add . && git -C "$MLIBC" commit -qm pinned
+MOTOR_MLIBC_REV="$(git -C "$MLIBC" rev-parse HEAD)"
+printf 'new header\n' > "$MLIBC/sysdeps/motor/moto-rt-cabi/moto_rt.h"
+git -C "$MLIBC" commit -qam newer
+prepare_mlibc_source
+[ "$(cat "$MLIBC_SOURCE/sysdeps/motor/moto-rt-cabi/moto_rt.h")" = 'pinned header' ] ||
+	fail "mlibc snapshot did not preserve the pinned shim"
+if (prepare_mlibc_source) 2>/dev/null; then
+	fail "an existing mlibc snapshot was overwritten"
+fi
 
 echo "test-toolchain-keyed-paths PASS"

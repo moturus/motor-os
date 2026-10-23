@@ -104,7 +104,7 @@ CPython's platform surface, in the order it bites during a port:
 
 The C runtime is documented in `docs/libc.md`. From the application down:
 libc++ and libunwind; mlibc `sysdeps/motor`; compiler-rt builtins with
-`emutls.c` removed; `moto-rt-cabi` (`src/sys/lib/moto-rt-cabi`) as the
+`emutls.c` removed; `moto-rt-cabi` (mlibc's `sysdeps/motor/moto-rt-cabi`) as the
 single C-ABI bridge over `rt.vdso`; and the same `moto-rt`/VDSO runtime that
 Rust std uses. Binaries are static PIEs, TLS is emulated (`-femulated-tls`
 is a target default), and clang predefines `__motor__` but not `__unix__`.
@@ -480,7 +480,8 @@ platform checks that a `motor` platform name can reuse.
 * Both phases: the mlibc changes are covered by the existing assembly
   validation and the C smoke tests in `docs/libc.md`; add a `getuid` and
   `clock_getres` check there so the abort cannot return.
-* Per `AGENTS.md`, `src/sys/lib/moto-rt-cabi` changes are core: run
+* Shim changes live in mlibc's `sysdeps/motor/moto-rt-cabi`. Rebuild the
+  assembly with its updated mlibc pin and run
   `src/tests/full-test.sh` in debug and release three times each before
   committing them.
 
