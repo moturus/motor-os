@@ -30,6 +30,17 @@ toolchain_assert_clean() {
   [ -z "$state" ] || toolchain_die "managed checkout is dirty: $repo"
 }
 
+# The superproject's own files only. A declared revision that moves a gitlink
+# leaves the submodule worktrees behind until each is detached in turn; every
+# submodule is checked on its own, and the whole tree strictly at the end.
+toolchain_assert_clean_superproject() {
+  local repo="$1" state
+  state="$(git -C "$repo" status --porcelain=v1 --untracked-files=all \
+    --ignore-submodules=all)" ||
+    toolchain_die "cannot inspect checkout state: $repo"
+  [ -z "$state" ] || toolchain_die "managed checkout is dirty: $repo"
+}
+
 toolchain_clone_managed() {
   local repository="$1" destination="$2" seed="${3:-}"
   [ ! -e "$destination" ] ||
@@ -79,12 +90,12 @@ toolchain_managed_checkout() {
 
   # This check deliberately precedes checkout. Never switch, stash, reset, or
   # clean a worktree containing user changes.
-  toolchain_assert_clean "$destination" || return
+  toolchain_assert_clean_superproject "$destination" || return
   git -C "$destination" checkout --detach "$revision" ||
     toolchain_die "cannot detach $destination at $revision"
   [ "$(git -C "$destination" rev-parse HEAD)" = "$revision" ] ||
     toolchain_die "checkout did not select $revision: $destination"
-  toolchain_assert_clean "$destination"
+  toolchain_assert_clean_superproject "$destination"
 }
 
 toolchain_ignored_path_allowed() {
@@ -413,7 +424,7 @@ toolchain_managed_submodule() {
     return 1
   fi
   toolchain_assert_clean "$destination" || return
-  toolchain_assert_clean "$parent"
+  toolchain_assert_clean_superproject "$parent"
 }
 
 toolchain_verify_exact_submodule() {

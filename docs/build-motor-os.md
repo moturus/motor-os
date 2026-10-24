@@ -5,10 +5,9 @@ Motor OS compiler/runtime assembly and all release images. It builds Linux-host
 Rust tools, standalone LLVM/Clang, the C/C++ sysroot, native Motor LLVM and
 rustc, and the OS from one reviewed source tuple.
 
-The current development tuple is the exact Rust 1.99 beta baseline declared in
-`src/toolchain-versions.sh`. The Motor fork uses Rust's `dev` channel, so its
-Cargo reports `1.99.0-dev`; this is a beta development assembly, not the final
-`1.99.0-motor.1` source release.
+The current tuple is upstream Rust 1.99.1 with the Motor patches rebased onto
+it, declared in `src/toolchain-versions.sh` as `1.99.1-motor.1`. The Motor
+fork uses Rust's `dev` channel, so its Cargo reports `1.99.1-dev`.
 
 ## Quick start
 
@@ -299,6 +298,6 @@ src/tests/full-test.sh --release
 Do not add explicit `+nightly`, `+stable`, or legacy `+dev-*` selectors. Rust's
 Stage 0 compiler is used only internally by `x.py`.
 
-The final stable-release rebase and immutable source tags are intentionally
-deferred until upstream Rust 1.99.0 is published. See
+Immutable source tags in the forks follow the core gate on the 1.99.1
+tuple. See
 [toolchain.md](toolchain.md), section 5, for the update and release procedure.

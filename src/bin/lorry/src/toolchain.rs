@@ -289,11 +289,11 @@ fn parse_verbose_version(text: &str) -> Result<BTreeMap<String, String>> {
 }
 
 fn infer_compatibility(release: &str) -> Option<CargoCompat> {
-    if release == "1.99.0" || release.starts_with("1.99.0-") {
-        Some(CargoCompat::V1_99)
-    } else {
-        None
-    }
+    // The family is the minor version: every 1.99.x release ships Cargo 1.99.
+    let patch = release.strip_prefix("1.99.")?;
+    let patch = patch.split('-').next()?;
+    (!patch.is_empty() && patch.bytes().all(|byte| byte.is_ascii_digit()))
+        .then_some(CargoCompat::V1_99)
 }
 
 /// Where a program runs from: like `Command`, a bare name is looked up on
@@ -752,6 +752,10 @@ mod tests {
             Some(CargoCompat::V1_99)
         );
         assert_eq!(infer_compatibility("1.99.0-dev"), Some(CargoCompat::V1_99));
+        assert_eq!(infer_compatibility("1.99.1"), Some(CargoCompat::V1_99));
+        assert_eq!(infer_compatibility("1.99.1-dev"), Some(CargoCompat::V1_99));
+        assert_eq!(infer_compatibility("1.99."), None);
+        assert_eq!(infer_compatibility("1.99.x"), None);
         assert_eq!(infer_compatibility("1.98.0"), None);
         assert_eq!(infer_compatibility("2.0.0"), None);
     }

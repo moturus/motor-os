@@ -52,8 +52,8 @@ The declaration is data only. The values that matter most:
   its content and lower version parts are never compared, and `moto-sys` is
   not checked at all.
 - `MOTOR_TOOLCHAIN_ID` and `MOTOR_RUSTUP_TOOLCHAIN_BASE`: the human-readable
-  lineage (`1.99.0-beta-f47d5bb-motor.dev.2`) and the prefix of the rustup
-  name (`motor-1.99.0-beta-f47d5bb-dev.2`).
+  lineage (`1.99.1-motor.1`) and the prefix of the rustup name
+  (`motor-1.99.1`).
 
 The declaration covers the C, C++, and Rust toolchain only. Userspace add-ons
 (Lua, ripgrep, Helix, sed) are declared in `src/build-motor-os.sh`, and the vsock
@@ -89,7 +89,7 @@ record only values that follow from the key, so an equal key always means an
 equal manifest.
 
 **Rustup name.** `<rustup base>-<toolchain key>`, for example
-`motor-1.99.0-beta-f47d5bb-dev.2-774c61a5…`. Authoring builds use
+`motor-1.99.1-774c61a5…`. Authoring builds use
 `motor-authoring-<version>-<12 hex of the base>-<key>` instead, so they can
 never be mistaken for a managed build. The prefix carries
 `MOTOR-TOOLCHAIN-MANIFEST` and the stamp `lib/rustlib/MOTOR-TOOLCHAIN-KEY`.
@@ -198,7 +198,7 @@ deleted by a build.
 
 ### Rust runtime and native formatting
 
-The selected `.dev.2` Motor target defaults to `panic=unwind`. rustc,
+The selected Motor target defaults to `panic=unwind`. rustc,
 rustfmt, rust-analyzer, and ordinary applications use the standard Motor
 sysroots; the analyzer's private patched-library build has been retired.
 Salsa cancellation and rustfmt's speculative parsing require real unwinding.
@@ -309,11 +309,11 @@ mlibc fork, update `MOTOR_MLIBC_REV`, and run the producer to build the new
 assembly. Dependency updates belong in the shim's `Cargo.toml` and
 `Cargo.lock`; local Motor OS runtime edits do not change what it links.
 
-The stable release converts `MOTOR_TOOLCHAIN_MATURITY` to `stable`,
-`UPSTREAM_RUST_REF` to the `1.99.0` tag, and the id to `1.99.0-motor.1`,
-after rebasing both forks onto the final upstream commits, and then creates
-immutable source tags in the forks. It is deferred until upstream 1.99.0
-exists. Only source refs are published; no binary toolchain is.
+The 1.99.1 tuple is the stable form: `MOTOR_TOOLCHAIN_MATURITY` is
+`stable`, `UPSTREAM_RUST_REF` is the `1.99.1` tag, and the id is
+`1.99.1-motor.1`, with both forks rebased onto the tag's commits on their
+`motor-os-1.99.1` branches. Immutable source tags in the forks follow the
+core gate. Only source refs are published; no binary toolchain is.
 
 ## 6. Failures you will see, and what they mean
 

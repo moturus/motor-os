@@ -537,9 +537,9 @@ To see what is selected:</p>
 <pre><code>rustc -vV
 cargo -Vv
 rustc --print sysroot</code></pre>
-<p>Cargo reports <code>1.99.0-dev</code> and the exact Cargo commit: the current toolchain
-is built from the Rust 1.99 beta, and the stable <code>1.99.0-motor.1</code> release waits
-for upstream Rust 1.99.0. The sysroot contains <code>MOTOR-TOOLCHAIN-MANIFEST</code> and
+<p>Cargo reports <code>1.99.1-dev</code> and the exact Cargo commit: the current toolchain
+is built from the Rust 1.99.1 tag with the Motor patches rebased onto it
+(<code>1.99.1-motor.1</code>). The sysroot contains <code>MOTOR-TOOLCHAIN-MANIFEST</code> and
 <code>lib/rustlib/MOTOR-TOOLCHAIN-KEY</code>; every assembly, and the developer image under
 <code>/devtools/toolchain/manifest</code>, contains <code>MOTOR-ASSEMBLY-MANIFEST</code>. The
 manifests record the revisions, keys, and hashes everything was built from, and

@@ -220,6 +220,20 @@ toolchain_generate_native_llvm_config() {
 	done
 }
 
+# x.py builds the native LLVM under the Rust checkout, but that tree belongs to
+# one assembly: its cmake cache names that assembly's motor-clang. Configuring
+# it with another compiler makes cmake delete the cache and reconfigure without
+# the command-line definitions, which drops the Motor cross-build settings. A
+# tree another assembly configured is removed and built again.
+toolchain_reset_foreign_native_llvm() {
+	local root="$1" wrapper="$2" cached
+	[ -e "$root" ] || return 0
+	cached="$(sed -n 's/^CMAKE_C_COMPILER:[A-Z]*=//p' "$root/build/CMakeCache.txt" 2>/dev/null)"
+	[ "$cached" != "$wrapper" ] || return 0
+	echo "toolchain: native LLVM tree belongs to another assembly; rebuilding: $root" >&2
+	rm -rf "$root"
+}
+
 toolchain_build_native_rustc() {
 	local rust="$1" authoring_base="$2" bootstrap_cache="$3"
 	local expected_digest="$AUTHORING_SOURCE_DIGEST"
@@ -227,6 +241,8 @@ toolchain_build_native_rustc() {
 	toolchain_generate_cross_wrappers "$ASSEMBLY_SYSROOT" "$STANDALONE_LLVM_BIN" || return
 	native_llvm_bin="$ASSEMBLY_ROOT/native-llvm-config/bin"
 	target_llvm_root="$rust/build/x86_64-unknown-motor/llvm"
+	toolchain_reset_foreign_native_llvm "$target_llvm_root" \
+		"$ASSEMBLY_SYSROOT/bin/motor-clang" || return
 	toolchain_generate_native_llvm_config \
 		"$native_llvm_bin" "$STANDALONE_LLVM_BIN" "$target_llvm_root" || return
 	NATIVE_BOOTSTRAP_CONFIG="$ASSEMBLY_ROOT/native-bootstrap.toml"

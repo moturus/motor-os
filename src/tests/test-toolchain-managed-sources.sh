@@ -107,6 +107,50 @@ if toolchain_managed_checkout "$remote" refs/heads/development "$first" "$linked
   fail "linked managed worktree was accepted"
 fi
 
+# A declared revision that moves a gitlink: the stale submodule worktree is not
+# dirt in the superproject, the submodule is then detached at its new gitlink,
+# and the whole tree is clean afterwards. Real submodule edits still block.
+sub_remote="$TMP_ROOT/sub-remote"
+git init -q -b main "$sub_remote"
+sub_first="$(commit_file "$sub_remote" sub-one "sub first")"
+sub_second="$(commit_file "$sub_remote" sub-two "sub second")"
+super_remote="$TMP_ROOT/super-remote"
+git init -q -b main "$super_remote"
+git -C "$super_remote" -c protocol.file.allow=always \
+  submodule add -q "$sub_remote" sub
+git -C "$super_remote/sub" checkout -q "$sub_first"
+git -C "$super_remote" add sub
+git -C "$super_remote" -c user.name=Test -c user.email=test@example.com \
+  commit -q -m "super first"
+super_first="$(git -C "$super_remote" rev-parse HEAD)"
+git -C "$super_remote/sub" checkout -q "$sub_second"
+git -C "$super_remote" add sub
+git -C "$super_remote" -c user.name=Test -c user.email=test@example.com \
+  commit -q -m "super second"
+super_second="$(git -C "$super_remote" rev-parse HEAD)"
+super="$TMP_ROOT/managed-super"
+toolchain_managed_checkout "$super_remote" refs/heads/main "$super_first" "$super"
+toolchain_managed_submodule "$super" sub "$sub_remote" refs/heads/main "$sub_first" \
+  >/dev/null 2>&1 || fail "submodule was not initialized at its gitlink"
+[ "$(git -C "$super/sub" rev-parse HEAD)" = "$sub_first" ] ||
+  fail "submodule is not at the first gitlink"
+toolchain_managed_checkout "$super_remote" refs/heads/main "$super_second" "$super" \
+  >/dev/null 2>&1 || fail "a moved gitlink was rejected as a dirty checkout"
+[ "$(git -C "$super" rev-parse HEAD)" = "$super_second" ] ||
+  fail "superproject did not move to the second revision"
+toolchain_managed_submodule "$super" sub "$sub_remote" refs/heads/main "$sub_second" \
+  >/dev/null 2>&1 || fail "submodule did not follow the moved gitlink"
+[ "$(git -C "$super/sub" rev-parse HEAD)" = "$sub_second" ] ||
+  fail "submodule is not at the second gitlink"
+toolchain_assert_clean "$super" || fail "tree is not clean after the submodule update"
+printf 'dirty\n' >> "$super/sub/input"
+if toolchain_managed_submodule "$super" sub "$sub_remote" refs/heads/main "$sub_second" \
+  >/dev/null 2>&1; then
+  fail "a modified submodule was accepted"
+fi
+grep -q dirty "$super/sub/input" || fail "modified submodule content was changed"
+git -C "$super/sub" checkout -q -- input
+
 # Exercise the verifier under nounset before constructing its full Rust fixture.
 # It must reach the expected missing-LLVM diagnostic, not abort while deriving
 # the LLVM path from its first local variable.

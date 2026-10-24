@@ -13,7 +13,7 @@ effective revisions and keys actually built; do not infer them from a branch
 name or copy a historical revision from documentation.
 
 The fork uses Rust's `dev` channel. Its compiler description identifies the
-Motor beta tuple, and its Cargo reports `1.99.0-dev` plus the exact Cargo
+Motor tuple, and its Cargo reports `1.99.1-dev` plus the exact Cargo
 commit. Rust's downloaded Stage 0 compiler is only a bootstrap input selected
 by that Rust revision's `src/stage0`; repository commands never select Stage 0
 or an independent nightly/stable Cargo.
@@ -151,7 +151,7 @@ An editor that owns a session terminal must additionally pass
 editor retains keyboard and Ctrl+C ownership. This launch instruction is
 consumed by Motor before rust-analyzer starts.
 
-Analysis cancellation requires Rust unwinding. The selected `.dev.2` toolchain
+Analysis cancellation requires Rust unwinding. The selected toolchain
 supplies the pure Rust unwinder in the standard Motor sysroot, and the
 analyzer builds directly against the installed std. Older `.dev.1` images
 rebuilt a private copy of the pinned Rust library for the analyzer; images
@@ -339,7 +339,7 @@ mlibc's strong entry point and runtime win over Rust std's weak fallbacks.
 
 ### Panic strategy and unwinding
 
-The selected `.dev.2` Motor target defaults ordinary Rust applications to
+The selected Motor target defaults ordinary Rust applications to
 `panic=unwind`. A program can catch a panic and continue:
 
 ```rust
@@ -438,6 +438,7 @@ src/tests/full-test.sh
 src/tests/full-test.sh --release
 ```
 
-The final rebase and immutable `1.99.0-motor.1` source tags remain deferred
-until upstream Rust 1.99.0 is published. Beta-built binaries are not renamed or
-published as that stable release.
+Both forks are rebased onto the upstream `1.99.1` tag on their
+`motor-os-1.99.1` branches, and the declaration names the tuple
+`1.99.1-motor.1`. Immutable source tags in the forks follow the core gate on
+that tuple.

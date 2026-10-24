@@ -83,6 +83,22 @@ chmod +x "$rust/x.py"
 
 toolchain_build_native_rustc "$rust" '' "$BOOTSTRAP_CACHE"
 toolchain_validate_native_rustc "$RUSTC_MAIN" || fail "native identity was rejected"
+
+# A native LLVM tree configured by another assembly is rebuilt, not reused;
+# this assembly's own tree is kept.
+native_llvm="$rust/build/x86_64-unknown-motor/llvm"
+mkdir -p "$native_llvm/build" "$native_llvm/lib"
+printf 'CMAKE_C_COMPILER:STRING=%s\n' \
+	"$temporary/other-assembly/sysroot/bin/motor-clang" > "$native_llvm/build/CMakeCache.txt"
+: > "$native_llvm/lib/marker"
+toolchain_build_native_rustc "$rust" '' "$BOOTSTRAP_CACHE" 2>/dev/null
+[ ! -e "$native_llvm/lib/marker" ] || fail "a foreign native LLVM tree was reused"
+mkdir -p "$native_llvm/build" "$native_llvm/lib"
+printf 'CMAKE_C_COMPILER:STRING=%s\n' \
+	"$ASSEMBLY_SYSROOT/bin/motor-clang" > "$native_llvm/build/CMakeCache.txt"
+: > "$native_llvm/lib/marker"
+toolchain_build_native_rustc "$rust" '' "$BOOTSTRAP_CACHE"
+[ -e "$native_llvm/lib/marker" ] || fail "this assembly's native LLVM tree was discarded"
 expected_rustfmt_build="dev (${EFFECTIVE_MOTOR_RUST_REV:0:10} $(git -C "$rust" log -1 --format=%cs))"
 toolchain_validate_native_rustfmt "$RUSTFMT_MAIN" "$expected_rustfmt_build" ||
 	fail "native rustfmt identity was rejected"

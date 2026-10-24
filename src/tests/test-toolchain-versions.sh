@@ -68,6 +68,15 @@ newline_value=$'first\nsecond:third'
   "$(toolchain_hash_pairs value "$newline_value")" ] ||
   fail "embedded newlines are not deterministic"
 
+if [ "$MOTOR_TOOLCHAIN_MATURITY" = stable ]; then
+  toolchain_can_publish_stable || fail "stable tuple is not publishable"
+elif toolchain_can_publish_stable; then
+  fail "beta tuple authorized stable publication"
+fi
+original_maturity="$MOTOR_TOOLCHAIN_MATURITY"
+original_ref="$UPSTREAM_RUST_REF"
+original_id="$MOTOR_TOOLCHAIN_ID"
+MOTOR_TOOLCHAIN_MATURITY=beta
 if toolchain_can_publish_stable; then
   fail "beta tuple authorized stable publication"
 fi
@@ -75,5 +84,8 @@ MOTOR_TOOLCHAIN_MATURITY=stable
 UPSTREAM_RUST_REF=refs/tags/1.99.0
 MOTOR_TOOLCHAIN_ID=1.99.0-motor.1
 toolchain_can_publish_stable || fail "well-formed stable tuple was rejected"
+MOTOR_TOOLCHAIN_MATURITY="$original_maturity"
+UPSTREAM_RUST_REF="$original_ref"
+MOTOR_TOOLCHAIN_ID="$original_id"
 
 echo "test-toolchain-versions PASS"

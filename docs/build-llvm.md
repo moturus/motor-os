@@ -6,10 +6,11 @@ its outputs; it is not a separate branch-switching or cache-clearing recipe.
 
 ## Source identity
 
-The current beta tuple is declared in `src/toolchain-versions.sh`:
+The current tuple, Rust 1.99.1 on LLVM 23.1.1, is declared in
+`src/toolchain-versions.sh`:
 
-- upstream Rust LLVM base `21cf28432798952d942bacc6bcee3a328faa3638`;
-- Motor LLVM `7c2a7b21e3dc7be1f0c41d443bc420bcc774b1d4`;
+- upstream Rust LLVM base `1b9c0d5ff9bbe7634aead059efe6b11a7eeba145` (LLVM 23.1.1);
+- Motor LLVM `366c9278e2bf5ac6e539694efcccf7fc585a3504` (branch `motor-os-1.99.1`);
 - Motor mlibc `9abf5139f8948020ffd8b96f0ad22c8247818b27`, including its C-ABI shim and lockfile.
 
 The Motor Rust revision's `src/llvm-project` gitlink must equal the declared
@@ -19,8 +20,8 @@ managed build rejects a mismatched gitlink, remote, revision, or dirty checkout.
 
 Executable-permission support is a cross-repository compatibility boundary.
 This tuple combines the Motor OS fd wrapper descended from `fb4d6989`, mlibc
-with the permission support from `0cece7e5`, and LLVM `7c2a7b21e3dc`
-(the beta-line cherry-pick of `bc769e6e44a4`). Do not mix an older shim, libc,
+with the permission support from `0cece7e5`, and LLVM `606d4754c103`
+(the 1.99.1-line rebase of `7c2a7b21e3dc`, a cherry-pick of `bc769e6e44a4`). Do not mix an older shim, libc,
 or linker binary into an assembly: a new output may remain writable or Cargo's
 copied build scripts may become non-executable.
 

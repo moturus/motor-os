@@ -121,10 +121,10 @@ rustc)
   elif [ "\${1:-}" = --print ]; then dirname "\$(dirname "\$0")";
   else while [ "\$#" -gt 0 ]; do if [ "\$1" = -o ]; then shift; : > "\$1"; fi; shift; done; fi ;;
 cargo) printf '%s\\n' 'cargo' 'release: $MOTOR_CARGO_VERSION' 'commit-hash: $MOTOR_CARGO_REV' ;;
-rust-analyzer) printf '%s\\n' 'rust-analyzer 1.99.0-dev (${MOTOR_RUST_REV:0:9} 2026-08-30)' ;;
+rust-analyzer) printf '%s\\n' 'rust-analyzer $UPSTREAM_RUST_VERSION-$MOTOR_RUST_CHANNEL (${MOTOR_RUST_REV:0:9} 2026-08-30)' ;;
 rust-analyzer-proc-macro-srv)
   [ "\${RUST_ANALYZER_INTERNALS_DO_NOT_USE:-}" = 'this is unstable' ] || exit 9
-  printf '%s\\n' 'rust-analyzer-proc-macro-srv 1.99.0-dev (${MOTOR_RUST_REV:0:9} 2026-08-30)' ;;
+  printf '%s\\n' 'rust-analyzer-proc-macro-srv $UPSTREAM_RUST_VERSION-$MOTOR_RUST_CHANNEL (${MOTOR_RUST_REV:0:9} 2026-08-30)' ;;
 *) printf '%s\\n' version ;;
 esac
 TOOL

@@ -34,9 +34,9 @@ cat > "$fake_tool" <<EOF
 case "\$(basename "\$0")" in
 rustc)
   if [ "\${1:-}" = -vV ]; then
-    printf '%s\n' 'rustc 1.99.0-dev ($MOTOR_TOOLCHAIN_ID)' \
+    printf '%s\n' 'rustc $UPSTREAM_RUST_VERSION-$MOTOR_RUST_CHANNEL ($MOTOR_TOOLCHAIN_ID)' \
       'binary: rustc' 'commit-hash: $MOTOR_RUST_REV' \
-      'host: x86_64-unknown-linux-gnu' 'release: 1.99.0-dev'
+      'host: x86_64-unknown-linux-gnu' 'release: $UPSTREAM_RUST_VERSION-$MOTOR_RUST_CHANNEL'
   elif [ "\${1:-}" = --print ] && [ "\${2:-}" = sysroot ]; then
     printf '%s\n' '$prefix'
   else
@@ -45,13 +45,13 @@ rustc)
       shift
     done
   fi ;;
-cargo) printf '%s\n' 'cargo 1.99.0-dev' 'release: 1.99.0-dev' \
+cargo) printf '%s\n' 'cargo $UPSTREAM_RUST_VERSION-$MOTOR_RUST_CHANNEL' 'release: $UPSTREAM_RUST_VERSION-$MOTOR_RUST_CHANNEL' \
   'commit-hash: $MOTOR_CARGO_REV' ;;
-rust-analyzer) printf '%s\n' 'rust-analyzer 1.99.0-dev (${MOTOR_RUST_REV:0:9} 2026-08-30)' ;;
+rust-analyzer) printf '%s\n' 'rust-analyzer $UPSTREAM_RUST_VERSION-$MOTOR_RUST_CHANNEL (${MOTOR_RUST_REV:0:9} 2026-08-30)' ;;
 rust-analyzer-proc-macro-srv)
   [ "\${RUST_ANALYZER_INTERNALS_DO_NOT_USE:-}" = 'this is unstable' ] || exit 9
-  printf '%s\n' 'rust-analyzer-proc-macro-srv 1.99.0-dev (${MOTOR_RUST_REV:0:9} 2026-08-30)' ;;
-*) printf '%s 1.99.0-dev\n' "\$(basename "\$0")" ;;
+  printf '%s\n' 'rust-analyzer-proc-macro-srv $UPSTREAM_RUST_VERSION-$MOTOR_RUST_CHANNEL (${MOTOR_RUST_REV:0:9} 2026-08-30)' ;;
+*) printf '%s $UPSTREAM_RUST_VERSION-$MOTOR_RUST_CHANNEL\n' "\$(basename "\$0")" ;;
 esac
 EOF
 chmod +x "$fake_tool"
@@ -82,7 +82,7 @@ if toolchain_validate_rust_analyzer_version \
 	fail "rust-analyzer with the wrong release was accepted"
 fi
 if toolchain_validate_rust_analyzer_version \
-	"rust-analyzer 1.99.0-dev (aaaaaaaaa 2026-08-30)" \
+	"rust-analyzer $UPSTREAM_RUST_VERSION-$MOTOR_RUST_CHANNEL (aaaaaaaaa 2026-08-30)" \
 	rust-analyzer 2>/dev/null; then
 	fail "rust-analyzer with the wrong commit was accepted"
 fi

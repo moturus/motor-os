@@ -457,7 +457,7 @@ mlibc.</p>
 <div class="table-wrap">
 <table>
   <tr><th>Component</th><th>Source</th><th>What Motor OS adds</th></tr>
-  <tr><td>Rust</td><td><a href="https://github.com/moturus/rust">moturus/rust</a>, based on the upcoming Rust release (1.99 at the time of writing) with LLVM 23</td><td>The <code>x86_64-unknown-motor</code> target, a Tier-3 target upstream; the standard library's Motor OS layer, which calls the <code>moto-rt</code> crate (0.17.x); a few compiler patches, all on one development branch per upstream baseline (<code>motor-os-1.99.0-beta-f47d5bb</code> today), from which both the cross and the native toolchain are built.</td></tr>
+  <tr><td>Rust</td><td><a href="https://github.com/moturus/rust">moturus/rust</a>, based on Rust 1.99.1 with LLVM 23.1.1</td><td>The <code>x86_64-unknown-motor</code> target, a Tier-3 target upstream; the standard library's Motor OS layer, which calls the <code>moto-rt</code> crate (0.17.x); a few compiler patches, all on one development branch per upstream baseline (<code>motor-os-1.99.0-beta-f47d5bb</code> today), from which both the cross and the native toolchain are built.</td></tr>
   <tr><td>Cargo, Clippy, rustfmt</td><td>Upstream, at the revisions the Rust fork specifies</td><td>Nothing. Cargo runs on Linux only. Clippy's driver and rustfmt are also built natively for the developer image, where <code>lorry clippy</code> and Helix use them.</td></tr>
   <tr><td>LLVM</td><td><a href="https://github.com/moturus/llvm-project">moturus/llvm-project</a>, LLVM 23</td><td>A Motor OS target in Clang: the driver knows the link line, the defaults (emulated TLS, static PIE, lld, compiler-rt, libc++), and the sysroot layout. Built twice: for the Linux host, and natively for Motor OS.</td></tr>
   <tr><td>mlibc</td><td><a href="https://github.com/moturus/mlibc">moturus/mlibc</a></td><td>The Motor OS sysdeps and a build configuration that reads its runtime files from <code>/system/cfg/libc</code>. The fork also owns <code>sysdeps/motor/moto-rt-cabi</code>, a C ABI over the published Motor runtime crates (see <a href="c-cpp.html">C/C++ on Motor OS</a>).</td></tr>
@@ -482,7 +482,7 @@ object that the OS maps into every process.</p>
 <h3>Rust</h3>
 <p>The Motor OS build installs the Rust fork's output as one rustup toolchain whose name
 carries the upstream baseline and a key derived from every input,
-<code>motor-1.99.0-beta-f47d5bb-dev.1-&lt;key&gt;</code> today. It contains
+<code>motor-1.99.1-&lt;key&gt;</code> today. It contains
 <code>rustc</code> and <code>rustdoc</code>, its own Cargo, Clippy, and rustfmt, the
 standard library for the Linux host, the standard library for
 <code>x86_64-unknown-motor</code> under <code>lib/rustlib/x86_64-unknown-motor</code>, and
@@ -656,7 +656,7 @@ toolchain.</p>
   <code>rust-toolchain.toml</code> selects it, and the Makefile refuses to run with a
   toolchain that does not carry a Motor key.</li>
   <li><strong>Exact lineage.</strong> The toolchain's identifier carries the upstream version
-  and commit (<code>1.99.0-beta-f47d5bb-motor.dev.2</code> during the beta), and
+  and the Motor release (<code>1.99.1-motor.1</code>), and
   <code>rustc -vV</code> reports the Motor Rust commit it was built from. Two keys derived
   from the inputs name the local outputs: the toolchain key covers the compilers and
   their libraries, and the assembly key adds the mlibc commit and the native build
@@ -668,11 +668,10 @@ toolchain.</p>
   the revisions, keys, and hashes they were built from.</li>
   <li><strong>The same C wrappers.</strong> <code>motor-clang</code>, <code>motor-clang++</code>,
   and <code>motor-rust-cc</code> are generated into each assembly's sysroot.</li>
-  <li><strong>A stable baseline to come.</strong> The current toolchain is built from the
-  Rust 1.99 beta, and Cargo reports <code>1.99.0-dev</code>. The first stable release,
-  <code>1.99.0-motor.1</code>, is planned on the exact Rust 1.99.0 tag once it ships
-  (scheduled for October 2026): the Motor patches are rebased onto it, everything is
-  rebuilt and revalidated, and only then are the source tags published in the forks.
+  <li><strong>A stable baseline.</strong> The current toolchain is built from the exact
+  Rust 1.99.1 tag with the Motor patches rebased onto it, as <code>1.99.1-motor.1</code>;
+  Cargo reports <code>1.99.1-dev</code>. Source tags are published in the forks only after
+  the rebuilt toolchain passes the full test gate.
   Binaries are not published; the toolchain is built locally from the tagged
   sources.</li>
 </ul>
