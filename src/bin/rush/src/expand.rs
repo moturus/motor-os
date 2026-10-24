@@ -283,11 +283,13 @@ fn split_fields(elems: &[Elem], ifs: &str) -> Vec<Vec<(char, Tag)>> {
 // ---- pathname expansion helpers (step 6) -----------------------------------
 
 /// Turn a split field into a glob pattern: quoted characters (and any literal
-/// backslash) are escaped so only unquoted `*?[` stay magic.
+/// backslash) are escaped so only unquoted `*?[` stay magic. A slash is never
+/// magic and separates the pattern's components, so it stays unescaped even
+/// when quoted, as in `"$dir"/*` with an absolute `$dir`.
 fn build_glob_pattern(field: &[(char, Tag)]) -> String {
     let mut p = String::new();
     for (c, tag) in field {
-        if *tag == Tag::Quoted || *c == '\\' {
+        if (*tag == Tag::Quoted && *c != '/') || *c == '\\' {
             p.push('\\');
         }
         p.push(*c);
@@ -872,5 +874,31 @@ mod tests {
         assert_eq!(fields("~/bin", &mut sh), vec!["/home/u/bin"]);
         // Quoted tilde is literal.
         assert_eq!(fields("\"~\"", &mut sh), vec!["~"]);
+    }
+
+    #[test]
+    fn quoted_absolute_prefix_globs() {
+        let dir = std::env::temp_dir().join(format!("rush_expand_glob_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for sub in ["a/bin", "b/bin"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        std::fs::write(dir.join("a/bin/x"), "").unwrap();
+        std::fs::write(dir.join("b/bin/y"), "").unwrap();
+        let base = dir.to_str().unwrap();
+        let mut sh = Shell::new();
+        sh.set("dir", base.into()).unwrap();
+        // The quoted prefix is absolute, and its slashes separate components.
+        assert_eq!(
+            fields("\"$dir\"/*", &mut sh),
+            vec![format!("{base}/a"), format!("{base}/b")]
+        );
+        assert_eq!(
+            fields("\"$dir\"/*/bin/*", &mut sh),
+            vec![format!("{base}/a/bin/x"), format!("{base}/b/bin/y")]
+        );
+        // A quoted `*` stays literal.
+        assert_eq!(fields("\"$dir/*\"", &mut sh), vec![format!("{base}/*")]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
