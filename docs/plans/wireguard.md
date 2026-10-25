@@ -1,7 +1,9 @@
 # WireGuard through a process-backed IP device
 
-Completed steps: 0 - boringtun fork. The prerequisite SLAAC fix for step 1 is complete.
+Completed steps: 0 - boringtun fork.
 Current step: 1 - routes without a gateway.
+The prerequisite SLAAC fix and netstack route support are complete.
+Sys-io route and source selection is in progress.
 
 2026-10-24. Design and implementation plan, grounded in the tree at
 a3d739f9. This document specifies the process-backed IP device, WireGuard
@@ -553,11 +555,12 @@ Rules for every step:
 
 * Patches are 100-300 lines including tests. Split steps as needed to keep
   patches small; patch counts are not prescribed.
-* Steps 1-5 change sys-io and the SDK, so they are core work: before each
-  commit, `src/tests/full-test.sh` passes three times in debug and three
-  times with `--release`. Steps 6-8 are gated by their own tests. Step 9
-  introduces a minimal VM gate alongside activation, and step 10 expands
-  it. From step 9 onward, WireGuard changes also pass that VM gate.
+* Intermediate patches require one debug and one `--release` run of
+  `src/tests/full-test.sh` before committing. When all implementation work
+  is complete, the final gate requires three debug and three `--release`
+  runs. Steps 6-8 also run their component tests. Step 9 introduces a
+  minimal VM gate alongside activation, and step 10 expands it. From step 9
+  onward, WireGuard changes also pass that VM gate.
 * With no packet device registered, sys-io behaves as today. Each step
   leaves the tree buildable, formatted with the repository toolchain, and
   free of new compiler and clippy warnings.

@@ -946,7 +946,7 @@ fn apply_dhcp_update(
                     .filter(|route| route.ip_network.is_ipv4())
                     .map(|route| moto_netstack::iface::Route {
                         cidr: config::ip_network_to_cidr(&route.ip_network),
-                        via_router: route.gateway.into(),
+                        via_router: Some(route.gateway.into()),
                         preferred_until: None,
                         expires_at: None,
                     }),
@@ -1030,7 +1030,7 @@ impl<'a> NetDev<'a> {
             for route in &dev_cfg.routes {
                 storage.push(moto_netstack::iface::Route {
                     cidr: config::ip_network_to_cidr(&route.ip_network),
-                    via_router: route.gateway.into(),
+                    via_router: Some(route.gateway.into()),
                     preferred_until: None,
                     expires_at: None,
                 });

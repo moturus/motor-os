@@ -94,6 +94,45 @@ fn sub_minimum_mtu_rejects_ipv6_configuration_and_selection() {
     assert_eq!(iface.inner.route(&destination, Instant::ZERO), None);
 }
 
+#[test]
+#[cfg(feature = "medium-ip")]
+fn ip_interface_route_reaches_outside_the_local_cidr() {
+    let cases = [
+        #[cfg(feature = "proto-ipv4")]
+        (
+            IpCidr::new(IpAddress::v4(10, 20, 0, 1), 32),
+            IpAddress::v4(10, 20, 0, 7),
+            24,
+        ),
+        #[cfg(feature = "proto-ipv6")]
+        (
+            IpCidr::new(IpAddress::v6(0x2001, 0xdb8, 20, 0, 0, 0, 0, 1), 128),
+            IpAddress::v6(0x2001, 0xdb8, 20, 0, 0, 0, 0, 7),
+            64,
+        ),
+    ];
+    for (local, destination, prefix) in cases {
+        let mut device = crate::tests::TestingDevice::new(Medium::Ip);
+        let mut iface =
+            Interface::new(Config::new(HardwareAddress::Ip), &mut device, Instant::ZERO);
+        iface.update_ip_addrs(|addrs| addrs.push(local));
+        assert_eq!(iface.inner.route(&destination, Instant::ZERO), None);
+        assert!(!iface.inner.has_neighbor(&destination));
+
+        iface.routes_mut().update(|routes| {
+            routes.push(crate::iface::Route::new_interface(IpCidr::new(
+                destination,
+                prefix,
+            )));
+        });
+        assert_eq!(
+            iface.inner.route(&destination, Instant::ZERO),
+            Some(destination)
+        );
+        assert!(iface.inner.has_neighbor(&destination));
+    }
+}
+
 #[cfg(feature = "socket-udp")]
 #[rstest]
 #[cfg_attr(feature = "medium-ip", case::ip(Medium::Ip))]

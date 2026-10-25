@@ -490,7 +490,9 @@ fn any_ip(#[case] medium: Medium) {
                 Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 0),
                 64,
             )),
-            via_router: IpAddress::Ipv6(Ipv6Address::new(0xfdbe, 0, 0, 0, 0, 0, 0, 0x0001)),
+            via_router: Some(IpAddress::Ipv6(Ipv6Address::new(
+                0xfdbe, 0, 0, 0, 0, 0, 0, 0x0001,
+            ))),
             preferred_until: None,
             expires_at: None,
         });
@@ -1676,7 +1678,10 @@ fn test_router_advertisement(#[case] medium: Medium, #[case] with_ipv4_route: bo
             route.cidr,
             IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 0), 0)
         );
-        assert_eq!(route.via_router, IpAddress::Ipv6(remote_ip_addr.address()));
+        assert_eq!(
+            route.via_router,
+            Some(IpAddress::Ipv6(remote_ip_addr.address()))
+        );
         assert_eq!(route.preferred_until, None);
         assert_eq!(route.expires_at, None);
     });
@@ -1761,7 +1766,7 @@ fn test_router_advertisement(#[case] medium: Medium, #[case] with_ipv4_route: bo
         iface
             .routes()
             .get_default_ipv4_route()
-            .map(|route| route.via_router),
+            .and_then(|route| route.via_router),
         with_ipv4_route.then(|| IpAddress::v4(192, 0, 2, 1)),
     );
 }

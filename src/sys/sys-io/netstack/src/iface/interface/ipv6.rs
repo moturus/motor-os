@@ -985,7 +985,7 @@ impl Interface {
 
             self.inner.routes.update(|routes| {
                 routes.retain(|r| match (&r.cidr, &r.via_router) {
-                    (IpCidr::Ipv6(cidr), IpAddress::Ipv6(via_router)) => !removed_routes
+                    (IpCidr::Ipv6(cidr), Some(IpAddress::Ipv6(via_router))) => !removed_routes
                         .clone()
                         .any(|f| f.same_route(cidr, via_router)),
                     _ => true,
@@ -993,14 +993,14 @@ impl Interface {
 
                 for route in required_routes {
                     if routes.iter().all(|r| match (&r.cidr, &r.via_router) {
-                        (IpCidr::Ipv6(cidr), IpAddress::Ipv6(via_router)) => {
+                        (IpCidr::Ipv6(cidr), Some(IpAddress::Ipv6(via_router))) => {
                             !route.same_route(cidr, via_router)
                         }
                         _ => true,
                     }) {
                         let _ = routes.push(Route {
                             cidr: route.cidr.into(),
-                            via_router: route.via_router.into(),
+                            via_router: Some(route.via_router.into()),
                             preferred_until: None,
                             expires_at: None,
                         });
