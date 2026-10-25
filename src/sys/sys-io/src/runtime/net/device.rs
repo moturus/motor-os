@@ -909,7 +909,7 @@ fn apply_dhcp_update(
                 if address.contains(IpAddr::V4(gateway)) {
                     Some(config::IpRoute {
                         ip_network: "0.0.0.0/0".parse().unwrap(),
-                        gateway: IpAddr::V4(gateway),
+                        gateway: Some(IpAddr::V4(gateway)),
                     })
                 } else {
                     log::warn!("{name}: DHCP router {gateway} is outside {address}; ignoring it.");
@@ -946,7 +946,7 @@ fn apply_dhcp_update(
                     .filter(|route| route.ip_network.is_ipv4())
                     .map(|route| moto_netstack::iface::Route {
                         cidr: config::ip_network_to_cidr(&route.ip_network),
-                        via_router: Some(route.gateway.into()),
+                        via_router: route.gateway.map(Into::into),
                         preferred_until: None,
                         expires_at: None,
                     }),
@@ -1030,7 +1030,7 @@ impl<'a> NetDev<'a> {
             for route in &dev_cfg.routes {
                 storage.push(moto_netstack::iface::Route {
                     cidr: config::ip_network_to_cidr(&route.ip_network),
-                    via_router: Some(route.gateway.into()),
+                    via_router: route.gateway.map(Into::into),
                     preferred_until: None,
                     expires_at: None,
                 });
@@ -1657,7 +1657,9 @@ pub(crate) mod self_test {
                 ip_network: format!("10.{n}.0.0/16")
                     .parse()
                     .map_err(|e| format!("{}:{}: {e:?}", file!(), line!()))?,
-                gateway: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, n as u8, 0, 254)),
+                gateway: (n % 2 == 0).then_some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                    10, n as u8, 0, 254,
+                ))),
             });
         }
 
@@ -1673,10 +1675,16 @@ pub(crate) mod self_test {
         st_assert_eq!(dev.iface.ip_addrs().len(), ENTRIES);
 
         let mut routes = 0;
-        dev.iface
-            .routes_mut()
-            .update(|storage| routes = storage.len());
+        let mut interface_routes = 0;
+        dev.iface.routes_mut().update(|storage| {
+            routes = storage.len();
+            interface_routes = storage
+                .iter()
+                .filter(|route| route.via_router.is_none())
+                .count();
+        });
         st_assert_eq!(routes, ENTRIES);
+        st_assert_eq!(interface_routes, ENTRIES / 2);
 
         Ok(())
     }
@@ -1686,7 +1694,7 @@ pub(crate) mod self_test {
         cfg.cidrs.push("2001:db8::2/64".parse().unwrap());
         cfg.routes.push(config::IpRoute {
             ip_network: "::/0".parse().unwrap(),
-            gateway: "2001:db8::1".parse().unwrap(),
+            gateway: Some("2001:db8::1".parse().unwrap()),
         });
         let mut dev = NetDev::new(
             "self-test",

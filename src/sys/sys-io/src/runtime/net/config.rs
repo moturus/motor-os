@@ -88,7 +88,15 @@ impl<'de> Deserialize<'de> for MacAddress {
 #[derive(Clone, Deserialize, Debug, Eq, PartialEq)]
 pub(super) struct IpRoute {
     pub ip_network: IpNetwork,
-    pub gateway: IpAddr,
+    // Boot configs still require a gateway; None is for registered devices.
+    #[serde(deserialize_with = "deserialize_gateway")]
+    pub gateway: Option<IpAddr>,
+}
+
+fn deserialize_gateway<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<IpAddr>, D::Error> {
+    IpAddr::deserialize(deserializer).map(Some)
 }
 
 #[derive(Clone, Deserialize, Debug)]
@@ -167,10 +175,10 @@ impl NetConfig {
                 continue;
             }
             let static_ipv4 = device.cidrs.iter().any(IpNetwork::is_ipv4)
-                || device
-                    .routes
-                    .iter()
-                    .any(|route| route.ip_network.is_ipv4() || route.gateway.is_ipv4());
+                || device.routes.iter().any(|route| {
+                    route.ip_network.is_ipv4()
+                        || route.gateway.is_some_and(|gateway| gateway.is_ipv4())
+                });
             if static_ipv4 {
                 return Err(format!(
                     "devices.{name}: DHCP and static IPv4 configuration cannot be combined"
@@ -234,26 +242,30 @@ fn same_family(left: IpAddr, right: IpAddr) -> bool {
 ///
 /// Directly connected networks and configured routes compete by prefix length.
 /// A configured gateway must itself be reachable through one of the device's
-/// directly connected CIDRs.
+/// directly connected CIDRs. At equal lengths, connected routes win, then
+/// registered interface routes, then gateways; otherwise insertion order wins.
 pub(super) fn find_route<'a>(
     devices: impl Iterator<Item = (usize, &'a DeviceCfg)>,
     dst: IpAddr,
 ) -> Option<(usize, IpAddr)> {
-    let mut best: Option<(u8, bool, usize, IpAddr)> = None;
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum Kind {
+        Gateway,
+        Interface,
+        Connected,
+    }
+    let mut best: Option<((u8, Kind), usize, IpAddr)> = None;
 
-    let mut consider = |prefix: u8, direct: bool, device_idx: usize, source: IpAddr| {
-        let replace = best.is_none_or(|(best_prefix, best_direct, _, _)| {
-            prefix > best_prefix || (prefix == best_prefix && direct && !best_direct)
-        });
-        if replace {
-            best = Some((prefix, direct, device_idx, source));
+    let mut consider = |prefix: u8, kind: Kind, device_idx: usize, source: IpAddr| {
+        if best.is_none_or(|(score, _, _)| (prefix, kind) > score) {
+            best = Some(((prefix, kind), device_idx, source));
         }
     };
 
     for (device_idx, device) in devices {
         for cidr in &device.cidrs {
             if same_family(cidr.ip(), dst) && cidr.contains(dst) {
-                consider(cidr.prefix(), true, device_idx, cidr.ip());
+                consider(cidr.prefix(), Kind::Connected, device_idx, cidr.ip());
             }
         }
 
@@ -261,24 +273,39 @@ pub(super) fn find_route<'a>(
             if !same_family(route.ip_network.ip(), dst) || !route.ip_network.contains(dst) {
                 continue;
             }
-            if route.gateway.is_unspecified() || !same_family(route.gateway, dst) {
-                continue;
-            }
-
-            let source = device
-                .cidrs
-                .iter()
-                .filter(|cidr| same_family(cidr.ip(), dst) && cidr.contains(route.gateway))
-                .max_by_key(|cidr| cidr.prefix())
-                .map(IpNetwork::ip);
+            let (source, kind) = match route.gateway {
+                Some(gateway) if !gateway.is_unspecified() && same_family(gateway, dst) => (
+                    device
+                        .cidrs
+                        .iter()
+                        .filter(|cidr| same_family(cidr.ip(), dst) && cidr.contains(gateway))
+                        .max_by_key(|cidr| cidr.prefix())
+                        .map(IpNetwork::ip),
+                    Kind::Gateway,
+                ),
+                None => {
+                    let mut sources = device
+                        .cidrs
+                        .iter()
+                        .filter(|cidr| same_family(cidr.ip(), dst));
+                    let source = sources
+                        .clone()
+                        .filter(|cidr| cidr.contains(dst))
+                        .max_by_key(|cidr| cidr.prefix())
+                        .or_else(|| sources.next())
+                        .map(IpNetwork::ip);
+                    (source, Kind::Interface)
+                }
+                _ => continue,
+            };
 
             if let Some(source) = source {
-                consider(route.ip_network.prefix(), false, device_idx, source);
+                consider(route.ip_network.prefix(), kind, device_idx, source);
             }
         }
     }
 
-    best.map(|(_, _, device_idx, source)| (device_idx, source))
+    best.map(|(_, device_idx, source)| (device_idx, source))
 }
 
 /// Where the next read must stop: the end of the block `read` sits in, or the
@@ -507,6 +534,14 @@ pub(crate) mod self_test {
             route_selection_includes_loopback_cidr,
         ),
         (
+            "net::config::interface_route_priorities_and_sources",
+            interface_route_priorities_and_sources,
+        ),
+        (
+            "net::config::boot_routes_still_require_gateways",
+            boot_routes_still_require_gateways,
+        ),
+        (
             "net::config::defaults_the_half_open_caps",
             defaults_the_half_open_caps,
         ),
@@ -538,7 +573,7 @@ pub(crate) mod self_test {
         for (network, gateway) in routes {
             device.routes.push(IpRoute {
                 ip_network: network.parse().unwrap(),
-                gateway: gateway.parse().unwrap(),
+                gateway: Some(gateway.parse().unwrap()),
             });
         }
         device
@@ -716,6 +751,104 @@ pub(crate) mod self_test {
             find_route([(3, &loopback)].into_iter(), "127.0.0.2".parse().unwrap()),
             Some((3, "127.0.0.1".parse().unwrap()))
         );
+        Ok(())
+    }
+
+    fn interface_route_priorities_and_sources() -> Result<(), String> {
+        for (physical_cidr, gateway, tunnel_cidr, connected_cidr, remote, default) in [
+            (
+                "192.0.2.2/24",
+                "192.0.2.1",
+                "10.30.0.1/32",
+                "10.20.0.1/24",
+                "10.20.0.7",
+                "0.0.0.0/0",
+            ),
+            (
+                "2001:db8::2/64",
+                "2001:db8::1",
+                "fd00:30::1/128",
+                "fd00:20::1/64",
+                "fd00:20::7",
+                "::/0",
+            ),
+        ] {
+            let remote: IpAddr = remote.parse().unwrap();
+            let mut physical = device(physical_cidr, &[(default, gateway)]);
+            let mut tunnel = device(tunnel_cidr, &[]);
+            tunnel.cidrs.push(if remote.is_ipv4() {
+                "10.40.0.1/32".parse().unwrap()
+            } else {
+                "fd00:40::1/128".parse().unwrap()
+            });
+            tunnel.routes.push(IpRoute {
+                ip_network: default.parse().unwrap(),
+                gateway: None,
+            });
+            let tunnel_source = tunnel.cidrs[0].ip();
+            for devices in [
+                [(0, &physical), (1, &tunnel)],
+                [(1, &tunnel), (0, &physical)],
+            ] {
+                st_assert_eq!(
+                    find_route(devices.into_iter(), remote),
+                    Some((1, tunnel_source))
+                );
+                st_assert_eq!(
+                    find_route(devices.into_iter(), gateway.parse().unwrap()),
+                    Some((0, physical.cidrs[0].ip()))
+                );
+            }
+
+            let connected = device(connected_cidr, &[]);
+            let prefix = connected.cidrs[0].network();
+            let prefix = IpNetwork::new(prefix, connected.cidrs[0].prefix()).unwrap();
+            physical.routes[0].ip_network = prefix;
+            st_assert_eq!(
+                find_route([(1, &tunnel), (0, &physical)].into_iter(), remote),
+                Some((0, physical.cidrs[0].ip()))
+            );
+            tunnel.routes[0].ip_network = prefix;
+            for devices in [
+                [(0, &physical), (1, &tunnel)],
+                [(1, &tunnel), (0, &physical)],
+            ] {
+                st_assert_eq!(
+                    find_route(devices.into_iter(), remote),
+                    Some((1, tunnel_source))
+                );
+                st_assert_eq!(
+                    find_route(devices.into_iter().chain([(2, &connected)]), remote),
+                    Some((2, connected.cidrs[0].ip()))
+                );
+            }
+
+            // A host route outranks the local CIDRs, so source selection must
+            // still find the most-specific local address containing the peer.
+            let host_prefix = if remote.is_ipv4() { 32 } else { 128 };
+            tunnel.routes[0].ip_network = IpNetwork::new(remote, host_prefix).unwrap();
+            tunnel.cidrs.push(IpNetwork::new(tunnel_source, 0).unwrap());
+            tunnel.cidrs.push(connected.cidrs[0]);
+            st_assert_eq!(
+                find_route([(1, &tunnel)].into_iter(), remote),
+                Some((1, connected.cidrs[0].ip()))
+            );
+            tunnel.cidrs.clear();
+            tunnel.cidrs.push(if remote.is_ipv4() {
+                "2001:db8::2/64".parse().unwrap()
+            } else {
+                "192.0.2.2/24".parse().unwrap()
+            });
+            st_assert_eq!(find_route([(1, &tunnel)].into_iter(), remote), None);
+        }
+        Ok(())
+    }
+
+    fn boot_routes_still_require_gateways() -> Result<(), String> {
+        st_assert!(toml::from_str::<IpRoute>("ip_network = '0.0.0.0/0'").is_err());
+        let route: IpRoute = toml::from_str("ip_network = '0.0.0.0/0'\ngateway = '192.0.2.1'")
+            .map_err(|err| err.to_string())?;
+        st_assert_eq!(route.gateway, Some("192.0.2.1".parse().unwrap()));
         Ok(())
     }
 

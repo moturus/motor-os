@@ -1,9 +1,9 @@
 # WireGuard through a process-backed IP device
 
-Completed steps: 0 - boringtun fork.
-Current step: 1 - routes without a gateway.
-The prerequisite SLAAC fix and netstack route support are complete.
-Sys-io route and source selection is in progress.
+Completed steps: 0 - boringtun fork; 1 - routes without a gateway.
+Current step: 2 - devices that come and go.
+Device lifetime and removal safety are in progress.
+The preexisting strobe allocation failure is deferred in future-work.md.
 
 2026-10-24. Design and implementation plan, grounded in the tree at
 a3d739f9. This document specifies the process-backed IP device, WireGuard
@@ -603,8 +603,9 @@ is not used, so the step picks the smallest representation that leaves
 the Ethernet path unchanged.
 
 Tests: sys-io self-tests for the selection order, `/0` against the physical
-default, both families, duplicate exact prefixes on two devices, and source
-selection; netstack host tests for the lookup.
+default, both families, source selection and unchanged boot-config gateway
+requirements; netstack host tests for the lookup. Rejection of duplicate
+registered prefixes on two devices is tested with registration in step 3.
 
 ### Step 2: devices that come and go
 
