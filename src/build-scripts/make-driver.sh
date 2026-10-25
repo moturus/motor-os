@@ -4,7 +4,7 @@
 # failure, the log path, and a final BUILD FAILED line. The Makefile invokes
 # this for every top-level goal, so parallel builds cannot bury a failure.
 set -uo pipefail
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 
 # Dry runs only print recipes; leave their output untouched and unlogged.
 if [[ "${MAKEFLAGS%% *}" =~ ^[A-Za-z]*n[A-Za-z]*$ ]]; then

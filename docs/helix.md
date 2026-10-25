@@ -185,16 +185,14 @@ and hardlinks.
 
 ## Build and regression coverage
 
-Helix is a userspace add-on, not a part of the toolchain.
+Helix is an external source, not a part of the toolchain.
 [`src/build-motor-os.sh`](../src/build-motor-os.sh) declares the Helix fork
 and the branch to follow; no commit is declared. Dependency patches and
-grammar revisions live in that fork. After the toolchain and its assembly are
-complete, the [producer](build-motor-os.md) updates the checkout in
-`$MOTORH/helix`, explicitly fetches locked Cargo dependencies, then builds
-with the Motor compiler using `--locked` and `--offline`. The built commit
-is recorded in the assembly's `ADDON-helix` file, and Helix is rebuilt alone
-when the branch head differs; it is no part of the assembly's key, manifest,
-or validation. The image contains only the binary, queries, themes, and
+grammar revisions live in that fork. The [build](build-motor-os.md) updates
+the checkout in `external-sources/helix`, explicitly fetches locked Cargo
+dependencies, then builds with the Motor compiler using `--locked` and
+`--offline`. Every run of the build builds it again; Cargo rebuilds only what
+changed. The image contains only the binary, queries, themes, and
 tutor; raw and stripped binaries undergo ELF checks.
 
 The Motor `parking_lot` fork parks idle Tokio workers with `moto_rt::Futex`.

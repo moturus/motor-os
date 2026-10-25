@@ -564,8 +564,9 @@ host ownership or host read/write permissions.</p>
 
 <p>Configurations with assembly inputs require <code>MOTOR_ASSEMBLY_IMAGE_ROOT</code> to name a
 normalized absolute host directory. Assembly paths in YAML must be normalized relative paths. The
-Make recipes obtain the root from <code>src/resolve-toolchain-assembly.sh --resolve</code>; see <a
-href="toolchain.html">assembly resolution</a> for the build workflow.</p>
+Make recipes pass <code>build/assembly/images</code>, which holds the files of the native toolchain
+and of the external sources; see <a href="build.html">Building Motor OS</a> for the build
+workflow.</p>
 
 <h2 id="change-guest-permissions">Change guest permissions</h2>
 

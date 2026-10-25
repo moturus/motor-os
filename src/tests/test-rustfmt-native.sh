@@ -33,18 +33,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-assembly_images="$("$ROOT_DIR/src/resolve-toolchain-assembly.sh" --resolve)"
-manifest="$assembly_images/rustc/devtools/toolchain/manifest"
-revision="$(sed -n 's/^effective_rust_rev=//p' "$manifest")"
-version_base64="$(sed -n 's/^native_rustfmt_expected_version_base64=//p' "$manifest")"
-[ "$(grep -c '^effective_rust_rev=' "$manifest")" -eq 1 ] ||
-  fail 'assembly manifest lacks one effective Rust revision'
-[ "$(grep -c '^native_rustfmt_expected_version_base64=' "$manifest")" -eq 1 ] ||
-  fail 'assembly manifest lacks one native rustfmt version'
-expected_version="$(printf '%s' "$version_base64" | base64 -d)" ||
-  fail 'assembly rustfmt version is not valid base64'
-[[ "$expected_version" =~ ^rustfmt\ 1\.10\.0-dev\ \(${revision:0:10}\ [0-9]{4}-[0-9]{2}-[0-9]{2}\)$ ]] ||
-  fail "assembly rustfmt version does not match its effective revision: $expected_version"
+# The native rustfmt is built from the same sources as the host toolchain's.
+expected_version="$("$(cd "$ROOT_DIR" && rustc --print sysroot)/bin/rustfmt" --version)"
 actual_version="$(remote /devtools/bin/rustfmt --version)"
 [ "$actual_version" = "$expected_version" ] ||
   fail "native version is '$actual_version', expected '$expected_version'"

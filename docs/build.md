@@ -1,27 +1,45 @@
 # Building Motor OS
 
 Motor OS is cross-compiled on Linux. The supported build entry point has been
-tested on Ubuntu 24.04 and 26.04.
+tested on Ubuntu 24.04 and 26.04. It needs the Motor toolchain that
+`rust-toolchain.toml` names, `x86_64-unknown-motor-1.99.1`, as two archives
+from [motor-os-toolchain](https://github.com/moturus/motor-os-toolchain): its
+release, or a build of that repository.
+
+Install rustup before the host toolchain. If it is not installed yet:
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+  sh -s -- -y --default-toolchain none
+. "$HOME/.cargo/env"
+```
+
+If rustup is already installed, ensure it is on `PATH`. With both toolchain
+archives downloaded into the development root:
 
 ```sh
 mkdir motor-dev
 cd motor-dev
 git clone https://github.com/moturus/motor-os.git
+tar -xaf motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux.tar.zst
+motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux/install.sh
+rm -rf motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux
 cd motor-os
 src/build-motor-os.sh
 ```
 
-The script installs missing host packages and rustup, configures the VM host,
-checks out the exact Rust, LLVM, Cargo, and mlibc revisions declared in
-`src/toolchain-versions.sh`, builds the complete host and native toolchains,
-and creates the base, standard, developer, and wasm release images. Package installation and VM networking
-setup use `sudo`, and both run at the very start, so the rest of the build can
-be left unattended; managed source and dependency acquisition uses the network.
-If the build is interrupted or fails, run the same command again.
+`install.sh` installs the Linux-host toolchain and links it into rustup; the
+native archive, `motor-toolchain-x86_64-unknown-motor-1.99.1.tar.zst`, stays
+in the development root ([toolchain.md](toolchain.md)). The script installs
+missing host packages and rustup, configures the VM host, builds the external
+sources, and creates the base, standard, developer, and wasm release images.
+Package installation and VM networking setup use `sudo`, and both run at the
+very start, so the rest of the build can be left unattended; the external
+sources and dependencies come from the network. If the build is interrupted or
+fails, run the same command again.
 
-The repository's `rust-toolchain.toml` selects the exact, key-qualified Motor
-toolchain. After the unified build succeeds, ordinary repository commands use
-that toolchain without a `+nightly`, `+stable`, or legacy `+dev-*` selector:
+Ordinary repository commands use the selected toolchain without a
+`+nightly`, `+stable`, or legacy `+dev-*` selector:
 
 ```sh
 cargo -Vv
@@ -29,25 +47,31 @@ make -j"$(nproc)"
 cargo fmt --manifest-path src/sys/Cargo.toml --all --check
 ```
 
-Build products are isolated by their complete input identities. By default,
-the parent of the Motor OS checkout contains:
+The build reads the native archive from the parent of the Motor OS checkout
+(the development root) and writes nothing there. Everything it fetches or
+builds stays in the checkout, in directories Git ignores:
 
 ```text
-toolchain-src/   exact managed Rust/LLVM and mlibc sources
-toolchains/      immutable key-qualified host toolchain prefixes
-assemblies/      keyed C sysroots, native tools, and generated image roots
-ripgrep/ helix/ sed/ lua-<version>/
-                 sources of the userspace add-ons, built last
-javy/ wasmi/ wasmtime/ target-lexicon/ tokio/ mio/
-                 published Motor branches for the Javy/Wasmi and Wasmtime add-ons
-wasi-sdk-24.0-x86_64-linux/
+external-sources/
+    ripgrep/ helix/ sed/ motor-os-tar/
+                 fork checkouts that follow a branch
+    javy/ wasmtime/
+                 the Javy/Wasmi and Wasmtime fork checkouts, at their revisions
+    lua-<version>/
+                 the Lua release
+    wasi-sdk-24.0-x86_64-linux/
                  pinned wasi-sdk for the QuickJS code of the Javy test plugins
+build/assembly/  the image overlays of the native toolchain and of the
+                 external sources, and the external sources' build trees
+build/obj/       the Motor OS build trees
+vm_images/       the images
 ```
 
-Re-running `src/build-motor-os.sh` validates and reuses a complete matching
-prefix or assembly. It does not broadly delete older keyed outputs.
+Every run of `src/build-motor-os.sh` builds all external sources again, which
+Cargo keeps incremental. After installing a different or rebuilt toolchain,
+run `make clean` first: it removes all build artifacts.
 
-With an installed assembly, build just the wasm add-ons and their images with:
+With a built assembly, build just Javy, Wasmtime, and their images with:
 
 ```sh
 src/build-motor-os.sh --javy-only --wasmtime-only
@@ -63,12 +87,13 @@ image's example under `/devtools/src/wasm`.
 
 The developer image also stages Motor OS library sources in
 `/devtools/src/motor-os/sys/lib` for offline native `lorry test` runs: moto-sdk
-with moto-rt and moto-sys. Their crates.io dependencies are an add-on too,
-locked to `src/sys/Cargo.lock`. moto-sdk uses tokio only on Unix, and Motor OS
-never builds it, but Cargo.lock covers every target. So the staged workspace
+with moto-rt and moto-sys. Their crates.io dependencies are an overlay of the
+assembly too, locked to `src/sys/Cargo.lock`. moto-sdk uses tokio only on
+Unix, and Motor OS never builds it, but Cargo.lock covers every target. So the
+staged workspace
 patches tokio to an empty placeholder package, `tokio-placeholder`, and no
 tokio sources reach the image. When the lock changes the dependencies, refresh
-the add-on with:
+that overlay with:
 
 ```sh
 src/build-motor-os.sh --sys-lib-deps-only
@@ -89,8 +114,8 @@ MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -o /none/tmp/hello.wasm
 MOTOR_OS_CAPS=0 /devtools/bin/wasmi /none/tmp/hello.wasm
 ```
 
-The add-ons follow published `moturus` branches and record resolved revisions,
-the selected assembly, native library content, and input digests in
+Javy and Wasmtime follow published `moturus` branches and record resolved
+revisions, the toolchain, native library content, and input digests in
 `/devtools/javy/sources.txt` and `/devtools/wasmtime/sources.txt`. Their test
 inputs are staged outside the images, in the assembly's `tests/javy` and
 `tests/wasmtime`, and uploaded by the tests; the Wasmtime fixtures and two
@@ -117,13 +142,12 @@ Engine regressions remain in the owning forks. Upstream Brotli is used; compress
 source bytes can differ between Linux and Motor because their math libraries
 round some logarithms differently.
 
-For the source layout, authoring mode, generated manifests, and update policy,
-see [Building the complete toolchain](build-motor-os.md). The LLVM/C++ and
-native Rust components are described in [build-llvm.md](build-llvm.md) and
-[build-rustc.md](build-rustc.md); they are not separate build entry points.
-How ordinary builds find the assembly is documented in
-[Resolving the toolchain assembly](assembly-resolution.md). Which Motor OS
-crates are published, and how programs depend on them, is in
+For the external sources, the build stages, and their outputs, see
+[Building Motor OS with its external sources](build-motor-os.md); for how the
+toolchain is installed, selected, and changed, see [toolchain.md](toolchain.md).
+The C/C++ and Rust toolchains on Linux and on Motor OS are described in
+[build-llvm.md](build-llvm.md) and [build-rustc.md](build-rustc.md). Which
+Motor OS crates are published, and how programs depend on them, is in
 [Motor OS crates](crates.md).
 
 ## Run Motor OS

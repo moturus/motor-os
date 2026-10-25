@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The library workspace the developer image stages for native tests:
-# src/sys-lib-workspace.sh assembles it offline from the crates the image
-# config stages, locked to src/sys/Cargo.lock's dependency versions.
+# src/build-scripts/sys-lib-workspace.sh assembles it offline from the crates
+# the image config stages, locked to src/sys/Cargo.lock's dependency versions.
 
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -9,7 +9,7 @@ fail() { echo "test-sys-lib-workspace: $*" >&2; exit 1; }
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-"$ROOT_DIR/src/sys-lib-workspace.sh" --offline "$work/lib"
+"$ROOT_DIR/src/build-scripts/sys-lib-workspace.sh" --offline "$work/lib"
 for crate in moto-rt moto-sys moto-sdk; do
 	[ -f "$work/lib/$crate/Cargo.toml" ] || fail "the workspace lacks $crate"
 done
@@ -39,7 +39,7 @@ different="$(LC_ALL=C comm -23 <(printf '%s\n' "$locked") \
 [ -z "$different" ] ||
 	fail "the workspace locks packages differently from src/sys/Cargo.lock: $different"
 
-if "$ROOT_DIR/src/sys-lib-workspace.sh" --offline "$work/lib" 2>/dev/null; then
+if "$ROOT_DIR/src/build-scripts/sys-lib-workspace.sh" --offline "$work/lib" 2>/dev/null; then
 	fail "an existing destination was reused"
 fi
 echo "test-sys-lib-workspace PASS"

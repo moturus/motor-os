@@ -1,132 +1,43 @@
 #!/usr/bin/env bash
-# Resolve the exact managed Motor toolchain used by Lorry's Cargo oracles.
+# Resolve the Motor toolchain used by Lorry's Cargo oracles: the one the
+# repository's rust-toolchain.toml names, and the native Rust sysroot in the
+# assembly.
 
 lorry_toolchain_fail() {
     echo "current-toolchain: $*" >&2
     return 1
 }
 
-lorry_manifest_value() {
-    local manifest="$1" key="$2"
-    awk -F= -v key="$key" '
-        $1 == key { value = substr($0, length(key) + 2); count++ }
-        END { if (count != 1 || value == "") exit 1; print value }
-    ' "$manifest"
-}
-
 lorry_load_current_toolchain() {
-    local script_dir repository_root toolchain_file toolchain_key
-    local prefix prefix_manifest cargo_verbose rustc_verbose
-    local assembly_resolver assembly_images
-    local assembly_manifest assembly_root assembly_key
+    local script_dir repository_root toolchain_file prefix cargo_verbose
 
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return
     repository_root="${LORRY_REPOSITORY_ROOT:-$(cd "$script_dir/../../../.." && pwd)}"
-    . "$repository_root/src/toolchain-versions.sh"
 
     toolchain_file="$repository_root/rust-toolchain.toml"
     [ -f "$toolchain_file" ] ||
-        lorry_toolchain_fail "exact root selector is absent: $toolchain_file" || return
+        lorry_toolchain_fail "root selector is absent: $toolchain_file" || return
     LORRY_MOTOR_TOOLCHAIN="$(sed -n \
         's/^channel = "\([^"]*\)"$/\1/p' "$toolchain_file")"
     [ -n "$LORRY_MOTOR_TOOLCHAIN" ] ||
         lorry_toolchain_fail "root selector has no unique channel" || return
-    case "$LORRY_MOTOR_TOOLCHAIN" in
-        "$MOTOR_RUSTUP_TOOLCHAIN_BASE-"*)
-            toolchain_key="${LORRY_MOTOR_TOOLCHAIN#"$MOTOR_RUSTUP_TOOLCHAIN_BASE-"}"
-            ;;
-        *) lorry_toolchain_fail "root selector is not the declared exact Motor toolchain" || return ;;
-    esac
-    [ "${#toolchain_key}" -eq 64 ] ||
-        lorry_toolchain_fail "root selector has a non-canonical toolchain key" || return
-    case "$toolchain_key" in *[!0-9a-f]*)
-        lorry_toolchain_fail "root selector has a non-canonical toolchain key" || return ;;
-    esac
 
     LORRY_TEST_CARGO="$(rustup which cargo --toolchain "$LORRY_MOTOR_TOOLCHAIN")" || return
     LORRY_TEST_RUSTC="$(rustup which rustc --toolchain "$LORRY_MOTOR_TOOLCHAIN")" || return
     [ -x "$LORRY_TEST_CARGO" ] && [ -x "$LORRY_TEST_RUSTC" ] ||
         lorry_toolchain_fail "rustup resolved an incomplete Motor toolchain" || return
     prefix="$($LORRY_TEST_RUSTC --print sysroot)" || return
-    prefix_manifest="$prefix/MOTOR-TOOLCHAIN-MANIFEST"
-    [ -f "$prefix_manifest" ] ||
-        lorry_toolchain_fail "installed prefix manifest is absent: $prefix_manifest" || return
-    [ "$(lorry_manifest_value "$prefix_manifest" schema)" = \
-        "$MOTOR_GENERATED_MANIFEST_SCHEMA" ] ||
-        lorry_toolchain_fail "installed prefix manifest has the wrong schema" || return
-    [ "$(lorry_manifest_value "$prefix_manifest" toolchain_key)" = "$toolchain_key" ] ||
-        lorry_toolchain_fail "installed prefix manifest has the wrong toolchain key" || return
-    [ "$(lorry_manifest_value "$prefix_manifest" rustup_toolchain)" = \
-        "$LORRY_MOTOR_TOOLCHAIN" ] ||
-        lorry_toolchain_fail "installed prefix manifest has the wrong rustup name" || return
-    [ "$(lorry_manifest_value "$prefix_manifest" cargo_rev)" = "$MOTOR_CARGO_REV" ] ||
-        lorry_toolchain_fail "installed prefix manifest has the wrong Cargo revision" || return
-    [ "$(lorry_manifest_value "$prefix_manifest" effective_rust_rev)" = \
-        "$MOTOR_RUST_REV" ] ||
-        lorry_toolchain_fail "installed prefix manifest has the wrong Rust revision" || return
-    [ "$(lorry_manifest_value "$prefix_manifest" effective_llvm_rev)" = \
-        "$MOTOR_LLVM_REV" ] ||
-        lorry_toolchain_fail "installed prefix manifest has the wrong LLVM revision" || return
-    [ "$(cat "$prefix/lib/rustlib/MOTOR-TOOLCHAIN-KEY")" = "$toolchain_key" ] ||
-        lorry_toolchain_fail "installed prefix key stamp does not match" || return
-
     cargo_verbose="$($LORRY_TEST_CARGO -Vv)" || return
-    grep -Fqx "release: $MOTOR_CARGO_VERSION" <<< "$cargo_verbose" ||
-        lorry_toolchain_fail "Cargo does not report $MOTOR_CARGO_VERSION" || return
-    grep -Fqx "commit-hash: $MOTOR_CARGO_REV" <<< "$cargo_verbose" ||
-        lorry_toolchain_fail "Cargo does not report $MOTOR_CARGO_REV" || return
-    rustc_verbose="$($LORRY_TEST_RUSTC -vV)" || return
-    grep -Fqx "commit-hash: $MOTOR_RUST_REV" <<< "$rustc_verbose" ||
-        lorry_toolchain_fail "rustc does not report $MOTOR_RUST_REV" || return
 
-    if [ -n "${LORRY_ASSEMBLY_MANIFEST:-}" ]; then
-        assembly_manifest="$LORRY_ASSEMBLY_MANIFEST"
-    else
-        assembly_resolver="$repository_root/src/resolve-toolchain-assembly.sh"
-        [ -x "$assembly_resolver" ] ||
-            lorry_toolchain_fail "canonical assembly resolver is absent: $assembly_resolver" || return
-        assembly_images="$("$assembly_resolver" --resolve)" || return
-        case "$assembly_images" in
-            *$'\n'*)
-                lorry_toolchain_fail "canonical assembly resolver returned multiple paths" || return
-                ;;
-            /*/images) ;;
-            *)
-                lorry_toolchain_fail \
-                    "canonical assembly resolver returned an invalid image root: $assembly_images" || return
-                ;;
-        esac
-        assembly_manifest="${assembly_images%/images}/MOTOR-ASSEMBLY-MANIFEST"
-    fi
-    assembly_manifest="$(realpath "$assembly_manifest")" || return
-    assembly_root="$(dirname "$assembly_manifest")"
-    assembly_key="$(lorry_manifest_value "$assembly_manifest" assembly_key)" || return
-    [ "$(basename "$assembly_root")" = "$assembly_key" ] ||
-        lorry_toolchain_fail "assembly manifest is outside its keyed directory" || return
-    [ "$(lorry_manifest_value "$assembly_manifest" schema)" = \
-        "$MOTOR_GENERATED_MANIFEST_SCHEMA" ] ||
-        lorry_toolchain_fail "assembly manifest has the wrong schema" || return
-    [ "$(lorry_manifest_value "$assembly_manifest" toolchain_key)" = "$toolchain_key" ] ||
-        lorry_toolchain_fail "assembly manifest has the wrong toolchain key" || return
-    [ "$(lorry_manifest_value "$assembly_manifest" rustup_toolchain)" = \
-        "$LORRY_MOTOR_TOOLCHAIN" ] ||
-        lorry_toolchain_fail "assembly manifest has the wrong rustup name" || return
-    [ "$(lorry_manifest_value "$assembly_manifest" effective_rust_rev)" = \
-        "$MOTOR_RUST_REV" ] ||
-        lorry_toolchain_fail "assembly manifest has the wrong Rust revision" || return
-    [ "$(lorry_manifest_value "$assembly_manifest" effective_llvm_rev)" = \
-        "$MOTOR_LLVM_REV" ] ||
-        lorry_toolchain_fail "assembly manifest has the wrong LLVM revision" || return
-
-    LORRY_MOTOR_LINKER="$assembly_root/sysroot/bin/motor-clang"
-    LORRY_MOTOR_SYSROOT="$assembly_root/images/rustc/devtools/rust"
+    LORRY_MOTOR_LINKER="$prefix/lib/rustlib/x86_64-unknown-motor/sysroot/bin/motor-clang"
+    LORRY_MOTOR_SYSROOT="$repository_root/build/assembly/images/rustc/devtools/rust"
     [ -x "$LORRY_MOTOR_LINKER" ] ||
-        lorry_toolchain_fail "manifest-selected Motor linker is absent" || return
+        lorry_toolchain_fail "the toolchain's Motor linker is absent" || return
     [ -d "$LORRY_MOTOR_SYSROOT/lib/rustlib/x86_64-unknown-motor" ] ||
-        lorry_toolchain_fail "manifest-selected Motor Rust sysroot is incomplete" || return
+        lorry_toolchain_fail "the assembly has no Motor Rust sysroot; run src/build-motor-os.sh" ||
+        return
 
-    LORRY_ASSEMBLY_MANIFEST="$assembly_manifest"
     export LORRY_MOTOR_TOOLCHAIN LORRY_TEST_CARGO LORRY_TEST_RUSTC
-    export LORRY_MOTOR_LINKER LORRY_MOTOR_SYSROOT LORRY_ASSEMBLY_MANIFEST
-    printf '%s\n%s\n' '== Exact Motor Cargo oracle ==' "$cargo_verbose" >&2
+    export LORRY_MOTOR_LINKER LORRY_MOTOR_SYSROOT
+    printf '%s\n%s\n' '== Motor Cargo oracle ==' "$cargo_verbose" >&2
 }

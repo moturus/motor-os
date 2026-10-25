@@ -1,34 +1,27 @@
 # Rust toolchains for Motor OS
 
-The Linux-host Motor toolchain and the native Motor rustc are built by
-`src/build-motor-os.sh` from one Rust revision. This document describes their
-identity, layout, and link model; there is no separate `build-rustc.sh` or
-legacy dev-toolchain handoff.
+The Linux-host Motor toolchain and the native Motor rustc are built from one
+Rust revision by [motor-os-toolchain](https://github.com/moturus/motor-os-toolchain).
+This document describes their identity, layout, and link model.
 
 ## One Rust source revision
 
-`src/toolchain-versions.sh` is the source of truth for the exact upstream Rust,
-Motor Rust, Cargo, and Motor LLVM commits. Generated manifests record the
-effective revisions and keys actually built; do not infer them from a branch
-name or copy a historical revision from documentation.
+The toolchain repository's `versions.sh` names the Motor Rust branch, and the
+build takes its head, whose gitlinks select Cargo and Motor LLVM. `rustc -vV`
+and `cargo -Vv` report the commits they were built from; do not infer them from
+a branch name or copy a historical revision from documentation.
 
-The fork uses Rust's `dev` channel. Its compiler description identifies the
-Motor tuple, and its Cargo reports `1.99.1-dev` plus the exact Cargo
-commit. Rust's downloaded Stage 0 compiler is only a bootstrap input selected
+The fork uses Rust's `dev` channel. Its compiler description is the
+toolchain's name, `x86_64-unknown-motor-1.99.1`, and its Cargo reports
+`1.99.1-dev` plus the exact Cargo commit. Rust's downloaded Stage 0 compiler is only a bootstrap input selected
 by that Rust revision's `src/stage0`; repository commands never select Stage 0
 or an independent nightly/stable Cargo.
 
 ## Linux-host toolchain
 
-Before building the C sysroot, Rust bootstrap installs an immutable Stage 2
-toolchain under:
-
-```text
-$MOTORH/toolchains/<exact-rustup-name>/
-```
-
-The exact rustup name appends the 64-character toolchain key. The installed
-prefix contains:
+The Linux-host toolchain is installed from its archive into a directory that
+rustup knows as `x86_64-unknown-motor-1.99.1` (see
+[toolchain.md](toolchain.md)). It contains:
 
 - Linux-host rustc and rustdoc;
 - Cargo from the Rust revision's Cargo gitlink;
@@ -38,13 +31,12 @@ prefix contains:
 - rustfmt and `cargo-fmt`;
 - `rust-src` for boot-loader `-Zbuild-std` builds.
 
-It is an installer-produced prefix, not Rust's mutable
-`build/x86_64-unknown-linux-gnu/stage2` directory. A later native-compiler
-bootstrap cannot replace it. The workflow validates component paths, full
-`rustc -vV` and `cargo -Vv` identities, the reported sysroot, both target
-compile probes, and its immutable manifest before registering the rustup link.
+It also carries Clang, LLD, the LLVM tools, and the C/C++ cross sysroot. The
+toolchain build validates component paths, full `rustc -vV` and `cargo -Vv`
+identities, the reported sysroot, and both target compile probes before it
+packages the toolchain.
 
-The root `rust-toolchain.toml` selects this exact managed name. Consequently,
+The root `rust-toolchain.toml` selects the toolchain by name. Consequently,
 repository work uses bare commands:
 
 ```sh
@@ -203,7 +195,7 @@ runnables remain upstream Cargo command templates outside native acceptance.
 
 The server is built from the selected Rust tree's standalone analyzer
 workspace without `in-rust-tree`, against installed Motor std. Its recipe
-in `src/toolchain-native-rust-analyzer.sh` uses `opt-level=s` and
+in the toolchain build uses `opt-level=s` and
 `motor-clang` with `-C link-self-contained=no -C default-linker-libraries=yes`.
 mlibc startup executes the inventory registrations in `.init_array`.
 Using the bootstrap `motor-rust-cc` wrapper with those default-library flags
@@ -213,10 +205,10 @@ Motor fork changes disable implicit analyzer user-configuration lookup
 (`dirs` is compiled only off Motor), stitch the matching `rust-src` directly
 without a sysroot Cargo query, and stream child stdout/stderr through two
 reader threads with a bounded chunk queue. Project metadata still uses
-Lorry. File URI support and constructor registration use the checked-in
-[URL and inventory patches](../src/patches/README.md). Their archive, patch,
-and prepared-tree identities participate in toolchain validation; regular
-builds and tests remain locked and offline.
+Lorry. File URI support and constructor registration use the URL and
+inventory patches in the toolchain repository's `patches/`, applied to
+checksum-verified crates.io archives; the analyzer builds locked and
+offline.
 
 The staged analyzer retains its `.comment` compiler identity. Packaged
 `rust-src` comes from the selected installed prefix, with executable bits
@@ -275,12 +267,10 @@ limitations, save recovery, and regression coverage.
 
 ## Native Motor rustc
 
-After LLVM, mlibc, compiler-rt, and libc++ are available in the keyed assembly
-sysroot, a second `x.py` invocation builds rustc for
-`x86_64-unknown-motor` from the same effective Rust and LLVM trees, together
-with rustfmt and Clippy. The build
-verifies that this invocation leaves the installed host prefix byte-for-byte
-unchanged.
+After LLVM, mlibc, compiler-rt, and libc++ are built into the cross sysroot,
+a second `x.py` invocation of the toolchain build builds rustc for
+`x86_64-unknown-motor` from the same Rust and LLVM trees, together with
+rustfmt and Clippy.
 
 The development image packages these native Rust files:
 
@@ -308,10 +298,9 @@ rustfmt discovers `rustfmt.toml` from the source path and its ancestors. A
 syntax error produces a diagnostic and does not replace the source file.
 
 The native Clippy driver is built by the same bootstrap invocation as rustc.
-The assembly validates its compiler identity and native ELF properties and
-records its content hash. `lorry clippy` checks that
-`clippy-driver --rustc -vV` matches the selected rustc, and binds cached member
-units to the driver's contents.
+The toolchain build validates its compiler identity and native ELF
+properties. `lorry clippy` checks that `clippy-driver --rustc -vV` matches the
+selected rustc, and binds cached member units to the driver's contents.
 Run `lorry clippy` in an admitted package to get human diagnostics, or add
 `--message-format=json` for Cargo-compatible messages.
 
@@ -407,38 +396,16 @@ keeps its crates.io `libc 0.2.189`; neither is redirected to the compiler
 workspace's Motor fork. These selections are lockfile inputs and normal builds
 do not refresh them.
 
-## Building, authoring, and validation
+## Building and validation
 
-Build the declared managed tuple:
-
-```sh
-src/build-motor-os.sh --source-mode managed
-```
-
-Test local Rust and LLVM changes without mutating the managed checkouts:
-
-```sh
-src/build-motor-os.sh \
-  --source-mode authoring \
-  --rust-source /absolute/path/to/rust \
-  --authoring-base FULL_40_CHARACTER_BASE_COMMIT
-```
-
-An authoring compiler records the current commits and canonical dirty-tree
-digest in a distinct non-release identity. It never updates the checked-in root
-selector or qualifies for source publication.
-
-The installed host prefix contains `MOTOR-TOOLCHAIN-MANIFEST`; the matching
-assembly and development image contain `MOTOR-ASSEMBLY-MANIFEST` with both host
-and native identities and hashes. Run the full repository tests after compiler
-changes:
+The toolchain repository builds these compilers; its README describes builds
+of local Rust and LLVM changes. Run the full repository tests after moving to
+another toolchain:
 
 ```sh
 src/tests/full-test.sh
 src/tests/full-test.sh --release
 ```
 
-Both forks are rebased onto the upstream `1.99.1` tag on their
-`motor-os-1.99.1` branches, and the declaration names the tuple
-`1.99.1-motor.1`. Immutable source tags in the forks follow the core gate on
-that tuple.
+`x86_64-unknown-motor-1.99.1` is built from both forks rebased onto the
+upstream `1.99.1` tag on their `motor-os-1.99.1` branches.

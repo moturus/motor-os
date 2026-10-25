@@ -36,8 +36,11 @@ static_dirs:
 assembly_dirs:
   - "libc"
   - "rg"
+  - "tar"
 assembly_required_executables:
   - "rg/system/bin/rg"
+  - "tar/system/bin/tar"
+  - "tar/system/bin/zstd"
 ca_bundle: "/etc/ssl/certs/ca-certificates.crt"
 filesystem: "motor-fs"
 img_name: "motor-os.qcow2"

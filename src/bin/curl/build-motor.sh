@@ -10,17 +10,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 MOTOR_TARGET="x86_64-unknown-motor"
-MOTOR_LINKER="${LORRY_MOTOR_LINKER:-}"
-MOTOR_C_COMPILER="${LORRY_MOTOR_C_COMPILER:-}"
-MOTOR_C_SYSROOT="${LORRY_MOTOR_C_SYSROOT:-}"
+# By default, the cross sysroot of the toolchain rust-toolchain.toml selects.
+MOTOR_C_SYSROOT="${LORRY_MOTOR_C_SYSROOT:-$(cd "$ROOT_DIR" && rustc --print sysroot)/lib/rustlib/$MOTOR_TARGET/sysroot}"
+MOTOR_LINKER="${LORRY_MOTOR_LINKER:-$MOTOR_C_SYSROOT/bin/motor-clang}"
+MOTOR_C_COMPILER="${LORRY_MOTOR_C_COMPILER:-$MOTOR_C_SYSROOT/bin/motor-clang}"
 MOTOR_ARCHIVER="${LORRY_MOTOR_ARCHIVER:-$(command -v ar)}"
-
-if [ -n "${MOTOR_ASSEMBLY_IMAGE_ROOT:-}" ]; then
-    ASSEMBLY_ROOT="$(realpath "$MOTOR_ASSEMBLY_IMAGE_ROOT/..")"
-    MOTOR_C_SYSROOT="${MOTOR_C_SYSROOT:-$ASSEMBLY_ROOT/sysroot}"
-    MOTOR_LINKER="${MOTOR_LINKER:-$MOTOR_C_SYSROOT/bin/motor-clang}"
-    MOTOR_C_COMPILER="${MOTOR_C_COMPILER:-$MOTOR_C_SYSROOT/bin/motor-clang}"
-fi
 
 MOTO_BIN="${MOTO_BIN:?set MOTO_BIN to the image bin directory}"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT_DIR/build/obj/curl}"

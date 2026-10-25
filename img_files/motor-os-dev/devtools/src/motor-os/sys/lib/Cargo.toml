@@ -1,6 +1,7 @@
 # Motor OS library sources, staged for native tests: run `lorry test` here.
 # `make dev.img` adds Cargo.lock, admits the workspace, and compiles its
-# dependencies into the Interactive Lorry cache; see src/prepare-dev-image.sh.
+# dependencies into the Interactive Lorry cache; see
+# src/build-scripts/prepare-dev-image.sh.
 [workspace]
 members = ["moto-sdk"]
 # moto-rt and moto-sys are members too, as path dependencies below this root,

@@ -5,20 +5,21 @@ ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 . "$ROOT_DIR/src/build-motor-os.sh"
 temporary="$(mktemp -d)"
 trap 'rm -rf "$temporary"' EXIT
-fail() { echo "test-wasm-addon-fetch: $*" >&2; exit 1; }
-export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-$(sed -n 's/^channel = "\(.*\)"/\1/p' "$ROOT_DIR/rust-toolchain.toml")}"
+fail() { echo "test-wasmtime-fetch: $*" >&2; exit 1; }
+export RUSTUP_TOOLCHAIN="$TOOLCHAIN"
 export CARGO_HOME="$temporary/cargo-home"
 export CARGO_TARGET_DIR="$temporary/target"
-MOTORH="$temporary/motorh"
+EXTERNAL_SOURCES="$temporary/external-sources"
+SYSROOT="$temporary/sysroot"
 ASSEMBLY_ROOT="$temporary/assembly"
 ASSEMBLY_BUILD_ROOT="$temporary/build"
 WASMTIME_IMG="$temporary/image"
 WASMTIME_TESTS="$temporary/tests"
-WASMTIME_SOURCE_MANIFEST=fixture
+wasmtime_source_manifest() { echo fixture; }
 registry="$temporary/registry"
-runtime="$MOTORH/wasmtime/motor-runtime"
+runtime="$EXTERNAL_SOURCES/wasmtime/motor-runtime"
 mkdir -p "$registry/fe/tc" "$temporary/downloads" "$CARGO_HOME" \
-	"$runtime/src" "$MOTORH/bridge/src" "$temporary/fetch-leaf-1.0.0/src"
+	"$runtime/src" "$EXTERNAL_SOURCES/bridge/src" "$temporary/fetch-leaf-1.0.0/src"
 cat > "$temporary/fetch-leaf-1.0.0/Cargo.toml" <<'EOF'
 [package]
 name = "fetch-leaf"
@@ -49,7 +50,7 @@ edition = "2024"
 [target.'cfg(target_os = "motor")'.dependencies]
 fetch-bridge = { path = "../../bridge" }
 EOF
-cat > "$MOTORH/bridge/Cargo.toml" <<'EOF'
+cat > "$EXTERNAL_SOURCES/bridge/Cargo.toml" <<'EOF'
 [package]
 name = "fetch-bridge"
 version = "1.0.0"
@@ -59,14 +60,14 @@ edition = "2024"
 fetch-leaf = "=1.0.0"
 EOF
 : > "$runtime/src/lib.rs"
-: > "$MOTORH/bridge/src/lib.rs"
-cat > "$MOTORH/wasmtime/motor-build.sh" <<'EOF'
+: > "$EXTERNAL_SOURCES/bridge/src/lib.rs"
+cat > "$EXTERNAL_SOURCES/wasmtime/motor-build.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 [ "$CARGO_NET_OFFLINE" = true ]
 cargo build --locked --manifest-path motor-runtime/Cargo.toml --target x86_64-unknown-motor --lib
 EOF
-chmod +x "$MOTORH/wasmtime/motor-build.sh"
+chmod +x "$EXTERNAL_SOURCES/wasmtime/motor-build.sh"
 (
 	cd "$runtime"
 	cargo generate-lockfile
@@ -80,4 +81,4 @@ sha256sum() { cat > /dev/null; }
 build_wasmtime_fixtures() { :; }
 build_wasmtime
 cmp "$runtime/Cargo.lock" "$temporary/original.lock" || fail "the producer changed the lockfile"
-echo "test-wasm-addon-fetch PASS"
+echo "test-wasmtime-fetch PASS"

@@ -14,12 +14,11 @@ check_rustfmt_size() {
 }
 
 measure_rustfmt() {
-  local root assembly key imager evidence without_assembly variant variant_assembly
+  local root assembly imager evidence without_assembly variant variant_assembly
   local binary launcher bytes_without bytes_with growth
   root="$(cd "$(dirname "$0")/../.." && pwd)"
-  assembly="$("$root/src/resolve-toolchain-assembly.sh" --resolve)"
-  key="$(<"$(rustc --print sysroot)/lib/rustlib/MOTOR-TOOLCHAIN-KEY")"
-  imager="$root/build/obj/$key/release/imager/release/imager"
+  assembly="$root/build/assembly/images"
+  imager="$root/build/obj/release/imager/release/imager"
   [ -x "$imager" ] || {
     echo 'build a release image before measuring rustfmt size' >&2
     return 1

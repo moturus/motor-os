@@ -3,7 +3,8 @@
 # full-test-dev.sh — the full test suite against the dev image.
 #
 # The dev-image full test includes the repository suite, httpd-axum regressions,
-# native source builds, and Lorry's bounded product suite. Lorry validation is
+# native source builds, a native install of the toolchain archive with programs
+# built by what it installed, and Lorry's bounded product suite. Lorry validation is
 # profile-independent and does not multiply coverage by the OS image profile.
 # Release runs also check the wasm tools on the small wasm image at 224 MiB and
 # the developer image at 256 MiB, and once that Javy's output equals upstream
@@ -101,6 +102,10 @@ MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" MOTO_IMAGE=motor-os-dev.qcow2 \
 
 MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" FULL_TEST_IMAGE_PREBUILT=1 \
   "$WD/test-dev-sources.sh" "${FORWARDED_ARGS[@]}"
+
+# The native toolchain archive, installed on a copy of the developer image.
+MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" \
+  "$WD/test-native-toolchain-install.sh" "${FORWARDED_ARGS[@]}"
 
 "$ROOT_DIR/src/bin/lorry/tests/test-all.sh"
 

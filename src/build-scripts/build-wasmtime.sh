@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Runtime-only Wasmtime add-on and its precompiled test fixtures, sourced by
-# build-motor-os.sh after toolchain selection and after build-javy.sh, whose
-# helpers and inputs it shares.
+# The runtime-only Wasmtime external source and its precompiled test fixtures,
+# sourced by build-motor-os.sh after toolchain selection and after
+# build-javy.sh, whose helpers and inputs it shares.
 
 # Motor variants of upstream p2 socket programs, built from the fork.
 WASMTIME_GUEST_PROGRAMS=(p2_tcp_bind p2_tcp_bind_listen_order p2_tcp_connect
@@ -31,7 +31,7 @@ WASMTIME_CORE_FIXTURES=(lifecycle limits-elements limits-memories limits-tables 
 # Fixtures are precompiled by a host compiler built from the runtime's own
 # sources, so their engine version and configuration always match it.
 build_wasmtime_fixtures() {
-	local root="$MOTORH/wasmtime" build="$ASSEMBLY_BUILD_ROOT/wasmtime"
+	local root="$EXTERNAL_SOURCES/wasmtime" build="$ASSEMBLY_BUILD_ROOT/wasmtime"
 	local out="$WASMTIME_TESTS"
 	local plugin="$ASSEMBLY_BUILD_ROOT/javy-inputs/plugin.wasm"
 	local javy_linux="$ASSEMBLY_BUILD_ROOT/javy-inputs/javy-linux"
@@ -39,12 +39,12 @@ build_wasmtime_fixtures() {
 	# Upstream Javy 9.1.0 for Linux compiles the TypeScript fixture.
 	printf '%s  %s\n%s  %s\n%s  %s\n' "$JAVY_PLUGIN_SHA" "$plugin" "$JAVY_LINUX_SHA" "$javy_linux" \
 		"$JAVY_TYPESCRIPT_SHA" "$typescript" |
-		sha256sum --quiet -c - || die "the Wasmtime fixtures need the Javy add-on's inputs"
+		sha256sum --quiet -c - || die "the Wasmtime fixtures need Javy's build inputs"
 	(
 		cd "$root"
 		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$build/host" cargo build --locked --release \
 			--manifest-path motor-runtime/Cargo.toml --features compile --bin compile \
-			-j "$(wasm_addon_jobs)"
+			-j "$(wasm_build_jobs)"
 		export RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN"
 		cargo fetch --locked
 		local bins=() program
@@ -73,24 +73,30 @@ build_wasmtime_fixtures() {
 	"$compile" pulley64 core "$build/typescript.wasm" "$out/typescript.cwasm"
 }
 
+wasmtime_source_manifest() {
+	wasm_source_manifest "${WASMTIME_SOURCES[*]}" src/build-scripts/build-wasmtime.sh
+	printf 'guest-toolchain=%s\n' "$(RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN" rustc --version)"
+	printf 'plugin=%s\ntypescript=%s\njavy-linux=%s\n' "$JAVY_PLUGIN_SHA" \
+		"$JAVY_TYPESCRIPT_SHA" "$JAVY_LINUX_SHA"
+}
+
 build_wasmtime() {
-	# The orchestrator's selection (managed or authoring) overrides Wasmtime's
-	# own rust-toolchain.toml for the fetch and is inherited by motor-build.sh.
-	[ -n "${RUSTUP_TOOLCHAIN:-}" ] || die "no Rust toolchain was selected for Wasmtime"
+	local manifest
+	manifest="$(wasmtime_source_manifest)"
 	(
-		cd "$MOTORH/wasmtime/motor-runtime"
+		cd "$EXTERNAL_SOURCES/wasmtime/motor-runtime"
 		# Separate target-filtered fetches miss host dependencies below a
 		# Motor-only edge; Cargo's offline build still needs those packages.
 		cargo fetch --locked
 		cd ..
 		CARGO_NET_OFFLINE=true MOTOR_BUILD_DIR="$ASSEMBLY_BUILD_ROOT/wasmtime" \
-			MOTOR_SYSROOT="$ASSEMBLY_ROOT/sysroot" JOBS="$(wasm_addon_jobs)" ./motor-build.sh runtime
+			MOTOR_SYSROOT="$SYSROOT" JOBS="$(wasm_build_jobs)" ./motor-build.sh runtime
 	)
 	local data="$WASMTIME_IMG/devtools/wasmtime"
 	mkdir -p "$WASMTIME_IMG/devtools/bin" "$data"
 	install -m 755 "$ASSEMBLY_BUILD_ROOT/wasmtime/runtime/x86_64-unknown-motor/release/wasmtime-rt" \
 		"$WASMTIME_IMG/devtools/bin/wasmtime-rt"
-	printf '%s\n' "$WASMTIME_SOURCE_MANIFEST" > "$data/sources.txt"
+	printf '%s\n' "$manifest" > "$data/sources.txt"
 	(cd "$WASMTIME_IMG" && sha256sum devtools/bin/wasmtime-rt devtools/wasmtime/sources.txt \
 		> "$data/SHA256SUMS")
 	# Test fixtures stay out of the images; test-wasm.sh uploads them.
@@ -98,23 +104,4 @@ build_wasmtime() {
 	mkdir -p "$WASMTIME_TESTS"
 	build_wasmtime_fixtures
 	(cd "$WASMTIME_TESTS" && sha256sum *.cwasm > SHA256SUMS)
-}
-
-build_wasmtime_addon() {
-	WASMTIME_IMG="$ASSEMBLY_IMAGE_ROOT/wasmtime"
-	WASMTIME_TESTS="$ASSEMBLY_ROOT/tests/wasmtime"
-	local source
-	WASMTIME_SOURCE_MANIFEST="$(
-		wasm_source_manifest "${WASMTIME_SOURCES[*]}" src/build-wasmtime.sh
-		printf 'guest-toolchain=%s\n' "$(RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN" rustc --version)"
-		printf 'plugin=%s\ntypescript=%s\njavy-linux=%s\n' "$JAVY_PLUGIN_SHA" \
-			"$JAVY_TYPESCRIPT_SHA" "$JAVY_LINUX_SHA"
-	)"
-	source="$(printf '%s\n' "$WASMTIME_SOURCE_MANIFEST" | sha256sum | cut -d' ' -f1)"
-	# All outputs must still match, not just the executable used by ensure_addon.
-	if ! (cd "$WASMTIME_IMG" && sha256sum --status -c devtools/wasmtime/SHA256SUMS) 2>/dev/null ||
-		! (cd "$WASMTIME_TESTS" && sha256sum --status -c SHA256SUMS) 2>/dev/null; then
-		rm -f "$ASSEMBLY_ROOT/ADDON-wasmtime"
-	fi
-	ensure_addon wasmtime "$source" "$WASMTIME_IMG" devtools/bin/wasmtime-rt build_wasmtime
 }

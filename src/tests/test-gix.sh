@@ -768,8 +768,7 @@ fi
 
 . "$WD/vm-test-boot.sh"
 test_vm_configure_ssh
-assembly_images="$("$ROOT_DIR/src/resolve-toolchain-assembly.sh" --resolve)"
-linker="${assembly_images%/images}/sysroot/bin/motor-clang"
+linker="$(cd "$ROOT_DIR" && rustc --print sysroot)/lib/rustlib/x86_64-unknown-motor/sysroot/bin/motor-clang"
 messages="$temporary/cargo-messages.json"
 native_env=(
   "CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER=$linker"

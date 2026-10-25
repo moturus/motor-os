@@ -466,9 +466,11 @@ started with <code>run-dev.sh</code> (8 vCPUs, 8 GiB).</p>
   <tr><td><code>/system/bin/curl</code></td><td>A curl-compatible HTTPS client, the network tool Lorry uses to fetch crates.</td></tr>
 </table>
 </div>
-<p><code>/devtools</code> itself is System-owned; Interactive sessions write under
-<code>/devtools/src</code> and <code>/devtools/lorry/user</code>, and may edit the launcher
-scripts in <code>/devtools/bin</code> in place but not add or remove entries there.</p>
+<p><code>/devtools</code> belongs to Interactive sessions: they build under
+<code>/devtools/src</code>, keep Lorry's state in <code>/devtools/lorry/user</code>, and can
+install a newer toolchain with the <code>install.sh</code> of its native archive, which
+replaces <code>/devtools/llvm</code> and <code>/devtools/rust</code>; see
+<a href="toolchain.html">Toolchains</a>.</p>
 
 <h2>Compiling natively</h2>
 <pre><code>cd /devtools/src/hello-world
