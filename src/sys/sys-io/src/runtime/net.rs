@@ -19,6 +19,7 @@ mod backlog;
 mod completed;
 mod config;
 mod device;
+mod devices;
 mod half_open;
 mod icmp;
 mod pressure;
@@ -35,6 +36,7 @@ pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
     completed::self_test::TESTS,
     config::self_test::TESTS,
     device::self_test::TESTS,
+    devices::self_test::TESTS,
     half_open::self_test::TESTS,
     stats::self_test::TESTS,
 ];
@@ -83,9 +85,7 @@ struct NetRuntimeInner {
     sockets: HashMap<u64, Rc<RefCell<socket::MotoSocket>>>,
     tcp_listeners: HashMap<u64, Rc<RefCell<tcp_listener::TcpListener>>>,
 
-    // In the future, Motor OS may use Vec<Option<NetDev>>, but at the moment
-    // Motor OS does not support device hot (un)plug.
-    devices: Vec<device::NetDev<'static>>,
+    devices: devices::Devices,
 
     // IP => Dev idx.
     ip_addresses: HashMap<IpAddr, usize>,
@@ -201,9 +201,8 @@ impl NetRuntime {
     async fn spawn_net_runtime(&self) {
         const NUM_LISTENERS: usize = 8;
 
-        let num_devices = self.inner.borrow().devices.len();
-
-        for idx in 0..num_devices {
+        let num_slots = self.inner.borrow().devices.slot_count();
+        for idx in 0..num_slots {
             self.spawn_device_runtime(idx);
         }
 
@@ -218,10 +217,16 @@ impl NetRuntime {
         let this = self.clone();
 
         let _ = moto_sdk::async_runtime::LocalRuntime::spawn(async move {
-            let notify = this.inner.borrow().devices[device_idx]
-                .device_runtime_notify
-                .clone();
-            let name = this.inner.borrow().devices[device_idx].name().to_owned();
+            let (notify, name) = {
+                let inner = this.inner.borrow();
+                let Some(device) = inner.devices.get(device_idx) else {
+                    return;
+                };
+                (
+                    device.device_runtime_notify.clone(),
+                    device.name().to_owned(),
+                )
+            };
 
             // The timer armed for poll_delay(), kept across iterations. Under
             // load the notify branch below wins nearly every time, so arming a
@@ -231,8 +236,13 @@ impl NetRuntime {
 
             loop {
                 this.stats.poll_runs.set(this.stats.poll_runs.get() + 1);
-                let outcome =
-                    this.inner.borrow_mut().devices[device_idx].poll(&this.stats, &this.backlog);
+                let outcome = {
+                    let mut inner = this.inner.borrow_mut();
+                    let Some(device) = inner.devices.get_mut(device_idx) else {
+                        return;
+                    };
+                    device.poll(&this.stats, &this.backlog)
+                };
                 if outcome.addresses_changed {
                     this.rebuild_ip_addresses();
                 }
@@ -711,7 +721,6 @@ impl NetRuntime {
             inner
                 .devices
                 .iter()
-                .enumerate()
                 .map(|(device_idx, device)| (device_idx, device.config())),
             *ip_addr,
         )
@@ -723,7 +732,6 @@ impl NetRuntime {
             let addresses: HashMap<IpAddr, usize> = inner
                 .devices
                 .iter()
-                .enumerate()
                 .flat_map(|(device_idx, device)| {
                     device
                         .ip_addesses()
@@ -928,7 +936,7 @@ pub(super) async fn init(
     // Created before the devices: their rx/tx tasks bump the device counters.
     let net_stats = Rc::new(stats::NetStats::default());
 
-    let mut devices = vec![];
+    let mut devices = devices::Devices::default();
 
     if config.loopback {
         let mut loopback_cfg = config::DeviceCfg::new("02:00:00:00:00:01");
@@ -972,7 +980,7 @@ pub(super) async fn init(
         log::warn!("VirtioNET device {:?} not configured.", device.mac());
     }
 
-    if devices.is_empty() && vsock_device.is_none() {
+    if devices.iter().next().is_none() && vsock_device.is_none() {
         log::warn!(
             "NET runtime intentionally disabled: valid configuration produced zero usable devices."
         );
@@ -981,16 +989,16 @@ pub(super) async fn init(
 
     let mut device_idx = 0;
     let mut ip_addresses = HashMap::new();
-    for device in &devices {
+    for (index, device) in devices.iter() {
         for address in device.ip_addesses() {
-            ip_addresses.insert(address, device_idx);
+            ip_addresses.insert(address, index);
         }
         device_idx += 1;
     }
 
     let dns_servers = devices
         .iter()
-        .map(|device| device.config().dns_servers.clone())
+        .map(|(_, device)| device.config().dns_servers.clone())
         .collect::<Vec<_>>();
     let runtime = NetRuntime {
         inner: Rc::new(RefCell::new(NetRuntimeInner {
@@ -1061,6 +1069,9 @@ struct EphemeralTcpPort {
 impl Drop for EphemeralTcpPort {
     fn drop(&mut self) {
         let mut inner = self.runtime.inner.borrow_mut();
-        inner.devices[self.dev_idx].free_ephemeral_tcp_port(self.port);
+        // The socket's last drop can already have reaped the whole device.
+        if let Some(device) = inner.devices.retained_mut(self.dev_idx) {
+            device.free_ephemeral_tcp_port(self.port);
+        }
     }
 }

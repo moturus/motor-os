@@ -27,6 +27,7 @@ impl Drop for IcmpSocketGuard {
         let device = &mut inner.devices[self.device_idx];
         device.sockets.remove(self.handle);
         device.free_icmp_identifier(self.identifier);
+        inner.devices.reap(self.device_idx);
     }
 }
 

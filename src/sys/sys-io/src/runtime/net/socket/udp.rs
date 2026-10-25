@@ -257,7 +257,7 @@ impl MotoSocket {
             let inner = runtime.inner.borrow();
             let mut fallback = None;
             let mut selected = None;
-            for (device_idx, device) in inner.devices.iter().enumerate() {
+            for (device_idx, device) in inner.devices.iter() {
                 for ip_addr in device.ip_addesses() {
                     if ip_addr.is_ipv4() != requested.is_ipv4() {
                         continue;

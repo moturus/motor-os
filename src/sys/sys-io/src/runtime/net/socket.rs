@@ -237,6 +237,7 @@ impl Drop for MotoSocket {
         runtime_ref.devices[device_idx]
             .sockets
             .remove(netstack_handle);
+        runtime_ref.devices.reap(device_idx);
     }
 }
 

@@ -2,7 +2,8 @@
 
 Completed steps: 0 - boringtun fork; 1 - routes without a gateway.
 Current step: 2 - devices that come and go.
-Device lifetime and removal safety are in progress.
+Device-index lifetime is complete.
+Socket and listener removal are in progress.
 The preexisting strobe allocation failure is deferred in future-work.md.
 
 2026-10-24. Design and implementation plan, grounded in the tree at

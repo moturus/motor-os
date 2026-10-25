@@ -1079,6 +1079,11 @@ impl<'a> NetDev<'a> {
         completion
     }
 
+    pub(super) fn stop_polling(&mut self) {
+        self.poll_waiters.clear();
+        self.device_runtime_notify.notify_one();
+    }
+
     // Have to have this as a method here because it borrows self twice: for the socket and for the iface.
     pub(super) fn tcp_connect(
         &mut self,
