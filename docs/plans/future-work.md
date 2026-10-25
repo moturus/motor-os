@@ -50,6 +50,39 @@ the directory, where POSIX fails with `ENOTDIR`/`EISDIR` (motor-fs
 concurrent replacement between that lookup and the move still gets the native
 behavior, within the same parent.
 
+## strobe aborts when copying a log payload under memory pressure (2026-10-25)
+
+`LogServer::process_raw_log_request` in `src/sys/strobe/src/logging.rs`
+copies the kernel-log payload with an infallible `to_vec()`. If its backing
+allocation is refused, Rust aborts the entire logging service. The captured
+stack is `process_raw_log_request` → `[u8]::to_vec_in` →
+`alloc::raw_vec::handle_error` → `rust_oom` → `std::process::abort`;
+the process exits with status `0xffffffff`.
+
+Confirmed while investigating a WireGuard debug gate failure, on baseline
+`d575301b` with the pending sys-io route changes removed. Repeating the
+existing systest pressure tests with temporary kernel diagnostics recorded
+a refused 64-page backing allocation from privileged strobe, charged as
+132 pages including metadata. Free-for-admission was 127 pages, below the
+128-page privileged floor: 7,451 physically available pages minus 7,120
+committed pages and a concurrent IPC mapping's 204-page reservation.
+That mapping had already allocated its pages but had not yet released its
+reservation. Admission intentionally double-counts in-flight allocations;
+this can temporarily remove the headroom needed by system services.
+Raw serial instrumentation lengthened that interval and has been removed.
+
+The original gate's SSH disconnect was not conclusively attributed to this
+abort. A separate diagnostic also saw sys-tty exit with status -1, without
+an exit stack. Neither observation proves the same cause.
+
+Investigate fallible log-payload copies and bounded buffering that reports
+or counts dropped records on allocation refusal, including sys-tty's log
+forwarding path. Add native pressure coverage that checks service survival.
+Changing admission accounting is a separate design decision. Deferred while
+WireGuard implementation continues. Evidence: `/tmp/wireguard-step1-validation.md`,
+`/tmp/wg-step1b-diagnose-baseline/console.log` and
+`/tmp/wg-step1b-strobe-abort-stack.txt`.
+
 ## sys-io aborts when a TCP connection is established at the memory floor (2026-10-04)
 
 A release `full-test.sh` run on 2026-10-04 timed out after 900 s with
