@@ -1,8 +1,7 @@
 # WireGuard through a process-backed IP device
 
-Completed steps: none.
-Current step: 1 - routes without a gateway (blocked on preexisting-bug review).
-Step 0 is validated locally; fork publication and test-gate integration are pending.
+Completed steps: 0 - boringtun fork. The prerequisite SLAAC fix for step 1 is complete.
+Current step: 1 - routes without a gateway.
 
 2026-10-24. Design and implementation plan, grounded in the tree at
 a3d739f9. This document specifies the process-backed IP device, WireGuard
@@ -84,9 +83,9 @@ transport-address loss; step 5 expands ping coverage.
 
 ## Design decisions
 
-* No `ring` in the core workspace. `wg` lives outside it and uses the
-  pure-Rust fork; the fork's `ring` feature stays available for a later,
-  measured decision in userspace.
+* `wg` retains boringtun's upstream `ring` backend. The separate `wg`
+  workspace owns its crypto dependencies and C/assembly build requirements;
+  they stay outside the core workspace.
 * Keys and configs live under `/user/cfg/wireguard/`. The binary ships as
   `/system/bin/wg`.
 * `wg` is started by the user; starting it at boot is out of scope.
@@ -366,31 +365,25 @@ bounded I/O and timer scheduling as specified below.
 
 ### The boringtun fork
 
-The fork work is **outside this repository**:
-`github.com/moturus/boringtun`, branch `motor-os-0.7.1`, based on the 0.7.1
-source commit `051c9d47dc9c5cb36e461b7d36dcd673820dc98b`. Announce that work
-explicitly when it starts. Pin the reviewed fork revision in `wg`'s git
-dependency and lockfile. The fork has three changes:
+The fork work is **outside this repository**, in `../boringtun/`:
+`github.com/moturus/boringtun`, branch `motor-os`, based on the 0.7.1
+release commit `253f7afb2b3df9e952065d10bf2af19913cb176b`. Announce that work
+explicitly when it starts. The user has reviewed and published the fork changes.
+Pin revision `dcad5645547a89b278b346a399dbc0fae19a02f4` in `wg`'s git
+dependency and lockfile. The fork has two changes:
 
-1. Add a `target_os = "motor"` branch to `sleepyinstant`, which currently
-   has Unix and Windows branches without a Motor fallback. Wrap Motor's
-   monotonic `std::time::Instant`. The existing `SystemTime` implementation
-   supplies the handshake's TAI64N timestamp; no runtime or std changes.
-2. Replace `ring::aead::CHACHA20_POLY1305` in `session.rs` and `handshake.rs`
-   with `chacha20poly1305::ChaCha20Poly1305`, and replace
-   `ring::constant_time::verify_slices_are_equal` in `rate_limiter.rs` and
-   `handshake.rs` with `subtle::ConstantTimeEq`. Add `subtle` as a direct
-   dependency. Select the pure-Rust backend for production `wg`, with the
-   original `ring` backend available through a fork feature for comparison.
-   The pure-Rust build must not pull in `ring` or its C/assembly build chain.
-3. Expose and document `Tunn::handle_verified_packet`, currently
+1. Add a `std::time::Instant` fallback to `sleepyinstant` for targets that
+   are neither Unix nor Windows, including Motor OS. Suspend-time accounting
+   follows each target's `Instant` implementation. The existing `SystemTime`
+   implementation supplies the handshake's TAI64N timestamp; no runtime or
+   std changes.
+2. Expose and document `Tunn::handle_verified_packet`, currently
    `pub(crate)`. Its caller must first use the device's shared
    `RateLimiter::verify_packet`. This permits dispatch without a second MAC
    check or limiter charge. Keep the normal public `decapsulate` checks.
 
-Preserve nonce layout, associated data, tag placement, authentication-error
-handling and replay checks. Before integration, run upstream tests on Linux
-with both cipher backends, differential/known-answer cipher tests and
+Keep boringtun's crypto implementation unchanged. Before integration, run
+upstream tests on Linux, including known-answer cipher tests and
 `mock-instant` timer tests. Compile and link for the Motor target with its
 random-source adapter as well. The reference peer uses unchanged upstream
 0.7.1 with `ring` and a separate workspace/lockfile.
@@ -398,12 +391,14 @@ random-source adapter as well. The reference peer uses unchanged upstream
 Register `getrandom` 0.2's custom backend over
 `moto_sdk::rt::fill_random_bytes`, following
 [russhd's adapter](../../src/bin/russhd/src/lib.rs). The standalone workspace
-also needs the Motor `parking_lot` and `parking_lot_core` patches already
-used in [the core manifest](../../src/sys/Cargo.toml); they are not inherited
-from that separate workspace. Recheck the target dependency closure after
-pinning the fork and its features. Any later Motor `ring` benchmark must use
-an explicit Motor-target compiler configuration, such as `motor-clang`,
-rather than relying on host-compiler defaults.
+uses the existing Motor `ring` port from
+[russhd's manifest](../../src/bin/russhd/Cargo.toml), plus the Motor
+`parking_lot` and `parking_lot_core` patches already used in
+[the core manifest](../../src/sys/Cargo.toml); these patches are not
+inherited from other workspaces. No additional changes to the `ring` fork
+are planned. Build its C/assembly sources with an explicit Motor-target
+compiler configuration, such as `motor-clang`. Recheck the target dependency
+closure after pinning the fork and its features.
 
 ### Peer ownership, dispatch and roaming
 
@@ -579,14 +574,19 @@ ping coverage.
 ### Step 0: boringtun fork (outside this repository)
 
 Implement [the boringtun fork](#the-boringtun-fork) at the pinned upstream
-base: the Motor `sleepyinstant` branch, selectable RustCrypto/`subtle`
-backend and documented public `handle_verified_packet`. This work changes
-`github.com/moturus/boringtun`, outside the main repository, and must be
+base: the generic `sleepyinstant` fallback and documented public
+`handle_verified_packet`, retaining the upstream `ring` backend. This work
+changes `github.com/moturus/boringtun`, outside the main repository, and must be
 announced when it starts. Before step 7 pins the reviewed revision, pass
-upstream tests with both backends, differential/vector and mock-clock tests,
-and a Motor compile/link check with the custom random-source adapter.
+upstream tests, including vector and mock-clock tests, and a Motor
+compile/link check with the existing `ring` port and custom random-source
+adapter.
 
 ### Step 1: routes without a gateway
+
+First correct the existing SLAAC route-installation bug so an IPv4 route
+does not suppress an advertised IPv6 default route. Keep regression coverage
+in the full test suite; enabling SLAAC in sys-io is outside this change.
 
 sys-io `config.rs` (`IpRoute`, `find_route`) and route installation in
 `device.rs`; netstack `iface/route.rs` and the next-hop lookup for
@@ -754,7 +754,7 @@ parse, verified dispatch and authenticated endpoint learning. Preserve the
 250 ms timer deadline and bounded flush work. Packets in and out are byte
 slices here; nothing touches sys-io.
 
-Tests: known-answer and cross-backend cipher tests; longest-prefix TX/RX
+Tests: known-answer cipher tests; longest-prefix TX/RX
 ownership with `/0` and narrower owners; all message kinds and unknown
 indices/keys; cookie threshold/reset and single accounting; replay rejection;
 handshake/empty-keepalive endpoint learning; and mock-clock retry, keepalive,
@@ -864,8 +864,8 @@ packet-device run solely to IPC or crypto.
 
 On the default and small VM shapes, record throughput, small-packet rate,
 CPU, latency, queue high-water marks and IPC wakeups. Use those results to
-decide whether batching or the fork's `ring` feature is worth pursuing. Add
-a `docs/networking.md` section on provisioning and permissions, routing
+decide whether batching is worth pursuing. Add a `docs/networking.md`
+section on provisioning and permissions, routing
 rules, limits and diagnostics.
 
 ### Left to the steps
@@ -905,7 +905,7 @@ what it fixed.
 | Device slots     | Concurrent devices; names independent of indices; append despite holes;       |
 |                  | removal leaves None; other indices stay stable; same-name registration        |
 |                  | appends; vacant slots grow but do not consume device quota                    |
-| Crypto           | Unchanged upstream peer in both roles and families; vectors and cross-backend |
+| Crypto           | Unchanged upstream peer in both roles and families; vectors and authenticated |
 |                  | seal/open with zero/nonzero counters, empty keepalives, MTU payloads and      |
 |                  | associated data; changed ciphertext/tag/nonce rejected                        |
 | Peer ownership   | Multiple peers; IPv4/IPv6 longest-prefix TX destination and RX source         |
@@ -961,11 +961,5 @@ bridging would require a separate extension.
 
 ## Open questions
 
-* Access to `github.com/moturus/boringtun` is needed to publish and pin the
-  tested fork before step 7. Steps 1-5 can proceed independently.
-* Resolve or explicitly defer the existing SLAAC route-installation bug
-  before continuing step 1: an IPv4 route prevents an advertised IPv6
-  default route from being installed. SLAAC is currently disabled in
-  sys-io's feature set.
-
-The remaining implementation choices are listed under "Left to the steps" above.
+None currently. The remaining implementation choices are listed under
+"Left to the steps" above.
