@@ -66,7 +66,9 @@ measure_rustfmt() {
   printf 'without_qcow2_bytes=%s\nwith_qcow2_bytes=%s\nqcow2_growth_bytes=%s\n' \
     "$bytes_without" "$bytes_with" "$growth" >> "$evidence/sizes"
   check_rustfmt_size rustfmt-qcow2-growth "$growth" "$RUSTFMT_QCOW2_GROWTH_MAX_BYTES"
-  echo "test-rustfmt-size PASS; evidence=$evidence"
+  # A failed check keeps the evidence; a pass leaves no images behind.
+  rm -rf "$evidence"
+  echo "test-rustfmt-size PASS"
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then

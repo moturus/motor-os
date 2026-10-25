@@ -417,8 +417,8 @@ clean:
 	rm -rf src/imager/target
 	cd src/bin && rm -rf */target
 	cd src/sys && rm -rf */target
-	rm -f lib/rt.vdso/rt.vdso
-	rm -rf src/bin/lorry/tests/metadata-schema/target
-	rm -rf src/tests/rust-analyzer-smoke/fixtures/motor/target
+	rm -f src/sys/lib/rt.vdso/rt.vdso
+	rm -rf src/bin/lorry/tests/*/target
+	rm -rf src/tests/rust-analyzer-smoke/fixtures/*/target
 
 endif

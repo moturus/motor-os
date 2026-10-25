@@ -46,7 +46,9 @@ measure() {
   printf 'without_qcow2_bytes=%s\nwith_qcow2_bytes=%s\nqcow2_growth_bytes=%s\n' \
     "$bytes_without" "$bytes_with" "$((bytes_with - bytes_without))" >> "$evidence/sizes"
   check_size qcow2-growth "$((bytes_with - bytes_without))" 134217728
-  echo "test-rust-analyzer-size PASS; evidence=$evidence"
+  # A failed check keeps the evidence; a pass leaves no images behind.
+  rm -rf "$evidence"
+  echo "test-rust-analyzer-size PASS"
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
