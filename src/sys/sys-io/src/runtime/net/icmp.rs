@@ -149,7 +149,7 @@ pub(super) async fn echo(
         ));
     }
 
-    let identifier = runtime.inner.borrow_mut().devices[device_idx]
+    let (identifier, removed) = runtime.inner.borrow_mut().devices[device_idx]
         .get_icmp_identifier()
         .ok_or(ErrorKind::AddrInUse)?;
 
@@ -233,9 +233,11 @@ pub(super) async fn echo(
     .fuse();
     let timeout =
         moto_sdk::async_runtime::sleep(Duration::from_millis(request.timeout_ms as u64)).fuse();
-    futures::pin_mut!(receive, timeout);
+    let removed = removed.fuse();
+    futures::pin_mut!(receive, timeout, removed);
 
     let reply = futures::select_biased! {
+        _ = removed => return Err(ErrorKind::NotConnected.into()),
         source = receive => Some((source, started.elapsed())),
         _ = timeout => None,
     };

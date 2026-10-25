@@ -1541,6 +1541,36 @@ impl Sender {
         Ok(())
     }
 
+    /// Send a message owning one of this sender's pages. Reclaim the page
+    /// if sending fails or is canceled, including before the first poll.
+    /// `page_idx` must be the live page encoded in `msg`, not yet published.
+    pub fn send_with_owned_page(
+        &self,
+        msg: Msg,
+        page_idx: u16,
+    ) -> impl core::future::Future<Output = Result<()>> + '_ {
+        let expected_flag = match self.inner.endpoint_type {
+            EndpointType::Client => 0,
+            EndpointType::Server => IoPage::SERVER_FLAG,
+        };
+        let page = if page_idx & IoPage::SERVER_FLAG != expected_flag {
+            Err(moto_rt::Error::InvalidArgument)
+        } else {
+            self.get_page(page_idx).map(|mut page| {
+                // A canceled send frees our own page, so local allocators
+                // must wake even if the peer is not draining the channel.
+                page.wake = PageWake::Local(self.inner.page_waiters.clone());
+                page
+            })
+        };
+        async move {
+            let page = page?;
+            self.send(msg).await?;
+            IoPage::into_u16(page);
+            Ok(())
+        }
+    }
+
     pub async fn send(&self, msg: Msg) -> Result<()> {
         use crate::async_runtime::AsFuture;
 

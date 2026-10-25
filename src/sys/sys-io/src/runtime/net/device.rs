@@ -854,7 +854,8 @@ pub(super) struct NetDev<'a> {
     udp_addresses_in_use: std::collections::HashSet<SocketAddr>,
 
     tcp_ports_in_use: std::collections::HashSet<u16>,
-    icmp_identifiers_in_use: std::collections::HashSet<u16>,
+    icmp_identifiers_in_use:
+        std::collections::HashMap<u16, Option<moto_sdk::async_runtime::oneshot::Sender<()>>>,
 
     // This is the notify that drives the netstack device runtime in net.rs.
     pub(super) device_runtime_notify: Rc<moto_sdk::async_runtime::LocalNotify>,
@@ -1056,7 +1057,7 @@ impl<'a> NetDev<'a> {
             udp_ports_in_use: std::collections::HashSet::new(),
             udp_addresses_in_use: std::collections::HashSet::new(),
             tcp_ports_in_use: std::collections::HashSet::new(),
-            icmp_identifiers_in_use: std::collections::HashSet::new(),
+            icmp_identifiers_in_use: std::collections::HashMap::new(),
             device_runtime_notify: notify,
             poll_waiters: Vec::new(),
         }
@@ -1081,6 +1082,11 @@ impl<'a> NetDev<'a> {
 
     pub(super) fn stop_polling(&mut self) {
         self.poll_waiters.clear();
+        // Keep identifiers reserved until their socket guards detach, but
+        // cancel the probes now, including ones waiting for their timeout.
+        for cancel in self.icmp_identifiers_in_use.values_mut() {
+            cancel.take();
+        }
         self.device_runtime_notify.notify_one();
     }
 
@@ -1452,12 +1458,19 @@ impl<'a> NetDev<'a> {
         }
     }
 
-    pub(super) fn get_icmp_identifier(&mut self) -> Option<u16> {
-        (1..=u16::MAX).find(|identifier| self.icmp_identifiers_in_use.insert(*identifier))
+    pub(super) fn get_icmp_identifier(
+        &mut self,
+    ) -> Option<(u16, moto_sdk::async_runtime::oneshot::Receiver<()>)> {
+        let identifier = (1..=u16::MAX)
+            .find(|identifier| !self.icmp_identifiers_in_use.contains_key(identifier))?;
+        let (cancel, removed) = moto_sdk::async_runtime::oneshot();
+        self.icmp_identifiers_in_use
+            .insert(identifier, Some(cancel));
+        Some((identifier, removed))
     }
 
     pub(super) fn free_icmp_identifier(&mut self, identifier: u16) {
-        if !self.icmp_identifiers_in_use.remove(&identifier) {
+        if self.icmp_identifiers_in_use.remove(&identifier).is_none() {
             log::error!(
                 "{}: ICMP identifier {identifier} was not in use.",
                 self.name
@@ -1526,6 +1539,10 @@ pub(crate) mod self_test {
             "net::device::tx_queue_is_bounded_and_reopens",
             tx_queue_is_bounded_and_reopens,
         ),
+        (
+            "net::device::removal_cancels_icmp_probes",
+            removal_cancels_icmp_probes,
+        ),
     ];
 
     /// A minimal parsed `NetConfig`, carrying the compiled-in defaults for
@@ -1533,6 +1550,31 @@ pub(crate) mod self_test {
     /// [`super::super::init`] sees when the operator wrote no overrides.
     fn net_cfg() -> config::NetConfig {
         toml::from_str("auto_icmp_echo_reply = false\nloopback = true\n[devices]\n").unwrap()
+    }
+
+    fn removal_cancels_icmp_probes() -> Result<(), String> {
+        use futures::FutureExt;
+        let mut device = NetDev::new(
+            "wg0",
+            &config::DeviceCfg::new("02:00:00:00:00:01"),
+            &net_cfg(),
+            NetstackDevice::Loopback(moto_netstack::phy::Loopback::new(
+                moto_netstack::phy::Medium::Ip,
+            )),
+        );
+        let (first, mut first_removed) = device.get_icmp_identifier().unwrap();
+        let (second, mut second_removed) = device.get_icmp_identifier().unwrap();
+        st_assert!(first != second);
+        st_assert!((&mut first_removed).now_or_never().is_none());
+        st_assert!((&mut second_removed).now_or_never().is_none());
+        device.stop_polling();
+        st_assert!(first_removed.now_or_never().unwrap().is_err());
+        st_assert!(second_removed.now_or_never().unwrap().is_err());
+        // Guard cleanup remains valid after the cancellation notification.
+        device.free_icmp_identifier(first);
+        device.free_icmp_identifier(second);
+        st_assert!(device.icmp_identifiers_in_use.is_empty());
+        Ok(())
     }
 
     /// A failed refill remains recorded and is retried after a later RX

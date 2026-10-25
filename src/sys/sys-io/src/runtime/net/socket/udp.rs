@@ -1,3 +1,4 @@
+use futures::FutureExt;
 use std::io::ErrorKind;
 use std::rc::Weak;
 use std::{cell::RefCell, net::SocketAddr, rc::Rc, task::Poll};
@@ -17,6 +18,7 @@ pub struct UdpState {
     ephemeral_port: Option<u16>,
     tx_queue: UdpDefragmentingQueue,
     rx_queue: Rc<RefCell<UdpFragmentingQueue>>,
+    cancel_rx: Option<moto_sdk::async_runtime::oneshot::Sender<()>>,
 }
 
 impl MotoSocket {
@@ -79,6 +81,7 @@ impl MotoSocket {
             base,
             SocketState::Udp(UdpState {
                 ephemeral_port,
+                cancel_rx: None,
                 tx_queue: UdpDefragmentingQueue::new_bounded(),
                 rx_queue: Rc::new(RefCell::new(UdpFragmentingQueue::new(
                     socket_id,
@@ -88,7 +91,7 @@ impl MotoSocket {
         )
     }
 
-    async fn udp_rx(weak_socket: Weak<RefCell<MotoSocket>>) {
+    async fn udp_rx(weak_socket: Weak<RefCell<MotoSocket>>) -> bool {
         let weak_clone = weak_socket.clone();
 
         // Poll for packet.
@@ -125,11 +128,11 @@ impl MotoSocket {
         .await;
 
         if !cont {
-            return;
+            return false;
         }
 
         let Some(socket) = weak_socket.upgrade() else {
-            return; // The socket is gone.
+            return false; // The socket is gone.
         };
         let mut socket_ref = socket.borrow_mut();
         let socket_mut = &mut *socket_ref;
@@ -157,17 +160,62 @@ impl MotoSocket {
             msg.status = moto_rt::E_OK;
 
             log::debug!("RX msg for UDP socket 0x{socket_id:x}");
-            let _ = sender.send(msg).await;
+            if msg.payload.args_16()[10] == 0 {
+                let _ = sender.send(msg).await;
+            } else {
+                let _ = sender
+                    .send_with_owned_page(msg, msg.payload.shared_pages()[11])
+                    .await;
+            }
         }
 
-        Self::spawn_udp_rx_task(weak_socket);
+        true
     }
 
     fn spawn_udp_rx_task(weak_socket: Weak<RefCell<MotoSocket>>) {
-        // Note: because the socket has been created, there is no need to sync this
-        // task, as no RX packets will be losts.
+        let Some(socket) = weak_socket.upgrade() else {
+            return;
+        };
+        let (cancel, removed) = moto_sdk::async_runtime::oneshot();
+        {
+            let mut socket = socket.borrow_mut();
+            // Removal can overtake a bind reply blocked on channel capacity.
+            if socket
+                .base
+                .runtime
+                .inner
+                .borrow()
+                .devices
+                .get(socket.base.ip_backend().device_idx)
+                .is_none()
+            {
+                return;
+            }
+            assert!(
+                socket
+                    .state
+                    .unwrap_udp()
+                    .cancel_rx
+                    .replace(cancel)
+                    .is_none()
+            );
+        }
+        drop(socket);
         let _ = moto_sdk::async_runtime::LocalRuntime::spawn(async move {
-            Self::udp_rx(weak_socket).await;
+            let receive = async {
+                while Self::udp_rx(weak_socket.clone()).await {
+                    moto_sdk::async_runtime::yield_now().await;
+                }
+            }
+            .fuse();
+            let removed = removed.fuse();
+            futures::pin_mut!(receive, removed);
+            // Cancellation also interrupts a receive waiting for IPC pages
+            // or reply space, releasing its privately queued datagrams.
+            futures::select_biased! {
+                _ = removed => (),
+                _ = receive => (),
+            }
         });
     }
 
@@ -180,6 +228,7 @@ impl MotoSocket {
     }
 
     pub(super) fn on_udp_socket_drop(base: &mut super::SocketBase, state: &mut UdpState) {
+        state.cancel_rx.take();
         // UDP sockets don't linger.
         let runtime = base.runtime.clone();
         let device_idx = base.ip_backend().device_idx;

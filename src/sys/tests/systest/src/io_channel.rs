@@ -1,5 +1,72 @@
 use std::sync::atomic::Ordering;
 
+pub fn test_canceled_page_send() {
+    use core::future::Future;
+    use core::task::Context;
+    use futures::FutureExt;
+    use moto_sdk::ipc::io_channel::{ClientConnection, IoPage, Msg, listen};
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    struct WakeFlag(AtomicBool);
+    impl std::task::Wake for WakeFlag {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+        let listener = listen("systest_canceled_page_send");
+        let client = ClientConnection::connect("systest_canceled_page_send").unwrap();
+        let (sender, _receiver) = listener.await.unwrap();
+        for _ in 0..moto_sdk::ipc::io_channel::QUEUE_SIZE {
+            assert_eq!(sender.send(Msg::new()).now_or_never(), Some(Ok(())));
+        }
+        assert!(sender.send(Msg::new()).now_or_never().is_none());
+        for polled in [false, true] {
+            let page = sender.alloc_page(1).await.unwrap();
+            let mut msg = Msg::new();
+            let index = IoPage::into_u16(page);
+            msg.payload.shared_pages_mut()[0] = index;
+            let mut pending = Box::pin(sender.send_with_owned_page(msg, index));
+            let flag = Arc::new(WakeFlag(AtomicBool::new(false)));
+            let waker = std::task::Waker::from(flag.clone());
+            let mut cx = Context::from_waker(&waker);
+            if polled {
+                assert!(pending.as_mut().poll(&mut cx).is_pending());
+            }
+            let mut allocation = Box::pin(sender.alloc_page(1));
+            assert!(allocation.as_mut().poll(&mut cx).is_pending());
+            drop(pending);
+            assert!(
+                flag.0.load(Ordering::Acquire),
+                "local page allocator was not woken"
+            );
+            drop(
+                crate::net_harness::bounded_output(allocation, 2)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        for _ in 0..moto_sdk::ipc::io_channel::QUEUE_SIZE {
+            client.recv().unwrap();
+        }
+        assert_eq!(client.recv().err(), Some(moto_rt::Error::NotReady));
+        let page = sender.alloc_page(1).await.unwrap();
+        page.bytes_mut()[0] = 42;
+        let mut msg = Msg::new();
+        let index = IoPage::into_u16(page);
+        msg.payload.shared_pages_mut()[0] = index;
+        sender.send_with_owned_page(msg, index).await.unwrap();
+        let received = client.recv().unwrap();
+        let page = client.get_page(received.payload.shared_pages()[0]).unwrap();
+        assert_eq!(page.bytes()[0], 42);
+        drop(page);
+        drop(sender.alloc_page(1).await.unwrap());
+    });
+    println!("----- io_channel::test_canceled_page_send PASS");
+}
+
 pub fn test_listener_cleanup() {
     use core::future::{Future, poll_fn};
     use core::task::Poll;
@@ -690,6 +757,7 @@ pub fn test_active_channel_polls(available_cpus: usize) {
 }
 
 pub fn run_all_tests(available_cpus: usize) {
+    test_canceled_page_send();
     test_listener_cleanup();
     basic_test();
     test_ping_pong();
