@@ -72,6 +72,13 @@ pub(super) struct IpSocketBackend {
     device_idx: usize,
     device_notify: Rc<moto_sdk::async_runtime::LocalNotify>,
     local_addr: SocketAddr,
+    publication: IpSocketPublication,
+}
+
+enum IpSocketPublication {
+    Private,
+    Sending(moto_sdk::async_runtime::oneshot::Receiver<bool>),
+    Published,
 }
 
 pub(super) enum SocketBackend {
@@ -99,6 +106,7 @@ impl SocketBase {
                 device_idx,
                 device_notify,
                 local_addr: socket_addr,
+                publication: IpSocketPublication::Private,
             }),
             client_handle: client_sender.remote_handle(),
             client_sender: Some(client_sender),
@@ -143,6 +151,13 @@ impl SocketBase {
 
     pub(super) fn ip_backend(&self) -> &IpSocketBackend {
         let SocketBackend::Ip(backend) = &self.backend else {
+            panic!("vsock has no IP backend")
+        };
+        backend
+    }
+
+    fn ip_backend_mut(&mut self) -> &mut IpSocketBackend {
+        let SocketBackend::Ip(backend) = &mut self.backend else {
             panic!("vsock has no IP backend")
         };
         backend
@@ -242,6 +257,47 @@ impl Drop for MotoSocket {
 }
 
 impl MotoSocket {
+    /// Publish the handle before starting I/O. Removal can take the receiver
+    /// to order its terminal notification after this reply without retaining
+    /// the socket while a client is not reading its channel.
+    pub(super) async fn publish_ip_socket(
+        socket: Rc<RefCell<Self>>,
+        reply: moto_sdk::ipc::io_channel::Msg,
+    ) -> bool {
+        use futures::FutureExt;
+
+        let sender = socket.borrow().base.sender().clone();
+        // The usual reply fits immediately and needs no extra allocation.
+        if let Some(result) = sender.send(reply).now_or_never() {
+            if result.is_ok() {
+                socket.borrow_mut().base.ip_backend_mut().publication =
+                    IpSocketPublication::Published;
+            }
+            return result.is_ok();
+        }
+        let (sent, ready) = moto_sdk::async_runtime::oneshot();
+        {
+            let mut socket = socket.borrow_mut();
+            let ip = socket.base.ip_backend_mut();
+            assert!(matches!(ip.publication, IpSocketPublication::Private));
+            ip.publication = IpSocketPublication::Sending(ready);
+        }
+        let weak = Rc::downgrade(&socket);
+        drop(socket);
+        let success = sender.send(reply).await.is_ok();
+        let published = weak.upgrade().is_some_and(|socket| {
+            let mut socket = socket.borrow_mut();
+            let ip = socket.base.ip_backend_mut();
+            if !success || !matches!(ip.publication, IpSocketPublication::Sending(_)) {
+                return false;
+            }
+            ip.publication = IpSocketPublication::Published;
+            true
+        });
+        let _ = sent.send(success);
+        published
+    }
+
     pub(super) fn socket_id(&self) -> u64 {
         self.base.socket_id
     }

@@ -314,6 +314,7 @@ pub struct TcpState {
     // the accept, the client won't know which connection the
     // incoming RX bytes should be routed to...
     rx_ready: Rc<moto_sdk::async_runtime::LocalNotify>,
+    cancel_rx: Option<moto_sdk::async_runtime::oneshot::Sender<()>>,
 
     // The client has closed its TX (in posix sense).
     // The TX queue above may still have bytes to send.
@@ -509,6 +510,9 @@ impl MotoSocket {
         sizes: TcpBufferSizes,
         rings: RingBuild,
     ) -> std::io::Result<Rc<RefCell<MotoSocket>>> {
+        if runtime.inner.borrow().devices.get(device_idx).is_none() {
+            return Err(ErrorKind::NotConnected.into());
+        }
         // The out-of-order capacity this socket is built with, asserted here
         // because the netstack's own tests cannot see it: `lib.rs` compiles
         // `cfg(test)` against a hardcoded config, so the feature in Cargo.toml
@@ -588,6 +592,7 @@ impl MotoSocket {
                 tx_queue: VecDeque::new(),
                 tx_queue_notify: Rc::new(moto_sdk::async_runtime::LocalNotify::new()),
                 rx_ready: Rc::new(moto_sdk::async_runtime::LocalNotify::new()),
+                cancel_rx: None,
                 stat_tx_bytes: 0,
                 stat_rx_bytes: 0,
                 rx_closed: false,
@@ -1021,7 +1026,9 @@ impl MotoSocket {
 
         let _ = moto_sdk::async_runtime::LocalRuntime::spawn(async move {
             // We don't do I/O on the socket until it is accepted by the client.
-            accepted_rx.await;
+            if accepted_rx.await.is_err() {
+                return;
+            }
             Self::tcp_read_task(weak_socket).await
         });
     }
@@ -1084,7 +1091,9 @@ impl MotoSocket {
             let Self { base, state } = socket_mut;
 
             let tcp_state = state.unwrap_tcp_mut();
-            let mut msg = tcp_state.connect_req.take().unwrap();
+            let Some(mut msg) = tcp_state.connect_req.take() else {
+                return;
+            };
             msg.handle = base.socket_id;
             msg.status = if connect_timed_out
                 || api_net::tcp_stream_connect_timeout(&msg)
@@ -1098,6 +1107,7 @@ impl MotoSocket {
             (base.sender().clone(), msg)
         };
 
+        drop(moto_socket);
         let _ = sender.send(msg).await;
     }
 
@@ -1118,32 +1128,68 @@ impl MotoSocket {
             netstack_socket.set_ack_delay(Some(moto_netstack::time::Duration::from_millis(10)));
         });
 
-        let (sender, msg) = {
+        let msg = {
             let mut socket_ref = moto_socket.borrow_mut();
             let socket_mut = &mut *socket_ref;
             let Self { base, state } = socket_mut;
 
             let tcp_state = state.unwrap_tcp_mut();
-            let mut msg = tcp_state.connect_req.take().unwrap();
+            let Some(mut msg) = tcp_state.connect_req.take() else {
+                return;
+            };
             msg.handle = base.socket_id;
             api_net::put_socket_addr(&mut msg.payload, &base.ip_backend().local_addr);
             msg.status = moto_rt::E_OK;
 
-            (base.sender().clone(), msg)
+            msg
         };
 
-        let _ = sender.send(msg).await;
-        let _ = moto_sdk::async_runtime::LocalRuntime::spawn(async move {
-            Self::tcp_read_task(weak_socket).await
-        });
+        if Self::publish_ip_socket(moto_socket, msg).await {
+            let _ = moto_sdk::async_runtime::LocalRuntime::spawn(async move {
+                Self::tcp_read_task(weak_socket).await
+            });
+        }
     }
 
     async fn tcp_read_task(weak_socket: Weak<RefCell<Self>>) {
+        use futures::FutureExt;
+
+        let Some(moto_socket) = weak_socket.upgrade() else {
+            return;
+        };
+        let (cancel, removed) = moto_sdk::async_runtime::oneshot();
+        {
+            let mut socket = moto_socket.borrow_mut();
+            if socket
+                .base
+                .runtime
+                .inner
+                .borrow()
+                .devices
+                .get(socket.base.ip_backend().device_idx)
+                .is_none()
+            {
+                return;
+            }
+            assert!(socket.unwrap_tcp_mut().cancel_rx.replace(cancel).is_none());
+        }
+        drop(moto_socket);
         let weak_socket_cloned = weak_socket.clone();
         let _ = moto_sdk::async_runtime::LocalRuntime::spawn(async move {
             Self::tcp_write_task(weak_socket_cloned).await
         });
 
+        let receive = Self::tcp_read_loop(weak_socket).fuse();
+        let removed = removed.fuse();
+        futures::pin_mut!(receive, removed);
+        // Netstack wakers do not reach a receive parked on IPC capacity.
+        futures::select_biased! {
+            _ = removed => (),
+            _ = receive => (),
+        }
+    }
+
+    async fn tcp_read_loop(weak_socket: Weak<RefCell<Self>>) {
         let (socket_id, sender, subchannel_mask, rx_ready, stats, device_notify) = {
             let Some(moto_socket) = weak_socket.upgrade() else {
                 return;
@@ -1279,7 +1325,9 @@ impl MotoSocket {
                 let mut msg =
                     moto_sdk::sys_io::api_net::tcp_stream_rx_msg(socket_id, io_page, sz, 0);
                 msg.status = moto_rt::E_OK;
-                let _ = sender.send(msg).await;
+                let _ = sender
+                    .send_with_owned_page(msg, msg.payload.shared_pages()[0])
+                    .await;
             }
         } // loop
 
@@ -1518,6 +1566,7 @@ impl MotoSocket {
         }
 
         msg.status = moto_rt::E_OK;
+        drop(moto_socket);
         let _ = sender.send(msg).await;
     }
 
@@ -1565,6 +1614,8 @@ impl MotoSocket {
                 // A stream can be dropped before its client enables RX. Wake
                 // that pre-I/O gate so its task can observe socket teardown.
                 state.rx_ready.notify_one();
+                state.cancel_rx.take();
+                state.tx_queue_notify.notify_one();
                 // Linger can expire while the TX task still owns client pages
                 // it could not hand to a full netstack send buffer. This drop
                 // is the final owner of the socket, so release those pages
@@ -1581,9 +1632,14 @@ impl MotoSocket {
             let completion = {
                 let socket_ref = moto_socket.borrow();
                 let mut runtime_ref = socket_ref.base.runtime.inner.borrow_mut();
-                runtime_ref.devices[socket_ref.base.ip_backend().device_idx].poll_completion()
+                runtime_ref
+                    .devices
+                    .get_mut(socket_ref.base.ip_backend().device_idx)
+                    .map(|device| device.poll_completion())
             };
-            let _ = completion.await;
+            if let Some(completion) = completion {
+                let _ = completion.await;
+            }
 
             // A successful reset dispatch clears the peer tuple after calling
             // TxToken::consume; a remaining tuple means no TX token was available.

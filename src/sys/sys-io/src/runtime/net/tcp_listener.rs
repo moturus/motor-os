@@ -437,6 +437,7 @@ impl TcpListener {
         };
 
         if let Some((accept_req, accepted_tx, client)) = accepted {
+            drop(moto_socket);
             Self::process_matched_accept(
                 this,
                 socket_id,
@@ -508,8 +509,10 @@ impl TcpListener {
         moto_sdk::sys_io::api_net::put_socket_addr(&mut resp.payload, &remote_addr);
         resp.status = moto_rt::E_OK;
 
-        let _ = client_sender.send(resp).await;
-        accepted_tx.send(()).unwrap();
+        drop(this);
+        if MotoSocket::publish_ip_socket(moto_socket, resp).await {
+            let _ = accepted_tx.send(());
+        }
     }
 
     /* ----------------------------------- API calls ------------------------------------ */

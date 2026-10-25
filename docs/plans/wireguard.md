@@ -5,10 +5,12 @@ Current step: 2 - devices that come and go.
 Device-index lifetime and client UDP invalidation are complete.
 UDP and ICMP cancellation are complete.
 The preexisting TCP port-selection prerequisite is complete.
-TCP cancellation and socket-publication ordering are being worked on;
+TCP cancellation and socket-publication ordering are complete;
 server-side socket and listener removal remain in this step.
 Parallel work: steps 6-8 - standalone `wg` and the independent host peer.
 The preexisting strobe allocation failure is deferred in future-work.md.
+Further implementation is paused for the UDP self-delivery
+decision under "Open questions" at the end of this document.
 
 2026-10-24. Design and implementation plan, grounded in the tree at
 a3d739f9. This document specifies the process-backed IP device, WireGuard
@@ -975,5 +977,8 @@ bridging would require a separate extension.
 
 ## Open questions
 
-None currently. The remaining implementation choices are listed under
-"Left to the steps" above.
+Should the preexisting failure to deliver UDP between sockets bound to this
+host's physical IP addresses be fixed now or recorded as future work? It
+reproduces with ordinary sockets over both IPv4 and IPv6, before the new
+physical-transport binding option. WireGuard traffic to external peers does
+not depend on fixing local self-delivery.

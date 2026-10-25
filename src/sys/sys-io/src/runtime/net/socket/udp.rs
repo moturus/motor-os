@@ -423,9 +423,9 @@ impl MotoSocket {
 
         resp.handle = socket_id;
         resp.status = moto_rt::E_OK;
-        let _ = sender.send(resp).await;
-
-        Self::spawn_udp_rx_task(weak_socket);
+        if Self::publish_ip_socket(udp_socket, resp).await {
+            Self::spawn_udp_rx_task(weak_socket);
+        }
 
         Ok(())
     }
