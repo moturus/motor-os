@@ -4,6 +4,7 @@ Completed steps: 0 - boringtun fork; 1 - routes without a gateway.
 Current step: 2 - devices that come and go.
 Device-index lifetime and client UDP invalidation are complete.
 UDP and ICMP cancellation are complete.
+The preexisting TCP port-selection prerequisite is complete.
 TCP cancellation and socket-publication ordering are being worked on;
 server-side socket and listener removal remain in this step.
 Parallel work: steps 6-8 - standalone `wg` and the independent host peer.
@@ -612,6 +613,11 @@ requirements; netstack host tests for the lookup. Rejection of duplicate
 registered prefixes on two devices is tested with registration in step 3.
 
 ### Step 2: devices that come and go
+
+First fix the preexisting outgoing TCP port collision with explicit and
+wildcard listeners. Ephemeral source selection must exclude their local
+endpoints while preserving existing connection and TIME-WAIT exclusions.
+Cover both IP families with native connection and accept tests.
 
 sys-io `net.rs` (the device vector, `ip_addresses`, `find_route`, the
 per-device poll task), `tcp_listener.rs` (`add_address`, `remove_address`),

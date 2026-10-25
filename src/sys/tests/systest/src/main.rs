@@ -1600,6 +1600,10 @@ fn main() {
         tcp::test_loopback_peer_time_wait();
         return;
     }
+    if args.len() == 2 && args[1] == "test-outgoing-listener-ports" {
+        tcp::test_outgoing_ports_exclude_listeners();
+        return;
+    }
     if args.len() == 2 && args[1] == "test-time-wait-releases-client-channel" {
         tcp::test_time_wait_releases_client_channel();
         return;

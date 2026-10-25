@@ -804,13 +804,26 @@ impl NetRuntime {
     ) -> Option<Rc<EphemeralTcpPort>> {
         let mut inner = self.inner.borrow_mut();
         let NetRuntimeInner {
-            devices, sockets, ..
+            devices,
+            sockets,
+            tcp_listeners,
+            ..
         } = &mut *inner;
         let local_port = devices[device_idx].get_ephemeral_tcp_port(&ip_addr, |port| {
             let local_addr = SocketAddr::new(ip_addr, port);
-            sockets.values().any(|socket| {
-                socket::MotoSocket::occupies_tcp_tuple(socket, device_idx, local_addr, remote_addr)
-            })
+            // Explicit listener ports have no ephemeral reservation. Exclude
+            // their endpoints too, including each address of a wildcard bind.
+            tcp_listeners
+                .values()
+                .any(|listener| listener.borrow().listens_on(local_addr, device_idx))
+                || sockets.values().any(|socket| {
+                    socket::MotoSocket::occupies_tcp_tuple(
+                        socket,
+                        device_idx,
+                        local_addr,
+                        remote_addr,
+                    )
+                })
         })?;
         Some(Rc::new(EphemeralTcpPort {
             dev_idx: device_idx,

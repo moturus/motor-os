@@ -1975,6 +1975,87 @@ pub fn test_tx_error_with_queued_rx() {
     println!("test_tx_error_with_queued_rx() PASS");
 }
 
+pub fn test_outgoing_ports_exclude_listeners() {
+    use std::net::{IpAddr, TcpListener};
+
+    for (ip, wildcard) in [("127.0.0.1", "0.0.0.0"), ("::1", "::")] {
+        let ip: IpAddr = ip.parse().unwrap();
+        for bind_ip in [ip, wildcard.parse().unwrap()] {
+            // Find the current bottom of the free range, then bind that port
+            // explicitly so the listener owns no ephemeral-port reservation.
+            let probe = TcpListener::bind(SocketAddr::new(ip, 0)).unwrap();
+            let destination = probe.local_addr().unwrap();
+            drop(probe);
+            wait_for_sockets_released(destination);
+            let listener = TcpListener::bind(SocketAddr::new(bind_ip, destination.port())).unwrap();
+            exchange_avoiding_listener_port(&listener, destination, destination.port());
+
+            // Also exclude the listening port when connecting elsewhere: the
+            // fix must check listener occupancy, not just unequal endpoints.
+            let other = TcpListener::bind(SocketAddr::new(ip, 0)).unwrap();
+            let other_addr = other.local_addr().unwrap();
+            exchange_avoiding_listener_port(&other, other_addr, destination.port());
+            drop((other, listener));
+            wait_for_sockets_released(other_addr);
+            wait_for_sockets_released(destination);
+        }
+    }
+    println!("test_outgoing_ports_exclude_listeners() PASS");
+}
+
+fn exchange_avoiding_listener_port(
+    listener: &std::net::TcpListener,
+    destination: SocketAddr,
+    forbidden_port: u16,
+) {
+    use std::os::fd::AsRawFd;
+
+    let mut client =
+        std::net::TcpStream::connect_timeout(&destination, Duration::from_secs(2)).unwrap();
+    let local = client.local_addr().unwrap();
+    assert_ne!(
+        local.port(),
+        forbidden_port,
+        "outgoing socket reused a listening port"
+    );
+    assert_ne!(local, destination, "outgoing socket connected to itself");
+    listener.set_nonblocking(true).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let (mut accepted, peer) = loop {
+        match listener.accept() {
+            Ok(accepted) => break accepted,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "listener did not accept the connection"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => panic!("accept failed: {error:?}"),
+        }
+    };
+    assert_eq!(peer, local);
+    accepted.set_nonblocking(false).unwrap();
+    for stream in [&client, &accepted] {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        moto_rt::net::set_linger(stream.as_raw_fd(), Some(Duration::ZERO)).unwrap();
+    }
+    let mut buffer = [0; 8];
+    client.write_all(b"listener").unwrap();
+    accepted.read_exact(&mut buffer).unwrap();
+    assert_eq!(&buffer, b"listener");
+    accepted.write_all(b"accepted").unwrap();
+    client.read_exact(&mut buffer).unwrap();
+    assert_eq!(&buffer, b"accepted");
+    drop((client, accepted));
+    wait_for_connection_released(local, destination);
+}
+
 fn test_connect_reset_is_not_a_timeout() {
     let error = std::net::TcpStream::connect_timeout(
         &"127.0.0.1:1".parse().unwrap(),
@@ -4489,6 +4570,7 @@ pub fn run_all_tests() {
     // Needs a quiet ephemeral port space: its self-connect relies on being
     // handed the port it just freed.
     test_simultaneous_open();
+    test_outgoing_ports_exclude_listeners();
     test_native_net_cancellation();
     test_connect_reset_is_not_a_timeout();
     test_loopback_peer_time_wait();
