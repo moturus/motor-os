@@ -343,6 +343,13 @@ else
     --no-default-features --features "$NETSTACK_FEATURES"
 fi
 
+# SLAAC is optional in sys-io; exercise its route merging alongside the
+# interface tests without changing the production feature set above.
+cargo test --locked --offline "${profile_args[@]}" \
+  --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \
+  --no-default-features --features "$NETSTACK_FEATURES,proto-ipv6-slaac" \
+  --lib iface::
+
 # The test-only image changes only sys-init.cfg, through a later static overlay,
 # and proves the opt-in System serial session without changing standard-image
 # role expectations.

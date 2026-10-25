@@ -1504,9 +1504,10 @@ fn test_ndisc_advert_requires_target_probe_to_evict(#[case] medium: Medium) {
 }
 
 #[rstest]
-#[case(Medium::Ethernet)]
+#[case(Medium::Ethernet, false)]
+#[cfg_attr(feature = "proto-ipv4", case(Medium::Ethernet, true))]
 #[cfg(feature = "proto-ipv6-slaac")]
-fn test_router_advertisement(#[case] medium: Medium) {
+fn test_router_advertisement(#[case] medium: Medium, #[case] with_ipv4_route: bool) {
     fn recv_icmpv6(
         device: &mut crate::tests::TestingDevice,
         timestamp: Instant,
@@ -1561,6 +1562,13 @@ fn test_router_advertisement(#[case] medium: Medium) {
     iface.update_ip_addrs(|ip_addrs| {
         ip_addrs.push(IpCidr::Ipv6(local_ip_addr));
     });
+    #[cfg(feature = "proto-ipv4")]
+    if with_ipv4_route {
+        iface
+            .routes_mut()
+            .add_default_ipv4_route(Ipv4Address::new(192, 0, 2, 1));
+    }
+    let ipv4_routes = usize::from(with_ipv4_route);
 
     let mut sockets = SocketSet::new();
     iface.poll(Instant::ZERO, &mut device, &mut sockets);
@@ -1661,18 +1669,16 @@ fn test_router_advertisement(#[case] medium: Medium) {
         assert_eq!(generated, expected);
     }
     // Verify the pushed route matches expected
-    iface.routes_mut().update(|route| {
-        assert_eq!(route.len(), 1);
+    iface.routes_mut().update(|routes| {
+        assert_eq!(routes.len(), 1 + ipv4_routes);
+        let route = routes.iter().find(|route| route.is_ipv6_gateway()).unwrap();
         assert_eq!(
-            route[0].cidr,
+            route.cidr,
             IpCidr::new(IpAddress::v6(0, 0, 0, 0, 0, 0, 0, 0), 0)
         );
-        assert_eq!(
-            route[0].via_router,
-            IpAddress::Ipv6(remote_ip_addr.address())
-        );
-        assert_eq!(route[0].preferred_until, None);
-        assert_eq!(route[0].expires_at, None);
+        assert_eq!(route.via_router, IpAddress::Ipv6(remote_ip_addr.address()));
+        assert_eq!(route.preferred_until, None);
+        assert_eq!(route.expires_at, None);
     });
 
     // Craft a router advertisement with zero lifetime for the prefix
@@ -1711,7 +1717,7 @@ fn test_router_advertisement(#[case] medium: Medium) {
     iface.poll(now, &mut device, &mut sockets);
     assert_eq!(iface.ip_addrs().len(), 1);
     iface.routes_mut().update(|route| {
-        assert_eq!(route.len(), 1);
+        assert_eq!(route.len(), 1 + ipv4_routes);
     });
 
     // Craft router advertisement with zero router lifetime
@@ -1748,8 +1754,16 @@ fn test_router_advertisement(#[case] medium: Medium) {
     let now = Instant::from_secs(20);
     iface.poll(now, &mut device, &mut sockets);
     iface.routes_mut().update(|route| {
-        assert_eq!(route.len(), 0);
+        assert_eq!(route.len(), ipv4_routes);
     });
+    #[cfg(feature = "proto-ipv4")]
+    assert_eq!(
+        iface
+            .routes()
+            .get_default_ipv4_route()
+            .map(|route| route.via_router),
+        with_ipv4_route.then(|| IpAddress::v4(192, 0, 2, 1)),
+    );
 }
 
 #[rstest]

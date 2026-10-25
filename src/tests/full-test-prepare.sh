@@ -82,6 +82,8 @@ host_build --manifest-path "$ROOT_DIR/src/sys/lib/frusa/Cargo.toml"
 NETSTACK_FEATURES="async,assembler-max-segment-count-32,fragmentation-buffer-size-65536,iface-neighbor-cache-count-64,medium-ethernet,medium-ip,proto-ipv4,proto-ipv4-fragmentation,proto-ipv6,proto-ipv6-fragmentation,reassembly-buffer-count-4,reassembly-buffer-size-65536,socket-icmp,socket-tcp,socket-udp"
 host_build --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \
   --no-default-features --features "$NETSTACK_FEATURES"
+host_build --locked --offline --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \
+  --no-default-features --features "$NETSTACK_FEATURES,proto-ipv6-slaac" --lib
 # motor-fs reads --cfg tokio_unstable from its own .cargo/config.toml, which
 # cargo picks up only from the crate directory.
 (cd "$ROOT_DIR/src/sys/lib/motor-fs" && host_build --features image-admin)
