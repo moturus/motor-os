@@ -2233,6 +2233,110 @@ fn test_channel_failure_wakes_every_waiter() {
     println!("net_driver::test_channel_failure_wakes_every_waiter PASS");
 }
 
+/// A terminal UDP event reaches even a bind whose caller has not resumed,
+/// wakes blocked I/O, and leaves another binding on the same channel usable.
+fn test_udp_binding_invalidation() {
+    use core::future::Future;
+    use core::task::{Context, Poll};
+    use moto_sdk::io::net::udp::UdpSocket;
+
+    struct Wakes(AtomicUsize);
+    impl std::task::Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let active_udp = crate::tcp::read_sys_io_metric("net.udp_sockets");
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+        let (client, driver_task) = host_channel().await;
+        let anchor = client.try_reserve().unwrap();
+        let loopback = "127.0.0.1:0".parse().unwrap();
+        let mut bind = Box::pin(UdpSocket::bind_reserved(
+            client.try_reserve().unwrap(),
+            &loopback,
+            None,
+        ));
+        core::future::poll_fn(|cx| {
+            assert!(bind.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        // Drive the response, but do not poll the bind future again yet.
+        crate::net_harness::wait_until("UDP registration before bind resumes", || {
+            client.udp_handles_for_test().len() == 1
+        })
+        .await;
+        let handle = client.udp_handles_for_test()[0];
+        client.invalidate_udp_for_test(handle);
+        let invalid = bind.await.unwrap();
+        let destination = "127.0.0.1:12345".parse().unwrap();
+        assert_eq!(
+            invalid.try_send_to(b"closed", &destination),
+            Err(moto_rt::E_NOT_CONNECTED)
+        );
+        assert_eq!(client.reservations(), 1);
+        drop(invalid);
+
+        let socket = UdpSocket::bind_reserved(client.try_reserve().unwrap(), &loopback, None)
+            .await
+            .unwrap();
+        let survivor = UdpSocket::bind_reserved(client.try_reserve().unwrap(), &loopback, None)
+            .await
+            .unwrap();
+        let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+        let waker = std::task::Waker::from(wakes.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut byte = [0];
+        let mut receive = Box::pin(socket.recv_from_future(&mut byte, false));
+        assert!(receive.as_mut().poll(&mut cx).is_pending());
+        socket.with_tx_pages_exhausted_for_test(|| {
+            for _ in 0..moto_sdk::io_internal::udp_queues::UDP_QUEUE_MAX_DATAGRAMS {
+                assert_eq!(socket.try_send_to(b"queued", &destination), Ok(6));
+            }
+            let mut send = core::pin::pin!(socket.send_to_future(b"blocked", &destination));
+            let mut writable = core::pin::pin!(socket.writable());
+            assert!(send.as_mut().poll(&mut cx).is_pending());
+            assert!(writable.as_mut().poll(&mut cx).is_pending());
+            let before = wakes.0.load(Ordering::Relaxed);
+            client.invalidate_udp_for_test(socket.handle());
+            assert!(wakes.0.load(Ordering::Relaxed) >= before + 3);
+            assert_eq!(
+                send.as_mut().poll(&mut cx),
+                Poll::Ready(Err(moto_rt::E_NOT_CONNECTED))
+            );
+            assert!(writable.as_mut().poll(&mut cx).is_ready());
+            assert!(matches!(
+                receive.as_mut().poll(&mut cx),
+                Poll::Ready(Err(moto_rt::E_NOT_CONNECTED))
+            ));
+        });
+        assert_eq!(socket.rx_waiter_count(), 0);
+        assert_eq!(socket.tx_waiter_count(), 0);
+        assert_eq!(client.reservations(), 2);
+        // Late events are harmless after the handle has been unregistered.
+        client.invalidate_udp_for_test(socket.handle());
+        assert_eq!(survivor.try_send_to(b"live", survivor.local_addr()), Ok(4));
+        let mut bytes = [0; 4];
+        let (length, _) = bounded_output(survivor.recv_from_future(&mut bytes, false), 5)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&bytes[..length], b"live");
+        drop(receive);
+        drop((socket, survivor, anchor));
+        assert!(
+            bounded(driver_task, 5).await,
+            "UDP invalidation driver did not exit"
+        );
+        assert_eq!(client.reservations(), 0);
+    });
+    // Test events model server removal; closing the test channel reclaims the
+    // real server handles left behind by that injection.
+    crate::tcp::wait_for_sys_io_metric("net.udp_sockets", |n| n == active_udp);
+    println!("net_driver::test_udp_binding_invalidation PASS");
+}
+
 /// The vsock tests of the standard image: the wire codecs, then discovery on
 /// a guest with a NIC and no vsock device. They expect the topology and the
 /// capabilities the test harness provides (`MOTOR_OS_CAPS=0x3cc`), so the
@@ -2258,5 +2362,6 @@ pub fn run_all_tests() {
     test_connected_udp_ignores_foreign_datagrams();
     test_dropped_futures_leave_no_waiters();
     test_channel_failure_wakes_every_waiter();
+    test_udp_binding_invalidation();
     crate::net_caps::test_admission();
 }

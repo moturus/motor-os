@@ -82,7 +82,7 @@ impl UdpSocket {
         self.close_inner(true);
     }
 
-    fn close_inner(&self, channel_failed: bool) {
+    fn close_inner(&self, remote_closed: bool) {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -92,7 +92,7 @@ impl UdpSocket {
 
         self.wake_rx_waiters();
         self.wake_tx_waiters();
-        if channel_failed {
+        if remote_closed {
             self.raise_readiness(
                 Readiness::READABLE
                     | Readiness::WRITABLE
@@ -114,7 +114,7 @@ impl UdpSocket {
         // the record itself waits for the datagrams this socket had already
         // handed to the channel, which must reach a socket sys-io still has.
         let reservation = self.channel_reservation.lock().take().unwrap();
-        if channel_failed || self.channel.is_failed() {
+        if remote_closed || self.channel.is_failed() {
             drop(reservation);
         } else {
             self.channel.enqueue_teardown(reservation, req);
@@ -204,7 +204,6 @@ impl UdpSocket {
         event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<Arc<UdpSocket>, ErrorCode> {
         channel_reservation.reserve_subchannel();
-        let subchannel_mask = channel_reservation.subchannel_mask();
         let req = if select_route {
             api_net::bind_udp_socket_for_remote_request(
                 requested_addr,
@@ -214,15 +213,23 @@ impl UdpSocket {
             api_net::bind_udp_socket_request(requested_addr, channel_reservation.subchannel_idx())
         };
         let channel = channel_reservation.channel().clone();
-        let (channel_reservation, resp) = channel
-            .rpc_bind(
-                req,
-                channel_reservation,
-                api_net::NetCmd::UdpSocketDrop as u16,
-            )
+        channel
+            .rpc_bind_udp(req, channel_reservation, event_listener)
             .await
-            .into_result()?;
+    }
 
+    // Register on the driver's receive path before it dispatches the next
+    // message: an immediate invalidation must not race the awaiting caller.
+    pub(super) fn on_bind_response(
+        channel_reservation: ChannelReservation,
+        request: io_channel::Msg,
+        resp: io_channel::Msg,
+        event_listener: Option<Arc<dyn NetEventListener>>,
+    ) -> Result<Arc<Self>, ErrorCode> {
+        resp.status()?;
+        let requested_addr = api_net::get_socket_addr(&request.payload);
+        let select_route = request.command == api_net::NetCmd::UdpSocketBindForRemote as u16;
+        let subchannel_mask = channel_reservation.subchannel_mask();
         let socket_addr = api_net::get_socket_addr(&resp.payload);
         assert_ne!(0, socket_addr.port());
         if select_route {
@@ -480,6 +487,7 @@ impl UdpSocket {
     pub fn process_incoming_msg(&self, msg: io_channel::Msg) {
         let cmd = api_net::NetCmd::try_from(msg.command).unwrap();
         match cmd {
+            api_net::NetCmd::EvtUdpSocketInvalidated => self.close_inner(true),
             api_net::NetCmd::UdpSocketTxRx => {
                 let mut rx_queue = self.rx_queue.lock();
                 if self.is_closed() {

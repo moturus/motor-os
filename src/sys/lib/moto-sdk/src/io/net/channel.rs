@@ -210,6 +210,26 @@ impl NetClient {
             channel.fail();
         }
     }
+
+    #[doc(hidden)]
+    #[cfg(feature = "test-support")]
+    pub fn udp_handles_for_test(&self) -> alloc::vec::Vec<u64> {
+        self.channel
+            .upgrade()
+            .map_or_else(alloc::vec::Vec::new, |channel| {
+                channel.udp_sockets.lock().keys().copied().collect()
+            })
+    }
+
+    #[doc(hidden)]
+    #[cfg(feature = "test-support")]
+    pub fn invalidate_udp_for_test(&self, handle: u64) {
+        let channel = self.channel.upgrade().unwrap();
+        let mut msg = io_channel::Msg::new();
+        msg.command = api_net::NetCmd::EvtUdpSocketInvalidated.as_u16();
+        msg.handle = handle;
+        channel.dispatch_incoming(msg);
+    }
 }
 
 /// One channel's progress driver (design section 5.2): the rx and tx tasks
@@ -336,13 +356,20 @@ pub(super) enum RpcWaiter {
         listener: Weak<TcpListener>,
         cleanup: DriverCredit,
     },
-    /// TcpListener/UdpSocket bind completion. The reservation rides in the
+    /// TcpListener bind completion. The reservation rides in the
     /// waiter so a bind future cancelled after its request was queued still
     /// has the channel slot needed to roll the new handle back.
     Bind {
         reservation: ChannelReservation,
         drop_command: u16,
         tx: crate::async_runtime::oneshot::Sender<PendingBind>,
+    },
+    /// UDP registration must precede a terminal event following the bind reply.
+    UdpBind {
+        reservation: ChannelReservation,
+        request: io_channel::Msg,
+        event_listener: Option<Arc<dyn super::readiness::NetEventListener>>,
+        tx: crate::async_runtime::oneshot::Sender<Result<Arc<UdpSocket>, ErrorCode>>,
     },
 }
 
@@ -846,6 +873,7 @@ impl Drop for RpcRegistration<'_> {
                             | RpcWaiter::Connect { .. }
                             | RpcWaiter::VsockOpen { .. }
                             | RpcWaiter::Bind { .. }
+                            | RpcWaiter::UdpBind { .. }
                     )
                 ) || self.channel.is_failed()
             );
@@ -1057,6 +1085,21 @@ impl NetChannel {
                     // A cancelled bind leaves no receiver; dropping the
                     // undelivered PendingBind rolls the new handle back.
                     let _ = tx.send(pending);
+                }
+                Some(RpcWaiter::UdpBind {
+                    reservation,
+                    request,
+                    event_listener,
+                    tx,
+                }) => {
+                    // A canceled caller drops the new socket, releasing its
+                    // server handle through the ordinary close path.
+                    let _ = tx.send(UdpSocket::on_bind_response(
+                        reservation,
+                        request,
+                        msg,
+                        event_listener,
+                    ));
                 }
                 None if self.is_failed() => {
                     // The TX task can observe the dead handle while the RX
@@ -1778,6 +1821,9 @@ impl NetChannel {
                     resp,
                 });
             }
+            RpcWaiter::UdpBind { tx, .. } => {
+                let _ = tx.send(Err(moto_rt::E_NOT_CONNECTED));
+            }
         }
     }
 
@@ -2023,6 +2069,44 @@ impl NetChannel {
         registration.sent = true;
 
         rx.await.expect("bind RPC sender dropped")
+    }
+
+    pub(super) async fn rpc_bind_udp(
+        &self,
+        mut request: io_channel::Msg,
+        reservation: ChannelReservation,
+        event_listener: Option<Arc<dyn super::readiness::NetEventListener>>,
+    ) -> Result<Arc<UdpSocket>, ErrorCode> {
+        debug_assert!(core::ptr::eq(self, reservation.channel().as_ref()));
+        let (tx, rx) = crate::async_runtime::oneshot();
+        request.id = self.new_req_id();
+        {
+            let mut rpc_map = self.rpc_map.lock();
+            if self.is_failed() {
+                return Err(moto_rt::E_NOT_CONNECTED);
+            }
+            assert!(
+                rpc_map
+                    .insert(
+                        request.id,
+                        RpcWaiter::UdpBind {
+                            reservation,
+                            request,
+                            event_listener,
+                            tx,
+                        }
+                    )
+                    .is_none()
+            );
+        }
+        let mut registration = RpcRegistration {
+            channel: self,
+            id: request.id,
+            sent: false,
+        };
+        self.send(request).await;
+        registration.sent = true;
+        rx.await.expect("UDP bind RPC sender dropped")
     }
 
     /// Send a connect request without blocking the polling thread.
@@ -2313,7 +2397,7 @@ impl NetChannel {
                     let _ = self.conn.get_page(msg.payload.shared_pages()[11]);
                 }
             }
-            api_net::NetCmd::UdpSocketTxRxAck => {}
+            api_net::NetCmd::UdpSocketTxRxAck | api_net::NetCmd::EvtUdpSocketInvalidated => {}
             _ => {
                 // This is logged always because if a new incoming message is added that
                 // has to be handled but is not, we may have a problem.

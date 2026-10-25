@@ -47,6 +47,8 @@ pub enum NetCmd {
     VsockListenerAccept,
     VsockListenerDrop,
     VsockLocalCid,
+    /// Terminal loss of this UDP binding. No page or payload; id is zero.
+    EvtUdpSocketInvalidated,
     NetCmdMax,
 }
 
@@ -81,6 +83,7 @@ impl NetCmd {
                 | NetCmd::UdpSocketDrop
                 | NetCmd::UdpSocketSetOption
                 | NetCmd::UdpSocketGetOption
+                | NetCmd::EvtUdpSocketInvalidated
         )
     }
 }

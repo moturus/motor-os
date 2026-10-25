@@ -2,8 +2,10 @@
 
 Completed steps: 0 - boringtun fork; 1 - routes without a gateway.
 Current step: 2 - devices that come and go.
-Device-index lifetime is complete.
-Socket and listener removal are in progress.
+Device-index lifetime and client UDP invalidation are complete.
+Server-side cancellation and resource cleanup are being worked on.
+Server-side socket and listener removal remain in this step.
+Parallel work: steps 6-7 - standalone `wg` configuration and peer/crypto logic.
 The preexisting strobe allocation failure is deferred in future-work.md.
 
 2026-10-24. Design and implementation plan, grounded in the tree at
