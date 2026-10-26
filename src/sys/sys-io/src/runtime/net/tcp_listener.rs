@@ -106,20 +106,12 @@ impl TcpListener {
             .any(|(_, index)| *index == device_idx)
     }
 
-    #[cfg_attr(
-        not(debug_assertions),
-        expect(dead_code, reason = "registration follows in step 3")
-    )]
     pub(super) fn port(&self) -> u16 {
         self.socket_addr.port()
     }
 
     /// Registration must fail if an expanded endpoint cannot be constructed;
     /// the caller rolls back every endpoint belonging to the new device.
-    #[cfg_attr(
-        not(debug_assertions),
-        expect(dead_code, reason = "registration follows in step 3")
-    )]
     pub(super) fn try_add_address(
         this: &Rc<RefCell<Self>>,
         address: IpAddr,

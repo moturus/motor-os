@@ -16,6 +16,27 @@ struct RetiringDevice {
 }
 
 impl Devices {
+    pub(super) fn prepare_push(&mut self) -> std::io::Result<()> {
+        self.active
+            .try_reserve(1)
+            .map_err(|_| std::io::ErrorKind::OutOfMemory)?;
+        // Reserve retirement bookkeeping while registration can still fail.
+        let active = self.iter().count();
+        self.retiring
+            .try_reserve(active + 1)
+            .map_err(|_| std::io::ErrorKind::OutOfMemory)?;
+        Ok(())
+    }
+
+    pub(super) fn packet_count(&self) -> usize {
+        self.iter().filter(|(_, device)| device.is_packet()).count()
+            + self
+                .retiring
+                .values()
+                .filter(|retired| retired.device.is_packet())
+                .count()
+    }
+
     pub(super) fn slot_count(&self) -> usize {
         self.active.len()
     }

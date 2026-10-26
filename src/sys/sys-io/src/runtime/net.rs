@@ -28,6 +28,11 @@ mod icmp;
 )]
 mod packet_device;
 mod pressure;
+#[cfg_attr(
+    not(debug_assertions),
+    expect(dead_code, reason = "registration IPC follows in step 3")
+)]
+mod registration;
 #[cfg(debug_assertions)]
 mod self_test;
 mod socket;
@@ -46,6 +51,7 @@ pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
     devices::self_test::TESTS,
     half_open::self_test::TESTS,
     packet_device::self_test::TESTS,
+    registration::self_test::TESTS,
     self_test::TESTS,
     stats::self_test::TESTS,
 ];
@@ -139,6 +145,7 @@ impl NetRuntimeInner {
 
 #[derive(Clone)]
 struct NetRuntime {
+    interface_policy: device::InterfacePolicy,
     inner: Rc<RefCell<NetRuntimeInner>>,
 
     stats: Rc<stats::NetStats>,
@@ -816,6 +823,12 @@ impl NetRuntime {
         expect(dead_code, reason = "registration follows in step 3")
     )]
     async fn remove_device(&self, device_idx: usize) {
+        self.remove_device_inner(device_idx, true).await;
+    }
+
+    // A failed registration may briefly expand a listener whose old physical
+    // address was withdrawn. Rollback preserves that listener and its accepts.
+    async fn remove_device_inner(&self, device_idx: usize, detach_listeners: bool) {
         if !self.inner.borrow_mut().devices.retire(device_idx) {
             return;
         }
@@ -842,10 +855,12 @@ impl NetRuntime {
         self.rebuild_ip_addresses();
         self.stats.num_devices.set(self.stats.num_devices.get() - 1);
         let mut accepts = Vec::new();
-        for listener in listeners {
-            accepts.push(tcp_listener::TcpListener::detach_device(
-                &listener, device_idx,
-            ));
+        if detach_listeners {
+            for listener in listeners {
+                accepts.push(tcp_listener::TcpListener::detach_device(
+                    &listener, device_idx,
+                ));
+            }
         }
         let mut notices = Vec::new();
         for socket in sockets {
@@ -1123,6 +1138,7 @@ pub(super) async fn init(
         .map(|(_, device)| device.config().dns_servers.clone())
         .collect::<Vec<_>>();
     let runtime = NetRuntime {
+        interface_policy: (&config).into(),
         inner: Rc::new(RefCell::new(NetRuntimeInner {
             next_socket_id: 1,
             sockets: HashMap::new(),

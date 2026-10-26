@@ -19,10 +19,13 @@ pub(super) const TESTS: &[SelfTest] = &[
     ),
 ];
 
-fn runtime() -> std::result::Result<NetRuntime, String> {
+pub(super) fn runtime() -> std::result::Result<NetRuntime, String> {
     let fs = crate::runtime::fs::self_test::runtime().map_err(|error| error.to_string())?;
     let stats = Rc::new(stats::NetStats::default());
+    let config: config::NetConfig =
+        toml::from_str("auto_icmp_echo_reply = false\nloopback = true\n[devices]\n").unwrap();
     Ok(NetRuntime {
+        interface_policy: (&config).into(),
         inner: Rc::new(RefCell::new(NetRuntimeInner {
             next_socket_id: 1,
             sockets: HashMap::new(),
@@ -59,7 +62,7 @@ fn runtime() -> std::result::Result<NetRuntime, String> {
     })
 }
 
-fn add_device(runtime: &NetRuntime, name: &str, address: &str) -> usize {
+pub(super) fn add_device(runtime: &NetRuntime, name: &str, address: &str) -> usize {
     let config: config::NetConfig =
         toml::from_str("auto_icmp_echo_reply = false\nloopback = true\n[devices]\n").unwrap();
     let mut cfg = config::DeviceCfg::new("02:00:00:00:00:01");

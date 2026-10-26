@@ -607,10 +607,6 @@ impl moto_netstack::phy::Device for VirtioDevice {
 pub(super) enum NetstackDevice {
     VirtIo(VirtioDevice),
     Loopback(moto_netstack::phy::Loopback),
-    #[cfg_attr(
-        not(debug_assertions),
-        expect(dead_code, reason = "registration follows in step 3")
-    )]
     Packet(super::packet_device::PacketDevice),
 }
 
@@ -1110,10 +1106,6 @@ impl<'a> NetDev<'a> {
         &self.name
     }
 
-    #[cfg_attr(
-        not(debug_assertions),
-        expect(dead_code, reason = "registration follows in step 3")
-    )]
     pub(super) fn is_packet(&self) -> bool {
         matches!(self.device, NetstackDevice::Packet(_))
     }
