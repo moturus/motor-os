@@ -5,6 +5,9 @@ use moto_netstack::socket::{tcp, udp};
 use moto_netstack::time::{Duration, Instant};
 use moto_netstack::wire::{HardwareAddress, IpAddress, IpCidr};
 
+#[cfg(test)]
+mod tests;
+
 pub const TCP_ECHO_PORT: u16 = 7000;
 pub const UDP_ECHO_PORT: u16 = 7001;
 pub const BENCH_PORT: u16 = 40000;
