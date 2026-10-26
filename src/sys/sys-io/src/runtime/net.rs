@@ -22,16 +22,8 @@ mod device;
 mod devices;
 mod half_open;
 mod icmp;
-#[cfg_attr(
-    not(debug_assertions),
-    expect(dead_code, reason = "registration follows in step 3")
-)]
 mod packet_device;
 mod pressure;
-#[cfg_attr(
-    not(debug_assertions),
-    expect(dead_code, reason = "registration IPC follows in step 3")
-)]
 mod registration;
 #[cfg(debug_assertions)]
 mod self_test;
@@ -818,10 +810,6 @@ impl NetRuntime {
         }
     }
 
-    #[cfg_attr(
-        not(debug_assertions),
-        expect(dead_code, reason = "registration follows in step 3")
-    )]
     async fn remove_device(&self, device_idx: usize) {
         self.remove_device_inner(device_idx, true).await;
     }

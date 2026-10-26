@@ -1,10 +1,82 @@
 //! Device admission and publication on the single-threaded net runtime.
 use super::*;
+use futures::Stream;
 use moto_sdk::sys_io::api_ip_device::Registration;
+use moto_sdk::{
+    ipc::io_channel::{self, Msg},
+    sys_io::api_ip_device,
+};
 
 const MAX_DEVICES: usize = 4;
 
 impl NetRuntime {
+    #[expect(dead_code, reason = "registration dispatch follows in step 3")]
+    pub(super) async fn serve_packet_provider(
+        &self,
+        first: Msg,
+        sender: &channel_budget::ClientSender,
+        receiver: io_channel::Receiver,
+    ) {
+        let role = moto_sys::caps::ProcessRole::from_caps(
+            self.inner.borrow().clients[&sender.remote_handle()].capabilities,
+        );
+        if role == moto_sys::caps::ProcessRole::None
+            || self.connection_pid(sender.remote_handle()) == 0
+        {
+            let _ = sender.send(reply(&first, moto_rt::E_NOT_ALLOWED)).await;
+            return;
+        }
+        if first.id != 1 {
+            let _ = moto_sys::SysCpu::kill_remote(sender.remote_handle());
+            return;
+        }
+        let framing = (|| {
+            let length = api_ip_device::page_length(&first)?;
+            let page = sender.get_remote_page(first.payload.shared_pages()[11])?;
+            Ok::<_, moto_rt::Error>((length, page))
+        })();
+        let registration = if let Ok((length, page)) = framing {
+            let mut bytes = [0; io_channel::PAGE_SIZE];
+            bytes[..length].copy_from_slice(&page.bytes()[..length]);
+            drop(page);
+            Registration::decode(&bytes[..length])
+        } else {
+            let _ = moto_sys::SysCpu::kill_remote(sender.remote_handle());
+            return;
+        };
+        let registration = match registration {
+            Ok(registration) => registration,
+            Err(error) => {
+                let _ = sender.send(reply(&first, error.into())).await;
+                return;
+            }
+        };
+        let (index, packet) = match self.register_packet_device(registration).await {
+            Ok(device) => device,
+            Err(error) => {
+                let _ = sender
+                    .send(reply(
+                        &first,
+                        crate::util::map_err_into_native(error).into(),
+                    ))
+                    .await;
+                return;
+            }
+        };
+        let terminal = if sender.send(reply(&first, moto_rt::E_OK)).await.is_ok() {
+            // Both directions keep progressing when the other's ring or page
+            // pool fills. Leaving this scope drops in-flight page guards first.
+            transfer_packets(sender, receiver, &packet).await
+        } else {
+            None
+        };
+        drop(packet);
+        self.remove_device(index).await;
+        if let Some(terminal) = terminal {
+            let _ = sender.send(reply(&terminal, moto_rt::E_OK)).await;
+        }
+    }
+
     pub(super) async fn register_packet_device(
         &self,
         registration: Registration,
@@ -124,6 +196,113 @@ impl NetRuntime {
         }
         self.spawn_device_runtime(index);
         Ok((index, packet))
+    }
+}
+
+fn reply(request: &Msg, status: moto_rt::ErrorCode) -> Msg {
+    let mut msg = Msg::new();
+    msg.id = request.id;
+    msg.command = request.command;
+    msg.status = status;
+    msg
+}
+
+async fn transfer_packets(
+    sender: &channel_budget::ClientSender,
+    mut receiver: io_channel::Receiver,
+    packet: &packet_device::PacketDevice,
+) -> Option<Msg> {
+    use core::task::Poll;
+    enum Event {
+        Received(moto_rt::Result<Msg>),
+        Sent(moto_rt::Result<()>),
+    }
+    // The stream retains a pending send and its token/page when input wins.
+    // One outer loop owns the I/O yield: sibling futures must not request
+    // multiple runtime I/O turns during one executor poll.
+    let outgoing = futures::stream::unfold((), |_| async {
+        Some((send_packet(sender, packet).await, ()))
+    });
+    futures::pin_mut!(outgoing);
+    let mut prefer_rx = true;
+    let mut batch = 0;
+    loop {
+        let event = core::future::poll_fn(|cx| {
+            for rx in [prefer_rx, !prefer_rx] {
+                if rx {
+                    if let Poll::Ready(result) = receiver.poll_recv(cx) {
+                        return Poll::Ready(Event::Received(result));
+                    }
+                } else if let Poll::Ready(Some(result)) = outgoing.as_mut().poll_next(cx) {
+                    return Poll::Ready(Event::Sent(result));
+                }
+            }
+            Poll::Pending
+        })
+        .await;
+        match event {
+            Event::Sent(Ok(())) => prefer_rx = true,
+            Event::Sent(Err(_)) | Event::Received(Err(_)) => return None,
+            Event::Received(Ok(msg)) => {
+                prefer_rx = false;
+                match receive_packet(&receiver, packet, msg) {
+                    Ok(Some(terminal)) => return Some(terminal),
+                    Ok(None) => {}
+                    Err(_) => {
+                        let _ = moto_sys::SysCpu::kill_remote(sender.remote_handle());
+                        return None;
+                    }
+                }
+            }
+        }
+        batch += 1;
+        if batch == 32 {
+            batch = 0;
+            moto_sdk::async_runtime::yield_to_io().await;
+        }
+    }
+}
+
+fn receive_packet(
+    receiver: &io_channel::Receiver,
+    packet: &packet_device::PacketDevice,
+    msg: Msg,
+) -> moto_rt::Result<Option<Msg>> {
+    if msg.command == NetCmd::IpDeviceUnregister.as_u16()
+        && msg.id == 2
+        && msg.handle == 0
+        && msg.flags == 0
+        && msg.wake_handle == 0
+        && msg.payload.args_8().iter().all(|byte| *byte == 0)
+    {
+        return Ok(Some(msg));
+    }
+    if msg.command != NetCmd::IpDevicePacket.as_u16() || msg.id != 0 {
+        return Err(moto_rt::Error::InvalidArgument);
+    }
+    let length = api_ip_device::page_length(&msg)?;
+    let page = receiver.get_remote_page(msg.payload.shared_pages()[11])?;
+    packet.submit(&page.bytes()[..length]);
+    Ok(None)
+}
+
+async fn send_packet(
+    sender: &channel_budget::ClientSender,
+    packet: &packet_device::PacketDevice,
+) -> moto_rt::Result<()> {
+    loop {
+        let ready = packet.tx_ready.notified();
+        let Some(outbound) = packet.take_outbound() else {
+            ready.await;
+            continue;
+        };
+        let page = sender.alloc_page(u64::MAX).await?;
+        page.bytes_mut()[..outbound.bytes().len()].copy_from_slice(outbound.bytes());
+        let page = io_channel::IoPage::into_u16(page);
+        let msg = api_ip_device::page_message(NetCmd::IpDevicePacket, page, outbound.bytes().len())
+            .unwrap();
+        sender.send_with_owned_page(msg, page).await?;
+        return Ok(());
     }
 }
 
