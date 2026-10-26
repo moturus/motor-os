@@ -843,6 +843,7 @@ pub(super) struct NetDev<'a> {
     device: NetstackDevice,
     iface: moto_netstack::iface::Interface,
     pub(super) sockets: moto_netstack::iface::SocketSet<'a>,
+    pub(super) pending_tasks: usize,
     dhcp_socket: Option<moto_netstack::iface::SocketHandle>,
     dhcp_lease: Option<DhcpLease>,
 
@@ -1060,6 +1061,7 @@ impl<'a> NetDev<'a> {
             icmp_identifiers_in_use: std::collections::HashMap::new(),
             device_runtime_notify: notify,
             poll_waiters: Vec::new(),
+            pending_tasks: 0,
         }
     }
 
@@ -1188,6 +1190,7 @@ impl<'a> NetDev<'a> {
             icmp_identifiers_in_use,
             device_runtime_notify: notify,
             poll_waiters,
+            pending_tasks: _,
             external: _,
         } = self;
         // Every segment this poll emits reads the timestamp clock, so it is

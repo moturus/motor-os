@@ -27,7 +27,7 @@ mod lock_manager;
 mod mbr;
 mod mounts;
 #[cfg(debug_assertions)]
-mod self_test;
+pub(super) mod self_test;
 mod spawn;
 pub mod stats;
 mod virtio_partition;

@@ -629,7 +629,7 @@ impl MotoSocket {
         let runtime = tcp_listener.borrow().runtime().clone();
         runtime.pressure.admit()?;
         // Create the socket.
-        let (weak_socket, key) = {
+        let (weak_socket, key, socket_id) = {
             let mut tcp_listener_mut = tcp_listener.borrow_mut();
 
             // Read at construction time: a size configured on the listener
@@ -686,7 +686,11 @@ impl MotoSocket {
             let key = (tcp_listener_mut.listener_id(), socket_addr);
             runtime.backlog.entered_listen(key);
 
-            (Rc::downgrade(&moto_socket), key)
+            (
+                Rc::downgrade(&moto_socket),
+                key,
+                moto_socket.borrow().socket_id(),
+            )
         };
 
         // A fresh listening socket resumes stateful admission for this
@@ -697,17 +701,23 @@ impl MotoSocket {
         // still current. Deferring the waiter until the listen task's first
         // poll let a large new pool queue heap growth past that boundary.
         let (connected_tx, connected_rx) = moto_sdk::async_runtime::oneshot();
-        moto_sdk::async_runtime::LocalRuntime::spawn(async move {
+        let listen_runtime = runtime.clone();
+        listen_runtime.spawn_device_task(device_idx, async move {
             let _ = connected_rx.await;
             replenish_pool(runtime, weak_listener, device_idx, socket_addr, key);
         });
 
-        moto_sdk::async_runtime::LocalRuntime::spawn(Self::tcp_listen_task(
-            connected_tx,
-            weak_socket,
+        listen_runtime.spawn_device_task(
             device_idx,
-            key,
-        ));
+            Self::tcp_listen_task(
+                listen_runtime.clone(),
+                socket_id,
+                connected_tx,
+                weak_socket,
+                device_idx,
+                key,
+            ),
+        );
 
         Ok(())
     }
@@ -798,26 +808,20 @@ impl MotoSocket {
             "tcp: cookie handshake completed: {:?} => {local_addr:?}",
             restore.remote
         );
-        Self::on_incoming_connection(Rc::downgrade(&moto_socket)).await;
+        let weak_socket = Rc::downgrade(&moto_socket);
+        drop(moto_socket);
+        Self::on_incoming_connection(weak_socket).await;
     }
 
     async fn tcp_listen_task(
+        runtime: NetRuntime,
+        socket_id: u64,
         connected_tx: moto_sdk::async_runtime::oneshot::Sender<()>,
         weak_socket: Weak<RefCell<Self>>, // Weak because called asynchronously.
         device_idx: usize,
         key: super::super::backlog::PoolKey,
     ) {
         let (listener_id, _) = key;
-        let (socket_id, runtime) = {
-            let Some(moto_socket) = weak_socket.upgrade() else {
-                return;
-            };
-            (
-                moto_socket.borrow().socket_id(),
-                moto_socket.borrow().base.runtime.clone(),
-            )
-        };
-
         log::debug!("listen task for 0x{socket_id:x}");
 
         // First, wait for a state change.
@@ -1022,9 +1026,16 @@ impl MotoSocket {
         };
 
         let (accepted_tx, accepted_rx) = moto_sdk::async_runtime::oneshot();
+        let (runtime, device_idx) = {
+            let socket = moto_socket.borrow();
+            (
+                socket.base.runtime.clone(),
+                socket.base.ip_backend().device_idx,
+            )
+        };
         TcpListener::on_socket_connected(tcp_listener, moto_socket, accepted_tx).await;
 
-        let _ = moto_sdk::async_runtime::LocalRuntime::spawn(async move {
+        runtime.spawn_device_task(device_idx, async move {
             // We don't do I/O on the socket until it is accepted by the client.
             if accepted_rx.await.is_err() {
                 return;
@@ -1144,10 +1155,18 @@ impl MotoSocket {
             msg
         };
 
+        let (runtime, device_idx) = {
+            let socket = moto_socket.borrow();
+            (
+                socket.base.runtime.clone(),
+                socket.base.ip_backend().device_idx,
+            )
+        };
         if Self::publish_ip_socket(moto_socket, msg).await {
-            let _ = moto_sdk::async_runtime::LocalRuntime::spawn(async move {
-                Self::tcp_read_task(weak_socket).await
-            });
+            runtime.spawn_device_task(
+                device_idx,
+                async move { Self::tcp_read_task(weak_socket).await },
+            );
         }
     }
 
@@ -1173,9 +1192,16 @@ impl MotoSocket {
             }
             assert!(socket.unwrap_tcp_mut().cancel_rx.replace(cancel).is_none());
         }
+        let (runtime, device_idx) = {
+            let socket = moto_socket.borrow();
+            (
+                socket.base.runtime.clone(),
+                socket.base.ip_backend().device_idx,
+            )
+        };
         drop(moto_socket);
         let weak_socket_cloned = weak_socket.clone();
-        let _ = moto_sdk::async_runtime::LocalRuntime::spawn(async move {
+        runtime.spawn_device_task(device_idx, async move {
             Self::tcp_write_task(weak_socket_cloned).await
         });
 
@@ -1815,7 +1841,14 @@ impl MotoSocket {
             log::debug!("TCP socket 0x{socket_id:x}: lingering for {linger_secs} seconds.");
             let deadline = moto_sdk::async_runtime::Instant::now()
                 + std::time::Duration::from_secs(linger_secs as u64);
-            moto_sdk::async_runtime::LocalRuntime::spawn(async move {
+            let (runtime, device_idx) = {
+                let socket = moto_socket.borrow();
+                (
+                    socket.base.runtime.clone(),
+                    socket.base.ip_backend().device_idx,
+                )
+            };
+            runtime.spawn_device_task(device_idx, async move {
                 Self::tcp_linger_task(socket_clone, deadline, linger_cancel, lingerer, close_req)
                     .await
             });
@@ -2147,7 +2180,7 @@ impl MotoSocket {
 
         // Spawn the socket task.
 
-        moto_sdk::async_runtime::LocalRuntime::spawn(async move {
+        runtime.spawn_device_task(device_idx, async move {
             Self::tcp_connect_task(weak_socket).await;
         });
 

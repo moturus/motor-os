@@ -18,7 +18,7 @@ pub(super) fn memfs(cap: u64) -> Result<FS> {
     })?))
 }
 
-pub(super) fn runtime() -> Result<FsRuntime> {
+pub(in crate::runtime) fn runtime() -> Result<FsRuntime> {
     let exec_locks: Rc<RefCell<spawn::ExecLocks>> = Default::default();
     Ok(FsRuntime {
         mounts: Rc::new(RefCell::new(mounts::MountTable::new(memfs(1 << 20)?))),

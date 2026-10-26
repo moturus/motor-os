@@ -23,6 +23,8 @@ mod devices;
 mod half_open;
 mod icmp;
 mod pressure;
+#[cfg(debug_assertions)]
+mod self_test;
 mod socket;
 pub(crate) mod stats;
 mod tcp_listener;
@@ -38,6 +40,7 @@ pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
     device::self_test::TESTS,
     devices::self_test::TESTS,
     half_open::self_test::TESTS,
+    self_test::TESTS,
     stats::self_test::TESTS,
 ];
 
@@ -158,7 +161,41 @@ struct NetRuntime {
     channel_budget: Rc<channel_budget::ChannelBudget>,
 }
 
+// A canceled task may still own pages or queues after its socket disappears.
+// Count it before spawning, including the interval before its first poll.
+struct DeviceTask {
+    inner: Rc<RefCell<NetRuntimeInner>>,
+    device_idx: usize,
+}
+
+impl Drop for DeviceTask {
+    fn drop(&mut self) {
+        let mut inner = self.inner.borrow_mut();
+        inner.devices[self.device_idx].pending_tasks -= 1;
+        inner.devices.reap(self.device_idx);
+    }
+}
+
 impl NetRuntime {
+    fn spawn_device_task(&self, device_idx: usize, task: impl Future<Output = ()> + 'static) {
+        {
+            let mut inner = self.inner.borrow_mut();
+            let Some(device) = inner.devices.get_mut(device_idx) else {
+                return;
+            };
+            device.pending_tasks += 1;
+        }
+        let work = DeviceTask {
+            inner: self.inner.clone(),
+            device_idx,
+        };
+        // Map keeps the task in place rather than duplicating its storage in
+        // another async block, and needs no additional heap allocation.
+        moto_sdk::async_runtime::LocalRuntime::spawn(futures::FutureExt::map(task, move |()| {
+            drop(work);
+        }));
+    }
+
     fn client_is_active(&self, handle: SysHandle) -> bool {
         self.inner
             .borrow()
@@ -216,7 +253,7 @@ impl NetRuntime {
     fn spawn_device_runtime(&self, device_idx: usize) {
         let this = self.clone();
 
-        let _ = moto_sdk::async_runtime::LocalRuntime::spawn(async move {
+        self.spawn_device_task(device_idx, async move {
             let (notify, name) = {
                 let inner = this.inner.borrow();
                 let Some(device) = inner.devices.get(device_idx) else {
@@ -266,7 +303,7 @@ impl NetRuntime {
                         this.inner.borrow_mut().devices[device_idx].take_tcp_cookie_restores();
                     for restore in restores {
                         let runtime = this.clone();
-                        moto_sdk::async_runtime::LocalRuntime::spawn(async move {
+                        this.spawn_device_task(device_idx, async move {
                             socket::MotoSocket::create_tcp_restored_socket(
                                 &runtime, device_idx, restore,
                             )

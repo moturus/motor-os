@@ -200,8 +200,15 @@ impl MotoSocket {
                     .is_none()
             );
         }
+        let (runtime, device_idx) = {
+            let socket = socket.borrow();
+            (
+                socket.base.runtime.clone(),
+                socket.base.ip_backend().device_idx,
+            )
+        };
         drop(socket);
-        let _ = moto_sdk::async_runtime::LocalRuntime::spawn(async move {
+        runtime.spawn_device_task(device_idx, async move {
             let receive = async {
                 while Self::udp_rx(weak_socket.clone()).await {
                     moto_sdk::async_runtime::yield_now().await;

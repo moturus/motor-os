@@ -6,8 +6,9 @@ Device-index lifetime and client UDP invalidation are complete.
 UDP and ICMP cancellation are complete.
 The preexisting TCP port-selection and UDP self-delivery prerequisites
 are complete.
-TCP cancellation and socket-publication ordering are complete;
-server-side socket and listener removal remain in this step.
+TCP cancellation, socket-publication ordering and device-task lifetime
+accounting are complete. Server-side socket invalidation is being completed
+next, followed by listener removal.
 Parallel work: steps 6-8 - standalone `wg` and the independent host peer.
 The preexisting strobe allocation failure is deferred in future-work.md.
 

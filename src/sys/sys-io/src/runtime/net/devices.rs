@@ -72,8 +72,13 @@ impl Devices {
     }
 
     pub(super) fn reap(&mut self, index: usize) {
+        if let Some(retired) = self.retiring.get(&index) {
+            retired.device.device_runtime_notify.notify_all();
+        }
         if self.retiring.get(&index).is_some_and(|retired| {
-            retired.cleanup_complete && retired.device.sockets.iter().next().is_none()
+            retired.cleanup_complete
+                && retired.device.pending_tasks == 0
+                && retired.device.sockets.iter().next().is_none()
         }) {
             self.retiring.remove(&index);
         }
