@@ -281,65 +281,83 @@ impl MotoSocket {
         }
     }
 
-    pub(super) async fn invalidate_ip_socket(socket: Rc<RefCell<Self>>) -> Option<RemovalNotice> {
+    fn removal_notice(
+        &mut self,
+        pending_connect: Option<moto_sdk::ipc::io_channel::Msg>,
+    ) -> Option<RemovalNotice> {
         use moto_sdk::{ipc::io_channel::Msg, sys_io::api_net};
 
-        let tcp = socket.borrow().is_tcp();
-        let pending_connect = tcp.then(|| Self::prepare_removed_tcp(&socket)).flatten();
+        let ip = self.base.ip_backend_mut();
+        let publication = std::mem::replace(&mut ip.publication, IpSocketPublication::Private);
+        let (published, reply_ready) = match publication {
+            IpSocketPublication::Private => (false, None),
+            IpSocketPublication::Sending(ready) => (true, Some(ready)),
+            IpSocketPublication::Published => (true, None),
+        };
+        let sender = self.base.client_sender.clone()?;
+        let mut message = if let Some(mut connect) = pending_connect {
+            connect.status = moto_rt::E_NOT_CONNECTED;
+            connect
+        } else if published {
+            let mut message = Msg::new();
+            message.status = moto_rt::E_OK;
+            if self.is_tcp() {
+                message.command = api_net::NetCmd::EvtTcpStreamStateChanged as u16;
+                message.payload.args_32_mut()[0] = api_net::TcpState::Closed.into();
+                message.payload.args_32_mut()[1] = api_net::TCP_STATE_CHANGE_CAUSE_RESET;
+            } else {
+                message.command = api_net::NetCmd::EvtUdpSocketInvalidated as u16;
+            }
+            message
+        } else {
+            return None;
+        };
+        message.handle = self.base.socket_id;
+        Some(RemovalNotice {
+            sender,
+            message,
+            reply_ready,
+        })
+    }
+
+    pub(super) fn is_udp_transport_on(&self, address: std::net::IpAddr, device_idx: usize) -> bool {
+        matches!(&self.state, SocketState::Udp(state) if state.physical_transport)
+            && self.device_index() == Some(device_idx)
+            && self.base.ip_backend().local_addr.ip() == address
+    }
+
+    /// Remove queued output before address-change processing can poll the NIC.
+    /// Only delivery of the terminal notice may wait on a slow client.
+    pub(super) fn invalidate_udp_socket(socket: Rc<RefCell<Self>>) -> Option<RemovalNotice> {
         let (runtime, socket_id, client_handle, notice) = {
             let mut socket = socket.borrow_mut();
-            let ip = socket.base.ip_backend_mut();
-            let publication = std::mem::replace(&mut ip.publication, IpSocketPublication::Private);
-            let (published, reply_ready) = match publication {
-                IpSocketPublication::Private => (false, None),
-                IpSocketPublication::Sending(ready) => (true, Some(ready)),
-                IpSocketPublication::Published => (true, None),
-            };
-            let base = &socket.base;
-            let notice = base.client_sender.clone().and_then(|sender| {
-                let mut message = if let Some(mut connect) = pending_connect {
-                    connect.status = moto_rt::E_NOT_CONNECTED;
-                    connect
-                } else if published {
-                    let mut message = Msg::new();
-                    message.status = moto_rt::E_OK;
-                    if tcp {
-                        message.command = api_net::NetCmd::EvtTcpStreamStateChanged as u16;
-                        message.payload.args_32_mut()[0] = api_net::TcpState::Closed.into();
-                        message.payload.args_32_mut()[1] = api_net::TCP_STATE_CHANGE_CAUSE_RESET;
-                    } else {
-                        message.command = api_net::NetCmd::EvtUdpSocketInvalidated as u16;
-                    }
-                    message
-                } else {
-                    return None;
-                };
-                message.handle = base.socket_id;
-                Some(RemovalNotice {
-                    sender,
-                    message,
-                    reply_ready,
-                })
-            });
+            assert!(matches!(socket.state, SocketState::Udp(_)));
+            let notice = socket.removal_notice(None);
             (
-                base.runtime.clone(),
-                base.socket_id,
-                base.client_handle,
+                socket.base.runtime.clone(),
+                socket.base.socket_id,
+                socket.base.client_handle,
                 notice,
             )
         };
-        if tcp {
-            Self::drop_tcp_socket(socket).await;
-        } else {
-            {
-                let mut inner = runtime.inner.borrow_mut();
-                if let Some(client) = inner.clients.get_mut(&client_handle) {
-                    client.sockets.remove(&socket_id);
-                }
-                inner.sockets.remove(&socket_id);
+        {
+            let mut inner = runtime.inner.borrow_mut();
+            if let Some(client) = inner.clients.get_mut(&client_handle) {
+                client.sockets.remove(&socket_id);
             }
-            drop(socket);
+            inner.sockets.remove(&socket_id);
         }
+        drop(socket);
+        notice
+    }
+
+    pub(super) async fn invalidate_ip_socket(socket: Rc<RefCell<Self>>) -> Option<RemovalNotice> {
+        if !socket.borrow().is_tcp() {
+            return Self::invalidate_udp_socket(socket);
+        }
+        let pending_connect = Self::prepare_removed_tcp(&socket);
+        let notice = socket.borrow_mut().removal_notice(pending_connect);
+        Self::drop_tcp_socket(socket).await;
         notice
     }
 

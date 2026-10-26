@@ -81,6 +81,31 @@ impl TxQueueState {
     fn take_exhausted(&mut self) -> bool {
         std::mem::take(&mut self.exhausted)
     }
+
+    fn discard_source(&mut self, address: IpAddr) {
+        use moto_netstack::wire::{EthernetFrame, EthernetProtocol, Ipv4Packet, Ipv6Packet};
+        self.work.retain(|(packet, _)| {
+            let bytes: &[u8] = packet.as_ref();
+            let source =
+                EthernetFrame::new_checked(bytes)
+                    .ok()
+                    .and_then(|frame| match frame.ethertype() {
+                        EthernetProtocol::Ipv4 => Ipv4Packet::new_checked(frame.payload())
+                            .ok()
+                            .map(|packet| IpAddr::from(packet.src_addr())),
+                        EthernetProtocol::Ipv6 => Ipv6Packet::new_checked(frame.payload())
+                            .ok()
+                            .map(|packet| IpAddr::from(packet.src_addr())),
+                        _ => None,
+                    });
+            if source == Some(address) {
+                self.bytes -= packet.capacity();
+                false
+            } else {
+                true
+            }
+        });
+    }
 }
 
 type TxQueue = Rc<RefCell<TxQueueState>>;
@@ -1459,6 +1484,13 @@ impl<'a> NetDev<'a> {
 
     pub(super) fn is_external(&self) -> bool {
         self.external
+    }
+
+    pub(super) fn discard_queued_source(&mut self, address: IpAddr) {
+        if let NetstackDevice::VirtIo(device) = &mut self.device {
+            device.tx_queue.borrow_mut().discard_source(address);
+            self.device_runtime_notify.notify_one();
+        }
     }
 
     pub(super) fn get_ephemeral_udp_port(&mut self, _local_ip_addr: &IpAddr) -> Option<u16> {

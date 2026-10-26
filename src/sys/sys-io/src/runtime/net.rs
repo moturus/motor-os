@@ -824,8 +824,24 @@ impl NetRuntime {
         };
 
         for (address, device_idx) in removed {
+            if let Some(device) = self.inner.borrow_mut().devices.get_mut(device_idx) {
+                device.discard_queued_source(address);
+            }
             for listener in &listeners {
                 tcp_listener::TcpListener::remove_address(listener, address, device_idx);
+            }
+            let transports = self
+                .inner
+                .borrow()
+                .sockets
+                .values()
+                .filter(|socket| socket.borrow().is_udp_transport_on(address, device_idx))
+                .cloned()
+                .collect::<Vec<_>>();
+            for transport in transports {
+                if let Some(notice) = MotoSocket::invalidate_udp_socket(transport) {
+                    self.spawn_device_task(device_idx, notice.send());
+                }
             }
         }
         for (address, device_idx) in added {
