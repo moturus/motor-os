@@ -37,7 +37,7 @@ The declaration is data only. The values that matter most:
   declared so that a wrong gitlink is an error, not a surprise.
 - `UPSTREAM_RUST_REV`, `UPSTREAM_STAGE0_REV`, `RUST_LLVM_BASE_REV`: the
   upstream Rust base, its Stage 0 bootstrap compiler, and the upstream LLVM
-  commit that the Motor LLVM patches sit on. Recorded for lineage; the
+  commit that the Motor OS LLVM patches sit on. Recorded for lineage; the
   producer checks them against the fork, and they are no key input.
 - `MOTOR_RUST_ROOT_LOCK_SHA256`, `MOTOR_RUST_LIBRARY_LOCK_SHA256`,
   `MOTOR_RUST_ANALYZER_LOCK_SHA256`: hashes of the three Cargo lockfiles at
@@ -172,7 +172,7 @@ toolchain key → assembly key → overlays and sysroot.
 5. Renders `toolchain-state/<key>/bootstrap.toml` and claims the prefix. An
    existing prefix directory is reused after validation of every component,
    source commit, sysroot, lock hash, and compile probe; otherwise `x.py`
-   installs rustc, rustdoc, Cargo, host and Motor std, Clippy, rust-analyzer,
+   installs rustc, rustdoc, Cargo, host and Motor OS std, Clippy, rust-analyzer,
    rustfmt, and `rust-src` into it, and the manifest and stamp are written
    read-only. The prefix is then linked into rustup.
 6. Derives the assembly key and claims the assembly. A completed assembly is
@@ -198,8 +198,8 @@ deleted by a build.
 
 ### Rust runtime and native formatting
 
-The selected `.dev.2` Motor target defaults to `panic=unwind`. rustc,
-rustfmt, rust-analyzer, and ordinary applications use the standard Motor
+The selected `.dev.2` Motor OS target defaults to `panic=unwind`. rustc,
+rustfmt, rust-analyzer, and ordinary applications use the standard Motor OS
 sysroots; the analyzer's private patched-library build has been retired.
 Salsa cancellation and rustfmt's speculative parsing require real unwinding.
 System binaries retain explicit abort profiles in both image modes;
@@ -211,7 +211,7 @@ abort profiles using `-Zbuild-std=core,alloc`. The VDSO's debug build keeps
 `core`, `alloc`, and `compiler_builtins` optimized without assertions,
 matching the prebuilt sysroot behavior and avoiding runtime latency growth.
 
-Rust std registers the executable's unwind metadata finder during Motor's
+Rust std registers the executable's unwind metadata finder during Motor OS's
 `std::rt::init`. For mlibc-linked binaries it also registers through
 `.init_array.00001`, before ordinary C++ static constructors can throw.
 Both entry paths must keep this registration. The finder reads static ELF
@@ -235,16 +235,16 @@ constructors, unwind sections, and static-PIE protections on native tools.
 `src/tests/test-unwind.sh` validates its own binaries and exercises both
 entry paths, abort and fat-LTO builds, and Rust/C++ destructor propagation.
 
-Native rustfmt is built by Rust bootstrap with the compiler-private Motor
+Native rustfmt is built by Rust bootstrap with the compiler-private Motor OS
 rlibs, packaged at `/devtools/rust/bin/rustfmt`, and exposed through the
 `/devtools/bin/rustfmt` launcher.
 Helix selects the binary through its server's `RUSTFMT` environment; see
 the [editor guide](helix.md#native-rust-integration).
 
 rustfmt searches the input directory and its ancestors, then `/user`, then
-`/user/cfg/rustfmt` for `rustfmt.toml` or `.rustfmt.toml`. Motor ignores
+`/user/cfg/rustfmt` for `rustfmt.toml` or `.rustfmt.toml`. Motor OS ignores
 `HOME` and `XDG_CONFIG_HOME` for these lookups; `dirs` and `dirs-sys` are
-compiled only off Motor, with no additional fork. Native fixtures cover
+compiled only off Motor OS, with no additional fork. Native fixtures cover
 project and user configuration, ignored environment settings, editions, macros,
 and parser/lexer-error recovery. The size gates bound both the stripped
 formatter and its fresh-image growth at 21 MiB. Source, producer, runtime,

@@ -19,7 +19,7 @@ setup use `sudo`, and both run at the very start, so the rest of the build can
 be left unattended; managed source and dependency acquisition uses the network.
 If the build is interrupted or fails, run the same command again.
 
-The repository's `rust-toolchain.toml` selects the exact, key-qualified Motor
+The repository's `rust-toolchain.toml` selects the exact, key-qualified Motor OS
 toolchain. After the unified build succeeds, ordinary repository commands use
 that toolchain without a `+nightly`, `+stable`, or legacy `+dev-*` selector:
 
@@ -39,7 +39,7 @@ assemblies/      keyed C sysroots, native tools, and generated image roots
 ripgrep/ helix/ sed/ lua-<version>/
                  sources of the userspace add-ons, built last
 javy/ wasmi/ wasmtime/ target-lexicon/ tokio/ mio/
-                 published Motor branches for the Javy/Wasmi and Wasmtime add-ons
+                 published Motor OS branches for the Javy/Wasmi and Wasmtime add-ons
 wasi-sdk-24.0-x86_64-linux/
                  pinned wasi-sdk for the QuickJS code of the Javy test plugins
 ```
@@ -82,7 +82,7 @@ other running VM.
 The wasm image has a 1 GiB data partition and does not include the native
 development toolchain. The full Wasmtime compiler follows in a later milestone.
 
-On Motor, compile into a writable directory and execute with explicit masks:
+On Motor OS, compile into a writable directory and execute with explicit masks:
 
 ```sh
 MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -o /none/tmp/hello.wasm
@@ -114,7 +114,7 @@ refusals, TypeScript and WASI p2 sockets. `src/tests/full-test-dev.sh --release`
 runs them on the wasm image at 224 MiB and the developer image at 256 MiB, and
 the Linux identity checks once; debug suites skip them.
 Engine regressions remain in the owning forks. Upstream Brotli is used; compressed
-source bytes can differ between Linux and Motor because their math libraries
+source bytes can differ between Linux and Motor OS because their math libraries
 round some logarithms differently.
 
 For the source layout, authoring mode, generated manifests, and update policy,

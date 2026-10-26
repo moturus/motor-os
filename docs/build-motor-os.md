@@ -2,11 +2,11 @@
 
 `src/build-motor-os.sh` is the single supported entry point for building the
 Motor OS compiler/runtime assembly and all release images. It builds Linux-host
-Rust tools, standalone LLVM/Clang, the C/C++ sysroot, native Motor LLVM and
+Rust tools, standalone LLVM/Clang, the C/C++ sysroot, native Motor OS LLVM and
 rustc, and the OS from one reviewed source tuple.
 
 The current development tuple is the exact Rust 1.99 beta baseline declared in
-`src/toolchain-versions.sh`. The Motor fork uses Rust's `dev` channel, so its
+`src/toolchain-versions.sh`. The Motor OS fork uses Rust's `dev` channel, so its
 Cargo reports `1.99.0-dev`; this is a beta development assembly, not the final
 `1.99.0-motor.1` source release.
 
@@ -44,7 +44,7 @@ from `src/toolchain-versions.sh` into private build checkouts:
 
 ```text
 $MOTORH/toolchain-src/rust/
-  src/llvm-project/       Motor LLVM at the Rust gitlink
+  src/llvm-project/       Motor OS LLVM at the Rust gitlink
   src/tools/cargo/        upstream Cargo at the declared gitlink
 $MOTORH/toolchain-src/mlibc/
 ```
@@ -68,7 +68,7 @@ After selecting the host toolchain, the build prepares all add-on sources and
 checks their lockfiles before building the native assembly, downloading add-on
 assets, or compiling add-ons. The shared inventory in
 `src/build-addon-sources.sh` covers ripgrep, Helix, sed, Javy, Wasmtime, the
-independent Motor test workspaces in the forks, and the Motor smoke/plugin
+independent Motor OS test workspaces in the forks, and the Motor OS smoke/plugin
 workspaces. Upstream-only release and standalone fuzz workspaces are excluded.
 The `--javy-only` and `--wasmtime-only` paths check their selected workspaces too.
 
@@ -82,7 +82,7 @@ never repairs it automatically.
 
 Before offline compilation, the wasm add-ons fetch their complete locked
 dependency graphs. Target-filtered fetches can miss host dependencies reached
-through Motor-only dependency edges, even when Motor and Linux are fetched
+through Motor OS-only dependency edges, even when Motor OS and Linux are fetched
 separately. Fetching without a target filter also makes cold-cache builds
 independent of packages left over from earlier builds.
 
@@ -92,7 +92,7 @@ To validate an existing set of checkouts without fetching or compiling:
 src/check-addon-lockfiles.sh
 ```
 
-This command uses the same inventory and the selected Motor Cargo, with
+This command uses the same inventory and the selected Motor OS Cargo, with
 `--offline`. Missing checkouts or cached dependency metadata fail validation
 with their original diagnostics; they are not reported as version drift.
 `$MOTORH/motor-os` must resolve to the checkout being checked so the forks'
@@ -115,7 +115,7 @@ switching, resetting, stashing, cleaning, or updating either worktree. An
 authoring toolchain has a distinct non-release description and key and cannot
 replace the checked-in managed selector or satisfy source-publication checks.
 
-This separation is what permits work on Motor's Rust and LLVM patches without
+This separation is what permits work on Motor OS's Rust and LLVM patches without
 weakening the clean managed-build policy.
 
 ## Build order and outputs
@@ -129,7 +129,7 @@ The workflow performs these stages:
 3. Build standalone host LLVM from the effective LLVM tree and use it as
    rustc's host LLVM.
 4. Run Rust bootstrap once to install Linux-host rustc/rustdoc, Cargo, host and
-   Motor std, Clippy, rust-analyzer, rustfmt/`cargo-fmt`, and `rust-src` into
+   Motor OS std, Clippy, rust-analyzer, rustfmt/`cargo-fmt`, and `rust-src` into
    an immutable key-qualified prefix.
 5. Register that prefix under its exact rustup name and validate every
    component, source commit, sysroot, lock hash, and both host/target compile
@@ -188,7 +188,7 @@ Linux-host server. The native binary lives at
 `/devtools/rust/bin/rust-analyzer` and its sources at
 `/devtools/rust/lib/rustlib/src/rust/library`. The image contains no Cargo
 shim and does not launch the server at boot. See the
-[native server guide](build-rustc.md#native-motor-rust-analyzer) for
+[native server guide](build-rustc.md#native-motor-os-rust-analyzer) for
 the explicit Lorry environment, trusted-project configuration, and current
 acceptance status.
 

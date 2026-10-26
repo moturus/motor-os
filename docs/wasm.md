@@ -3,9 +3,9 @@
 The developer image (`make dev.img BUILD=release`, producing
 `motor-os-dev.qcow2`) includes Javy 9.1.0, Wasmi 1.1.0 and a runtime-only
 Wasmtime 48.0.1. Javy compiles JavaScript into a WebAssembly module containing
-the QuickJS runtime. Wasmi interprets that module using the Motor port's WASI
+the QuickJS runtime. Wasmi interprets that module using the Motor OS port's WASI
 Preview 1 support. The runtime-only Wasmtime executes precompiled Pulley
-artifacts; it contains no compiler, and on-Motor compilation is not installed
+artifacts; it contains no compiler, and compilation on Motor OS is not installed
 yet.
 
 ## Installed files
@@ -36,7 +36,7 @@ Wasmtime and Wasmi reserve each linear memory's declared maximum, or 4 GiB
 without one, as a sparse lazy mapping: only the pages a guest touches use RAM,
 and, as on Linux, there is no limit on the total or the number of memories in a
 process. A 64-bit memory cannot grow past 4 GiB; `memory.grow` returns -1, as
-upstream Wasmtime does with `-O memory-may-move=n`. When RAM runs out, Motor
+upstream Wasmtime does with `-O memory-may-move=n`. When RAM runs out, Motor OS
 kills whichever process has a page fault refused (there is no OOM killer, see
 [OOM handling](oom-handling.md)): the guest's runtime or another process. `-W
 max-memory-size` and `-W max-memories` bound a `wasmtime-rt` guest as upstream.

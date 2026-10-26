@@ -64,7 +64,7 @@ The SDK combines eleven former crates. Paths below are relative to `moto_sdk`.
   never enable it.
 - On Unix, `iobuf::IoBuf` and `tooling::mode2048` are available with or without
   `std`; `async_fs` additionally requires `std`. The imager, motor-fs, memfs
-  and russhd use these on the Linux host. Everything else is Motor-only.
+  and russhd use these on the Linux host. Everything else is Motor OS-only.
 
 ## Versions and publishing
 

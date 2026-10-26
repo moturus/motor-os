@@ -1,4 +1,4 @@
-# LLVM, mlibc, and the Motor C/C++ toolchain
+# LLVM, mlibc, and the Motor OS C/C++ toolchain
 
 LLVM/Clang, mlibc, and the C++ runtime are built by the unified
 `src/build-motor-os.sh` workflow. This document describes that component and
@@ -9,11 +9,11 @@ its outputs; it is not a separate branch-switching or cache-clearing recipe.
 The current beta tuple is declared in `src/toolchain-versions.sh`:
 
 - upstream Rust LLVM base `21cf28432798952d942bacc6bcee3a328faa3638`;
-- Motor LLVM `7c2a7b21e3dc7be1f0c41d443bc420bcc774b1d4`;
-- Motor mlibc `9abf5139f8948020ffd8b96f0ad22c8247818b27`, including its C-ABI shim and lockfile.
+- Motor OS LLVM `7c2a7b21e3dc7be1f0c41d443bc420bcc774b1d4`;
+- Motor OS mlibc `9abf5139f8948020ffd8b96f0ad22c8247818b27`, including its C-ABI shim and lockfile.
 
-The Motor Rust revision's `src/llvm-project` gitlink must equal the declared
-Motor LLVM revision. The standalone host compiler and rustc's host/native LLVM
+The Motor OS Rust revision's `src/llvm-project` gitlink must equal the declared
+Motor OS LLVM revision. The standalone host compiler and rustc's host/native LLVM
 builds therefore consume the same effective LLVM commit and source tree. A
 managed build rejects a mismatched gitlink, remote, revision, or dirty checkout.
 
@@ -24,9 +24,9 @@ with the permission support from `0cece7e5`, and LLVM `7c2a7b21e3dc`
 or linker binary into an assembly: a new output may remain writable or Cargo's
 copied build scripts may become non-executable.
 
-mlibc `39d67d64` leaves main-executable relocation to Motor's loader, avoiding
+mlibc `39d67d64` leaves main-executable relocation to Motor OS's loader, avoiding
 redundant startup passes that would make lazily relocated pages resident.
-Commit `52bed56c` additionally maps Motor's `CrossesDevices` error to `EXDEV`.
+Commit `52bed56c` additionally maps Motor OS's `CrossesDevices` error to `EXDEV`.
 Commit `9abf5139` hosts the `moto-rt-cabi` shim crate and its lockfile.
 Rebuild the assembly and relink native tools when changing the mlibc revision.
 
@@ -47,8 +47,8 @@ either worktree.
 
 The unified workflow builds this closure in dependency order:
 
-1. Standalone Linux-host Clang, LLD, and LLVM utilities for the Motor target.
-2. `libmoto_rt_cabi.a`, the Rust C-ABI shim over Motor's RT.VDSO, including the
+1. Standalone Linux-host Clang, LLD, and LLVM utilities for the Motor OS target.
+2. `libmoto_rt_cabi.a`, the Rust C-ABI shim over Motor OS's RT.VDSO, including the
    emulated-TLS runtime. Its crate and `moto_rt.h` come from
    `sysdeps/motor/moto-rt-cabi` in the pinned mlibc snapshot. Cargo fetches
    the locked registry dependencies, then builds offline with `core` and
@@ -56,7 +56,7 @@ The unified workflow builds this closure in dependency order:
 3. compiler-rt builtins, with the shim remaining the sole emulated-TLS owner.
 4. mlibc headers, `crt1.o`, `libc.a`, and companion libraries.
 5. libunwind, libc++abi, and libc++, with exceptions enabled.
-6. Native Motor LLVM/Clang/LLD as one multicall `llvm` executable.
+6. Native Motor OS LLVM/Clang/LLD as one multicall `llvm` executable.
 
 Lua is then built with the finished toolchain as an end-to-end native C
 application. It is an add-on, not a part of the assembly's identity.
@@ -104,7 +104,7 @@ c++ /devtools/src/hello-world/hello.cpp -o /user/tmp/hello-cxx
 /devtools/llvm/bin/llvm clang --version
 ```
 
-Clang's Motor toolchain owns the C/C++ startup and runtime link recipe. Plain C
+Clang's Motor OS toolchain owns the C/C++ startup and runtime link recipe. Plain C
 and C++ programs receive `crt1.o`, mlibc, compiler-rt, and the appropriate C++
 libraries. `-nostdlib`, `-nostartfiles`, and `-nodefaultlibs` remain meaningful
 so rustc can produce a pure-Rust binary without pulling in mlibc.
