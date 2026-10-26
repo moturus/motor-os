@@ -1539,6 +1539,10 @@ impl<'a> NetDev<'a> {
 /// Debug-only tests of the code above, run inside a live sys-io. See
 /// [`crate::self_test`].
 #[cfg(debug_assertions)]
+#[path = "udp_policy_tests.rs"]
+pub(super) mod udp_policy_tests;
+
+#[cfg(debug_assertions)]
 pub(crate) mod self_test {
     use super::*;
     use crate::self_test::{SelfTest, st_assert, st_assert_eq};
