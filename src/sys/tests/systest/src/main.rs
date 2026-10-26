@@ -29,6 +29,7 @@ mod ip_device;
 mod ip_device_admission;
 mod ip_device_live;
 mod ip_device_queues;
+mod ip_device_udp;
 mod ipc_service;
 mod kernel_log;
 mod logging;

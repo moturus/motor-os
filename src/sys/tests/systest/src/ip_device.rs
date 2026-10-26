@@ -8,6 +8,7 @@ pub fn run_all_tests() {
     crate::ip_device_live::test_multiple_devices_and_wildcard_listener();
     crate::ip_device_live::test_removal_wakes_stream_and_datagram_writers();
     crate::ip_device_queues::test_full_queues_recover();
+    crate::ip_device_udp::test_physical_bindings_and_ports();
 }
 
 pub fn test_registration_codec() {

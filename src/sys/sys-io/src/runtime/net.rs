@@ -108,6 +108,26 @@ struct NetRuntimeInner {
 }
 
 impl NetRuntimeInner {
+    fn find_route(&self, ip_addr: &IpAddr) -> Option<(usize, IpAddr)> {
+        if let Some(device_idx) = self.ip_addresses.get(ip_addr) {
+            return Some((*device_idx, *ip_addr));
+        }
+        config::find_route(
+            self.devices
+                .iter()
+                .map(|(device_idx, device)| (device_idx, device.config())),
+            *ip_addr,
+        )
+    }
+
+    fn udp_route_allowed(&self, device_idx: usize, destination: &IpAddr) -> bool {
+        let packet_device = self.devices[device_idx].is_packet();
+        let Some((selected, _)) = self.find_route(destination) else {
+            return !packet_device;
+        };
+        selected == device_idx || (!packet_device && !self.devices[selected].is_packet())
+    }
+
     fn next_socket_id(&mut self) -> u64 {
         let result = self.next_socket_id;
         self.next_socket_id += 1;
@@ -770,20 +790,7 @@ impl NetRuntime {
 
     // Find the device to route through.
     fn find_route(&self, ip_addr: &IpAddr) -> Option<(usize, IpAddr)> {
-        let inner = self.inner.borrow();
-
-        // First, look through local addresses.
-        if let Some(device_idx) = inner.ip_addresses.get(ip_addr) {
-            return Some((*device_idx, *ip_addr));
-        }
-
-        config::find_route(
-            inner
-                .devices
-                .iter()
-                .map(|(device_idx, device)| (device_idx, device.config())),
-            *ip_addr,
-        )
+        self.inner.borrow().find_route(ip_addr)
     }
 
     fn rebuild_ip_addresses(&self) {

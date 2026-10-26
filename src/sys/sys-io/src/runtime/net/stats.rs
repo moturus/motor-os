@@ -126,6 +126,7 @@ mod ids {
     pub const NET_PACKET_RX_DROPPED: u32 = 78;
     pub const NET_PACKET_RX_HIGH_WATER: u32 = 79;
     pub const NET_PACKET_TX_HIGH_WATER: u32 = 80;
+    pub const NET_UDP_TX_BOUNDARY_DROPS: u32 = 81;
 }
 
 /// Upper bounds, in bytes, of the received-frame size histogram. A frame larger
@@ -226,6 +227,8 @@ pub(super) struct NetStats {
     pub udp_tx_dropped: Cell<u64>,
     /// Complete UDP datagrams discarded at the per-socket TX admission limits.
     pub udp_tx_admission_drops: Cell<u64>,
+    /// Complete UDP datagrams whose route would change the packet device.
+    pub udp_tx_boundary_drops: Cell<u64>,
     /// Complete UDP datagrams discarded because the netstack TX ring was full.
     pub udp_tx_buffer_full_drops: Cell<u64>,
     /// UDP datagrams discarded because their route or next-hop neighbor could
@@ -422,6 +425,10 @@ impl NetStats {
             MetricEntry::global(ids::NET_POLL_RUNS, self.poll_runs.get()),
             MetricEntry::global(ids::NET_UDP_TX_DROPPED, self.udp_tx_dropped.get()),
             MetricEntry::global(
+                ids::NET_UDP_TX_BOUNDARY_DROPS,
+                self.udp_tx_boundary_drops.get(),
+            ),
+            MetricEntry::global(
                 ids::NET_UDP_TX_ADMISSION_DROPS,
                 self.udp_tx_admission_drops.get(),
             ),
@@ -603,6 +610,7 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::NET_TCP_RX_ALLOC_WAITS, "net.tcp.rx_alloc_waits"),
         MetricDescWire::new(ids::NET_POLL_RUNS, "net.poll_runs"),
         MetricDescWire::new(ids::NET_UDP_TX_DROPPED, "net.udp.tx_dropped"),
+        MetricDescWire::new(ids::NET_UDP_TX_BOUNDARY_DROPS, "net.udp.tx_boundary_drops"),
         MetricDescWire::new(
             ids::NET_UDP_TX_ADMISSION_DROPS,
             "net.udp.tx_admission_drops",

@@ -15,6 +15,7 @@ use super::SocketBase;
 use super::SocketState;
 
 pub struct UdpState {
+    pub(super) physical_transport: bool,
     ephemeral_port: Option<u16>,
     tx_queue: UdpDefragmentingQueue,
     rx_queue: Rc<RefCell<UdpFragmentingQueue>>,
@@ -49,6 +50,7 @@ impl MotoSocket {
         ephemeral_port: Option<u16>,
         client_sender: ClientSender,
         subchannel_mask: u64,
+        physical_transport: bool,
     ) -> std::io::Result<Rc<RefCell<MotoSocket>>> {
         let rx_buffer = moto_netstack::socket::udp::PacketBuffer::new(
             vec![moto_netstack::socket::udp::PacketMetadata::EMPTY; 64],
@@ -80,6 +82,7 @@ impl MotoSocket {
         MotoSocket::new_ip(
             base,
             SocketState::Udp(UdpState {
+                physical_transport,
                 ephemeral_port,
                 cancel_rx: None,
                 tx_queue: UdpDefragmentingQueue::new_bounded(),
@@ -285,7 +288,7 @@ impl MotoSocket {
         sender: &ClientSender,
     ) -> std::io::Result<()> {
         let remote_addr = api_net::get_socket_addr(&msg.payload);
-        if remote_addr.ip().is_unspecified() {
+        if msg.flags != 0 || remote_addr.ip().is_unspecified() {
             return Err(ErrorKind::InvalidInput.into());
         }
 
@@ -309,11 +312,21 @@ impl MotoSocket {
         sender: &ClientSender,
     ) -> std::io::Result<()> {
         let requested = api_net::get_socket_addr(&msg.payload);
+        if msg.flags & !api_net::UDP_BIND_PHYSICAL_TRANSPORT != 0 {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        let physical_transport = msg.flags & api_net::UDP_BIND_PHYSICAL_TRANSPORT != 0;
+        if physical_transport && requested.ip().is_unspecified() {
+            return Err(ErrorKind::InvalidInput.into());
+        }
         let (socket_addr, device_idx) = if requested.ip().is_unspecified() {
             let inner = runtime.inner.borrow();
             let mut fallback = None;
             let mut selected = None;
             for (device_idx, device) in inner.devices.iter() {
+                if device.is_packet() {
+                    continue;
+                }
                 for ip_addr in device.ip_addesses() {
                     if ip_addr.is_ipv4() != requested.is_ipv4() {
                         continue;
@@ -342,6 +355,14 @@ impl MotoSocket {
             };
             (requested, device_idx)
         };
+
+        if physical_transport {
+            let inner = runtime.inner.borrow();
+            let device = &inner.devices[device_idx];
+            if !device.is_external() || device.is_packet() {
+                return Err(ErrorKind::InvalidInput.into());
+            }
+        }
 
         Self::udp_bind_on_device(runtime, msg, sender, socket_addr, device_idx).await
     }
@@ -397,6 +418,7 @@ impl MotoSocket {
             allocated_port,
             sender.clone(),
             subchannel_mask,
+            msg.flags & api_net::UDP_BIND_PHYSICAL_TRANSPORT != 0,
         ) {
             Ok(socket) => socket,
             Err(err) => {
@@ -520,6 +542,7 @@ impl MotoSocket {
 
         let mut inner_ref = runtime.inner.borrow_mut();
         let inner = &mut *inner_ref;
+        let device_idx = base.ip_backend().device_idx;
 
         loop {
             let Ok(datagram) = udp_state.tx_queue.next_datagram() else {
@@ -536,24 +559,43 @@ impl MotoSocket {
                 break;
             };
 
-            // Ethernet transmission does not loop back to our own IP addresses.
-            // Use the destination's existing receive queue, including self-send.
-            let local_device = inner.ip_addresses.get(&datagram.addr.ip()).copied();
-            let result = if let Some(device_idx) = local_device {
-                inner.devices[device_idx].sockets.udp_deliver_local(
+            // A binding keeps its source and device. Only explicit physical
+            // transports bypass packet-device routes, including default routes.
+            if !udp_state.physical_transport
+                && !inner.udp_route_allowed(device_idx, &datagram.addr.ip())
+            {
+                need_udp_tx_ack |= !datagram.slice().is_empty();
+                runtime
+                    .stats
+                    .udp_tx_boundary_drops
+                    .set(runtime.stats.udp_tx_boundary_drops.get() + 1);
+                continue;
+            }
+
+            // Local delivery follows boundary policy. Physical transports must
+            // also bypass local packet-device addresses, not just their routes.
+            let local_device =
+                inner
+                    .ip_addresses
+                    .get(&datagram.addr.ip())
+                    .copied()
+                    .filter(|&index| {
+                        !udp_state.physical_transport || !inner.devices[index].is_packet()
+                    });
+            let result = if let Some(index) = local_device {
+                inner.devices[index].sockets.udp_deliver_local(
                     base.ip_backend().local_addr.into(),
                     datagram.addr.into(),
                     datagram.slice(),
                 )
             } else {
-                inner.devices[base.ip_backend().device_idx]
+                inner.devices[device_idx]
                     .sockets
                     .get_mut::<moto_netstack::socket::udp::Socket>(
                         base.ip_backend().handle(base.socket_id),
                     )
                     .send_slice(datagram.slice(), datagram.addr)
             };
-
             if let Err(err) = result {
                 match err {
                     moto_netstack::socket::udp::SendError::Unaddressable => {

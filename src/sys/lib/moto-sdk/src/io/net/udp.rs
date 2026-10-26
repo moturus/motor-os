@@ -21,6 +21,12 @@ use core::sync::atomic::*;
 use moto_rt::E_NOT_READY;
 use moto_rt::{ErrorCode, mutex::Mutex};
 
+enum Binding {
+    Local,
+    ForRemote,
+    PhysicalTransport,
+}
+
 pub struct UdpSocket {
     channel: Arc<NetChannel>,
     // Taken by close(), which transfers it to the teardown record carrying
@@ -172,7 +178,7 @@ impl UdpSocket {
         Self::bind_inner(
             reservation.into_channel_reservation(),
             socket_addr,
-            false,
+            Binding::Local,
             event_listener,
         )
         .await
@@ -191,7 +197,27 @@ impl UdpSocket {
         Self::bind_inner(
             reservation.into_channel_reservation(),
             remote_addr,
-            true,
+            Binding::ForRemote,
+            event_listener,
+        )
+        .await
+    }
+
+    /// Bind a WireGuard transport to an explicit physical local address.
+    /// Registered IP-device routes do not redirect its datagrams. Loss of the
+    /// bound address invalidates the socket and wakes pending I/O with an error.
+    pub async fn bind_physical_reserved(
+        reservation: super::channel::Reservation,
+        local_addr: &SocketAddr,
+        event_listener: Option<Arc<dyn NetEventListener>>,
+    ) -> Result<Arc<UdpSocket>, ErrorCode> {
+        if local_addr.ip().is_unspecified() {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        Self::bind_inner(
+            reservation.into_channel_reservation(),
+            local_addr,
+            Binding::PhysicalTransport,
             event_listener,
         )
         .await
@@ -200,11 +226,11 @@ impl UdpSocket {
     async fn bind_inner(
         mut channel_reservation: super::channel::ChannelReservation,
         requested_addr: &SocketAddr,
-        select_route: bool,
+        binding: Binding,
         event_listener: Option<Arc<dyn NetEventListener>>,
     ) -> Result<Arc<UdpSocket>, ErrorCode> {
         channel_reservation.reserve_subchannel();
-        let req = if select_route {
+        let mut req = if matches!(binding, Binding::ForRemote) {
             api_net::bind_udp_socket_for_remote_request(
                 requested_addr,
                 channel_reservation.subchannel_idx(),
@@ -212,6 +238,9 @@ impl UdpSocket {
         } else {
             api_net::bind_udp_socket_request(requested_addr, channel_reservation.subchannel_idx())
         };
+        if matches!(binding, Binding::PhysicalTransport) {
+            req.flags = api_net::UDP_BIND_PHYSICAL_TRANSPORT;
+        }
         let channel = channel_reservation.channel().clone();
         channel
             .rpc_bind_udp(req, channel_reservation, event_listener)
