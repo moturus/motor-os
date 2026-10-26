@@ -26,6 +26,7 @@ mod futex_stress;
 mod icmp;
 mod io_channel;
 mod ip_device;
+mod ip_device_admission;
 mod ip_device_live;
 mod ipc_service;
 mod kernel_log;
@@ -1583,6 +1584,10 @@ fn main() {
         tcp::test_native_net_cancellation();
         return;
     }
+    if ip_device_admission::run_child(&args) {
+        return;
+    }
+
     if args.len() == 2 && args[1] == "test-ip-device" {
         ip_device::run_all_tests();
         return;

@@ -81,6 +81,37 @@ impl Provider {
         }
     }
 
+    fn start_process() -> Self {
+        use moto_sys::caps::{CAP_INTERACTIVE, CAP_NET, MOTOR_OS_CAPS_ENV_KEY};
+        use std::io::{BufRead, BufReader};
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["ip-device-admission-child", "provider"])
+            .env(
+                MOTOR_OS_CAPS_ENV_KEY,
+                format!("0x{:x}", CAP_INTERACTIVE | CAP_NET),
+            )
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output = child.stdout.take().unwrap();
+        let (send, observed) = std::sync::mpsc::sync_channel(16);
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(output).lines() {
+                let _ = send.try_send(line.unwrap().parse().unwrap());
+            }
+        });
+        assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(), 0);
+        Self {
+            shutdown: Box::new(move |orderly| {
+                assert!(!orderly);
+                child.kill().unwrap();
+                assert!(!child.wait().unwrap().success());
+                reader.join().unwrap();
+            }),
+            observed,
+        }
+    }
+
     fn stop(self, orderly: bool) {
         (self.shutdown)(orderly);
     }
@@ -206,8 +237,16 @@ pub fn test_provider_death_wakes_pending_ops() {
     };
 
     let baseline = crate::tcp::read_sys_io_metric("net.num_devices");
-    for local in config(2).addresses.into_iter().map(|cidr| cidr.address) {
-        let provider = Provider::start_mode(2, false);
+    for (local, separate_process) in config(2)
+        .addresses
+        .into_iter()
+        .flat_map(|cidr| [(cidr.address, false), (cidr.address, true)])
+    {
+        let provider = if separate_process {
+            Provider::start_process()
+        } else {
+            Provider::start_mode(2, false)
+        };
         let peer = remote(local);
         let probe = std::thread::spawn(move || {
             moto_sdk::sys_io::icmp::IcmpEchoClient::connect()
