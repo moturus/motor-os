@@ -188,6 +188,10 @@ impl Scheduler {
     }
 }
 
+#[cfg(test)]
+#[path = "schedule_tests.rs"]
+mod tests;
+
 fn emit<I: Io>(
     cx: &mut Context<'_>,
     io: &mut I,
