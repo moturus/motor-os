@@ -1,7 +1,8 @@
 # WireGuard through a process-backed IP device
 
 Completed steps: 0 through 11.
-Current step: final validation - three debug and three release full-suite runs.
+Current step: none.
+Final gate: three debug and three release full-suite runs passed.
 
 2026-10-24. Design and implementation plan, grounded in the tree at
 a3d739f9. This document specifies the process-backed IP device, WireGuard
