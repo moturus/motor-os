@@ -2,6 +2,7 @@ pub mod config;
 pub mod crypto;
 mod files;
 mod ip;
+pub mod schedule;
 
 #[cfg(target_os = "motor")]
 fn motor_getrandom(bytes: &mut [u8]) -> Result<(), getrandom::Error> {
