@@ -14,6 +14,9 @@ use moto_sdk::sys_io::api_net;
 use super::NetRuntime;
 use crate::util::{map_err_into_native, map_native_error};
 
+#[cfg(debug_assertions)]
+pub(super) mod self_test;
+
 struct IcmpSocketGuard {
     runtime: NetRuntime,
     device_idx: usize,

@@ -43,6 +43,7 @@ pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
     device::udp_policy_tests::TESTS,
     devices::self_test::TESTS,
     half_open::self_test::TESTS,
+    icmp::self_test::TESTS,
     packet_device::self_test::TESTS,
     registration::self_test::TESTS,
     self_test::TESTS,
