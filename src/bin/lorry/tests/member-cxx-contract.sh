@@ -63,9 +63,10 @@ EOF
 HOST_CXX="$(realpath /usr/bin/clang++)"
 HOST_AR="$(realpath /usr/lib/llvm-21/bin/llvm-ar)"
 SDK_ROOT="$(dirname "$(dirname "$LORRY_MOTOR_LINKER")")"
-MOTOR_CXX="$(sed -n 's/^exec "\([^"]*\)".*/\1/p' "$SDK_ROOT/bin/motor-clang++")"
-MOTOR_CXX="$(realpath "$MOTOR_CXX")"
-MOTOR_AR="$(realpath "$(dirname "$MOTOR_CXX")/llvm-ar")"
+# The Clang that the toolchain's motor-clang++ wrapper runs.
+MOTOR_LLVM="$("$RUSTC" --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin"
+MOTOR_CXX="$(realpath "$MOTOR_LLVM/clang")"
+MOTOR_AR="$(realpath "$MOTOR_LLVM/llvm-ar")"
 printf '%s\n' "$HOST_CXX" >"$WORK/project/grammar/compiler-path"
 cat >"$WORK/project/.cargo/config.toml" <<EOF
 [target.x86_64-unknown-motor]

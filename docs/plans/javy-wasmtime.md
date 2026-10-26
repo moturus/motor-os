@@ -4,7 +4,7 @@ Promote the prototype into maintained forks in small, tested milestones.
 Preserve working engine/platform integrations and regressions; replace
 fixture-specific helpers with shared production code. Milestones 0–2 are
 delivered: the maintained Motor OS branches are published, and Javy/Wasmi and the
-runtime-only `wasmtime-rt` build through the normal add-on workflow, ship in
+runtime-only `wasmtime-rt` build through the normal external-source workflow, ship in
 the developer and small wasm images, and pass their installed-tool checks on
 both images at 256 and 224 MiB. HTTP serving (milestone 3) and the full
 compiler with native packaging (milestone 4) are ahead; see
@@ -27,15 +27,15 @@ Evidence under `build/` is host-local and not required.
   Wasmtime take `moto-rt` and `moto-sys` from crates.io, and Wasmtime's WASI
   filesystem adapter is path-based over `moto-rt` (see
   [Native filesystem](#native-filesystem-clocks-and-networking)). The tree pins
-  the javy and wasmtime revisions it builds in `src/build-addon-sources.sh`;
+  the javy and wasmtime revisions it builds in `src/build-scripts/external-sources.sh`;
   since 2026-10-22 wasmtime is at `633e7de36`: `08a09edea` plus outgoing
   `wasi-http` TLS that trusts the system CA bundle (see
   [Fibers, resource limits and HTTP](#fibers-resource-limits-and-http)).
-  With the 2026-10-20 pins, `make BUILD=release`, both add-on builds and
+  With the 2026-10-20 pins, `make BUILD=release`, both external-source builds and
   `full-test.sh --release` pass (2026-10-20, the owner limited the check to
   that); the wasm matrices under QEMU and Cloud Hypervisor passed the same
   morning with wasmtime `08a09edea` and the same Javy content before its
-  rebase. Wasmtime `633e7de36` has passed only its add-on build,
+  rebase. Wasmtime `633e7de36` has passed only its external-source build,
   `make images BUILD=release` and a one-off hermetic HTTPS check of its
   source: it accepts a server certified by a local CA in the image's bundle
   and refuses one certified outside it, where `08a09edea` refused the first
@@ -45,7 +45,7 @@ Evidence under `build/` is host-local and not required.
   [the memory contract](#javy-pipeline-and-memory-backing)). Those fork heads
   and tree `c4e44de3..c3ecb975` replace 96 MiB per memory, 128 MiB per
   process and four memories with 4 GiB per memory and no total or count, and
-  stop Wasmi writing zeros into reservations. The add-ons rebuilt from the
+  stop Wasmi writing zeros into reservations. Javy and Wasmtime rebuilt from the
   published heads pass `test-wasm.sh` under QEMU (384 s) and Cloud Hypervisor
   (392 s) and `full-test-dev.sh --release` (3,433 s, ALL PASS), which also
   covers the gate of Wasmtime `75d22026a` that the previous resume point asked
@@ -70,7 +70,7 @@ Evidence under `build/` is host-local and not required.
   serves 64 concurrent p2 requests at 224 MiB. **Resume** with the "Next"
   item of "Lazy guarded fiber stacks" under
   [Milestone 3](#milestone-3-httphttps-and-opt-in-p3): once the owner pushes,
-  rebuild the add-on and gate it. The other 3a rulings (2026-10-19):
+  rebuild the external source and gate it. The other 3a rulings (2026-10-19):
   deadlines follow Linux, and connection timeouts and accept errors follow
   upstream.
 - **Working rules from the owner:** commit messages are one line with no
@@ -203,8 +203,8 @@ and graceful shutdown and Ctrl-C were not qualified.
 
 The owner published the six maintained branches on 2026-10-07. Each is a real
 upstream repository with a Motor OS branch. The tree checks out only `javy` and
-`wasmtime`, beside this repository, at the revisions pinned in
-`src/build-addon-sources.sh`; the other four, and the Motor OS crates, are git
+`wasmtime`, in `external-sources/`, at the revisions pinned in
+`src/build-scripts/external-sources.sh`; the other four, and the Motor OS crates, are git
 dependencies that the forks' lockfiles pin (since 2026-10-20; the heads below
 are the 2026-10-07 publication).
 
@@ -250,13 +250,13 @@ filesystem confinement checks. It did not remeasure the 224 MiB margin.
 
 Build and images:
 
-- `src/build-javy.sh`, called from `src/build-motor-os.sh` (the normal
-  `build_addons` stage or `--javy-only`), follows the published `javy`, `wasmi`
-  and `wasmtime` branches with the add-on checkout helper, fetches under the
+- `src/build-scripts/build-javy.sh`, called from `src/build-motor-os.sh` (the normal
+  `build_external_sources` stage or `--javy-only`), follows the published `javy`, `wasmi`
+  and `wasmtime` branches with the external-source checkout helper, fetches under the
   Motor OS toolchain named by `rust-toolchain.toml`, sizes `JOBS` by available
   memory, downloads the plugin and TypeScript inputs by digest, and records the
-  resolved source graph in `/devtools/javy/sources.txt`. Reuse is keyed on
-  that manifest, so a new fork head rebuilds the add-on.
+  resolved source graph in `/devtools/javy/sources.txt`. Every run builds it
+  again; Cargo keeps that incremental (no stamps since 2026-10-25).
 - Binaries install at `/devtools/bin/javy` and `/devtools/bin/wasmi`, the
   default plugin at `/devtools/javy/plugins/default.wasm` and provenance under
   `/devtools/javy`. Test inputs (the TypeScript workload and the Linux identity
@@ -267,7 +267,7 @@ Build and images:
   user-facing guide is `docs/wasm.md`; the build steps are in `docs/build.md`
   and `docs/build-motor-os.md`.
 - Both a complete managed `src/build-motor-os.sh` run and the javy-only path
-  reproduce the add-on from fresh published checkouts and an empty Cargo cache.
+  reproduce the Javy build from fresh published checkouts and an empty Cargo cache.
   R1 below is fixed by 1j: the orchestrator's selection reaches the fetch and
   the fork build, and the manifest records it.
 
@@ -283,11 +283,11 @@ Tests:
 - `src/tests/test-javy.sh` (`--prepare`, `--image`, `--memory`,
   `--vmm qemu|chv`) builds both images and the crate, boots each image at 256
   and 224 MiB from a QEMU snapshot or a disposable Cloud Hypervisor copy,
-  checks that the installed binaries equal the staged add-on bytes, and runs
+  checks that the installed binaries equal the staged bytes, and runs
   the crate over SSH. Evidence is written to `build/javy-images`, replaced on
   each run. It is registered in `full-test-dev.sh --release`; debug suites do
   not run this matrix. Host contract tests in `full-test.sh` cover the
-  developer-suite wiring and generic add-on helpers; Javy-specific toolchain
+  developer-suite wiring and generic external-source helpers; Javy-specific toolchain
   selection needs the contract test planned in 1j.
 
 | TypeScript compilation | VM RAM (MiB) | Sampled whole-VM peak (MiB) | Sampled headroom (MiB) | Time (s) |
@@ -313,7 +313,7 @@ Review covered the 12 Motor OS integration commits `582ce13c` through `02893284`
 and relevant code at the maintained fork heads above. Both release VMM matrices
 passed again: eight boots, 328 smoke commands and zero admission refusals.
 Thirty-five imager tests passed (three existing tests remained ignored), as did
-`test-build-addons.sh`, `test-dev-memory-contract.sh` and `test-full-test-size.sh`.
+`test-external-sources.sh`, `test-dev-memory-contract.sh` and `test-full-test-size.sh`.
 The review used the installed binaries and did not rebuild an authoring toolchain.
 
 The following findings remain open. R1 was confirmed with a hermetic
@@ -324,7 +324,7 @@ the same code confirmed all six; severities below are from that review.
 
 | ID | Severity | Location | Finding and evidence | Follow-up |
 | --- | --- | --- | --- | --- |
-| R1 | Medium | Motor OS `src/build-javy.sh`; Javy `motor-build.sh` | Both overwrite the selected `RUSTUP_TOOLCHAIN` with the checked-in managed selector, and the fork script resolves the managed assembly. An authoring assembly can receive managed-toolchain binaries while its manifest records authoring provenance. Only full builds in authoring mode are affected. Wasmtime's `motor-build.sh` has the same override. | 1j, 2a |
+| R1 | Medium | Motor OS `src/build-scripts/build-javy.sh`; Javy `motor-build.sh` | Both overwrite the selected `RUSTUP_TOOLCHAIN` with the checked-in managed selector, and the fork script resolves the managed assembly. An authoring assembly can receive managed-toolchain binaries while its manifest records authoring provenance. Only full builds in authoring mode are affected. Wasmtime's `motor-build.sh` has the same override. | 1j, 2a |
 | R2 | Low | Javy `crates/motor-engine/src/wasmi_backend.rs`, `define_host_imports` | A valid module importing `wasi_snapshot_preview1::proc_exit` twice fails with a duplicate-definition error; the runner exits 1 instead of 0. Toolchains merge duplicate imports and Javy never emits them. | 1k |
 | R3 | Low–medium | Same file, `Vm::call`; runner invocation loop | `proc_exit(0)` becomes ordinary success. `--invoke exit-zero --invoke trap` executes the later trap and exits 1 instead of terminating successfully. | 1k |
 | R4 | Low | Same file, `wasi` descriptor handling | `fd_close` reports success without changing guest descriptor state. Closing stdin twice returned 0 twice; the second close should return `BADF` (8). Reads, writes and descriptor queries also lack closure checks. Only descriptors 0–2 exist. | 1k |
@@ -721,14 +721,14 @@ prototype results from delivered implementation. Keep Wasmi's core/IR crates in
 its workspace and Wizer in Wasmtime's `crates/wizer`. Native libraries are git
 dependencies on `moturus/motor-os` pinned by the forks' lockfiles; no fork
 refers to a sibling checkout by path, and the tree's own `src/sys/lib` is not
-an input of the add-ons (owner rule 2026-10-19, scheme below).
+an input of the external sources (owner rule 2026-10-19, scheme below).
 
 After correction 1j, repeat the integration pattern for Wasmtime: one assembly
-add-on per tool family built by a script under `src/`, at the fork revision
-pinned in `src/build-addon-sources.sh` by the add-on checkout helper, recording
+external source per tool family built by a script under `src/`, at the fork revision
+pinned in `src/build-scripts/external-sources.sh` by the external-source checkout helper, recording
 the resolved source graph (with the git dependencies the lockfiles pin) with
-the installed files, and invalidating reuse on changes to the pinned revision,
-build settings or pinned inputs. Binaries go
+the installed files, and rebuilding on every run (since 2026-10-25, with no
+stamps). Binaries go
 to `/devtools/bin`, tool data and provenance to `/devtools/<tool>` (never
 `/devtools/cfg`), and test inputs stay outside the images in the assembly's
 `tests/<tool>`; both images consume the same release overlay. Integration tests
@@ -743,7 +743,7 @@ and `motor_sockets as rustix`; wholesale
 cap-std/io-lifetimes/io-extras/system-interface/socket2/rustix ports are
 unnecessary.
 
-Build release add-ons with `panic="abort"`, `lto="fat"`, `codegen-units=1` and
+Build the external sources for release with `panic="abort"`, `lto="fat"`, `codegen-units=1` and
 `strip=true` at each owning workspace root; record C/C++ settings and verify
 stripped/populated templates on Motor OS. The full and runtime-only Wasmtime graphs
 use separate output directories so compiler features do not leak into the
@@ -808,7 +808,7 @@ The scheme as of 2026-10-22:
 | Motor OS crates | Javy and Wasmtime: `moto-rt = "0.17"` and `moto-sys = "0.3.2"` from crates.io, which Tokio's and Mio's `moto-rt = "0.17"` share | the fork's lockfiles |
 | Fork-to-fork (Wasmtime → Tokio, Mio, target-lexicon; Javy → Wasmi, Wizer in `moturus/wasmtime`) | `[patch.crates-io]` entries with `git = "https://github.com/moturus/<repo>", branch = "motor-<version>"` | the fork's lockfiles |
 | Ring | unchanged: git, exact rev | the fork's lockfiles |
-| Javy and Wasmtime themselves | `src/build-addon-sources.sh`: branch and full revision, like `src/toolchain-versions.sh` | the tree branch |
+| Javy and Wasmtime themselves | `src/build-scripts/external-sources.sh`: branch and full revision, like `src/toolchain-versions.sh` | the tree branch |
 | Toolchain and sysroot for the fork scripts | `RUSTUP_TOOLCHAIN` and `MOTOR_SYSROOT` in the environment, exported by `build-motor-os.sh`; the scripts no longer read `../motor-os` | the tree branch |
 
 **Historical Git scheme:** before the registry switch, the forks named
@@ -859,7 +859,7 @@ What a human does:
   where needed, and run `cargo update -p moto-sys` (or `moto-rt`). In each
   workspace with a lockfile (Wasmtime: root, `motor-runtime`, `motor-tests`,
   `motor-host-tests`; Javy: root, `motor-tests`), commit, push; then set the
-  fork's `MOTOR_*_REV` in `src/build-addon-sources.sh` and gate.
+  fork's `MOTOR_*_REV` in `src/build-scripts/external-sources.sh` and gate.
 - **Change Mio, Tokio, target-lexicon or Wasmi:** push the fork; in Wasmtime
   or Javy `cargo update -p <crate>`; then as above.
 - **Switch tree branches:** `build-motor-os.sh` moves a clean `../javy` or
@@ -888,7 +888,7 @@ Alternatives considered:
 - **Declare `branch = "dev"`** instead of `main`, so that plain `cargo update`
   follows `dev`. A one-line change per manifest plus `cargo update`.
 - **Pin ripgrep, Helix and sed by revision** the same way (`repo:branch:rev`
-  in `src/build-addon-sources.sh`); they still follow their branch heads.
+  in `src/build-scripts/external-sources.sh`); they still follow their branch heads.
 - **Move the Motor OS WASI host out of the fork** into a tree-owned crate that
   depends on Wasmtime by git, so that the tree's own path dependencies serve
   it. Too large: the adapters implement `wasmtime-wasi`'s internal backends.
@@ -899,11 +899,11 @@ workspace's), as it did with the path patch.
 
 **Gate, 2026-10-20 (fork heads pinned in the tree, pushed later that day).** Every
 workspace resolves and fetches with `--locked`, also from an empty Cargo home;
-`src/check-addon-lockfiles.sh` validates all twelve add-on workspaces offline;
-`test-build-addons.sh` covers the pinned checkouts (older revision detaches,
+`src/build-scripts/check-external-sources.sh` validates all twelve workspaces offline;
+`test-external-sources.sh` covers the pinned checkouts (older revision detaches,
 newer fast-forwards, unpublished revision refused, revision on another branch
 fetched, local commits never left). `src/build-motor-os.sh --javy-only` and
-`--wasmtime-only` rebuilt both add-ons from the pins (Javy 1 m 43 s, Cargo
+`--wasmtime-only` rebuilt both from the pins (Javy 1 m 43 s, Cargo
 reusing Binaryen). Fork tests: Wasmi's regressions and no-std check, Wasmtime's
 compiler-policy and ELF tests, `motor-wasi-tests` and Javy's `motor-tests`
 built for Motor OS. VM gates on the rebuilt images: `test-wasm.sh` under Cloud
@@ -970,7 +970,7 @@ confirms or refines them. No latency target is inferred from one run.
 
 Status 2026-10-09: 1f–1l are done, which closes milestone 1. All fork commits are
 published (Javy `3a04d39`, Wasmtime `a6b85b1cb`, each ending with the
-moto-rt 0.17.7 lock). The add-ons built from them with toolchain
+moto-rt 0.17.7 lock). Javy and Wasmtime built from them with toolchain
 `dev.2-abb676f7` passed the matrix under QEMU and Cloud Hypervisor: four
 boots per VMM, 57 `javy-smoke` (61 with the identity checks) and 43
 `wasmtime-smoke` commands each, zero admission refusals, about 280 s per VMM
@@ -990,7 +990,7 @@ binaries.
   bytecode and source section are built. Five runs each on the wasm image at
   224 MiB went from 207.3–212.4 MiB (median 212.1) to 197.3–208.1 MiB (median
   207.0); the spread follows the reclaim timing. Compile time stays 20.7 s.
-  The add-on built from the published commit passed both matrices and
+  The build from the published commit passed both matrices and
   `full-test-dev.sh --release`, with peaks of 201.6–204.2 MiB (wasm) and
   200.6–202.9 MiB (developer) at 224 MiB, so the median headroom is now about
   15 MiB. Reclaiming in Frusa on free was rejected: it puts heap-sized work on
@@ -1017,7 +1017,7 @@ no new dependency.
    `src/tests/javy-smoke/plugins`, a test-only workspace outside the fork.
    QuickJS needs wasi-sdk to build them: `src/build-motor-os.sh` fetches the
    pinned, digest-checked wasi-sdk 24.0 (the release rquickjs-sys would
-   otherwise download unchecked), and the Javy add-on builds the raw plugins
+   otherwise download unchecked), and the Javy build makes the raw plugins
    with the pinned guest Rust into the assembly's `tests/javy`. Run the
    retained custom GC/p2 plugin cases and the four deliberate fault-exhaustion
    cases on the delivered pipeline, all through the installed tools in
@@ -1052,7 +1052,7 @@ no new dependency.
    byte in every source mode. The only earlier difference, compressed
    TypeScript's `javy_source` (1,151,218 against 1,151,115 bytes), came from
    `log2f` in Brotli and disappeared with the toolchain fix above.
-   `src/build-javy.sh` runs the pinned Linux Javy at add-on build time on
+   `src/build-scripts/build-javy.sh` runs the pinned Linux Javy at build time on
    `javy-smoke/fixtures/hello.js` (compressed, uncompressed, omitted) and the
    TypeScript workload (compressed) and stages the four digests as
    `linux-reference.txt` with the test inputs; `javy-smoke --linux-identity`
@@ -1074,7 +1074,7 @@ no new dependency.
    and assembly once in the orchestrator and pass that selection through fetch
    and the Javy fork's build script. Preserve explicit authoring selections;
    standalone builds may resolve a default when no selection was supplied.
-   Verify that the installed manifest names the compiler and sysroot actually
+   Verify that the selected toolchain provides the compiler and sysroot actually
    used. Add hermetic host contract tests with distinct managed/authoring
    selections, including reuse invalidation when the selection changes; the
    review's build-script probe, which stubs `cargo` and the fork script to log
@@ -1118,7 +1118,7 @@ Status 2026-10-08: 2a is delivered; 2b, 2c, 2e and 2g are implemented as
 `moturus/wasmtime` commits `e0e9548fb..146853f2f`, published, and were
 qualified with locally built binaries on both images at 224 MiB (evidence in
 `build/wasm-milestone2/`). 2d is done and 2f is partly done (below); since
-2026-10-09 the delivered add-on passes the matrix under both VMMs. Since
+2026-10-09 the delivered runtime passes the matrix under both VMMs. Since
 2026-10-11 all items are done, and since 2026-10-18 the published heads are
 gated ([the resume point](#status-and-resume-point-2026-10-19)).
 
@@ -1157,7 +1157,7 @@ gated ([the resume point](#status-and-resume-point-2026-10-19)).
 **2d and 2f, 2026-10-08.** `src/build-motor-os.sh` installs a pinned upstream
 Rust (`WASM_GUEST_TOOLCHAIN`, 1.99.0) with `wasm32-wasip1`/`wasm32-wasip2` for
 guest programs; the Motor OS toolchain still has no wasm32 targets. The Wasmtime
-add-on builds a host Pulley `compile` tool from its own sources and precompiles
+build makes a host Pulley `compile` tool from its own sources and precompiles
 22 fixtures (about 12 MiB, staged outside the images since 2026-10-09): the
 fork's lifecycle, limit and memory WAT modules, a native-target artifact for
 refusal, 13 p2 socket programs, and the TypeScript workload compiled by the
@@ -1205,17 +1205,17 @@ Seventeen programs are excluded for missing Motor OS features: symlinks (9), har
 links (2), settable times (2), a host-set extreme mtime (1), read-only
 preopens, which the CLI cannot grant (2), and `EPIPE` for a writer whose reader
 is gone (1). The native behaviors behind these are in `future-work.md`. The
-add-on built from the published fork passes the QEMU and Cloud Hypervisor
+runtime built from the published fork passes the QEMU and Cloud Hypervisor
 matrices (four boots each, 57 + 93 commands, zero admission refusals, 290 and
 295 s).
 
 The Pulley disposition was accepted on 2026-10-09 (see the item below), which
 completes 2f.
 
-1. **2a — add-on delivery (delivered 2026-10-08, `--wasmtime-only`).** A
+1. **2a — delivery as an external source (delivered 2026-10-08, `--wasmtime-only`).** A
    host-precompiled Pulley hello ran on the wasm image as None, with role and
    capability refusals; evidence in `build/wasm-milestone2/2a`. Add
-   `src/build-wasmtime.sh` on the corrected
+   `src/build-scripts/build-wasmtime.sh` on the corrected
    `build-javy.sh` pattern: follow `moturus/wasmtime`, `target-lexicon`, `tokio`
    and `mio`, build the runtime-only graph with the release profile in its own output
    directory, stage `/devtools/bin/wasmtime-rt`, record the source graph in
@@ -1551,7 +1551,7 @@ kills the thread.
   0.17.9 lock that blocked `--locked` builds on 2026-10-19 is gone with
   [the dependency scheme](#fork-dependency-scheme-2026-10-20): Javy and
   Wasmtime take `moto-rt` 0.17.9 and `moto-sys` 0.3.2 from crates.io. The
-  add-ons rebuilt from the pinned revisions through `src/build-motor-os.sh
+  external sources rebuilt from the pinned revisions through `src/build-motor-os.sh
   --javy-only` and `--wasmtime-only`; the wasm matrices passed under QEMU and
   Cloud Hypervisor with wasmtime `08a09edea`, so 3a closes once the owner's
   commit lands; 3b and 3f follow the moto-sdk merge
@@ -1605,7 +1605,7 @@ complete matrix.
    cost. Qualify the policy through delivered CLI paths, bound compiler
    input/output resources and remove any remaining tracing. Output: fork
    tests/fixes, evidence.
-2. **4b — full CLI add-on.** Build the Cranelift graph in `build-wasmtime.sh`
+2. **4b — the full CLI.** Build the Cranelift graph in `build-wasmtime.sh`
    into its own output directory, stage `/devtools/bin/wasmtime`, and install
    it in both images. Apply the same role/mask guard as the runtime-only build
    before any input parsing, with the same `--help`/`--version` exemptions, and

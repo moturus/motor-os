@@ -44,11 +44,22 @@ fail() {
 
 network_args=(--offline)
 [ "$mode" = test ] || network_args=()
+verbosity_args=(--quiet)
+if [ "$mode" = prepare ]; then
+  verbosity_args=()
+fi
+
+progress() {
+  if [ "$mode" = prepare ]; then
+    echo "test-sdk-package: $*"
+  fi
+}
 
 # The .crate a publish would upload.
+progress "packaging moto-sdk"
 rm -rf "$OUT/crate" "$OUT"/.staging.*
 mkdir -p "$OUT"
-(cd "$ROOT_DIR/src/sys" && CARGO_TARGET_DIR="$OUT/crate" cargo package --quiet \
+(cd "$ROOT_DIR/src/sys" && CARGO_TARGET_DIR="$OUT/crate" cargo package "${verbosity_args[@]}" \
   --locked "${network_args[@]}" --no-verify --allow-dirty -p moto-sdk)
 staging="$(mktemp -d "$OUT/.staging.XXXXXX")"
 tar -xzf "$OUT"/crate/package/moto-sdk-*.crate -C "$staging" --strip-components=1 \
@@ -79,7 +90,10 @@ find "$OUT" -mindepth 1 -maxdepth 1 -name 'source-*' ! -name "source-$key" \
   -exec rm -rf {} +
 cd "$SOURCE"
 
-[ "$mode" = test ] || cargo fetch --quiet --locked
+if [ "$mode" != test ]; then
+  progress "fetching package-test dependencies"
+  cargo fetch "${verbosity_args[@]}" --locked
+fi
 
 # Every dependency comes from crates.io: no path, Git or patched source.
 packages="$(grep -c '^\[\[package\]\]$' Cargo.lock)"
@@ -112,11 +126,15 @@ done < <(awk '/^\[/ {
 test_args=()
 [ "$mode" = test ] || test_args=(--no-run)
 export CARGO_TARGET_DIR="$OUT/target"
-cargo test --quiet --locked "${network_args[@]}" "${profile_args[@]}" "${test_args[@]}"
-cargo test --quiet --locked "${network_args[@]}" "${profile_args[@]}" --target "$MOTOR" --no-run
-cargo build --quiet --locked "${network_args[@]}" "${profile_args[@]}" --target "$MOTOR" \
+progress "building host tests"
+cargo test "${verbosity_args[@]}" --locked "${network_args[@]}" "${profile_args[@]}" "${test_args[@]}"
+progress "building Motor OS tests"
+cargo test "${verbosity_args[@]}" --locked "${network_args[@]}" "${profile_args[@]}" --target "$MOTOR" --no-run
+progress "building Motor OS library with test-support"
+cargo build "${verbosity_args[@]}" --locked "${network_args[@]}" "${profile_args[@]}" --target "$MOTOR" \
   --features test-support
-cargo build --quiet --locked "${network_args[@]}" "${profile_args[@]}" --target "$MOTOR" \
+progress "building Motor OS library without default features"
+cargo build "${verbosity_args[@]}" --locked "${network_args[@]}" "${profile_args[@]}" --target "$MOTOR" \
   --no-default-features -Zbuild-std=core,alloc
 if [ "$mode" = test ]; then
   echo "moto-sdk package PASS"

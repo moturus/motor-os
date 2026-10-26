@@ -117,9 +117,9 @@ the bundle's certificate count and SHA-256.
 
 Configurations with assembly inputs require `MOTOR_ASSEMBLY_IMAGE_ROOT` to
 name a normalized absolute host directory. Assembly paths in YAML must be
-normalized relative paths. The Make recipes obtain the root from
-`src/resolve-toolchain-assembly.sh --resolve`; see
-[assembly resolution](assembly-resolution.md) for the build workflow.
+normalized relative paths. The Make recipes pass `build/assembly/images`,
+which holds the overlays of the native toolchain and of the external sources;
+see [toolchain.md](toolchain.md#4-the-assembly) for the build workflow.
 
 ## Change guest permissions
 

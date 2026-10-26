@@ -1,4 +1,5 @@
 /build
+/external-sources
 /target
 /vm_images
 /.motor-os

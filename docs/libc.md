@@ -53,8 +53,8 @@ Properties that follow, and that every consumer can rely on:
 ## Supported surface
 
 Brought up and gated milestone by milestone during the port, and exercised
-today by the assembly validation, the native Lua build, and the full-test
-suites:
+today by the toolchain build's checks, the native Lua build, and the
+full-test suites:
 
 - **ANSI C**: formatted I/O both directions (including correct `%.17g`
   round-trips), buffered file stdio, `malloc`, `setjmp`/`longjmp`, `abort`
@@ -96,7 +96,7 @@ suites:
   mlibc's `sysdeps/motor/moto-rt-cabi/src/cxa.rs`.
 - Executable-permission support is a cross-repository compatibility boundary
   between the fd wrapper, mlibc, and LLVM revisions; never mix components
-  across assembly tuples ([build-llvm.md](build-llvm.md), "Source identity").
+  of different toolchains ([build-llvm.md](build-llvm.md), "Sources").
 
 ## On-image layout and configuration
 
@@ -134,11 +134,11 @@ anything:
 
 ## Versioning
 
-The mlibc commit is declared as `MOTOR_MLIBC_REV` in `src/toolchain-versions.sh`, which
-enters `MOTOR_ASSEMBLY_KEY`, so a libc change selects a new assembly rather
-than mutating an existing one. That commit also fixes the shim, its C header,
-and its `Cargo.lock`, which selects published `moto-rt` and `moto-sys` crates.
-Building the shim requires no Motor OS source checkout. A compile-time
-assertion checks the header's `MOTO_RT_VERSION` against the selected
-`moto-rt::RT_VERSION`. The rules and procedures are in
-[toolchain.md](toolchain.md).
+mlibc is part of the Motor OS toolchain: the toolchain repository's
+`versions.sh` names its branch as `MOTOR_MLIBC_BRANCH`, so a libc change is a
+new toolchain release rather than a change to an existing one. That branch
+also carries the shim, its C header, and its `Cargo.lock`, which selects
+published `moto-rt` and `moto-sys` crates. Building the shim requires no
+Motor OS source checkout. A compile-time assertion checks the header's
+`MOTO_RT_VERSION` against the selected `moto-rt::RT_VERSION`. The procedures
+are in the toolchain repository's README and in [toolchain.md](toolchain.md).

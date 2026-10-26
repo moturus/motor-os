@@ -32,18 +32,11 @@ die()  { printf '\033[1;31m[build-base]\033[0m ERROR: %s\n' "$*" >&2; exit 1; }
 trap 'die "failed at line $LINENO"' ERR
 
 # --- development root and Motor OS checkout ---------------------------------
+# This script lives in <checkout>/src/build-scripts; $MOTORH defaults to the
+# checkout's parent.
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-# In a checkout, this script lives in <repo>/src: the repo is the Motor OS
-# tree and $MOTORH defaults to its parent. Copied out into an empty dev root,
-# the script's own directory is $MOTORH and the repo gets cloned beneath it.
-if [ -e "$SCRIPT_DIR/../.git" ]; then
-	MOTOR_DEFAULT="$(readlink -f "$SCRIPT_DIR/..")"
-	MOTORH="$(readlink -f "${MOTORH:-$MOTOR_DEFAULT/..}")"
-	MOTOR="${MOTOR_OS_DIR:-$MOTOR_DEFAULT}"
-else
-	MOTORH="$(readlink -f "${MOTORH:-$SCRIPT_DIR}")"
-	MOTOR="${MOTOR_OS_DIR:-$MOTORH/motor-os}"
-fi
+MOTOR="${MOTOR_OS_DIR:-$(readlink -f "$SCRIPT_DIR/../..")}"
+MOTORH="$(readlink -f "${MOTORH:-$MOTOR/..}")"
 export MOTORH
 
 # Build deps from docs/build.md, plus qemu-system so the host is ready to run

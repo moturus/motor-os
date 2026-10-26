@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Javy/Wasmi add-on and helpers shared with the Wasmtime add-on, sourced by
-# build-motor-os.sh after toolchain selection.
+# The Javy/Wasmi external source and helpers that Wasmtime's build shares,
+# sourced by build-motor-os.sh after toolchain selection.
 
-# Digests of the default plugin and the TypeScript workload; the Wasmtime add-on
+# Digests of the default plugin and the TypeScript workload; the Wasmtime build
 # compiles the same inputs into its fixtures.
 JAVY_PLUGIN_SHA=180230f9346dc4b7d7139791280c9f4da09b2292eef751a3d35ae80154d88350
 JAVY_TYPESCRIPT_SHA=4969f6546b830e751b6797be028accd242fd24e6e506661c51ddcd16b2646d68
@@ -21,23 +21,21 @@ javy_download() {
 	printf '%s  %s\n' "$digest" "$output" | sha256sum -c -
 }
 
-# The provenance of a wasm add-on, which is also its reuse key: the selected
-# toolchain, each "repo:branch[:revision]" source in $1 at its checked-out
-# commit with the git dependencies its lockfiles pin, and the checkout files
-# given after it.
+# The provenance that the Javy and Wasmtime overlays record: the toolchain,
+# each "repo:branch[:revision]" source in $1 at its checked-out commit with the
+# git dependencies its lockfiles pin, and the checkout files given after it.
 wasm_source_manifest() (
 	local sources="$1" spec repo branch revision
 	shift
 	cd "$MOTOR"
-	printf 'assembly=%s\n' "${ASSEMBLY_ROOT##*/}"
 	printf 'toolchain=%s\n' "$RUSTUP_TOOLCHAIN"
 	printf 'rustc=%s\n' "$(rustc --version)"
 	printf 'target=x86_64-unknown-motor\nprofile=release\n'
 	for spec in $sources; do
 		IFS=: read -r repo branch revision <<< "$spec"
 		printf '%s=https://github.com/moturus/%s.git %s %s\n' \
-			"$repo" "$repo" "$branch" "$(git -C "$MOTORH/$repo" rev-parse HEAD)"
-		(cd "$MOTORH/$repo" && git ls-files -z '*Cargo.lock' |
+			"$repo" "$repo" "$branch" "$(git -C "$EXTERNAL_SOURCES/$repo" rev-parse HEAD)"
+		(cd "$EXTERNAL_SOURCES/$repo" && git ls-files -z '*Cargo.lock' |
 			xargs -0 grep -h '^source = "git+' | LC_ALL=C sort -u | sed 's/^source = /  /')
 	done
 	sha256sum rust-toolchain.toml "$@"
@@ -47,7 +45,7 @@ javy_source_manifest() {
 	local plugins
 	mapfile -t plugins < <(cd "$MOTOR" && git ls-files --cached --others --exclude-standard \
 		src/tests/javy-smoke/plugins | LC_ALL=C sort)
-	wasm_source_manifest "${JAVY_SOURCES[*]}" src/build-javy.sh \
+	wasm_source_manifest "${JAVY_SOURCES[*]}" src/build-scripts/build-javy.sh \
 		src/tests/javy-smoke/fixtures/typescript-workload.js src/tests/javy-smoke/fixtures/hello.js \
 		"${plugins[@]}"
 	printf 'guest-toolchain=%s\n' "$(RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN" rustc --version)"
@@ -57,7 +55,7 @@ javy_source_manifest() {
 
 # Binaryen's C++ units and fat-LTO links are memory-hungry: allow 1.5 GiB per
 # job and bound by CPUs. The forks' own default is two jobs.
-wasm_addon_jobs() {
+wasm_build_jobs() {
 	local cpus memory
 	cpus="$(nproc)"
 	memory="$(awk '/^MemAvailable:/ { print int($2 / 1572864) }' /proc/meminfo)"
@@ -103,23 +101,24 @@ build_javy_test_plugins() {
 }
 
 build_javy() {
-	local inputs="$ASSEMBLY_BUILD_ROOT/javy-inputs" data="$JAVY_IMG/devtools/javy"
+	local inputs="$ASSEMBLY_BUILD_ROOT/javy-inputs" data="$JAVY_IMG/devtools/javy" manifest
+	manifest="$(javy_source_manifest)"
 	mkdir -p "$inputs"
 	javy_download https://github.com/bytecodealliance/javy/releases/download/v9.1.0/plugin.wasm.gz \
 		dc237a6fb9c7e58423456a12fc3c4e7a97d9d1eeb91b89ca73db76b78ae95e83 "$inputs/plugin.wasm.gz"
-	gzip -dc "$inputs/plugin.wasm.gz" > "$inputs/plugin.wasm"
+	# Javy's build script rebuilds the CLI whenever this file is rewritten.
+	[ -f "$inputs/plugin.wasm" ] || gzip -dc "$inputs/plugin.wasm.gz" > "$inputs/plugin.wasm"
 	printf '%s  %s\n' "$JAVY_PLUGIN_SHA" "$inputs/plugin.wasm" | sha256sum -c -
 	javy_download https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz \
 		10e108c9cf7d5f2879053dff18515fb405abf2ccef63eaaf017d9c571687a1d3 "$inputs/typescript.tgz"
-	# The orchestrator's selection (managed or authoring) overrides Javy's own
-	# rust-toolchain.toml for the fetch and is inherited by motor-build.sh.
-	[ -n "${RUSTUP_TOOLCHAIN:-}" ] || die "no Rust toolchain was selected for Javy"
+	# RUSTUP_TOOLCHAIN overrides Javy's own rust-toolchain.toml for the fetch
+	# and is inherited by motor-build.sh.
 	(
-		cd "$MOTORH/javy"
+		cd "$EXTERNAL_SOURCES/javy"
 		# Fetch the complete locked graph, including host build dependencies.
 		cargo fetch --locked
-		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/javy" JOBS="$(wasm_addon_jobs)" \
-			MOTOR_SYSROOT="$ASSEMBLY_ROOT/sysroot" JAVY_DEFAULT_PLUGIN="$inputs/plugin.wasm" \
+		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/javy" JOBS="$(wasm_build_jobs)" \
+			MOTOR_SYSROOT="$SYSROOT" JAVY_DEFAULT_PLUGIN="$inputs/plugin.wasm" \
 			./motor-build.sh
 	)
 	rm -rf "$JAVY_TESTS"
@@ -130,7 +129,7 @@ build_javy() {
 			"$JAVY_IMG/devtools/bin/$tool"
 	done
 	install -m 644 "$inputs/plugin.wasm" "$data/plugins/default.wasm"
-	printf '%s\n' "$JAVY_SOURCE_MANIFEST" > "$data/sources.txt"
+	printf '%s\n' "$manifest" > "$data/sources.txt"
 	(cd "$JAVY_IMG" && sha256sum devtools/bin/{javy,wasmi} devtools/javy/plugins/default.wasm \
 		devtools/javy/sources.txt > "$data/SHA256SUMS")
 	# Test inputs stay out of the images; test-wasm.sh uploads them.
@@ -145,18 +144,4 @@ build_javy() {
 	build_javy_test_plugins "$JAVY_TESTS"
 	(cd "$JAVY_TESTS" && sha256sum typescript-workload.js typescript-LICENSE.txt \
 		typescript-NOTICES.txt linux-reference.txt plugin-p1.wasm plugin-p2.wasm > SHA256SUMS)
-}
-
-build_javy_addon() {
-	JAVY_IMG="$ASSEMBLY_IMAGE_ROOT/javy"
-	JAVY_TESTS="$ASSEMBLY_ROOT/tests/javy"
-	local source
-	JAVY_SOURCE_MANIFEST="$(javy_source_manifest)"
-	source="$(printf '%s\n' "$JAVY_SOURCE_MANIFEST" | sha256sum | cut -d' ' -f1)"
-	# All outputs must still match, not just the executable used by ensure_addon.
-	if ! (cd "$JAVY_IMG" && sha256sum --status -c devtools/javy/SHA256SUMS) 2>/dev/null ||
-		! (cd "$JAVY_TESTS" && sha256sum --status -c SHA256SUMS) 2>/dev/null; then
-		rm -f "$ASSEMBLY_ROOT/ADDON-javy"
-	fi
-	ensure_addon javy "$source" "$JAVY_IMG" devtools/bin/javy build_javy
 }

@@ -534,17 +534,15 @@ for two secrets. Smaller images omit trees; they never relax a mode. The main ru
   <tr><td><code>/user/tmp</code></td><td><code>rwxrwx---</code></td><td><code>rw-rw----</code></td><td><code>rwxrwx---</code></td><td><code>r-xr-x---</code></td></tr>
   <tr><td><code>/none/cfg</code>, <code>/none/tmp</code>, <code>/devtools/lorry/none</code></td><td><code>rwxrwxrwx</code></td><td><code>rw-rw-rw-</code></td><td><code>rwxrwxrwx</code></td><td><code>r-xr-xr-x</code></td></tr>
   <tr><td><code>/none</code></td><td><code>rwxrwxr-x</code></td><td><code>rw-rw-r--</code></td><td><code>rwxrwxr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
-  <tr><td><code>/user</code>, <code>/user/bin</code>, <code>/devtools/src</code></td><td><code>rwxrwxr-x</code></td><td><code>rw-rw-r--</code></td><td><code>rwxrwxr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
+  <tr><td><code>/user</code>, <code>/user/bin</code>, <code>/devtools</code></td><td><code>rwxrwxr-x</code></td><td><code>rw-rw-r--</code></td><td><code>rwxrwxr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
   <tr><td><code>/user/cfg</code>, <code>/devtools/lorry/user</code></td><td><code>rwxrwx---</code></td><td><code>rw-rw----</code></td><td><code>rwxrwx---</code></td><td><code>r-xr-x---</code></td></tr>
-  <tr><td><code>/devtools/bin</code></td><td><code>rwxr-xr-x</code></td><td><code>rw-r--r--</code></td><td><code>rwxrwxr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
 </table>
 </div>
 <p><code>/system/cfg/sshd.toml</code> and <code>/system/cfg/ssl/ssl-key.pem</code> are
 <code>rw-r-----</code>: readable by the Interactive services that need them, invisible to
 None. With the initial modes, Interactive cannot create a new top-level directory or
-replace <code>/system</code>; it can edit a launcher script in <code>/devtools/bin</code>
-in place but not add or remove entries there; only System can create or rotate files in
-<code>/system/logs</code>.</p>
+replace <code>/system</code>; it owns <code>/devtools</code>, so a user can install a newer
+toolchain there; only System can create or rotate files in <code>/system/logs</code>.</p>
 <p>The <a href="imager.html">imager</a> classifies each source file by its host execute bit (a host-executable file
 must be a <code>#!</code> script or an ELF executable, anything else is rejected), resolves
 every mode before it creates the image, and creates non-writable files through a
@@ -570,8 +568,8 @@ not parse.</p>
   <code>CAP_FS_WRITE</code>. Only System may change <code>/</code>. Entry-ID changes
   need parent <code>w</code> but not <code>x</code>; pathname lookup still needs
   <code>x</code>. A file's own <code>w</code> still permits editing its contents
-  under a protected parent. Interactive can write to <code>/devtools/bin/www</code>
-  in place but cannot chmod it.</li>
+  under a protected parent: a file Interactive may write, in a directory whose
+  <code>w</code> it has dropped, can be edited but not chmodded.</li>
   <li>An SFTP upload onto an existing file replaces its contents in place and keeps
   its installed mode: OPEN's mode is a creation hint. An upload whose mode excludes
   a lower role that can currently read the file first takes that role's access

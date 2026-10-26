@@ -8,8 +8,8 @@
 # lock entry of moto-sdk's Unix-only tokio, are the image's static files.
 # Cargo.lock is derived from src/sys/Cargo.lock, so native tests use the
 # dependency versions of the in-tree build. src/build-motor-os.sh vendors the
-# workspace's dependencies, and src/prepare-dev-image.sh installs its
-# Cargo.lock.
+# workspace's dependencies, and src/build-scripts/prepare-dev-image.sh
+# installs its Cargo.lock.
 
 set -euo pipefail
 
@@ -26,7 +26,7 @@ fi
 [ "$#" -eq 1 ] || usage
 destination="$1"
 
-ROOT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd)"
 STAGED=/devtools/src/motor-os/sys/lib
 die() { echo "sys-lib-workspace: $*" >&2; exit 1; }
 

@@ -242,7 +242,8 @@ done
 vm_ssh "[ ! -e /devtools/src/motor-os/bin/curl ]" ||
   fail "developer image exposes curl as a Motor-native source project"
 # make dev.img admitted the staged library sources, compiled their
-# dependencies, and removed the build tree (src/prepare-dev-image.sh).
+# dependencies, and removed the build tree
+# (src/build-scripts/prepare-dev-image.sh).
 for crate in "${SYS_LIB_CRATES[@]}"; do
   vm_ssh "[ -f $SYS_LIB/$crate/Cargo.toml ]" ||
     fail "developer image is missing $SYS_LIB/$crate/Cargo.toml"
@@ -273,7 +274,7 @@ vm_ssh "[ ! -e /user/cfg/lorry ]" ||
   fail "developer image still contains the old Lorry state directory"
 vm_ssh "[ -f /devtools/lorry/readme.txt ]" ||
   fail "developer image is missing /devtools/lorry/readme.txt"
-expect_guest_mode /devtools lorry drwxr-xr-x "Lorry state directory"
+expect_guest_mode /devtools lorry drwxrwxr-x "Lorry state directory"
 expect_guest_mode /devtools/lorry user drwxrwx--- "Interactive Lorry state"
 expect_guest_mode /devtools/lorry none drwxrwxrwx "None Lorry state"
 expect_guest_mode /devtools/lorry/user vendor drwxrwx--- "Interactive Lorry repository"

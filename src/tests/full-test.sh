@@ -125,6 +125,7 @@ if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   # timeout moves the suite into a background process group; a terminal
   # operation can then stop timeout and the entire suite with SIGTTIN/SIGTTOU.
   # Keeping timeout's separate group preserves its whole-process-tree timeout.
+  echo "full-test: starting $BUILD tests ($VMM)"
   testing_started="$SECONDS"
   set -m
   timeout "${TIMEOUT}s" "$0" "${ORIGINAL_ARGS[@]}" < /dev/null
@@ -160,32 +161,9 @@ test_vm_configure_ssh
 # Host-only regression for upgrading an existing IPv4-only moto-tap after the
 # IPv6 test network was introduced.
 "$WD/test-build-base-networking.sh"
-"$WD/test-build-addons.sh"
+"$WD/test-external-sources.sh"
 "$WD/test-sys-lib-workspace.sh"
 "$WD/test-full-test-size.sh"
-"$WD/test-toolchain-assembly.sh"
-"$WD/test-toolchain-assembly-resolution.sh"
-"$WD/test-toolchain-authoring-sources.sh"
-"$WD/test-toolchain-bootstrap.sh"
-"$WD/test-toolchain-cutover.sh"
-"$WD/test-toolchain-cxx-sysroot.sh"
-"$WD/test-toolchain-entry-point.sh"
-"$WD/test-toolchain-host.sh"
-"$WD/test-toolchain-keyed-paths.sh"
-"$WD/test-toolchain-llvm.sh"
-"$WD/test-toolchain-managed-sources.sh"
-"$WD/test-toolchain-native.sh"
-"$WD/test-toolchain-native-rust-analyzer.sh"
-"$WD/test-toolchain-patched-crates.sh"
-"$WD/test-toolchain-prefix.sh"
-"$WD/test-toolchain-runtime.sh"
-"$WD/test-toolchain-rust-analyzer.sh"
-"$WD/test-toolchain-rust-analyzer-fetch.sh"
-"$WD/test-toolchain-rust-analyzer-identity.sh"
-"$WD/test-toolchain-state.sh"
-"$WD/test-toolchain-submodules.sh"
-"$WD/test-toolchain-tree-digest.sh"
-"$WD/test-toolchain-versions.sh"
 "$WD/test-vm-console-filter.sh"
 "$WD/test-vm-image-format.sh"
 "$WD/test-vm-vsock-backend.sh"
@@ -201,13 +179,10 @@ else
   bash "$WD/test-rmux-copy-status.sh" --self-test
 fi
 if [ "$BUILD" = "release" ]; then
-  "$WD/test-rust-analyzer-sources.sh" --release
   "$WD/test-rust-analyzer.sh" --release
 else
-  "$WD/test-rust-analyzer-sources.sh"
   "$WD/test-rust-analyzer.sh"
 fi
-"$WD/test-rustfmt-sources.sh"
 # Keep a local runtime version bump from breaking only the dev-image suite.
 python3 "$WD/test-dev-path-locks.py"
 
@@ -730,16 +705,10 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
     fail "Interactive session could not edit $editable_script in place"
   vm_ssh "/system/bin/rush -c 'cat $saved_script >$editable_script'" ||
     fail "could not restore $editable_script after its write probe"
-  if vm_ssh /system/bin/mv "$editable_script" "$editable_script.renamed"; then
-    fail "mv returned success after a denied installed-script rename"
-  fi
-  vm_ssh "[ -e $editable_script ] && [ ! -e $editable_script.renamed ]" ||
-    fail "Interactive session renamed $editable_script"
-  if vm_ssh /system/bin/rm "$editable_script"; then
-    fail "rm returned success after a denied installed-script deletion"
-  fi
-  vm_ssh "[ -e $editable_script ]" ||
-    fail "Interactive session deleted $editable_script"
+  # Interactive owns /devtools, where a user installs a toolchain.
+  vm_ssh "/system/bin/mv $editable_script $editable_script.renamed &&
+    /system/bin/mv $editable_script.renamed $editable_script" ||
+    fail "Interactive session could not rename $editable_script"
   vm_ssh /system/bin/rm "$saved_script"
   check_bin_permissions /devtools/bin mutable
 fi
@@ -981,16 +950,12 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   out="$(vm_ssh_stdout "/system/bin/rush -c '[ -d $sed_dir ] || mkdir $sed_dir; cd $sed_dir; printf \"alpha\nbeta\n\" | /devtools/bin/sed -n s/beta/BETA/p; echo RC=\$?; printf \"one\ntwo\n\" > f; chmod rwxrw---- f; /devtools/bin/sed -i s/one/ONE/ f; /devtools/bin/sed -i.bak -e s/two/TWO/ f; cat f f.bak; ls -l f'")"
   [ "$out" = $'BETA\nRC=0\nONE\nTWO\nONE\ntwo\n-rwxrw---- 8 f' ] ||
     fail "sed pipeline or in-place edit: '$out'"
-  # A writable script in a directory where no file can be created: the edit
-  # is staged in memory, and the script keeps its permissions and contents.
-  www=/devtools/bin/www
-  www_before="$(vm_ssh_stdout "/system/bin/rush -c 'cat $www'")"
-  out="$(vm_ssh_stdout "/system/bin/rush -c '/devtools/bin/sed -i 1s/^/#sed-probe/ $www; /devtools/bin/sed -n 1p $www; /devtools/bin/sed -i 1s/^#sed-probe// $www; ls -l $www'")"
-  [ "$(printf '%s\n' "$out" | head -1)" = "#sed-probe$(printf '%s\n' "$www_before" | head -1)" ] &&
-    [ "$(printf '%s\n' "$out" | sed -n 2p | awk '{ print $1 }')" = "-rwxrwxr-x" ] ||
-    fail "sed did not edit $www in place: '$out'"
-  [ "$(vm_ssh_stdout "/system/bin/rush -c 'cat $www'")" = "$www_before" ] ||
-    fail "sed did not restore $www"
+  # A writable file in a directory where no file can be created: the edit is
+  # staged in memory, and the file keeps its permissions.
+  locked="$sed_dir/locked"
+  out="$(vm_ssh_stdout "/system/bin/rush -c 'mkdir $locked; printf \"one\ntwo\n\" > $locked/f; chmod rwxrw---- $locked/f; chmod rwxr-xr-x $locked; /devtools/bin/sed -i s/one/ONE/ $locked/f; cat $locked/f; ls -l $locked/f; chmod rwxrwxr-x $locked; rm -r $locked'")"
+  [ "$out" = "ONE"$'\n'"two"$'\n'"-rwxrw---- 8 $locked/f" ] ||
+    fail "sed did not edit a file in a read-only directory in place: '$out'"
   echo "sed PASS"
 fi
 

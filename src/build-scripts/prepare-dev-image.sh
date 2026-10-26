@@ -17,7 +17,7 @@ usage() {
 
 [ "$#" -eq 1 ] || usage
 case "$1" in debug|release) BUILD="$1" ;; *) usage ;; esac
-ROOT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd)"
 
 # Preparation takes about 10 seconds on a release image and 4 minutes on a
 # debug one. A stalled boot or guest command must not hold the build, so the
@@ -102,7 +102,7 @@ shut_down_vm() {
   [ "$status" -eq 33 ] || fail "$TEST_VM_LABEL exited with status $status, not by shutting down"
 }
 
-"$ROOT_DIR/src/sys-lib-workspace.sh" --offline "$work/lib"
+"$ROOT_DIR/src/build-scripts/sys-lib-workspace.sh" --offline "$work/lib"
 test_vm_configure_ssh
 # The console goes to its log only; failures print it.
 start_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$work/console.log" > /dev/null

@@ -40,25 +40,23 @@ pub fn run(evidence: &Path, sampler_binary: &Path) -> io::Result<()> {
         .as_nanos();
     let root = PathBuf::from(format!("/user/tmp/ra-{}-{nonce:x}", std::process::id()));
     let second = root.with_file_name(format!("ra-{}-{nonce:x}-second", std::process::id()));
-    let manifest = remote.run("/system/bin/cat /devtools/toolchain/manifest")?;
-    fs::write(evidence.join("manifest"), &manifest.stdout)?;
     let version = remote.run(&format!("{SERVER} --version"))?;
     fs::write(evidence.join("version"), &version.stdout)?;
-    let expected = String::from_utf8_lossy(&manifest.stdout)
-        .lines()
-        .filter_map(|line| line.strip_prefix("native_rust_analyzer_expected_version_base64="))
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    if expected.len() != 1 {
-        return Err(io::Error::other("manifest lacks unique analyzer version"));
-    }
-    // Decode on the host using the same base64 format as assembly publication.
-    let encoded = evidence.join("version.base64");
-    fs::write(&encoded, &expected[0])?;
-    let decoded = checked(Command::new("base64").arg("-d").arg(encoded).output()?)?;
-    if String::from_utf8_lossy(&version.stdout).trim() != String::from_utf8_lossy(&decoded.stdout) {
+    // The native server is built from the same sources as the host toolchain's.
+    let sysroot = checked(
+        Command::new("rustc")
+            .args(["--print", "sysroot"])
+            .current_dir(&remote.repository)
+            .output()?,
+    )?;
+    let host_server =
+        Path::new(String::from_utf8_lossy(&sysroot.stdout).trim()).join("bin/rust-analyzer");
+    let host = checked(Command::new(host_server).arg("--version").output()?)?;
+    if String::from_utf8_lossy(&version.stdout).trim()
+        != String::from_utf8_lossy(&host.stdout).trim()
+    {
         return Err(io::Error::other(
-            "native analyzer version differs from assembly",
+            "native analyzer version differs from the host toolchain's",
         ));
     }
     let fixture = remote

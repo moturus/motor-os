@@ -1,34 +1,54 @@
-# Building the complete Motor OS toolchain
+# Building Motor OS with its external sources
 
 `src/build-motor-os.sh` is the single supported entry point for building the
-Motor OS compiler/runtime assembly and all release images. It builds Linux-host
-Rust tools, standalone LLVM/Clang, the C/C++ sysroot, native Motor OS LLVM and
-rustc, and the OS from one reviewed source tuple.
-
-The current development tuple is the exact Rust 1.99 beta baseline declared in
-`src/toolchain-versions.sh`. The Motor OS fork uses Rust's `dev` channel, so its
-Cargo reports `1.99.0-dev`; this is a beta development assembly, not the final
-`1.99.0-motor.1` source release.
+external sources and all release images with the Motor OS toolchain that
+`rust-toolchain.toml` names. The scripts it and the Makefile use are in
+`src/build-scripts/`. The toolchain itself is built and released by
+[motor-os-toolchain](https://github.com/moturus/motor-os-toolchain);
+[toolchain.md](toolchain.md) describes how this repository installs and uses
+it. The current toolchain is `x86_64-unknown-motor-1.99.1`: upstream Rust
+1.99.1 with the Motor OS patches. Its compilers use Rust's `dev` channel, so
+rustc and Cargo report `1.99.1-dev`.
 
 ## Quick start
 
-On Ubuntu 24.04 or 26.04:
+On Ubuntu 24.04 or 26.04, install rustup before the host toolchain. If it is
+not installed yet:
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+  sh -s -- -y --default-toolchain none
+. "$HOME/.cargo/env"
+```
+
+If rustup is already installed, ensure it is on `PATH`. With the two
+toolchain archives downloaded into the development root:
 
 ```sh
 mkdir motor-dev
 cd motor-dev
 git clone https://github.com/moturus/motor-os.git
+tar -xaf motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux.tar.zst
+motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux/install.sh
+rm -rf motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux
 cd motor-os
 src/build-motor-os.sh
 ```
 
-`MOTORH` defaults to the parent of the Motor OS checkout. Set it before running
-the script only when the development root should live elsewhere:
+The native archive, `motor-toolchain-x86_64-unknown-motor-1.99.1.tar.zst`,
+stays in the development root, `MOTORH`, which defaults to the parent of the
+Motor OS checkout. Set it before running the script only when the archives
+live elsewhere:
 
 ```sh
 export MOTORH=/absolute/path/to/motor-dev
-src/build-motor-os.sh --source-mode managed
+src/build-motor-os.sh
 ```
+
+The script reads only the native archive from there and writes nothing
+there. Everything else stays in the checkout: the external sources in
+`external-sources/`, the build trees and the assembly in `build/`, and the
+images in `vm_images/`.
 
 The script installs missing host packages and rustup, so initial provisioning
 uses `sudo` and the network. It also configures TAP/KVM prerequisites. Every
@@ -37,50 +57,42 @@ build that follows never asks for a password. Set
 `MOTOR_SKIP_HOST_NETWORK_SETUP=1` only after independently verifying that the
 required VM networking is already configured.
 
-## Source modes
+## External sources
 
-Managed mode is the default. It resolves the full commits and repository URLs
-from `src/toolchain-versions.sh` into private build checkouts:
+The external sources are the userspace programs built beside Motor OS:
+ripgrep, Helix, uutils sed, Lua, tar and zstd, Javy/Wasmi, and Wasmtime. They
+are cloned into `external-sources/`, which Git ignores. ripgrep, Helix, sed,
+and motor-os-tar follow one branch of their forks, in
+`external-sources/ripgrep`, `external-sources/helix`, `external-sources/sed`,
+and `external-sources/motor-os-tar`. Javy/Wasmi and Wasmtime are built from
+one branch of their forks at the exact revision declared in
+`src/build-scripts/external-sources.sh`, in `external-sources/javy` and
+`external-sources/wasmtime`: a clean checkout is moved to that revision, and
+commits that are not on the fork's branch are never left behind. Everything
+the forks depend on — Wasmi, Wizer, Tokio, Mio and target-lexicon by git, and
+the Motor OS crates `moto-rt` and `moto-sys` from crates.io — is pinned by the
+forks' lockfiles, which Cargo fetches; no fork refers to another checkout,
+and this tree's `src/sys/lib` is not an input of the external sources. Lua is
+a release, and so is the wasi-sdk that javy-smoke's test plugins need; both
+are downloaded into `external-sources/`.
 
-```text
-$MOTORH/toolchain-src/rust/
-  src/llvm-project/       Motor OS LLVM at the Rust gitlink
-  src/tools/cargo/        upstream Cargo at the declared gitlink
-$MOTORH/toolchain-src/mlibc/
-```
-
-Managed inputs must exactly match the declaration. A wrong remote, missing or
-unreachable commit, incorrect gitlink, dirty file, or untracked file is an
-error. The build never advances a toolchain branch, runs `cargo update`, or
-silently changes a dependency selection. The userspace add-ons differ by
-design: ripgrep, Helix, and sed follow one branch of their forks, in
-`$MOTORH/ripgrep`, `$MOTORH/helix`, and `$MOTORH/sed`. The Javy/Wasmi and
-Wasmtime add-ons are built from one branch of their forks at the exact revision
-declared in `src/build-addon-sources.sh`, in `$MOTORH/javy` and
-`$MOTORH/wasmtime`: a clean checkout is moved to that revision, and commits
-that are not on the fork's branch are never left behind. Everything the forks
-depend on — Wasmi, Wizer, Tokio, Mio and target-lexicon by git, and the Motor
-OS crates `moto-rt` and `moto-sys` from crates.io —
-is pinned by the forks' lockfiles, which Cargo fetches; no fork refers to a sibling checkout, and this tree's
-`src/sys/lib` is not an input of the add-ons.
-
-After selecting the host toolchain, the build prepares all add-on sources and
-checks their lockfiles before building the native assembly, downloading add-on
-assets, or compiling add-ons. The shared inventory in
-`src/build-addon-sources.sh` covers ripgrep, Helix, sed, Javy, Wasmtime, the
-independent Motor OS test workspaces in the forks, and the Motor OS smoke/plugin
-workspaces. Upstream-only release and standalone fuzz workspaces are excluded.
-The `--javy-only` and `--wasmtime-only` paths check their selected workspaces too.
+Before building, the script prepares all external sources and checks their
+lockfiles. The shared inventory in `src/build-scripts/external-sources.sh`
+covers ripgrep, Helix, sed, motor-os-tar, Javy, Wasmtime, the independent
+Motor OS test workspaces in the forks, and the Motor OS smoke/plugin workspaces.
+Upstream-only release and standalone fuzz workspaces are excluded. The
+`--javy-only` and `--wasmtime-only` paths check their selected workspaces
+too.
 
 The check uses `cargo update --workspace --locked`: Cargo retains existing
 dependency selections wherever valid, prints required changes, and refuses to
 modify a stale lockfile. Builds may fetch registry metadata for this check.
-All workspace failures are reported together in `build/addon-lockfiles.log`,
+All workspace failures are reported together in `build/external-lockfiles.log`,
 along with the selected source commits and working-tree status. A stale
 lockfile must be updated and reviewed in its owning repository; validation
 never repairs it automatically.
 
-Before offline compilation, the wasm add-ons fetch their complete locked
+Before offline compilation, Javy and Wasmtime fetch their complete locked
 dependency graphs. Target-filtered fetches can miss host dependencies reached
 through Motor OS-only dependency edges, even when Motor OS and Linux are fetched
 separately. Fetching without a target filter also makes cold-cache builds
@@ -89,82 +101,46 @@ independent of packages left over from earlier builds.
 To validate an existing set of checkouts without fetching or compiling:
 
 ```sh
-src/check-addon-lockfiles.sh
+src/build-scripts/check-external-sources.sh
 ```
 
-This command uses the same inventory and the selected Motor OS Cargo, with
-`--offline`. Missing checkouts or cached dependency metadata fail validation
-with their original diagnostics; they are not reported as version drift.
-`$MOTORH/motor-os` must resolve to the checkout being checked so the forks'
-relative path dependencies use that checkout's manifests.
-
-Rust and LLVM development uses explicit authoring mode instead of editing the
-managed checkout:
-
-```sh
-src/build-motor-os.sh \
-  --source-mode authoring \
-  --rust-source /absolute/path/to/rust \
-  --authoring-base FULL_40_CHARACTER_BASE_COMMIT
-```
-
-The supplied Rust checkout owns its `src/llvm-project` submodule. Local and
-unpushed commits, modified files, and untracked files in both trees become
-content-addressed authoring inputs. The build reads them without fetching,
-switching, resetting, stashing, cleaning, or updating either worktree. An
-authoring toolchain has a distinct non-release description and key and cannot
-replace the checked-in managed selector or satisfy source-publication checks.
-
-This separation is what permits work on Motor OS's Rust and LLVM patches without
-weakening the clean managed-build policy.
+This command uses the same inventory and the Motor OS Cargo, with `--offline`.
+Missing checkouts or cached dependency metadata fail validation with their
+original diagnostics; they are not reported as version drift.
 
 ## Build order and outputs
 
 The workflow performs these stages:
 
-1. Provision host packages, rustup, and VM prerequisites. No global rustup
-   default is selected or changed.
-2. Resolve and verify the exact Rust, LLVM, Cargo, and mlibc inputs. Hash the
-   starting Rust root and library lockfiles.
-3. Build standalone host LLVM from the effective LLVM tree and use it as
-   rustc's host LLVM.
-4. Run Rust bootstrap once to install Linux-host rustc/rustdoc, Cargo, host and
-   Motor OS std, Clippy, rust-analyzer, rustfmt/`cargo-fmt`, and `rust-src` into
-   an immutable key-qualified prefix.
-5. Register that prefix under its exact rustup name and validate every
-   component, source commit, sysroot, lock hash, and both host/target compile
-   probes.
-6. Derive an assembly key and build mlibc's C-ABI shim, compiler-rt builtins, mlibc,
-   libc++/libc++abi/libunwind, native LLVM, and native rustc in that
-   assembly's private directories. Then build the userspace add-ons (Lua,
-   ripgrep, Helix, sed, Javy/Wasmi, Wasmtime) with that toolchain; they are no part of its identity
-   and are rebuilt alone when their source changes.
-7. Write immutable host and assembly manifests, then build the base, standard,
-   and development images with the exact generated roots.
+1. Check that the native archive of the toolchain `rust-toolchain.toml`
+   names is in `$MOTORH`, then provision host packages, rustup, and VM
+   prerequisites. No global rustup default is selected or changed.
+2. Export that name as `RUSTUP_TOOLCHAIN`, so that the external sources that
+   pin toolchains of their own build with it too. It must be installed in
+   rustup.
+3. Prepare the external sources and check their lockfiles.
+4. Unpack the native toolchain's overlays into the assembly with
+   motor-os-tar's `tar`, built for Linux.
+5. Build the external sources into the assembly: Lua, ripgrep,
+   Helix, sed, tar and zstd, Javy/Wasmi, and Wasmtime, and fetch the
+   dependencies of the developer image's library sources. Every run builds
+   them all again; their Cargo target directories in the assembly keep that
+   incremental.
+6. Build the base, standard, development, and wasm images with
+   `make images BUILD=release`.
 
-The two identity levels deliberately differ:
+The assembly holds what the images take from outside the tree:
 
 ```text
-$MOTORH/toolchains/<exact-rustup-name>/
-    immutable host compiler prefix, keyed by compiler inputs
-
-$MOTORH/assemblies/<assembly-key>/
-    build/       component build trees
-    sysroot/     C/C++ cross sysroot and linker wrappers
-    images/      toolchain overlays (libc, LLVM, rustc, rust-analyzer) and
-                 add-on overlays (lua, rg, helix, sed, javy, wasmtime)
-    ADDON-*      the source each add-on was built from
+build/assembly/
+    build/       the external sources' build trees
+    images/      toolchain overlays (libc, llvm, rustc, rust-analyzer),
+                 overlays of the external sources (lua, rg, tar, helix, sed,
+                 javy, wasmtime), and sys-lib-deps
+    tests/       the Javy and Wasmtime test inputs
 ```
 
-An mlibc change, including its shim and locked Rust dependencies, selects a
-new assembly without changing the compiler lineage. Edits to this repository,
-build scripts and local runtime crates included, select nothing new. A changed
-add-on source rebuilds that
-add-on alone inside that assembly. A Rust or LLVM commit, bootstrap
-configuration, or host LLVM configuration change selects a new host toolchain
-prefix as well; Cargo and the Rust lockfiles change only with the Rust commit.
-Motor OS component outputs are further isolated under
-`build/obj/<toolchain-key>/<profile>/<component>`.
+Motor OS components build in `build/obj/<profile>/<component>`.
 
 The final images are:
 
@@ -172,121 +148,52 @@ The final images are:
 vm_images/release/motor-os-base.img
 vm_images/release/motor-os.qcow2
 vm_images/release/motor-os-dev.qcow2
+vm_images/release/motor-os-wasm.qcow2
 ```
 
-The standard image includes generated libc configuration and ripgrep. The
-development image additionally includes LLVM/Clang, the native Rust toolchain,
-rust-analyzer with matching `rust-src`, headers, libraries, and the complete assembly manifest under
-`/devtools/toolchain/manifest`. Generated `/devtools` content is never allowed
-to leak into the base or standard image.
+The standard image includes the libc configuration, ripgrep, tar, and zstd.
+The development image additionally includes LLVM/Clang, the native Rust
+toolchain, rust-analyzer with matching `rust-src`, headers, and libraries.
+Generated `/devtools` content is never allowed to leak into the base or
+standard image.
 
-Rust-analyzer's small URL and inventory portability patches are checked in
-under `src/patches/`. Provisioning uses pinned, checksum-verified crates.io
-archives and prepares immutable local sources under `$MOTORH/patched-crates/`;
-it needs no additional dependency forks. These inputs also identify the
-Linux-host server. The native binary lives at
-`/devtools/rust/bin/rust-analyzer` and its sources at
-`/devtools/rust/lib/rustlib/src/rust/library`. The image contains no Cargo
-shim and does not launch the server at boot. See the
-[native server guide](build-rustc.md#native-motor-os-rust-analyzer) for
-the explicit Lorry environment, trusted-project configuration, and current
+The native rust-analyzer lives at `/devtools/rust/bin/rust-analyzer` and its
+sources at `/devtools/rust/lib/rustlib/src/rust/library`. The image contains
+no Cargo shim and does not launch the server at boot. See the
+[native server guide](build-rustc.md#native-motor-os-rust-analyzer) for the
+explicit Lorry environment, trusted-project configuration, and current
 acceptance status.
 
-## Inspecting the selected tuple
+## Inspecting the toolchain
 
-The root `rust-toolchain.toml` names the exact managed toolchain. Bare commands
-from the repository therefore select its Cargo and compiler:
+The root `rust-toolchain.toml` names the toolchain. Bare commands from the
+repository therefore run its Cargo and compiler:
 
 ```sh
 rustc -vV
 cargo -Vv
-rustc --print sysroot
-rustup which cargo
-rustup which rust-analyzer
 ```
-
-The selected sysroot contains:
-
-```text
-MOTOR-TOOLCHAIN-MANIFEST
-lib/rustlib/MOTOR-TOOLCHAIN-KEY
-```
-
-Each completed assembly contains `MOTOR-ASSEMBLY-MANIFEST`; the same content is
-copied into every toolchain overlay. Add-on overlays carry none. To list local
-assemblies without guessing a key:
-
-```sh
-find "$MOTORH/assemblies" -mindepth 2 -maxdepth 2 \
-  -name MOTOR-ASSEMBLY-MANIFEST -print
-```
-
-The manifests record the effective Rust/LLVM revisions, Cargo identity,
-Stage 0, lock hashes, the `moto-rt` crate that std links, source state, both
-keys, and hashes of the native compiler and sysroot products. Every recorded
-value follows from the keys, so an equal key means an equal manifest.
-
-Later commands find the assembly on their own: its key follows from the
-selected toolchain and the declared inputs, and it lives beside that
-toolchain. Nothing is stored in the checkout. To see which assembly a
-checkout uses:
-
-```sh
-src/resolve-toolchain-assembly.sh --show
-```
-
-See [Resolving the toolchain assembly](assembly-resolution.md) for the
-validation and troubleshooting details.
 
 ## Re-running and failures
 
-Re-run the same command after a failure. A completed matching prefix or
-assembly is reused only after full manifest and artifact validation. Older
-keys are retained so invalidation mistakes remain visible; the workflow does
-not broadly clear Cargo, LLVM, mlibc, or image build directories.
+Re-run the same command after a failure. Every run builds the external
+sources again and unpacks the native toolchain's overlays again; Cargo and
+make rebuild only what changed.
 
-An adjacent `.building` directory is a producer lock; its `pid` file names the
-build that holds it. When that process is gone, the previous run was
-interrupted or failed: the next run discards the incomplete standalone LLVM,
-prefix, or assembly and builds it again. While the process is alive the run
-stops and names it.
-
-A `MOTOR-TOOLCHAIN-REJECTED` or `MOTOR-ASSEMBLY-REJECTED` marker preserves an
-invalid result for diagnosis, and a re-run does not discard it. The error
-prints the recorded reason and the two paths to remove. Resolve the underlying
-source, lockfile, or build defect before removing them.
-
-If Rust bootstrap rewrites a lockfile, that run's prefix is rejected because
-its starting key no longer describes the produced artifact. Review and commit
-the visible lockfile change in the Rust fork; the next run derives a new key.
-
-For a deliberately clean managed rebuild, first set and verify the development
-root. Then remove the keyed outputs and Rust bootstrap state before rerunning
-the build:
+After installing a different toolchain, or a rebuild of the same one, remove
+all build artifacts first:
 
 ```sh
-(
-  set -eu
-  test -n "${MOTORH:-}" && test "$MOTORH" != /
-  rm -rf -- "$MOTORH/toolchains"/* \
-    "$MOTORH/toolchain-state"/* \
-    "$MOTORH/assemblies"/* \
-    "$MOTORH/build/toolchain/standalone-llvm"/* \
-    "$MOTORH/toolchain-src/rust/build"
-  src/build-motor-os.sh --source-mode managed
-)
+make clean
+src/build-motor-os.sh
 ```
 
-The globs include adjacent `.building` producer locks. Inspect the expanded
-`MOTORH` and these paths before deleting them. Remove standalone LLVM only
-together with all assemblies: their sysroot wrappers refer to that keyed LLVM
-directory. The Rust `build/` tree is disposable after a successful build
-because each assembly contains copies of the native rustc and LLVM images it
-needs.
+`make clean` removes all of `build/`, the assembly included, and the other
+build artifacts in the tree, but not `external-sources/`.
 
 ## Building and testing the repository
 
-After the managed build, the root selector drives ordinary commands:
+After the build, the root selector drives ordinary commands:
 
 ```sh
 make -j"$(nproc)"
@@ -296,9 +203,5 @@ src/tests/full-test.sh
 src/tests/full-test.sh --release
 ```
 
-Do not add explicit `+nightly`, `+stable`, or legacy `+dev-*` selectors. Rust's
-Stage 0 compiler is used only internally by `x.py`.
-
-The final stable-release rebase and immutable source tags are intentionally
-deferred until upstream Rust 1.99.0 is published. See
-[toolchain.md](toolchain.md), section 5, for the update and release procedure.
+Do not add explicit `+nightly`, `+stable`, or legacy `+dev-*` selectors. See
+[toolchain.md](toolchain.md), section 7, for moving to another toolchain.

@@ -454,7 +454,9 @@ program that is being ported.</p>
 
 <h2>The target</h2>
 <ul>
-  <li>Static executables with no dynamic linking, <code>panic=abort</code>, and no ELF TLS;
+  <li>Static executables with no dynamic linking, <code>panic=unwind</code> by default,
+  and no ELF TLS; applications can opt out with <code>panic=abort</code>, and system
+  binaries declare abort profiles explicitly;
   thread-local storage is provided by the runtime.</li>
   <li>The standard library's Motor OS layer is deliberately thin: it calls
   <code>moto-rt</code>, which forwards to the per-process runtime <code>rt.vdso</code>

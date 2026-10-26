@@ -1,5 +1,5 @@
 //! Installed `wasmtime-rt` checks with the precompiled fixtures that the
-//! Wasmtime add-on builds from the runtime's own sources.
+//! Wasmtime build makes from the runtime's own sources.
 use std::fs;
 use std::time::{Duration, Instant};
 

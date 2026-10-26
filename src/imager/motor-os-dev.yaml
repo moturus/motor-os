@@ -84,6 +84,7 @@ static_dirs:
 assembly_dirs:
   - "libc"
   - "rg"
+  - "tar"
   - "llvm"
   - "rustc"
   - "helix"
@@ -95,6 +96,8 @@ assembly_dirs:
   - "sys-lib-deps"
 assembly_required_executables:
   - "rg/system/bin/rg"
+  - "tar/system/bin/tar"
+  - "tar/system/bin/zstd"
   - "llvm/devtools/bin/cc"
   - "llvm/devtools/bin/c++"
   - "llvm/devtools/llvm/bin/llvm"

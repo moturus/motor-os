@@ -358,27 +358,24 @@ selection are rejected. Direct URL pushes never invent a remote name.
 
 ## 6. Packaging, tests and gates (both tools)
 
-- gix and jj are userspace add-ons, not parts of the toolchain (see
+- gix and jj are external sources, not parts of the toolchain (see
   [toolchain.md](../toolchain.md)). `src/build-motor-os.sh` declares each
   fork and the branch to follow next to Lua, ripgrep, and Helix; nothing is
   added to `src/toolchain-versions.sh`, to a key, or to the assembly
   manifest, and no key schema changes.
-- `build_addons` builds them after the assembly is complete: the
-  branch-following checkout, an explicit dependency fetch, then a
+- `build_external_sources` builds them after the assembly is complete: the
+  branch-following checkout in `external-sources/`, an explicit dependency fetch, then a
   `--locked --offline` build of `-p gitoxide --bin gix` and `-p jj-cli --bin jj`
   with the assembly linker; host build scripts and proc macros stay on the
   host target. Version metadata is deterministic and runs no guest Git or jj.
-  Each records its built commit in `ADDON-gix` and `ADDON-jj` and is rebuilt
-  alone when its branch head changes. If the feature recipe or profile must
-  also force a rebuild, record it next to the commit.
+  Every run builds them again; Cargo keeps that incremental.
 - Stage only the executable, licences and a short version/feature/limits
   record in the overlays `images/gix` and `images/jj`. Add `gix` and `jj` to
   `assembly_dirs` and `gix/devtools/bin/gix` and `jj/devtools/bin/jj` to
   `assembly_required_executables` in `motor-os-dev.yaml`; base and main
   manifests are unchanged.
-- The host contract `src/tests/test-build-addons.sh` gains their cases
-  (branch selection, flags, staging, permissions, rebuild on a changed
-  source).
+- The host contract `src/tests/test-external-sources.sh` gains their cases
+  (branch selection, flags, staging, permissions).
   Guest drivers `test-gix.sh`, `test-jj.sh` and `test-git-workflows.sh` run
   from the `FULL_TEST_VERIFY_DEV_SOURCES=1` branch after SSH is up, each with
   a mode for an already running VM.

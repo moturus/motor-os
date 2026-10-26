@@ -1,6 +1,6 @@
-# Test-only Javy plugins for javy-smoke. src/build-javy.sh builds them on the
-# host into the assembly's tests/javy and test-wasm.sh uploads them; they are
-# part of no image.
+# Test-only Javy plugins for javy-smoke. src/build-scripts/build-javy.sh
+# builds them on the host into the assembly's tests/javy and test-wasm.sh
+# uploads them; they are part of no image.
 [workspace]
 members = ["p1", "p2"]
 resolver = "3"

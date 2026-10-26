@@ -619,8 +619,7 @@ fn use_assembly_image_root(config: &mut Config, root: Option<&Path>) -> Result<(
         return Ok(());
     }
     let root = root.ok_or_else(|| {
-        "image configuration requires an assembly; run src/resolve-toolchain-assembly.sh --resolve"
-            .to_owned()
+        "image configuration requires an assembly; set it to build/assembly/images".to_owned()
     })?;
     let mut components = root.components();
     if components.next() != Some(Component::RootDir)
@@ -944,8 +943,15 @@ mod tests {
             config.static_dirs,
             ["img_files/motor-os-base", "img_files/motor-os"]
         );
-        assert_eq!(config.assembly_dirs, ["libc", "rg"]);
-        assert_eq!(config.assembly_required_executables, ["rg/system/bin/rg"]);
+        assert_eq!(config.assembly_dirs, ["libc", "rg", "tar"]);
+        assert_eq!(
+            config.assembly_required_executables,
+            [
+                "rg/system/bin/rg",
+                "tar/system/bin/tar",
+                "tar/system/bin/zstd"
+            ]
+        );
         assert!(!config.assembly_dirs.iter().any(|path| path == "helix"));
         assert!(!config
             .assembly_required_executables
@@ -1043,6 +1049,7 @@ mod tests {
             [
                 "libc",
                 "rg",
+                "tar",
                 "llvm",
                 "rustc",
                 "helix",
@@ -1054,7 +1061,7 @@ mod tests {
                 "sys-lib-deps"
             ]
         );
-        assert_eq!(config.assembly_required_executables.len(), 16);
+        assert_eq!(config.assembly_required_executables.len(), 18);
         assert!(config
             .assembly_required_executables
             .iter()

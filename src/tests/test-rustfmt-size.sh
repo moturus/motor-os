@@ -14,12 +14,11 @@ check_rustfmt_size() {
 }
 
 measure_rustfmt() {
-  local root assembly key imager evidence without_assembly variant variant_assembly
+  local root assembly imager evidence without_assembly variant variant_assembly
   local binary launcher bytes_without bytes_with growth
   root="$(cd "$(dirname "$0")/../.." && pwd)"
-  assembly="$("$root/src/resolve-toolchain-assembly.sh" --resolve)"
-  key="$(<"$(rustc --print sysroot)/lib/rustlib/MOTOR-TOOLCHAIN-KEY")"
-  imager="$root/build/obj/$key/release/imager/release/imager"
+  assembly="$root/build/assembly/images"
+  imager="$root/build/obj/release/imager/release/imager"
   [ -x "$imager" ] || {
     echo 'build a release image before measuring rustfmt size' >&2
     return 1
@@ -66,7 +65,9 @@ measure_rustfmt() {
   printf 'without_qcow2_bytes=%s\nwith_qcow2_bytes=%s\nqcow2_growth_bytes=%s\n' \
     "$bytes_without" "$bytes_with" "$growth" >> "$evidence/sizes"
   check_rustfmt_size rustfmt-qcow2-growth "$growth" "$RUSTFMT_QCOW2_GROWTH_MAX_BYTES"
-  echo "test-rustfmt-size PASS; evidence=$evidence"
+  # A failed check keeps the evidence; a pass leaves no images behind.
+  rm -rf "$evidence"
+  echo "test-rustfmt-size PASS"
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then

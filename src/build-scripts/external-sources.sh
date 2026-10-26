@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Shared source and workspace inventory for add-on builds and merge validation.
+# Shared inventory of the external sources and their workspaces, for the build
+# and its lockfile validation.
 
-# Each wasm add-on is built from one Motor branch of its fork at the exact
+# Javy and Wasmtime are built from one Motor branch of their forks at the exact
 # revision declared here, so every Motor OS branch names the fork revisions it
 # was gated with. To take new fork work: push the fork, then set its revision
-# (an exported MOTOR_<ADDON>_REV wins, for a build before the pin is committed).
-# What the forks depend on — Tokio, Mio, target-lexicon, Wasmi and Wizer by git,
-# the Motor OS crates from crates.io — is pinned by
-# the add-ons' lockfiles; the tree keeps no sibling checkout of them.
+# (an exported MOTOR_JAVY_REV or MOTOR_WASMTIME_REV wins, for a build before
+# the pin is committed). What the forks depend on — Tokio, Mio,
+# target-lexicon, Wasmi and Wizer by git, the Motor OS crates from crates.io —
+# is pinned by the forks' lockfiles; external-sources/ keeps no checkout of
+# them.
 MOTOR_JAVY_BRANCH=motor-9.1.0
 MOTOR_JAVY_REV="${MOTOR_JAVY_REV:-12a6c52d7dbd62056ead74d8ddea3f8a235f278f}"
 MOTOR_WASMTIME_BRANCH=motor-48.0.1
@@ -18,62 +20,66 @@ MOTOR_WASMTIME_REV="${MOTOR_WASMTIME_REV:-633e7de368b913a696e7e15d4f546c55fc2ead
 JAVY_SOURCES=("javy:$MOTOR_JAVY_BRANCH:$MOTOR_JAVY_REV")
 WASMTIME_SOURCES=("wasmtime:$MOTOR_WASMTIME_BRANCH:$MOTOR_WASMTIME_REV")
 
-select_addon_workspaces() {
+select_external_sources() {
 	local selection="$1" spec repo
 	local -A seen=()
-	ADDON_SOURCES=()
-	ADDON_WORKSPACES=()
+	EXTERNAL_REPOS=()
+	EXTERNAL_WORKSPACES=()
 	if [ "$selection" = all ]; then
-		ADDON_SOURCES+=("ripgrep:$RIPGREP_BRANCH" "helix:$HELIX_BRANCH" "sed:$SED_BRANCH")
-		ADDON_WORKSPACES+=(ripgrep helix sed)
+		EXTERNAL_REPOS+=("ripgrep:$RIPGREP_BRANCH" "helix:$HELIX_BRANCH" "sed:$SED_BRANCH"
+			"motor-os-tar:$MOTOR_OS_TAR_BRANCH")
+		EXTERNAL_WORKSPACES+=("$RIPGREP" "$HELIX" "$SED" "$MOTOR_OS_TAR")
 	fi
 	if [ "$selection" != wasmtime ]; then
-		ADDON_SOURCES+=("${JAVY_SOURCES[@]}")
-		ADDON_WORKSPACES+=(javy javy/motor-tests
-			motor-os/src/tests/javy-smoke motor-os/src/tests/javy-smoke/plugins)
+		EXTERNAL_REPOS+=("${JAVY_SOURCES[@]}")
+		EXTERNAL_WORKSPACES+=("$EXTERNAL_SOURCES/javy" "$EXTERNAL_SOURCES/javy/motor-tests"
+			"$MOTOR/src/tests/javy-smoke" "$MOTOR/src/tests/javy-smoke/plugins")
 	fi
 	if [ "$selection" != javy ]; then
-		ADDON_SOURCES+=("${WASMTIME_SOURCES[@]}")
-		ADDON_WORKSPACES+=(wasmtime wasmtime/motor-runtime wasmtime/motor-tests
-			wasmtime/motor-host-tests motor-os/src/tests/wasmtime-smoke)
+		EXTERNAL_REPOS+=("${WASMTIME_SOURCES[@]}")
+		EXTERNAL_WORKSPACES+=("$EXTERNAL_SOURCES/wasmtime" "$EXTERNAL_SOURCES/wasmtime/motor-runtime"
+			"$EXTERNAL_SOURCES/wasmtime/motor-tests" "$EXTERNAL_SOURCES/wasmtime/motor-host-tests"
+			"$MOTOR/src/tests/wasmtime-smoke")
 	fi
-	local sources=("${ADDON_SOURCES[@]}")
-	ADDON_SOURCES=()
-	for spec in "${sources[@]}"; do
+	local repos=("${EXTERNAL_REPOS[@]}")
+	EXTERNAL_REPOS=()
+	for spec in "${repos[@]}"; do
 		repo=${spec%%:*}
 		[ -z "${seen[$repo]:-}" ] || continue
 		seen[$repo]=1
-		ADDON_SOURCES+=("$spec")
+		EXTERNAL_REPOS+=("$spec")
 	done
 }
 
-prepare_addon_sources() {
+prepare_external_sources() {
 	local spec repo branch revision
-	for spec in "${ADDON_SOURCES[@]}"; do
+	for spec in "${EXTERNAL_REPOS[@]}"; do
 		IFS=: read -r repo branch revision <<< "$spec"
-		update_addon_source "$repo" "$MOTORH/$repo" "https://github.com/moturus/$repo.git" \
+		update_external_source "$repo" "$EXTERNAL_SOURCES/$repo" "https://github.com/moturus/$repo.git" \
 			"$branch" "$revision"
 	done
 }
 
-report_addon_lockfiles() {
-	local spec repo workspace root output
+report_external_lockfiles() {
+	local spec repo checkout workspace root output
 	local failed=()
 	output="$(cargo --version)" || return 1
-	printf 'Add-on lockfile validation: %s\n' "$output"
+	printf 'Lockfile validation of the external sources: %s\n' "$output"
 	printf 'Rust toolchain: %s\n' "$RUSTUP_TOOLCHAIN"
-	for spec in motor-os "${ADDON_SOURCES[@]}"; do
+	for spec in motor-os "${EXTERNAL_REPOS[@]}"; do
 		repo=${spec%%:*}
-		if output="$(git -C "$MOTORH/$repo" rev-parse HEAD 2>&1)"; then
+		checkout="$EXTERNAL_SOURCES/$repo"
+		[ "$repo" != motor-os ] || checkout="$MOTOR"
+		if output="$(git -C "$checkout" rev-parse HEAD 2>&1)"; then
 			printf 'Source: %s %s\n' "$repo" "$output"
-			git -C "$MOTORH/$repo" status --short || return 1
+			git -C "$checkout" status --short || return 1
 		else
 			printf 'Source unavailable: %s\n%s\n' "$repo" "$output"
 			failed+=("$repo (source unavailable)")
 		fi
 	done
-	for workspace in "${ADDON_WORKSPACES[@]}"; do
-		root="$MOTORH/$workspace"
+	for root in "${EXTERNAL_WORKSPACES[@]}"; do
+		workspace="${root#"$MOTOR/"}"
 		printf '\nChecking %s\n  Manifest: %s/Cargo.toml\n  Lockfile: %s/Cargo.lock\n' \
 			"$workspace" "$root" "$root"
 		if [ ! -f "$root/Cargo.toml" ] || [ ! -f "$root/Cargo.lock" ]; then
@@ -95,17 +101,17 @@ report_addon_lockfiles() {
 		fi
 	done
 	if [ "${#failed[@]}" -ne 0 ]; then
-		printf '\nAdd-on lockfile validation failed:\n'
+		printf '\nLockfile validation of the external sources failed:\n'
 		printf '  %s\n' "${failed[@]}"
 		printf '%s\n' 'Review and update stale lockfiles in their owning repositories.' \
 			'For incomplete validation, resolve the source/cache errors reported above.' \
-			'No lockfiles were modified; add-on downloads and compilation have not started.'
+			'No lockfiles were modified; the external sources have not been built.'
 		return 1
 	fi
-	printf '\nAll selected add-on lockfiles are consistent.\n'
+	printf '\nAll selected lockfiles of the external sources are consistent.\n'
 }
 
-check_addon_lockfiles() {
+check_external_lockfiles() {
 	mkdir -p "$MOTOR/build" || return 1
-	report_addon_lockfiles "$@" 2>&1 | tee "$MOTOR/build/addon-lockfiles.log"
+	report_external_lockfiles "$@" 2>&1 | tee "$MOTOR/build/external-lockfiles.log"
 }
