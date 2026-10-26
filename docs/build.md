@@ -6,6 +6,12 @@ tested on Ubuntu 24.04 and 26.04. It needs the Motor toolchain that
 from [motor-os-toolchain](https://github.com/moturus/motor-os-toolchain): its
 release, or a build of that repository.
 
+The toolchain is built separately and does not need a Motor OS checkout.
+Its two archives contain the Linux-host cross toolchain and the native
+Motor OS toolchain, respectively; `src/build-motor-os.sh` consumes them
+and builds the external userspace programs and images. GNU tar needs
+`zstd` on the host to extract the downloaded `.tar.zst` archive.
+
 Install rustup before the host toolchain. If it is not installed yet:
 
 ```sh
@@ -67,9 +73,27 @@ build/obj/       the Motor OS build trees
 vm_images/       the images
 ```
 
+If the native archive lives elsewhere, set its directory explicitly:
+
+```sh
+export MOTORH=/absolute/path/to/motor-dev
+src/build-motor-os.sh
+```
+
+The build exports the selected name as `RUSTUP_TOOLCHAIN`, so external
+sources that carry their own selectors use the same Motor toolchain.
+It checks the external workspaces' lockfiles before compiling; failures
+are collected in `build/external-lockfiles.log`. Update a stale lockfile in
+its owning repository; the build does not repair it. See the
+[external-source guide](build-motor-os.md#external-sources).
+
 Every run of `src/build-motor-os.sh` builds all external sources again, which
 Cargo keeps incremental. After installing a different or rebuilt toolchain,
-run `make clean` first: it removes all build artifacts.
+run `make clean` first: it removes all build artifacts, including the assembly
+and images, while keeping `external-sources/`. There are no toolchain or
+assembly content keys to isolate old objects. Follow the
+[toolchain update procedure](toolchain.md#7-changing-the-toolchain), including
+its validation gates, for either a new version or a replacement `-dev` build.
 
 With a built assembly, build just Javy, Wasmtime, and their images with:
 

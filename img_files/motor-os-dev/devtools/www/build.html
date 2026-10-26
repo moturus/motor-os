@@ -464,13 +464,16 @@ builds the system, its external sources, and the VM images from a clean checkout
   of that repository.</li>
 </ul>
 <p>The packages the script installs are <code>git</code>, <code>build-essential</code>,
-<code>nasm</code>, <code>clang</code>, <code>cmake</code>, <code>ninja-build</code>,
+<code>nasm</code>, <code>clang</code>, <code>cmake</code>, <code>ninja-build</code>, <code>meson</code>,
 <code>zlib1g-dev</code>, <code>libssl-dev</code>, <code>pkg-config</code>, <code>curl</code>,
 <code>qemu-system</code>, and <code>qemu-utils</code>, plus rustup without a default
 toolchain. Cloud Hypervisor and Firecracker are not installed; QEMU is enough to build
 and test.</p>
 
 <h2>The one-script build</h2>
+<p>The toolchain is built separately; this script consumes its archives and builds
+Motor OS. GNU tar needs <code>zstd</code> on the host to extract the downloaded
+<code>.tar.zst</code> archive.</p>
 <p>Install rustup before the host toolchain. If it is not installed yet:</p>
 <pre><code>curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
   sh -s -- -y --default-toolchain none
@@ -490,13 +493,18 @@ rustup; the native archive, <code>motor-toolchain-x86_64-unknown-motor-1.99.1.ta
 stays next to the checkout. <code>src/build-motor-os.sh</code> is the single supported entry
 point. In order, it:</p>
 <ol>
-  <li>installs the missing host packages and rustup, creates the <code>moto-tap</code>
+  <li>checks that the selected native archive is in place, then installs the missing
+  host packages and rustup, creates the <code>moto-tap</code>
   interface with the forwarding and masquerade rules that let VMs reach the Internet, and
   makes <code>/dev/kvm</code> accessible. Each step is skipped when it has already been
   done; <code>MOTOR_SKIP_HOST_NETWORK_SETUP=1</code> skips the network part if you have
   configured it yourself;</li>
-  <li>checks that the toolchain <code>rust-toolchain.toml</code> names is installed and that
-  its native archive is in place;</li>
+  <li>exports the name from <code>rust-toolchain.toml</code> as
+  <code>RUSTUP_TOOLCHAIN</code>, so external sources with their own selectors also use
+  the installed Motor toolchain;</li>
+  <li>prepares the external sources and checks their lockfiles. Failures are collected
+  in <code>build/external-lockfiles.log</code>; a stale lockfile must be updated in its
+  owning repository, and the build does not repair it;</li>
   <li>unpacks the native toolchain's files from its archive;</li>
   <li>builds the external sources with that toolchain: Lua, ripgrep, Helix, sed, tar and
   zstd, Javy and Wasmi, and Wasmtime. Lua is a release, the others follow one branch or
@@ -504,7 +512,11 @@ point. In order, it:</p>
   <li>builds the base, standard, developer, and wasm images into
   <code>vm_images/release/</code>.</li>
 </ol>
-<p>It does not start a VM. Next to the checkout, in the directory <code>MOTORH</code> names
+<p>The developer-image target boots its new image once under QEMU to prepare the
+staged Motor OS library workspace and compile dependencies for offline native tests.
+It needs <code>moto-tap</code> configured and no other running VM; preparation takes about
+10 seconds for a release image and 4 minutes for a debug image.</p>
+<p>Next to the checkout, in the directory <code>MOTORH</code> names
 (the parent of the checkout by default), it only reads the native archive. Everything it
 fetches or builds stays in the checkout, in directories Git ignores:</p>
 <div class="table-wrap">
@@ -517,12 +529,21 @@ fetches or builds stays in the checkout, in directories Git ignores:</p>
   <tr><td><code>build/assembly/</code></td><td>The assembly:
     <code>images/</code> (the libc, LLVM, rustc, and rust-analyzer files of the native
     toolchain and the external sources, which the imager places into the images) and
-    <code>build/</code> (the external sources' build trees).</td></tr>
+    <code>build/</code> (the external sources' build trees), plus <code>tests/</code>
+    (Javy and Wasmtime test inputs).</td></tr>
+  <tr><td><code>build/obj/&lt;profile&gt;/</code></td><td>Motor OS component build trees.</td></tr>
+  <tr><td><code>vm_images/&lt;profile&gt;/</code></td><td>VM images and host-side tools.</td></tr>
 </table>
 </div>
+<p>If the native archive lives elsewhere, set its directory explicitly:</p>
+<pre><code>export MOTORH=/absolute/path/to/motor-dev
+src/build-motor-os.sh</code></pre>
 <p>The build is incremental and safe to rerun: after a failure, run the same command
 again. After installing a different or rebuilt toolchain, run <code>make clean</code>
-first: it removes all build artifacts.</p>
+first: it removes all build artifacts, including the assembly and images, while keeping
+<code>external-sources/</code>. Follow the
+<a href="toolchain.html#changing-the-toolchain">toolchain update procedure</a> for a
+new version or a replacement <code>-dev</code> build.</p>
 
 <h2>The toolchain the repository uses</h2>
 <p>The checkout's <code>rust-toolchain.toml</code> names the toolchain, so ordinary commands
@@ -539,7 +560,7 @@ the images' toolchain files in the assembly, <code>build/assembly/images</code>.
 <p>With the toolchain in place, the Makefile in the repository root builds the system, the
 programs, and the images. Debug is the default profile:</p>
 <pre><code>make -j"$(nproc)"                  # base and standard images, debug, into vm_images/debug/
-make -j"$(nproc)" images           # the developer image as well
+make -j"$(nproc)" images           # the developer and wasm images as well
 make -j"$(nproc)" BUILD=release    # the same into vm_images/release/
 make -j"$(nproc)" dev.img BUILD=release
 make sys-io rush                   # individual components
@@ -552,7 +573,7 @@ make clean                         # removes build/, the assembly included, and 
 <code>russhd</code>, <code>red</code>, <code>rmux</code>, <code>kibim</code>,
 <code>httpd</code>, <code>httpd-axum</code>, <code>lorry</code>, <code>curl</code>,
 <code>gears</code>, <code>mdbg</code>, <code>systest</code>, and so on; the image targets
-are <code>base.img</code>, <code>main.img</code>, <code>dev.img</code>, and
+are <code>base.img</code>, <code>main.img</code>, <code>dev.img</code>, <code>wasm.img</code>, and
 <code>system-tty.img</code> and <code>vsock-test.img</code>. The two test image
 targets require an absolute <code>TEST_IMAGE_ROOT</code> outside <code>vm_images/</code>;
 their test scripts create temporary directories and remove them after use.
@@ -560,9 +581,10 @@ Stripped binaries go to <code>build/bin/&lt;profile&gt;/</code>,
 and Cargo's target directories, with the unstripped binaries that <code>addr2line</code>
 needs, to <code>build/obj/&lt;profile&gt;/&lt;component&gt;/</code>.</p>
 <p>The imager (<code>src/imager</code>) assembles each image from a YAML description and
-the permission policy; see <a href="filesystem.html">Filesystem</a>. The standard and
-developer images additionally take the libc, ripgrep, tar, LLVM, and rustc files from
-the assembly, so they cannot be built without one; the base image needs none.</p>
+the permission policy; see <a href="filesystem.html">Filesystem</a>. The standard image
+takes libc configuration, ripgrep, tar, and zstd from the assembly; the developer image
+adds LLVM, Rust, and other developer tools. The wasm image takes its runtimes from the
+assembly and omits the native development toolchain. The base image needs no assembly.</p>
 
 <h2>Running the tests</h2>
 <pre><code>src/tests/full-test.sh              # debug
@@ -573,11 +595,18 @@ host-side tests of the build scripts, builds the standard image and the test pro
 runs the host <code>cargo test</code> suites (the imager, Motor FS, the networking stack,
 rush, rmux, red, russhd, rnetbench, sys-init, and the runtime libraries) and the
 System-console, TUI, and terminal-size tests, then boots the image under QEMU and drives
-it over SSH: systest, mio-test, tokio-tests, crossterm-smoke, SFTP, and the rest. A run is
-limited to fifteen minutes. <code>full-test-dev.sh</code> does the same against the
+it over SSH: systest, mio-test, tokio-tests, crossterm-smoke, SFTP, and the rest. Test
+execution is limited to fifteen minutes for a release run and twenty-five for debug
+or developer-image runs; a single vCPU doubles those budgets. Build preparation runs
+before that timer. <code>full-test-dev.sh</code> runs the repository suite against the
 developer image, then compiles the source snapshots natively inside the VM, runs the
-tests of the Motor OS libraries staged there, and runs Lorry's own suite; it wants a
-4 GiB VM. <code>full-test-networking.sh</code> is the
+tests of the Motor OS libraries staged there, runs Lorry's own suite, and installs the
+native toolchain archive on a separate copy of the developer image to build and run
+C, C++, and Rust programs. The repository phase defaults to an 8 GiB VM and the
+developer-source phase to 4 GiB.
+The main suite also checks boot under Cloud Hypervisor and Firecracker when
+<code>cloud-hypervisor-static</code> and <code>firecracker</code> are on <code>PATH</code>;
+it reports skips when they are absent. <code>full-test-networking.sh</code> is the
 networking subset with rnetbench throughput runs, and <code>stress-soak.sh</code> keeps one
 VM under concurrent load for as long as you ask, watching for crashes and stalls.</p>
 <p>On the developer image the same test programs are in <code>/devtools/tests</code> and can
@@ -593,6 +622,8 @@ to build Motor OS with it.</p>
 
 <h2>Further reading</h2>
 <p>The repository describes the build in more depth:
+<a href="https://github.com/moturus/motor-os/blob/main/docs/build.md"><code>docs/build.md</code></a>
+(the quick start),
 <a href="https://github.com/moturus/motor-os/blob/main/docs/build-motor-os.md"><code>docs/build-motor-os.md</code></a>
 (the external sources, build order, and outputs),
 <a href="https://github.com/moturus/motor-os/blob/main/docs/build-llvm.md"><code>docs/build-llvm.md</code></a>

@@ -12,6 +12,21 @@ in [build.md](build.md), the build of the external sources and images in
 
 ## 1. The pieces
 
+`rust-toolchain.toml` pins only the version, not a toolchain source commit or
+content digest. A published release is immutable. A Motor-side change under
+the same Rust version gets a release number, for example
+`x86_64-unknown-motor-1.99.1-2`; local builds use
+`x86_64-unknown-motor-1.99.1-dev`. A beta baseline may be named
+`x86_64-unknown-motor-1.100.0-beta`.
+
+The toolchain builder fetches the heads of the Rust, mlibc, and motor-os-tar
+branches in its `versions.sh`; Rust's gitlinks select LLVM and Cargo. Every
+toolchain build starts from an empty build tree and produces both archives
+and their `.sha256` files next to its checkout. Published versions are
+distributed as GitHub releases tagged with the version. The external
+userspace programs built by Motor OS are separate from the toolchain and
+keep their incremental build trees.
+
 | Piece | Where | Tracked? |
 |---|---|---|
 | The toolchain version | `rust-toolchain.toml` | yes |
@@ -24,6 +39,15 @@ in [build.md](build.md), the build of the external sources and images in
 
 `MOTORH` defaults to the parent of the checkout. The build reads the native
 archive from there and writes nothing there.
+
+The toolchain build normally reads nothing from a Motor OS checkout. Rust
+std and the compiler tools use published `moto-rt`; mlibc owns the
+`moto-rt-cabi` shim and its lockfile, using published `moto-rt` and `moto-sys`.
+Neither build compares those versions with the runtime crates in this
+checkout: `rt.vdso` checks compatibility at runtime. The toolchain
+repository's [runtime-crate reference and local override guide](https://github.com/moturus/motor-os-toolchain#the-motor-runtime-crates)
+describes changing them, including unpublished runtime work in a local
+`--dev` build.
 
 ## 2. Installing a toolchain
 
@@ -49,6 +73,10 @@ rm -rf motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux
 ```
 
 GNU tar needs the `zstd` program for `-a` with a `.zst` archive.
+Each archive extracts into one directory named after the archive, containing
+`install.sh` and either `toolchain/` (Linux-host payload) or `images/`
+(native overlays). The host archive can be removed after installation;
+keep the native archive available for image builds.
 `install.sh` copies the toolchain to its installation directory (`--prefix
 DIR` selects another one) and runs `rustup toolchain link`, so the unpacked
 archive is not needed afterwards. The native archive stays where it is:
@@ -72,6 +100,25 @@ archive is not needed afterwards. The native archive stays where it is:
    (`assembly_dirs`, `assembly_required_executables`); the base image takes
    nothing.
 
+The host installation follows Rust's directory layout:
+
+```text
+bin/                                           rustc, rustdoc, Cargo, Clippy,
+                                               rustfmt, rust-analyzer
+libexec/rust-analyzer-proc-macro-srv             host proc-macro server
+lib/rustlib/x86_64-unknown-linux-gnu/lib/         host standard library
+lib/rustlib/x86_64-unknown-linux-gnu/bin/         Clang, LLD, LLVM tools
+lib/rustlib/x86_64-unknown-linux-gnu/lib/clang/23/ Clang resource directory
+lib/rustlib/x86_64-unknown-motor/lib/             Motor standard library
+lib/rustlib/x86_64-unknown-motor/sysroot/         cross C/C++ sysroot and wrappers
+lib/rustlib/src/rust/library/                   rust-src
+```
+
+The cross wrappers find their tools and resource directory relative to
+themselves, so the installation does not depend on the toolchain build's
+original paths. `motor-clang` and `motor-clang++` compile and link C/C++;
+`motor-rust-cc` supplies the C runtime link recipe for Rust bootstrap.
+
 ## 4. The assembly
 
 `src/build-motor-os.sh` fills `build/assembly/`, which `make clean` removes
@@ -85,22 +132,45 @@ with the rest of `build/`:
   `libc`, unpacked from the native archive with motor-os-tar's `tar` built
   for Linux on every run, so a replaced archive takes effect.
 
+The standard and wasm images take the `libc` overlay's runtime configuration
+under `/system/cfg/libc`. The developer image takes all four overlays:
+
+| Path on Motor OS | Contents |
+|---|---|
+| `/devtools/llvm/bin/llvm` | native Clang, LLD, and LLVM tools as one multicall executable |
+| `/devtools/llvm/{include,lib,cfg}` | C/C++ headers, static libraries, startup object, Clang resource headers and configuration |
+| `/devtools/rust/bin/` | rustc, rustfmt, clippy-driver, rust-analyzer |
+| `/devtools/rust/lib/rustlib/x86_64-unknown-motor/lib/` | complete Motor Rust libraries, including `.rlib` and `.rmeta` files and linker support |
+| `/devtools/rust/lib/rustlib/src/rust/library/` | matching `rust-src` for rust-analyzer |
+| `/devtools/bin/` | Rush launchers: cc, c++, rustc, rustfmt, clippy-driver |
+| `/devtools/src/hello-world/` | C, C++, and Rust examples |
+
+There is no native Cargo, rustdoc, separate proc-macro server, or shared
+`librustc_driver`; Lorry is the native build driver. The host cross wrappers,
+host standard library, and static LLVM build libraries are not image files.
+
 ## 5. Installing the native toolchain on Motor OS
 
 The native archive also installs on a running developer VM. `/devtools`
 belongs to the Interactive role ([fs-permissions.md](fs-permissions.md)), so
-an ordinary session can replace the toolchain there:
+an ordinary session can replace the toolchain there.
+
+Copy the native archive into `/user/` on the VM first, then extract into an
+empty directory:
 
 ```sh
 mkdir /user/toolchain
 cd /user/toolchain
-tar -x -f motor-toolchain-x86_64-unknown-motor-1.99.1.tar.zst
+tar -x -f /user/motor-toolchain-x86_64-unknown-motor-1.99.1.tar.zst
 motor-toolchain-x86_64-unknown-motor-1.99.1/install.sh
 ```
 
 `install.sh` replaces `/devtools/llvm` and `/devtools/rust` with the requested
-toolchain and copies the launchers and examples. It then makes the programs
-executable by every role, and the launchers editable by Interactive as well,
+toolchain and copies the launchers and examples. It writes only under
+`/devtools`; mlibc's `hosts`, `services`, and `shells` configuration stays in
+the image's `/system/cfg/libc`. There is no `/devtools/cfg/libc` override.
+It then makes the programs executable by every role, and the launchers
+editable by Interactive as well,
 as they are on the image. The developer-image suite does exactly this on a
 copy of the image, in
 `src/tests/test-native-toolchain-install.sh`, and builds and runs programs
@@ -109,6 +179,8 @@ dependencies, which are bound to the installed toolchain files' sizes and
 modification times, so the next native build compiles them again.
 
 ## 6. Rust runtime and native formatting
+
+<a id="rust-runtime-and-native-formatting"></a>
 
 The selected Motor target defaults to `panic=unwind`. rustc,
 rustfmt, rust-analyzer, and ordinary applications use the standard Motor
@@ -182,7 +254,7 @@ editor cases in its developer-image branch.
 
 An archive rebuilt under the same name, as a local `-dev` build is, is a
 toolchain change too: install the host archive again, run `make clean`, and
-run `src/build-motor-os.sh`.
+run `src/build-motor-os.sh`, then the same validation gates.
 
 ## 8. Failures you will see, and what they mean
 
