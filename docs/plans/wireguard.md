@@ -1,7 +1,7 @@
 # WireGuard through a process-backed IP device
 
 Completed steps: 0 through 7.
-Current step: 8 - outer UDP transport and the host peer (5 of 10 patches complete).
+Current step: 8 - outer UDP transport and the host peer (6 of 10 patches complete).
 
 2026-10-24. Design and implementation plan, grounded in the tree at
 a3d739f9. This document specifies the process-backed IP device, WireGuard
