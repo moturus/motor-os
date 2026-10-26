@@ -78,6 +78,7 @@ mod vsock;
 mod vsock_outgoing;
 mod wait_set;
 mod wakebench;
+mod wireguard;
 mod xor_server;
 
 use std::{
@@ -1590,6 +1591,18 @@ fn main() {
         return;
     }
 
+    if args.len() == 4 && args[1] == "wireguard-client" {
+        wireguard::exchange(&args[2], &args[3]);
+        return;
+    }
+    if args.len() == 4 && args[1] == "wireguard-permissions" {
+        wireguard::permissions(&args[2..]);
+        return;
+    }
+    if args.len() == 2 && args[1] == "wireguard-cleanup" {
+        wireguard::cleanup();
+        return;
+    }
     if args.len() == 2 && args[1] == "test-ip-device" {
         ip_device::run_all_tests();
         return;

@@ -412,6 +412,7 @@ vm_rmux() {
 }
 
 . "$WD/test-udp-fragmentation.sh"
+. "$WD/test-wireguard.sh"
 . "$WD/test-ssh-client-host.sh"
 . "$WD/test-rush-script-caps.sh"
 
@@ -773,6 +774,7 @@ vm_ssh /system/bin/ping -c 1 127.0.0.1
 vm_ssh /system/bin/ping -c 1 localhost
 
 test_udp_fragmentation
+test_wireguard
 test_ssh_client_host
 
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then

@@ -5,15 +5,23 @@ fn main() {
         eprintln!("usage: wg <config.toml>");
         std::process::exit(1);
     };
-    match wg::config::Config::load(std::path::Path::new(&path)) {
-        Ok(config) => println!(
-            "{}: configuration valid ({} peers)",
-            config.name,
-            config.peers.len()
-        ),
-        Err(error) => {
-            eprintln!("wg: {error}");
-            std::process::exit(1);
-        }
+    if let Err(error) = wg::config::Config::load(std::path::Path::new(&path)).and_then(start) {
+        eprintln!("wg: {error}");
+        std::process::exit(1);
     }
+}
+
+#[cfg(target_os = "motor")]
+fn start(config: wg::config::Config) -> wg::config::Result<()> {
+    wg::motor::run(&config)
+}
+
+#[cfg(not(target_os = "motor"))]
+fn start(config: wg::config::Config) -> wg::config::Result<()> {
+    println!(
+        "{}: configuration valid ({} peers)",
+        config.name,
+        config.peers.len()
+    );
+    Ok(())
 }
