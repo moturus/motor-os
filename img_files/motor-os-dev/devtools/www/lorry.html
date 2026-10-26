@@ -634,7 +634,7 @@ an editor; building needs a review.</p>
   <li>Sources are the crates.io sparse index, the only supported registry, and Git over
   smart HTTP. Git is handled by an embedded client, never a <code>git</code> executable:
   anonymous HTTPS, shallow, with credentials, proxies, hooks, and filters disabled.</li>
-  <li>The configured curl (<code>/system/bin/curl</code> on Motor OS, Motor's own
+  <li>The configured curl (<code>/system/bin/curl</code> on Motor OS, Motor OS's own
   curl-compatible client) is run directly, never through a shell, restricted to HTTPS,
   without following redirects, and with proxy and credential settings stripped from the
   environment. A redirect is followed only for a site you have allowed in the redirect
@@ -645,7 +645,7 @@ an editor; building needs a review.</p>
   <li>The result is recorded in <code>.lorry/dependencies-v2.toml</code> with a checksum
   of the canonical review and one entry per reviewed host-and-target pair. A later
   build requires its own pair to be present and re-verifies every recorded pair, which
-  is why a Motor-capable rustc is needed even for a host-only build. An unchanged build
+  is why a Motor OS-capable rustc is needed even for a host-only build. An unchanged build
   reuses its finished result before this check. <code>lorry review</code> regenerates the
   canonical review offline so that it can be read, diffed, and checked into version
   control.</li>
@@ -703,7 +703,7 @@ thiserror, and others).</p>
   as its metadata is ready.</li>
   <li><strong>Procedural macros</strong> are compiled for the machine that runs the
   compiler. On Linux they load as ordinary dynamic libraries. Motor OS has no dynamic
-  loading, so on Motor a procedural macro is a static executable, and rustc talks to it
+  loading, so on Motor OS a procedural macro is a static executable, and rustc talks to it
   over the compiler's own proc-macro bridge protocol, carried in bounded, versioned frames
   on the child's stdin and stdout. This gives process separation, not a sandbox.</li>
   <li><strong>Build scripts</strong> of members and dependencies run on Linux in a

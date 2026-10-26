@@ -462,11 +462,11 @@ program that is being ported.</p>
   program picks up runtime fixes when the image is updated.</li>
   <li>The target is documented in the
   <a href="https://doc.rust-lang.org/nightly/rustc/platform-support/motor.html">Rust platform
-  support pages</a>. Building for it needs the Motor toolchain, described on the
+  support pages</a>. Building for it needs the Motor OS toolchain, described on the
   <a href="toolchain.html">Toolchains</a> page.</li>
 </ul>
 <p>Cross-compiling on Linux, from a project inside the Motor OS checkout, where the
-repository's <code>rust-toolchain.toml</code> selects the Motor toolchain (copy that file
+repository's <code>rust-toolchain.toml</code> selects the Motor OS toolchain (copy that file
 into a project that lives elsewhere):</p>
 <pre><code>cargo build --release --target x86_64-unknown-motor</code></pre>
 <p>The binary goes into the VM with <code>scp</code> (see
@@ -483,7 +483,7 @@ built natively with <code>rustc</code> or with <a href="lorry.html">Lorry</a>.</
   <tr><td><code>std::process</code></td><td><code>Command</code> with arguments, environment, and stdio piping; kill, wait, and try_wait; exit codes. No <code>fork</code>, no signals, no process groups.</td></tr>
   <tr><td><code>std::io</code></td><td>Stdio, pipes, <code>IsTerminal</code>; see <a href="terminals.html">Terminals</a> for what a terminal is.</td></tr>
   <tr><td><code>std::env</code>, <code>time</code>, <code>alloc</code></td><td>Arguments, environment, current directory, <code>current_exe</code>; system and monotonic time; the frusa allocator.</td></tr>
-  <tr><td><code>std::os::unix</code></td><td>Not available. Motor-specific extensions come from <code>moto-rt</code> and <code>moto-sys</code>.</td></tr>
+  <tr><td><code>std::os::unix</code></td><td>Not available. Motor OS-specific extensions come from <code>moto-rt</code> and <code>moto-sys</code>.</td></tr>
 </table>
 </div>
 
@@ -496,8 +496,8 @@ built natively with <code>rustc</code> or with <a href="lorry.html">Lorry</a>.</
   <li><strong>rustls with ring</strong>: TLS on both the client (curl, Gears) and server
   (httpd, httpd-axum) side.</li>
   <li><strong>russh</strong> and russh-sftp: the SSH server.</li>
-  <li><strong>crossterm</strong>: a Motor backend that handles terminal size and Ctrl+C the
-  Motor way, so a crossterm program needs no Motor-specific code.</li>
+  <li><strong>crossterm</strong>: a Motor OS backend that handles terminal size and Ctrl+C the
+  Motor OS way, so a crossterm program needs no Motor OS-specific code.</li>
   <li><strong>ctrlc</strong>: a fork whose handler is the process's Ctrl+C handler.</li>
   <li><strong>tracing</strong> and friends compile unchanged; see
   <a href="profiling.html">Profiling</a>.</li>
@@ -552,7 +552,7 @@ refactoring; and crates that wrap native Linux or Windows APIs will not work.</p
   floor fails before it starts, and spawning is refused under memory pressure with a
   recoverable error; a page fault on lazy memory below the floor kills the process. See
   <a href="memory.html">Memory</a>.</li>
-  <li><strong>Motor-specific APIs.</strong> <code>moto-rt</code> exposes the runtime
+  <li><strong>Motor OS-specific APIs.</strong> <code>moto-rt</code> exposes the runtime
   (process capabilities and roles, the Ctrl+C handler, the terminal descriptor, file
   permission updates); <code>moto-sys</code> exposes the syscalls and shared pages
   (memory pressure, per-process statistics, peer capabilities on a connection);

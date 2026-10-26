@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Motor FS, the journaling filesystem of Motor OS; the image layout; and per-role permissions.">
+<meta name="description" content="Motor OS filesystem, the journaling filesystem of Motor OS; the image layout; and per-role permissions.">
 <meta name="theme-color" content="#0a0a0a">
 <title>Filesystem | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
@@ -446,11 +446,11 @@ a.card h3 { color: var(--accent); }
 <article class="content">
 <div class="eyebrow">System</div>
 <h1>Filesystem</h1>
-<p class="lead">Motor FS is the default filesystem since June 2026. It is a journaling
+<p class="lead">The Motor OS filesystem is the default filesystem since June 2026. It is a journaling
 filesystem served by sys-io, with three-role permissions on every entry, advisory locks,
 and no notion of users, links, or numeric Unix modes.</p>
 
-<h2>Motor FS</h2>
+<h2>Motor OS filesystem</h2>
 <ul>
   <li><strong>Journaling.</strong> Writes are batched into transactions, committed to an
   on-disk redo log, and then checkpointed into the main block area. The design assumes
@@ -494,7 +494,7 @@ with the permission model below showing through <code>Permissions</code>.</p>
 </div>
 
 <h2>Permissions</h2>
-<p>A Motor FS mode is three permission triplets in <strong>System, Interactive, None</strong>
+<p>A Motor OS filesystem mode is three permission triplets in <strong>System, Interactive, None</strong>
 order; <code>rw-r-----</code> gives System read and write, Interactive read, and None
 nothing. Each triplet is one of <code>rwx</code>, <code>rw-</code>, <code>r-x</code>,
 <code>r--</code>, or <code>---</code>, and permissions are monotonic across roles:</p>

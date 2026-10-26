@@ -586,7 +586,7 @@ src/tests/full-test.sh --release
 src/tests/full-test-dev.sh --release</code></pre>
 <p><code>full-test.sh</code> is the suite every change is expected to pass. It runs the
 host-side tests of the build scripts, builds the standard image and the test programs,
-runs the host <code>cargo test</code> suites (the imager, Motor FS, the networking stack,
+runs the host <code>cargo test</code> suites (the imager, the Motor OS filesystem, the networking stack,
 rush, rmux, red, russhd, rnetbench, sys-init, and the runtime libraries) and the
 System-console, TUI, and terminal-size tests, then boots the image under QEMU and drives
 it over SSH: systest, mio-test, tokio-tests, crossterm-smoke, SFTP, and the rest. A run is

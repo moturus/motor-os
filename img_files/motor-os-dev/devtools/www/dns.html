@@ -509,7 +509,7 @@ stale answers.</p>
 <h2>Result contract</h2>
 <p>The resolver reports one of: success, not found, temporary failure, timeout, out of
 memory, unsupported family, system failure, resolver failure, invalid request, or busy.
-The runtime maps these to stable Motor error codes, which surface through
+The runtime maps these to stable Motor OS error codes, which surface through
 <code>std::io::Error</code>. Combined lookups collect IPv4 before IPv6 and then apply the
 destination-ordering policy: usable addresses first, with an unusable global IPv6 range
 ranked last so that a VM without IPv6 connectivity does not wait on it.</p>

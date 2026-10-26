@@ -461,7 +461,7 @@ rt.vdso, implements the system interface that Rust's standard library calls.</p>
   +----------------------------+   +-----------+  +--------------+  +--------+
   | sys-io                     |   | sys-init  |  | dns-resolver |  | strobe |
   |  virtio-blk  virtio-net    |   | sys-tty   |  +--------------+  +--------+
-  |  Motor FS    moto-netstack |   +-----------+
+  |  motor-fs    moto-netstack |   +-----------+
   +----------------------------+
         | syscalls (4 of them)
         v
@@ -551,7 +551,7 @@ its hot paths. Two small helper threads answer synchronous statistics queries.</
   virtio-net negotiates checksum offload and TSO on transmit and passes per-frame checksum
   verdicts up to the stack. Exactly one block device and any number of network devices
   are expected.</li>
-  <li><strong>Motor FS</strong>, the journaling filesystem, with a 16 MiB block cache,
+  <li><strong>Motor OS filesystem</strong>, the journaling filesystem, with a 16 MiB block cache,
   readahead, and a lock manager for advisory locks (see
   <a href="filesystem.html">Filesystem</a>).</li>
   <li><strong>moto-netstack</strong>, the networking stack, which grew out of smoltcp but
@@ -619,7 +619,7 @@ matching moto-rt 0.17.x).</p>
 </ul>
 <p>Programs are statically linked x86-64 ELF executables with no interpreter and no ELF
 TLS segment; thread-local storage is provided by the runtime. Anything that needs a
-Motor-specific interface, for example a service that wants to know a peer's
+Motor OS-specific interface, for example a service that wants to know a peer's
 capabilities, uses <code>moto-sys</code> or <code>moto-rt</code> directly.</p>
 
 <h2>Where things are in the source tree</h2>
@@ -649,7 +649,7 @@ capabilities, uses <code>moto-sys</code> or <code>moto-rt</code> directly.</p>
 
 <h3>Size</h3>
 <p>Lines of Rust, including tests, as of August 2026: the kernel about 18,600; rt.vdso
-about 10,700; sys-io about 13,900 plus about 73,900 in the networking stack; Motor FS about
+about 10,700; sys-io about 13,900 plus about 73,900 in the networking stack; the Motor OS filesystem about
 10,300; the VirtIO drivers about 3,400; the async runtime about 2,800.</p>
 <nav class="pager">
 <a class="pager-prev" href="imager.html"><span>Previous</span>Imager: image tools</a>
