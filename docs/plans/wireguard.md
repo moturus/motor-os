@@ -1,7 +1,7 @@
 # WireGuard through a process-backed IP device
 
 Completed steps: 0 through 8.
-Current step: 9 - device adapter and activation.
+Current step: 9 - device adapter and activation (1 of 2 patches complete).
 
 2026-10-24. Design and implementation plan, grounded in the tree at
 a3d739f9. This document specifies the process-backed IP device, WireGuard
@@ -295,7 +295,9 @@ not a new moto-rt/stdlib API or a general network-change subscription.
 V1 uses stable configured physical addresses. Address loss/replacement
 invalidates the affected transport binding through that notification and
 discards queued output using the old source. `wg` treats this as fatal,
-unregisters and closes its outer sockets; restart it to bind the new address.
+closes its registration channel and outer sockets, and exits. sys-io retires
+the device without making process exit wait for slow application clients.
+Restart `wg` to bind the new address.
 No automatic rebinding or NIC failover is planned. Peer silence or temporary
 transport unreachability does not invalidate the binding or withdraw tunnel
 routes while registration remains alive. Peer endpoint roaming still works
@@ -813,8 +815,8 @@ Routes come from the peers' allowed IPs. TX takes a packet from sys-io,
 finds its owner, encapsulates and sends. RX authenticates, checks the
 inner source against the owner table and submits. Counters cover drops,
 unauthenticated input, disallowed sources and unavailable transport. `wg`
-unregisters on exit and on fatal transport errors. The transport starts
-listening only here, with every earlier piece in place.
+closes its registration on exit and on fatal transport errors. The transport
+starts listening only here, with every earlier piece in place.
 
 Land a minimal `src/tests/test-wireguard.sh`, called from
 `src/tests/full-test.sh`, alongside activation. This gate proves registration,

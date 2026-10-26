@@ -18,3 +18,6 @@ mod config_tests;
 
 #[cfg(test)]
 mod crypto_tests;
+
+#[cfg(target_os = "motor")]
+pub mod motor;
