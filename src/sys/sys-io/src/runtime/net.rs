@@ -543,6 +543,20 @@ impl NetRuntime {
         // extra listener into the pool.
         self.spawn_new_listener().await;
 
+        let first = match receiver.recv().await {
+            Ok(first) => first,
+            Err(_) => {
+                self.on_connection_done(sender.remote_handle()).await;
+                return Ok(());
+            }
+        };
+        if first.command == NetCmd::IpDeviceRegister.as_u16() {
+            self.serve_packet_provider(first, &sender, receiver).await;
+            self.on_connection_done(sender.remote_handle()).await;
+            return Ok(());
+        }
+        let mut first = Some(first);
+
         // We want to process more than one message at a time (due to I/O
         // waits), but with bounded concurrency for backpressure, so we use
         // mpsc "tickets".
@@ -563,7 +577,10 @@ impl NetRuntime {
 
         let mut inline_data_messages = 0_u8;
         loop {
-            match receiver.recv().await {
+            match match first.take() {
+                Some(first) => Ok(first),
+                None => receiver.recv().await,
+            } {
                 Ok(msg) => {
                     // Data-path fast path: TcpStreamTx and TcpStreamRxAck
                     // handlers complete synchronously (they never await;

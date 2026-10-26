@@ -2,6 +2,8 @@ use moto_sdk::sys_io::api_ip_device::{Cidr, MAX_ADDRESSES, MAX_ROUTES, Registrat
 
 pub fn run_all_tests() {
     test_registration_codec();
+    crate::ip_device_live::test_reflected_transport_and_removal();
+    crate::ip_device_live::test_provider_death_wakes_pending_ops();
 }
 
 pub fn test_registration_codec() {

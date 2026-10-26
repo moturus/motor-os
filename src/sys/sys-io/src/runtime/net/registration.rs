@@ -10,7 +10,6 @@ use moto_sdk::{
 const MAX_DEVICES: usize = 4;
 
 impl NetRuntime {
-    #[expect(dead_code, reason = "registration dispatch follows in step 3")]
     pub(super) async fn serve_packet_provider(
         &self,
         first: Msg,
