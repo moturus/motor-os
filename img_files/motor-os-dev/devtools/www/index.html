@@ -133,7 +133,7 @@ main.wrap { padding-top: 2rem; padding-bottom: 3rem; }
 .sidebar li a.current { color: var(--accent); border-left-color: var(--accent); }
 
 .content { min-width: 0; max-width: var(--measure); }
-.home .content, .plain .content { max-width: none; }
+.plain .content { max-width: none; }
 
 /* Type */
 h1, h2, h3, h4 { line-height: 1.25; font-weight: 600; color: #fff; }
@@ -229,26 +229,7 @@ table.plain td code { white-space: normal; }
   margin-bottom: .3rem;
 }
 
-/* Cards and pills */
-.cards {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 1rem;
-  margin: 1.2rem 0 1.5rem;
-}
-.card {
-  display: block;
-  background: var(--bg-2);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 1.1rem 1.2rem;
-  color: var(--fg);
-}
-a.card:hover { border-color: var(--accent); color: var(--fg); text-decoration: none; }
-.card h3 { margin: 0 0 .4rem; font-size: 1.02rem; }
-a.card h3 { color: var(--accent); }
-.card p { margin: 0; color: var(--fg-2); font-size: .94rem; }
-.card .tag { font-family: var(--mono); font-size: .72rem; color: var(--fg-2); letter-spacing: .1em; text-transform: uppercase; }
+/* Pills */
 .pill {
   display: inline-block;
   font-family: var(--mono);
@@ -263,17 +244,6 @@ a.card h3 { color: var(--accent); }
 .pill.dim { border-color: var(--line); color: var(--fg-2); }
 
 /* Home page */
-.hero { padding: 1.5rem 0 2.5rem; text-align: center; }
-.hero h1 { font-size: 3rem; margin-bottom: .75rem; }
-.hero .lead { max-width: 40rem; margin-left: auto; margin-right: auto; font-size: 1.2rem; }
-.hero-tag {
-  font-family: var(--mono);
-  color: var(--accent);
-  font-size: .85rem;
-  letter-spacing: .12em;
-  text-transform: uppercase;
-  margin-bottom: 1rem;
-}
 .home h2 { border-top: 0; padding-top: 0; margin-top: 2.5rem; }
 
 /* Pager and footer */
@@ -325,15 +295,9 @@ a.card h3 { color: var(--accent); }
     font-size: .85rem;
   }
   .sidebar li a.current { border-color: var(--accent); }
-  .hero { padding-bottom: 1.5rem; }
-  .hero h1 { font-size: 2.3rem; }
-  .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   h1 { font-size: 1.75rem; }
   h2 { font-size: 1.3rem; }
   pre { font-size: .82rem; }
-}
-@media (max-width: 560px) {
-  .cards { grid-template-columns: 1fr; }
 }
 </style>
 </head>
@@ -353,55 +317,44 @@ a.card h3 { color: var(--accent); }
 <div id="content"></div>
 <main class="wrap home">
 <article class="content">
-<section class="hero">
-  <div class="hero-tag">An operating system for virtual machines</div>
-  <h1>Motor OS</h1>
-  <p class="lead">A simple, fast, and secure operating system built for the cloud.
-  Motor OS targets virtualized workloads such as web serving, serverless computing,
-  and edge caching, and avoids the overhead a general-purpose OS carries when it
-  runs inside a VM.</p>
-  <p class="lead">It is written entirely in Rust, from the kernel to the shell, and its
-  system interface is Rust, not C. It runs as an x86-64 KVM guest under QEMU,
-  Cloud Hypervisor, and Firecracker.</p>
-</section>
+<div class="eyebrow">An operating system for virtual machines</div>
+<h1>Motor OS</h1>
+<p class="lead">A simple, fast, and secure operating system built for the cloud.
+Motor OS targets virtualized workloads such as web serving, serverless computing,
+and edge caching, and avoids the overhead a general-purpose OS carries when it
+runs inside a VM.</p>
+<p class="lead">It is written entirely in Rust, from the kernel to the shell, and its
+system interface is Rust, not C. It runs as an x86-64 KVM guest under QEMU,
+Cloud Hypervisor, and Firecracker.</p>
 
-<div class="cards">
-  <a class="card" href="architecture.html">
-    <h3>A small kernel, everything else in userspace</h3>
-    <p>The kernel does memory, scheduling, and IPC. One userspace process, sys-io, owns the
-    VirtIO devices, the journaling filesystem, and the TCP/IP stack.</p>
-  </a>
-  <a class="card" href="rust.html">
-    <h3>Rust's standard library</h3>
-    <p>Programs that use <code>std</code> and do not depend on Unix or Windows APIs cross-compile
-    and run. Tokio, mio, hyper, axum, rustls, and russh work. The developer image compiles
-    Rust, C, and C++ natively.</p>
-  </a>
-  <a class="card" href="networking.html">
-    <h3>A native networking stack</h3>
-    <p>IPv4 and IPv6, DHCPv4, TCP with CUBIC, SACK, and RACK-TLP, SYN cookies, a DNS
-    resolver service, and configuration from one TOML file.</p>
-  </a>
-  <a class="card" href="capabilities.html">
-    <h3>Capability-based security</h3>
-    <p>Every process carries an immutable capability word. Three roles, System, Interactive,
-    and None, drive filesystem permissions. Network access and filesystem writes are
-    capabilities of their own, which a process can only narrow for its children. There is
-    no root account.</p>
-  </a>
-  <a class="card" href="commands.html">
-    <h3>A working shell and tools</h3>
-    <p>A POSIX-style shell, a terminal multiplexer, two editors, an SSH server with SFTP,
-    HTTP servers with TLS, and the usual commands: ls, ps, top, ss, ping, free.</p>
-  </a>
-  <a class="card" href="lorry.html">
-    <h3>A native Rust package manager</h3>
-    <p>Lorry takes a package's <code>Cargo.toml</code> and <code>Cargo.lock</code> unchanged
-    and aims for byte-identical binaries, but builds offline, from dependencies that were
-    fetched once, checked, and approved explicitly; build scripts and procedural macros
-    run only with a recorded grant.</p>
-  </a>
-</div>
+<h2><a href="architecture.html">A small kernel, everything else in userspace</a></h2>
+<p>The kernel does memory, scheduling, and IPC. One userspace process, sys-io, owns the
+VirtIO devices, the journaling filesystem, and the TCP/IP stack.</p>
+
+<h2><a href="rust.html">Rust's standard library</a></h2>
+<p>Programs that use <code>std</code> and do not depend on Unix or Windows APIs cross-compile
+and run. Tokio, mio, hyper, axum, rustls, and russh work. The developer image compiles
+Rust, C, and C++ natively.</p>
+
+<h2><a href="networking.html">A native networking stack</a></h2>
+<p>IPv4 and IPv6, DHCPv4, TCP with CUBIC, SACK, and RACK-TLP, SYN cookies, a DNS
+resolver service, and configuration from one TOML file.</p>
+
+<h2><a href="capabilities.html">Capability-based security</a></h2>
+<p>Every process carries an immutable capability word. Three roles, System, Interactive,
+and None, drive filesystem permissions. Network access and filesystem writes are
+capabilities of their own, which a process can only narrow for its children. There is
+no root account.</p>
+
+<h2><a href="commands.html">A working shell and tools</a></h2>
+<p>A POSIX-style shell, a terminal multiplexer, two editors, an SSH server with SFTP,
+HTTP servers with TLS, and the usual commands: ls, ps, top, ss, ping, free.</p>
+
+<h2><a href="lorry.html">A native Rust package manager</a></h2>
+<p>Lorry takes a package's <code>Cargo.toml</code> and <code>Cargo.lock</code> unchanged
+and aims for byte-identical binaries, but builds offline, from dependencies that were
+fetched once, checked, and approved explicitly; build scripts and procedural macros
+run only with a recorded grant.</p>
 
 <h2>Status</h2>
 <p>Motor OS is approaching beta quality. Its development started in 2021, and in 2026 it went through
