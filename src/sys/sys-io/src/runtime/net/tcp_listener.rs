@@ -95,7 +95,7 @@ impl TcpListener {
         self.listening_on.contains(&(socket_addr, device_idx))
     }
 
-    fn accepts_address(&self, address: IpAddr) -> bool {
+    pub(super) fn accepts_address(&self, address: IpAddr) -> bool {
         let bound = self.socket_addr.ip();
         (bound.is_unspecified() && bound.is_ipv4() == address.is_ipv4()) || bound == address
     }
@@ -104,6 +104,53 @@ impl TcpListener {
         self.listening_on
             .iter()
             .any(|(_, index)| *index == device_idx)
+    }
+
+    #[cfg_attr(
+        not(debug_assertions),
+        expect(dead_code, reason = "registration follows in step 3")
+    )]
+    pub(super) fn port(&self) -> u16 {
+        self.socket_addr.port()
+    }
+
+    /// Registration must fail if an expanded endpoint cannot be constructed;
+    /// the caller rolls back every endpoint belonging to the new device.
+    #[cfg_attr(
+        not(debug_assertions),
+        expect(dead_code, reason = "registration follows in step 3")
+    )]
+    pub(super) fn try_add_address(
+        this: &Rc<RefCell<Self>>,
+        address: IpAddr,
+        device_idx: usize,
+    ) -> std::io::Result<()> {
+        let (endpoint, count) = {
+            let mut listener = this.borrow_mut();
+            if !listener.accepts_address(address) {
+                return Ok(());
+            }
+            let endpoint = SocketAddr::new(address, listener.socket_addr.port());
+            let count = listener.initial_pool_size;
+            listener
+                .listening_on
+                .try_reserve(1)
+                .map_err(|_| ErrorKind::OutOfMemory)?;
+            listener
+                .listening_sockets
+                .try_reserve(count)
+                .map_err(|_| ErrorKind::OutOfMemory)?;
+            listener
+                .runtime
+                .backlog
+                .try_open((listener.listener_id, endpoint), count)?;
+            listener.listening_on.push((endpoint, device_idx));
+            (endpoint, count)
+        };
+        for _ in 0..count {
+            MotoSocket::create_tcp_listening_socket(Rc::downgrade(this), device_idx, endpoint)?;
+        }
+        Ok(())
     }
 
     pub(super) fn add_address(this: &Rc<RefCell<Self>>, address: IpAddr, device_idx: usize) {

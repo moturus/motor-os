@@ -6,6 +6,10 @@ use moto_sdk::ipc::io_channel::{self, Msg};
 
 pub(super) const TESTS: &[SelfTest] = &[
     (
+        "net::listener_expansion_can_roll_back",
+        listener_expansion_can_roll_back,
+    ),
+    (
         "net::removal_waits_for_unpolled_tasks",
         removal_waits_for_unpolled_tasks,
     ),
@@ -247,6 +251,103 @@ fn removal_with_pending_replies() -> std::result::Result<(), String> {
         st_assert_eq!(runtime.stats.tcp_listening_sockets.get(), 0);
         st_assert_eq!(runtime.stats.tcp_sockets.get(), 0);
         st_assert!(runtime.inner.borrow().sockets.is_empty());
+        Ok(())
+    })
+}
+
+fn listener_expansion_can_roll_back() -> std::result::Result<(), String> {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+        let runtime = runtime()?;
+        let boot = add_device(&runtime, "boot", "10.22.0.1/24");
+        let channel = io_channel::listen("sys_io_listener_expansion_self_test");
+        let client =
+            io_channel::ClientConnection::connect("sys_io_listener_expansion_self_test").unwrap();
+        let (sender, _receiver) = channel.await.unwrap();
+        let sender = runtime.channel_budget.admit_net(sender).ok().unwrap();
+        let handle = sender.remote_handle();
+        runtime
+            .inner
+            .borrow_mut()
+            .clients
+            .insert(handle, ClientConnection::new(sender.clone(), u64::MAX));
+        runtime.stats.active_clients.set(1);
+        tcp_listener::TcpListener::bind(
+            &runtime,
+            api_net::bind_tcp_listener_request(&"0.0.0.0:1234".parse().unwrap(), Some(2)),
+            &sender,
+        )
+        .await
+        .unwrap();
+        let id = client.recv().unwrap().handle;
+        let listener = runtime.inner.borrow().tcp_listeners[&id].clone();
+        st_assert!(
+            listener
+                .borrow()
+                .accepts_address("10.21.0.1".parse().unwrap())
+        );
+        st_assert!(
+            !listener
+                .borrow()
+                .accepts_address("fd21::1".parse().unwrap())
+        );
+        st_assert_eq!(listener.borrow().port(), 1234);
+        let baseline = runtime.stats.tcp_listening_sockets.get();
+        for fail in [false, true] {
+            let config: config::NetConfig =
+                toml::from_str("auto_icmp_echo_reply = false\nloopback = true\n[devices]\n")
+                    .unwrap();
+            let mut cfg = config::DeviceCfg::new("02:00:00:00:00:01");
+            cfg.cidrs.push("10.21.0.1/24".parse().unwrap());
+            let device = device::NetDev::new(
+                "wg0",
+                &cfg,
+                &config,
+                device::NetstackDevice::Loopback(moto_netstack::phy::Loopback::new(
+                    moto_netstack::phy::Medium::Ip,
+                )),
+            );
+            let index = runtime.inner.borrow_mut().devices.push(device);
+            runtime
+                .stats
+                .num_devices
+                .set(runtime.stats.num_devices.get() + 1);
+            runtime
+                .inner
+                .borrow_mut()
+                .ip_addresses
+                .insert("10.21.0.1".parse().unwrap(), index);
+            runtime
+                .inner
+                .borrow_mut()
+                .clients
+                .get_mut(&handle)
+                .unwrap()
+                .shutting_down = fail;
+            let expanded = tcp_listener::TcpListener::try_add_address(
+                &listener,
+                "10.21.0.1".parse().unwrap(),
+                index,
+            );
+            st_assert_eq!(expanded.is_err(), fail);
+            runtime
+                .inner
+                .borrow_mut()
+                .clients
+                .get_mut(&handle)
+                .unwrap()
+                .shutting_down = false;
+            st_assert!(listener.borrow().has_device(index));
+            if !fail {
+                st_assert_eq!(runtime.stats.tcp_listening_sockets.get(), baseline + 2);
+            }
+            runtime.remove_device(index).await;
+            st_assert!(!listener.borrow().has_device(index));
+            st_assert!(listener.borrow().has_device(boot));
+            st_assert_eq!(runtime.stats.tcp_listening_sockets.get(), baseline);
+        }
+        runtime.remove_device(boot).await;
+        runtime.on_connection_done(handle).await;
+        st_assert_eq!(runtime.stats.tcp_sockets.get(), 0);
         Ok(())
     })
 }

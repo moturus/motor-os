@@ -531,19 +531,26 @@ impl MotoSocket {
              eviction tests have to be able to fill the cache, so they cover the \
              policy and this assertion is the only check on the number"
         );
-        let buffer = |bytes: usize| moto_netstack::socket::tcp::SocketBuffer::new(vec![0; bytes]);
+        let buffer = |bytes: usize| -> std::io::Result<_> {
+            let mut storage = Vec::new();
+            storage
+                .try_reserve_exact(bytes)
+                .map_err(|_| ErrorKind::OutOfMemory)?;
+            storage.resize(bytes, 0);
+            Ok(moto_netstack::socket::tcp::SocketBuffer::new(storage))
+        };
         let mut netstack_socket = match rings {
             // The configured sizes are real from the first byte: the caller
             // committed to them (a connect request is on its way out).
             RingBuild::Configured => {
-                moto_netstack::socket::tcp::Socket::new(buffer(sizes.rx), buffer(sizes.tx))
+                moto_netstack::socket::tcp::Socket::new(buffer(sizes.rx)?, buffer(sizes.tx)?)
             }
             // Floor rings under the configured window scale: a listener-pool
             // socket costs its configured sizes only once a connection is
             // real. The caller latches the growth after listen().
             RingBuild::LazyFloor => moto_netstack::socket::tcp::Socket::new_with_win_shift(
-                buffer(TcpBufferSizes::FLOOR),
-                buffer(TcpBufferSizes::FLOOR),
+                buffer(TcpBufferSizes::FLOOR)?,
+                buffer(TcpBufferSizes::FLOOR)?,
                 moto_netstack::socket::tcp::win_shift_for_capacity(sizes.rx),
             ),
         };

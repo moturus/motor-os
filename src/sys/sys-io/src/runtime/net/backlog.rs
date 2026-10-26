@@ -135,6 +135,15 @@ impl BacklogBudget {
         );
     }
 
+    pub(super) fn try_open(&self, key: PoolKey, base: usize) -> std::io::Result<()> {
+        self.pools
+            .borrow_mut()
+            .try_reserve(1)
+            .map_err(|_| std::io::ErrorKind::OutOfMemory)?;
+        self.open(key, base);
+        Ok(())
+    }
+
     /// Drop a pool and return what it held globally. Called once the listener
     /// can no longer replenish, or its growth is charged for the process's life.
     pub(super) fn close(&self, key: PoolKey) {
