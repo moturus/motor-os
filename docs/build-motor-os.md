@@ -153,9 +153,9 @@ vm_images/release/motor-os-wasm.qcow2
 
 The standard image includes the libc configuration, ripgrep, tar, and zstd.
 The development image additionally includes LLVM/Clang, the native Rust
-toolchain, rust-analyzer with matching `rust-src`, headers, libraries, and the
-toolchain manifest as `/devtools/toolchain/manifest`. Generated `/devtools`
-content is never allowed to leak into the base or standard image.
+toolchain, rust-analyzer with matching `rust-src`, headers, and libraries.
+Generated `/devtools` content is never allowed to leak into the base or
+standard image.
 
 The native rust-analyzer lives at `/devtools/rust/bin/rust-analyzer` and its
 sources at `/devtools/rust/lib/rustlib/src/rust/library`. The image contains
@@ -172,10 +172,7 @@ repository therefore run its Cargo and compiler:
 ```sh
 rustc -vV
 cargo -Vv
-cat "$(rustc --print sysroot)/manifest"
 ```
-
-The manifest names the toolchain.
 
 ## Re-running and failures
 

@@ -42,10 +42,9 @@ image="$TEST_VM_IMG_DIR/$TEST_VM_IMAGE"
 [ -f "$image" ] || fail "the developer image is missing: $image"
 
 host_sysroot="$(cd "$ROOT_DIR" && rustc --print sysroot)"
-toolchain="$(sed -n 's/^toolchain=//p' "$host_sysroot/manifest")"
+toolchain="$(sed -n 's/^channel = "\(.*\)"/\1/p' "$ROOT_DIR/rust-toolchain.toml")"
 archive="$(readlink -f "${MOTORH:-$ROOT_DIR/..}")/motor-toolchain-$toolchain.tar.zst"
 [ -f "$archive" ] || fail "the native toolchain archive is missing: $archive"
-manifest="$ROOT_DIR/build/assembly/images/libc/devtools/toolchain/manifest"
 
 copy=motor-os-dev-toolchain-install.qcow2
 export MOTO_IMAGE="$copy"
@@ -84,14 +83,12 @@ printf 'put "%s" "%s/archive.tar.zst"\n' "$archive" "$guest" |
   sftp "${sftp_options[@]}" -b - motor@192.168.4.2 > /dev/null
 vm_ssh "/system/bin/tar -x -f $guest/archive.tar.zst -C $guest"
 
-# A different installed toolchain is replaced only when asked.
-vm_ssh "/system/bin/rush -c 'echo toolchain=x86_64-unknown-motor-0.0.0 > /devtools/toolchain/manifest'"
-if vm_ssh "$package/install.sh" > /dev/null 2>&1; then
-  fail "install.sh replaced a different toolchain without --replace"
+# Replace an existing installation and remove files absent from the payload.
+vm_ssh "/system/bin/rush -c 'echo stale > /devtools/llvm/stale-install && echo stale > /devtools/rust/stale-install'"
+vm_ssh "$package/install.sh"
+if ! vm_ssh "/system/bin/rush -c '[ ! -e /devtools/llvm/stale-install ] && [ ! -e /devtools/rust/stale-install ]'"; then
+  fail "install.sh left stale files in the toolchain directories"
 fi
-vm_ssh "$package/install.sh --replace"
-[ "$(vm_ssh /system/bin/cat /devtools/toolchain/manifest)" = "$(cat "$manifest")" ] ||
-  fail "the installed manifest differs from the archive's"
 vm_ssh "/system/bin/rm -r $guest"
 echo "test-native-toolchain-install: installed $toolchain in $((SECONDS - started)) s"
 

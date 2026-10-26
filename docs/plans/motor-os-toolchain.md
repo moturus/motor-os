@@ -76,10 +76,8 @@ two references to the checkout that a standalone build cannot keep:
 
 - the `moto-rt` major-version compatibility check in `toolchain-runtime.sh`,
   which compares std's locked `moto-rt` against `src/sys/lib/moto-rt`; it
-  protects the Motor OS tree, not the toolchain, and the toolchain manifests
-  already record `stdlib_moto_rt_version` and its checksum;
-- `motor_os_rev` in `MOTOR-ASSEMBLY-MANIFEST`, the Motor OS revision used
-  for the toolchain build, recorded for provenance.
+  protects the Motor OS tree, not the toolchain;
+- the Motor OS revision used for the toolchain build, recorded for provenance.
 
 Everything else that looks local is not an input: mlibc's sysdeps include
 `moto_rt.h` from the same mlibc tree; the LLVM fork's Motor driver
@@ -96,8 +94,7 @@ getting from the packaged form:
   headers and static libraries under `sysroot/devtools/llvm`, used by
   `lorry`, `gix`, `curl`, Helix, and `test-unwind.sh`;
 - the image overlays `images/{llvm,rustc,rust-analyzer,libc}`, listed by
-  the imager YAML files through `assembly_dirs`, with the `manifest` the
-  developer image exposes as `/devtools/toolchain/manifest`;
+  the imager YAML files through `assembly_dirs`;
 - the standalone LLVM `bin` directory, which the external-source builds use for
   `llvm-ar`, `llvm-strip`, `llvm-readelf`, and the Lua C build.
 
@@ -125,10 +122,7 @@ version-first name was rejected as a custom toolchain name.
 The declaration (today `src/toolchain-versions.sh`, then `versions.sh`)
 names the repositories and the Rust, mlibc, and tar branches whose heads
 are built (the Rust gitlinks select LLVM and Cargo), and drops `MOTOR_TOOLCHAIN_ID`,
-`MOTOR_RUSTUP_TOOLCHAIN_BASE`, the key schemas, and the key derivation. The
-manifest shipped with the toolchain names it and records nothing else: no
-source revisions, no revision of the toolchain repository, and no digests
-(decided 2026-10-25).
+`MOTOR_RUSTUP_TOOLCHAIN_BASE`, the key schemas, and the key derivation.
 
 A published version is immutable. If a Motor-side input (mlibc, the LLVM
 fork, a build recipe) must change after publication under the same Rust
@@ -175,12 +169,9 @@ branch and a new toolchain release. Section 2.9
 lists every place the runtime crates are referenced and how to build
 against local copies.
 
-Two small toolchain build adjustments follow from having no Motor OS
-checkout:
-
-- the `moto-rt` compatibility check is dropped, not moved; see the
-  runtime check in section 4;
-- `motor_os_rev` leaves the manifest, and nothing replaces it.
+Having no Motor OS checkout means the `moto-rt` compatibility check is
+dropped, not moved; see the runtime check in section 4. The build also
+stops recording a Motor OS revision.
 
 ### 2.4 Build stages
 
@@ -195,7 +186,7 @@ toolchain:
    Motor std, Clippy, rustfmt, rust-analyzer, `rust-src`);
 5. build the target side: mlibc source snapshot, shim, compiler-rt
    builtins, mlibc, libunwind, libc++abi, libc++, native LLVM, native
-   rustc, rustfmt, clippy-driver, native rust-analyzer; write the manifest;
+   rustc, rustfmt, clippy-driver, native rust-analyzer;
 6. build the Linux `tar` from `moturus/motor-os-tar` and package.
 
 Every build starts from nothing (decided 2026-10-24, after review): it
@@ -231,7 +222,6 @@ toolchain use; they do not need further planning here.
 
 ```
 x86_64-unknown-motor-1.99.1/                     the rustup toolchain
-  manifest                                       the toolchain's name
   bin/                                           rustc, rustdoc, cargo, rustfmt, cargo-clippy,
                                                  clippy-driver, rust-analyzer
   lib/rustlib/x86_64-unknown-linux-gnu/lib/      host std
@@ -265,14 +255,14 @@ builds:
 | Archive | Contents | Used by |
 |---|---|---|
 | `motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux.tar.zst` | a Linux `install.sh` and `toolchain/`, the rustup toolchain directory above: the Linux-host cross toolchain | Linux cross builds: the Motor OS repository, the userspace programs built beside it, third parties |
-| `motor-toolchain-x86_64-unknown-motor-1.99.1.tar.zst` | `manifest`, `images/` (the overlays `llvm`, `rustc`, `rust-analyzer`, `libc`), and a native `install.sh` | the Motor OS imager on Linux, or a user on a running Motor OS VM who downloads it and installs it natively |
+| `motor-toolchain-x86_64-unknown-motor-1.99.1.tar.zst` | `images/` (the overlays `llvm`, `rustc`, `rust-analyzer`, `libc`) and a native `install.sh` | the Motor OS imager on Linux, or a user on a running Motor OS VM who downloads it and installs it natively |
 
 The sysroot wrappers and the bootstrap configuration embed absolute paths
 today (`$MOTORH/build/toolchain/standalone-llvm/<key>/bin`), so the
 packaged wrappers must resolve the LLVM tools relative to their own
 location instead. Each archive unpacks into one top-level directory named
-like the archive, the way Rust's own tarballs do, with `install.sh`,
-`manifest`, and the payload inside it.
+like the archive, the way Rust's own tarballs do, with `install.sh` and the
+payload inside it.
 
 ### 2.6 Where the archives go and how they are installed
 
@@ -350,9 +340,9 @@ motor-toolchain-x86_64-unknown-motor-1.99.1/install.sh
 ```
 
 `install.sh` replaces `/devtools/llvm` and `/devtools/rust` and copies the
-rest of the overlays' `devtools/` trees (the launchers in `/devtools/bin`,
-the examples, `/devtools/toolchain/manifest`) over what is there; it
-refuses to install over a different version unless given `--replace`.
+rest of the overlays' `devtools/` trees (the launchers in `/devtools/bin`
+and the examples) over what is there. An existing installation is replaced
+with the requested toolchain.
 Everything it installs lives under `/devtools`, so an install never writes
 to `/system`. Three things follow:
 
@@ -380,12 +370,6 @@ image takes all four. Paths are absolute on the image; sizes refer to the
 staged files. This is today's layout; with the native install described in
 2.6, the `libc` configuration gains a `/devtools/cfg/libc` home that
 shadows `/system/cfg/libc`, and the rest stays as listed.
-
-**Shared by every overlay**
-
-| Path | Size | What it is |
-|---|---:|---|
-| `/devtools/toolchain/manifest` | 38 B | the toolchain's name, `toolchain=x86_64-unknown-motor-1.99.1`; identical in all four overlays |
 
 **`libc` overlay (every image)**
 
@@ -558,8 +542,8 @@ As implemented in step 4:
   `build/obj/<profile>/`, and the assembly, `build/assembly/`, have fixed
   paths; the assembly holds the native toolchain's overlays (unpacked by
   `src/build-motor-os.sh` on every run) beside those of the external
-  sources. The toolchain and assembly keys, `MOTOR-ASSEMBLY-MANIFEST`
-  validation, `src/resolve-toolchain-assembly.sh`, and
+  sources. The toolchain and assembly keys, assembly identity validation,
+  `src/resolve-toolchain-assembly.sh`, and
   `test-toolchain-cutover.sh` are gone. Apart from `src/build-motor-os.sh`,
   the build scripts are in `src/build-scripts/`.
 - **Nothing is written next to the checkout.** The external sources (the fork
@@ -616,8 +600,7 @@ Decided in review from 2026-10-23 to 2026-10-25:
   build locks, build stamps, or source verification: a build fetches the
   heads of the named branches, builds, writes two archives and their checksums next to its
   checkout, and removes everything else. Nothing pins or records a commit:
-  `versions.sh` names branches and the manifest names the toolchain only
-  (2026-10-25). Concurrent builds or
+  `versions.sh` names branches (2026-10-25). Concurrent builds or
   sources changed during a build are
   user error. Authoring mode and the planned `--local-runtime` option are
   dropped in favour of local repositories in `versions.sh` (2.4, 2.9).
@@ -741,10 +724,7 @@ Decided in review from 2026-10-23 to 2026-10-25:
    review of that version found races and stale-reuse defects in exactly
    that machinery, so it was removed: every build now starts from nothing
    (section 4). The build does not register the toolchain with rustup;
-   the Linux `install.sh` does. One manifest goes into the toolchain and
-   every overlay; since 2026-10-25 it only names the toolchain, after a
-   version that recorded the source revisions, the toolchain repository's
-   revision, and file digests was rejected. Motor OS tests compare the
+   the Linux `install.sh` does. Motor OS tests compare the
    native rustfmt and rust-analyzer with the host toolchain's. Rust bootstrap and the native
    builds use the shipped relocatable wrappers, so every build exercises
    them; the C stages still compile with the standalone Clang of the build
@@ -777,10 +757,9 @@ Decided in review from 2026-10-23 to 2026-10-25:
    `.sha256` file for each next to its checkout. The Linux `install.sh` copies the
    toolchain to `~/.local/share/motor/toolchains/<name>` (or `--prefix`)
    and links it into rustup. The native `install.sh`, a Rush script,
-   replaces `/devtools/llvm` and `/devtools/rust` and copies the launchers,
-   examples, and manifest; it refuses a different installed version
-   without `--replace`. mlibc's configuration stays in the image's
-   `/system/cfg/libc`.
+   replaces `/devtools/llvm` and `/devtools/rust` and copies the launchers
+   and examples, replacing any previous installation. mlibc's configuration
+   stays in the image's `/system/cfg/libc`.
 4. Switch the Motor OS repository: `rust-toolchain.toml` names the
    version; the Makefile derives paths from `rustc --print sysroot` and
    unpacks the native archive from next to the checkout; remove the
@@ -802,9 +781,9 @@ Decided in review from 2026-10-23 to 2026-10-25:
    the C cross sysroot, with the image's. On the finished tree,
    `src/tests/full-test-dev.sh --release` and
    `src/tests/full-test.sh --release` passed. On 2026-10-25, after the
-   archives moved next to the toolchain checkout and the manifest was cut
-   down to the name, the toolchain was rebuilt, Motor OS was rebuilt from an
-   empty object tree and assembly, and both runs passed again. Later that
+   archives moved next to the toolchain checkout, the toolchain was rebuilt,
+   Motor OS was rebuilt from an empty object tree and assembly, and both
+   runs passed again. Later that
    day `versions.sh` switched from commits to branches; the rebuilt
    toolchain took the same commits from the branch heads, its native
    archive is byte-identical, and after another clean rebuild both runs

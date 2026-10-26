@@ -30,10 +30,13 @@ for arg in "$@"; do
 done
 
 network_args=(--offline)
+verbosity_args=(--quiet)
 test_args=()
 if [ "$prepare" = 1 ]; then
   network_args=()
+  verbosity_args=()
   test_args=(--no-run)
+  echo "test-crossterm-host: fetching host-test dependencies"
   cargo fetch --locked --manifest-path "$RUSH_DIR/Cargo.toml"
 fi
 
@@ -58,13 +61,19 @@ fi
 
 targets="$ROOT_DIR/build/crossterm-host/$profile"
 for features in events events,use-dev-tty; do
+  if [ "$prepare" = 1 ]; then
+    echo "test-crossterm-host ($profile): building crossterm tests (features: $features)"
+  fi
   # Colored's round-trip tests require ANSI output; an inherited NO_COLOR=1
   # makes their result depend on which test first changes the global switch.
-  (cd "$copy" && NO_COLOR= CARGO_TARGET_DIR="$targets/$features" cargo test --quiet \
+  (cd "$copy" && NO_COLOR= CARGO_TARGET_DIR="$targets/$features" cargo test "${verbosity_args[@]}" \
     --locked "${network_args[@]}" "${profile_args[@]}" --lib \
     --no-default-features --features "$features" "${test_args[@]}")
 done
 
-(cd "$RUSH_DIR" && CARGO_TARGET_DIR="$targets/rush-dev-tty" cargo test --quiet \
+if [ "$prepare" = 1 ]; then
+  echo "test-crossterm-host ($profile): building Rush dev-tty tests"
+fi
+(cd "$RUSH_DIR" && CARGO_TARGET_DIR="$targets/rush-dev-tty" cargo test "${verbosity_args[@]}" \
   --locked "${network_args[@]}" "${profile_args[@]}" --features dev-tty \
   --test phase8 "${test_args[@]}")

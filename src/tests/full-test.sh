@@ -125,6 +125,7 @@ if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   # timeout moves the suite into a background process group; a terminal
   # operation can then stop timeout and the entire suite with SIGTTIN/SIGTTOU.
   # Keeping timeout's separate group preserves its whole-process-tree timeout.
+  echo "full-test: starting $BUILD tests ($VMM)"
   testing_started="$SECONDS"
   set -m
   timeout "${TIMEOUT}s" "$0" "${ORIGINAL_ARGS[@]}" < /dev/null

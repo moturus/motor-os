@@ -1074,7 +1074,7 @@ no new dependency.
    and assembly once in the orchestrator and pass that selection through fetch
    and the Javy fork's build script. Preserve explicit authoring selections;
    standalone builds may resolve a default when no selection was supplied.
-   Verify that the installed manifest names the compiler and sysroot actually
+   Verify that the selected toolchain provides the compiler and sysroot actually
    used. Add hermetic host contract tests with distinct managed/authoring
    selections, including reuse invalidation when the selection changes; the
    review's build-script probe, which stubs `cargo` and the fork script to log

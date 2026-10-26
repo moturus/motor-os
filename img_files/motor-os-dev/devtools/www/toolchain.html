@@ -626,7 +626,7 @@ because each layer is built with the one before it:</p>
   with Motor OS as host.</li>
   <li>Everything is packaged into two archives, written by motor-os-tar's
   <code>tar</code>: the Linux-host toolchain, and the native toolchain's files for the
-  images, each with a manifest and an <code>install.sh</code>.</li>
+  images, each with an <code>install.sh</code>.</li>
 </ol>
 <p>This repository's <code>src/build-motor-os.sh</code> then builds the external sources
 with the installed toolchain (Lua is cross-compiled against the sysroot as a check that a
@@ -649,9 +649,6 @@ and <code>rt.vdso</code> checks compatibility at run time.</p>
   library sources, both standard libraries, Clang, and the C/C++ sysroot live in one rustup
   toolchain, built from one Rust revision, with no host nightly involved. The repository's
   <code>rust-toolchain.toml</code> names it.</li>
-  <li><strong>A manifest everywhere.</strong> The installed toolchain and the developer
-  image (as <code>/devtools/toolchain/manifest</code>) carry a manifest that names the
-  toolchain, and <code>rustc -vV</code> reports the Motor Rust commit.</li>
   <li><strong>The same C wrappers.</strong> <code>motor-clang</code>, <code>motor-clang++</code>,
   and <code>motor-rust-cc</code> sit in the toolchain's sysroot and find everything they
   use relative to themselves, so an installed toolchain works wherever it is.</li>

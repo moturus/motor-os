@@ -529,12 +529,9 @@ first: it removes all build artifacts.</p>
 run from the checkout use it without a <code>+nightly</code>, <code>+stable</code>, or
 <code>+dev-*</code> selector; do not add one. To see which one it is:</p>
 <pre><code>rustc -vV
-cargo -Vv
-cat "$(rustc --print sysroot)/manifest"</code></pre>
+cargo -Vv</code></pre>
 <p>Cargo reports <code>1.99.1-dev</code> and the exact Cargo commit: the current toolchain
-is built from the Rust 1.99.1 tag with the Motor patches rebased onto it. Its
-<code>manifest</code>, which the developer image carries as
-<code>/devtools/toolchain/manifest</code>, names the toolchain.
+is built from the Rust 1.99.1 tag with the Motor patches rebased onto it.
 The cross sysroot and the LLVM tools are found from <code>rustc --print sysroot</code>, and
 the images' toolchain files in the assembly, <code>build/assembly/images</code>.</p>
 

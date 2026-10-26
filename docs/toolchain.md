@@ -85,10 +85,6 @@ with the rest of `build/`:
   `libc`, unpacked from the native archive with motor-os-tar's `tar` built
   for Linux on every run, so a replaced archive takes effect.
 
-Every toolchain overlay carries the toolchain's manifest as
-`devtools/toolchain/manifest`; the developer image exposes it as
-`/devtools/toolchain/manifest`.
-
 ## 5. Installing the native toolchain on Motor OS
 
 The native archive also installs on a running developer VM. `/devtools`
@@ -102,9 +98,8 @@ tar -x -f motor-toolchain-x86_64-unknown-motor-1.99.1.tar.zst
 motor-toolchain-x86_64-unknown-motor-1.99.1/install.sh
 ```
 
-`install.sh` replaces `/devtools/llvm` and `/devtools/rust`, copies the
-launchers, the examples, and the manifest, and refuses to replace a
-different toolchain without `--replace`. It then makes the programs
+`install.sh` replaces `/devtools/llvm` and `/devtools/rust` with the requested
+toolchain and copies the launchers and examples. It then makes the programs
 executable by every role, and the launchers editable by Interactive as well,
 as they are on the image. The developer-image suite does exactly this on a
 copy of the image, in
