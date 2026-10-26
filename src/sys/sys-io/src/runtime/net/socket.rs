@@ -81,6 +81,23 @@ enum IpSocketPublication {
     Published,
 }
 
+pub(super) struct RemovalNotice {
+    sender: ClientSender,
+    message: moto_sdk::ipc::io_channel::Msg,
+    reply_ready: Option<moto_sdk::async_runtime::oneshot::Receiver<bool>>,
+}
+
+impl RemovalNotice {
+    pub(super) async fn send(self) {
+        if let Some(ready) = self.reply_ready
+            && ready.await != Ok(true)
+        {
+            return;
+        }
+        let _ = self.sender.send(self.message).await;
+    }
+}
+
 pub(super) enum SocketBackend {
     Ip(IpSocketBackend),
     Vsock(crate::runtime::vsock::admission::ConnectionTuple),
@@ -257,6 +274,72 @@ impl Drop for MotoSocket {
 }
 
 impl MotoSocket {
+    #[cfg_attr(
+        not(debug_assertions),
+        expect(dead_code, reason = "device removal follows in step 2")
+    )]
+    pub(super) async fn invalidate_ip_socket(socket: Rc<RefCell<Self>>) -> Option<RemovalNotice> {
+        use moto_sdk::{ipc::io_channel::Msg, sys_io::api_net};
+
+        let tcp = socket.borrow().is_tcp();
+        let pending_connect = tcp.then(|| Self::prepare_removed_tcp(&socket)).flatten();
+        let (runtime, socket_id, client_handle, notice) = {
+            let mut socket = socket.borrow_mut();
+            let ip = socket.base.ip_backend_mut();
+            let publication = std::mem::replace(&mut ip.publication, IpSocketPublication::Private);
+            let (published, reply_ready) = match publication {
+                IpSocketPublication::Private => (false, None),
+                IpSocketPublication::Sending(ready) => (true, Some(ready)),
+                IpSocketPublication::Published => (true, None),
+            };
+            let base = &socket.base;
+            let notice = base.client_sender.clone().and_then(|sender| {
+                let mut message = if let Some(mut connect) = pending_connect {
+                    connect.status = moto_rt::E_NOT_CONNECTED;
+                    connect
+                } else if published {
+                    let mut message = Msg::new();
+                    message.status = moto_rt::E_OK;
+                    if tcp {
+                        message.command = api_net::NetCmd::EvtTcpStreamStateChanged as u16;
+                        message.payload.args_32_mut()[0] = api_net::TcpState::Closed.into();
+                        message.payload.args_32_mut()[1] = api_net::TCP_STATE_CHANGE_CAUSE_RESET;
+                    } else {
+                        message.command = api_net::NetCmd::EvtUdpSocketInvalidated as u16;
+                    }
+                    message
+                } else {
+                    return None;
+                };
+                message.handle = base.socket_id;
+                Some(RemovalNotice {
+                    sender,
+                    message,
+                    reply_ready,
+                })
+            });
+            (
+                base.runtime.clone(),
+                base.socket_id,
+                base.client_handle,
+                notice,
+            )
+        };
+        if tcp {
+            Self::drop_tcp_socket(socket).await;
+        } else {
+            {
+                let mut inner = runtime.inner.borrow_mut();
+                if let Some(client) = inner.clients.get_mut(&client_handle) {
+                    client.sockets.remove(&socket_id);
+                }
+                inner.sockets.remove(&socket_id);
+            }
+            drop(socket);
+        }
+        notice
+    }
+
     /// Publish the handle before starting I/O. Removal can take the receiver
     /// to order its terminal notification after this reply without retaining
     /// the socket while a client is not reading its channel.

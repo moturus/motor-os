@@ -7,11 +7,10 @@ UDP and ICMP cancellation are complete.
 The preexisting TCP port-selection and UDP self-delivery prerequisites
 are complete.
 TCP cancellation, socket-publication ordering and device-task lifetime
-accounting are complete. Server-side socket invalidation is being completed
-next, followed by listener removal.
+accounting and server-side socket invalidation are complete.
+Listener removal is in progress.
 Parallel work: steps 6-8 - standalone `wg` and the independent host peer.
-The preexisting sys-tty and strobe allocation failures are fixed; step 2
-validation is resuming.
+The preexisting sys-tty and strobe allocation failures are fixed.
 
 2026-10-24. Design and implementation plan, grounded in the tree at
 a3d739f9. This document specifies the process-backed IP device, WireGuard
@@ -565,8 +564,9 @@ Rules for every step:
 
 * Patches are 100-300 lines including tests. Split steps as needed to keep
   patches small; patch counts are not prescribed.
-* Intermediate patches require one debug and one `--release` run of
-  `src/tests/full-test.sh` before committing. When all implementation work
+* Each intermediate step requires one debug and one `--release` run of
+  `src/tests/full-test.sh` before its commits. Keep those commits small and
+  check that each intermediate tree builds. When all implementation work
   is complete, the final gate requires three debug and three `--release`
   runs. Steps 6-8 also run their component tests. Step 9 introduces a
   minimal VM gate alongside activation, and step 10 expands it. From step 9

@@ -1573,7 +1573,12 @@ impl MotoSocket {
 
         let (socket_id, sender) = {
             let socket_ref = moto_socket.borrow();
-            if socket_ref.base.lingering {
+            if socket_ref.base.lingering
+                || !matches!(
+                    socket_ref.base.ip_backend().publication,
+                    super::IpSocketPublication::Published
+                )
+            {
                 return;
             }
             // A socket retired to TIME-WAIT has no client to tell.
@@ -1612,6 +1617,17 @@ impl MotoSocket {
             .stats
             .tcp_sockets
             .set(base.runtime.stats.tcp_sockets.get() - 1);
+    }
+
+    pub(super) fn prepare_removed_tcp(
+        socket: &Rc<RefCell<Self>>,
+    ) -> Option<moto_sdk::ipc::io_channel::Msg> {
+        let mut socket = socket.borrow_mut();
+        socket.base.lingering = false;
+        let state = socket.unwrap_tcp_mut();
+        state.linger_cancel.take();
+        state.lingerer.take();
+        state.connect_req.take()
     }
 
     // Drop the socket fully.
@@ -1879,10 +1895,18 @@ impl MotoSocket {
 
         let socket_id = moto_socket.borrow().socket_id();
 
+        let close_replied = std::cell::Cell::new(false);
         {
             let linger_socket = moto_socket.clone();
-            let linger = async move {
-                Self::tcp_linger_inner(linger_socket, deadline, lingerer, close_req).await;
+            let linger = async {
+                Self::tcp_linger_inner(
+                    linger_socket,
+                    deadline,
+                    lingerer,
+                    close_req,
+                    &close_replied,
+                )
+                .await;
             };
             futures::pin_mut!(linger);
             futures::pin_mut!(linger_cancel);
@@ -1903,7 +1927,14 @@ impl MotoSocket {
             });
 
         moto_socket.borrow_mut().base.lingering = false;
+        let canceled_reply = close_req.filter(|_| !close_replied.get()).map(|mut reply| {
+            reply.status = moto_rt::E_NOT_CONNECTED;
+            (moto_socket.borrow().base.sender().clone(), reply)
+        });
         Self::drop_tcp_socket_inner(moto_socket, reset_open).await;
+        if let Some((sender, reply)) = canceled_reply {
+            let _ = sender.send(reply).await;
+        }
     }
 
     async fn tcp_linger_inner(
@@ -1911,6 +1942,7 @@ impl MotoSocket {
         deadline: moto_sdk::async_runtime::Instant,
         lingerer: Option<moto_sdk::async_runtime::oneshot::Receiver<()>>,
         close_req: Option<moto_sdk::ipc::io_channel::Msg>,
+        close_replied: &std::cell::Cell<bool>,
     ) {
         use futures::FutureExt;
 
@@ -1975,6 +2007,7 @@ impl MotoSocket {
             let sender = moto_socket.borrow().base.sender().clone();
             resp.status = moto_rt::E_OK;
             let _ = sender.send(resp).await;
+            close_replied.set(true);
         }
 
         if close_handshake_complete {
