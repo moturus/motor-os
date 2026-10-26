@@ -226,10 +226,18 @@ impl LogServer {
             return RpcOutcome::disconnect(moto_rt::E_INVALID_ARGUMENT);
         }
 
+        let payload = &conn.data()[size_of::<RawLogRequest>()..payload_end];
+        let mut data = Vec::new();
+        if data.try_reserve_exact(payload.len()).is_err() {
+            // The forwarder counts the rejected batch and keeps this
+            // connection for later records; do not abort the log service.
+            return RpcOutcome::keep(moto_rt::E_OUT_OF_MEMORY);
+        }
+        data.extend_from_slice(payload);
         let record = RawLogRecord {
             handle: conn.handle(),
             tag_id: req.tag_id,
-            data: conn.data()[size_of::<RawLogRequest>()..payload_end].to_vec(),
+            data,
         };
         if sender.send(io_thread::Msg::RawRecord(record)).is_err() {
             return RpcOutcome::disconnect(moto_rt::E_INTERNAL_ERROR);

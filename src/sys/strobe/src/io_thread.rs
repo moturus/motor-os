@@ -238,7 +238,9 @@ impl Connection {
         if self.disabled || record.is_empty() {
             return;
         }
-        if self.backlog_bytes + record.len() > BACKLOG_CAPACITY {
+        if self.backlog_bytes + record.len() > BACKLOG_CAPACITY
+            || self.backlog.try_reserve(1).is_err()
+        {
             self.dropped += 1;
             return;
         }

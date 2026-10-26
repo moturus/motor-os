@@ -10,7 +10,8 @@ TCP cancellation, socket-publication ordering and device-task lifetime
 accounting are complete. Server-side socket invalidation is being completed
 next, followed by listener removal.
 Parallel work: steps 6-8 - standalone `wg` and the independent host peer.
-The preexisting strobe allocation failure is deferred in future-work.md.
+The preexisting sys-tty and strobe allocation failures are fixed; step 2
+validation is resuming.
 
 2026-10-24. Design and implementation plan, grounded in the tree at
 a3d739f9. This document specifies the process-backed IP device, WireGuard

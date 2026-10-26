@@ -741,7 +741,21 @@ fn test_frame_churn() {
     println!("test_frame_churn PASS");
 }
 
+fn logging_services() -> [u64; 2] {
+    use moto_sys::stats::ProcessInfoV1;
+    let mut processes = [ProcessInfoV1::default(); 32];
+    let count = ProcessInfoV1::list(0, &mut processes).unwrap();
+    ["/system/services/sys-tty", "/system/services/strobe"].map(|name| {
+        processes[..count]
+            .iter()
+            .find(|process| process.active != 0 && process.debug_name() == name)
+            .unwrap_or_else(|| panic!("logging service {name} is not alive"))
+            .pid
+    })
+}
+
 pub fn run_all_tests() {
+    let services = logging_services();
     test_large_allocs();
     test_frame_churn();
     test_pressure_mode();
@@ -750,6 +764,11 @@ pub fn run_all_tests() {
     // large-n form for driving a build without the refusal set into OOM.
     test_fs_under_pressure(128);
     test_memfs_reclamation();
+    assert_eq!(
+        logging_services(),
+        services,
+        "logging services exited under pressure"
+    );
 }
 
 /// Both service gates must reclaim already-free memfs pages before refusing.
