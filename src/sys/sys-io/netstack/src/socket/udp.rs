@@ -531,32 +531,30 @@ impl<'a> Socket<'a> {
     ) {
         debug_assert!(self.accepts(cx, ip_repr, repr));
 
-        let size = payload.len();
+        self.enqueue_rx(
+            UdpMetadata {
+                endpoint: IpEndpoint::new(ip_repr.src_addr(), repr.src_port),
+                local_address: Some(ip_repr.dst_addr()),
+                meta,
+            },
+            payload,
+        );
+    }
 
-        let remote_endpoint = IpEndpoint {
-            addr: ip_repr.src_addr(),
-            port: repr.src_port,
-        };
-
+    pub(crate) fn enqueue_rx(&mut self, metadata: UdpMetadata, payload: &[u8]) {
         net_trace!(
             "udp:{}:{}: receiving {} octets",
             self.endpoint,
-            remote_endpoint,
-            size
+            metadata.endpoint,
+            payload.len()
         );
 
-        let metadata = UdpMetadata {
-            endpoint: remote_endpoint,
-            local_address: Some(ip_repr.dst_addr()),
-            meta,
-        };
-
-        match self.rx_buffer.enqueue(size, metadata) {
+        match self.rx_buffer.enqueue(payload.len(), metadata) {
             Ok(buf) => buf.copy_from_slice(payload),
             Err(_) => net_trace!(
                 "udp:{}:{}: buffer full, dropped incoming packet",
                 self.endpoint,
-                remote_endpoint
+                metadata.endpoint
             ),
         }
 

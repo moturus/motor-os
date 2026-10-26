@@ -512,12 +512,7 @@ impl MotoSocket {
         let mut need_udp_tx_ack = fragment_id != 0 || (admission_dropped && fragment_size != 0);
 
         let mut inner_ref = runtime.inner.borrow_mut();
-        let mut inner = &mut *inner_ref;
-        let netstack_socket = inner.devices[base.ip_backend().device_idx]
-            .sockets
-            .get_mut::<moto_netstack::socket::udp::Socket>(
-            base.ip_backend().handle(base.socket_id),
-        );
+        let inner = &mut *inner_ref;
 
         loop {
             let Ok(datagram) = udp_state.tx_queue.next_datagram() else {
@@ -534,7 +529,25 @@ impl MotoSocket {
                 break;
             };
 
-            if let Err(err) = netstack_socket.send_slice(datagram.slice(), datagram.addr) {
+            // Ethernet transmission does not loop back to our own IP addresses.
+            // Use the destination's existing receive queue, including self-send.
+            let local_device = inner.ip_addresses.get(&datagram.addr.ip()).copied();
+            let result = if let Some(device_idx) = local_device {
+                inner.devices[device_idx].sockets.udp_deliver_local(
+                    base.ip_backend().local_addr.into(),
+                    datagram.addr.into(),
+                    datagram.slice(),
+                )
+            } else {
+                inner.devices[base.ip_backend().device_idx]
+                    .sockets
+                    .get_mut::<moto_netstack::socket::udp::Socket>(
+                        base.ip_backend().handle(base.socket_id),
+                    )
+                    .send_slice(datagram.slice(), datagram.addr)
+            };
+
+            if let Err(err) = result {
                 match err {
                     moto_netstack::socket::udp::SendError::Unaddressable => {
                         log::debug!("Cannot send UDP packet to {:?}.", datagram.addr);
@@ -558,7 +571,9 @@ impl MotoSocket {
                     datagram.slice().len(),
                     datagram.addr
                 );
-                base.ip_backend().device_notify.notify_one();
+                if local_device.is_none() {
+                    base.ip_backend().device_notify.notify_one();
+                }
             }
         }
 

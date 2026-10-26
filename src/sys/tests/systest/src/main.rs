@@ -1604,6 +1604,10 @@ fn main() {
         tcp::test_outgoing_ports_exclude_listeners();
         return;
     }
+    if args.len() == 2 && args[1] == "test-udp-local-delivery" {
+        udp::test_udp_local_delivery();
+        return;
+    }
     if args.len() == 2 && args[1] == "test-time-wait-releases-client-channel" {
         tcp::test_time_wait_releases_client_channel();
         return;

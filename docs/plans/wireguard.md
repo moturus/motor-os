@@ -4,13 +4,12 @@ Completed steps: 0 - boringtun fork; 1 - routes without a gateway.
 Current step: 2 - devices that come and go.
 Device-index lifetime and client UDP invalidation are complete.
 UDP and ICMP cancellation are complete.
-The preexisting TCP port-selection prerequisite is complete.
+The preexisting TCP port-selection and UDP self-delivery prerequisites
+are complete.
 TCP cancellation and socket-publication ordering are complete;
 server-side socket and listener removal remain in this step.
 Parallel work: steps 6-8 - standalone `wg` and the independent host peer.
 The preexisting strobe allocation failure is deferred in future-work.md.
-Further implementation is paused for the UDP self-delivery
-decision under "Open questions" at the end of this document.
 
 2026-10-24. Design and implementation plan, grounded in the tree at
 a3d739f9. This document specifies the process-backed IP device, WireGuard
@@ -272,6 +271,8 @@ An application UDP socket stays attached to its device. Binding a tunnel
 address selects the packet device; ordinary wildcard binds retain physical
 or loopback selection and do not start choosing virtual devices.
 `connect` and `send_to` do not migrate sockets.
+UDP to a local address is delivered locally, preserving the bound source
+and receive-queue limits, subject to the device-boundary policy below.
 
 Use the existing `udp_bind_for_remote` operation when the destination is
 known at creation. Change the DNS resolver to use it for query sockets;
@@ -620,6 +621,10 @@ First fix the preexisting outgoing TCP port collision with explicit and
 wildcard listeners. Ephemeral source selection must exclude their local
 endpoints while preserving existing connection and TIME-WAIT exclusions.
 Cover both IP families with native connection and accept tests.
+
+Also fix preexisting UDP self-delivery on local physical addresses. Cover
+both families, wildcard and explicit binds, same-socket delivery, source
+identity, connected-peer filtering and empty/maximum-size datagrams.
 
 sys-io `net.rs` (the device vector, `ip_addresses`, `find_route`, the
 per-device poll task), `tcp_listener.rs` (`add_address`, `remove_address`),
@@ -977,8 +982,4 @@ bridging would require a separate extension.
 
 ## Open questions
 
-Should the preexisting failure to deliver UDP between sockets bound to this
-host's physical IP addresses be fixed now or recorded as future work? It
-reproduces with ordinary sockets over both IPv4 and IPv6, before the new
-physical-transport binding option. WireGuard traffic to external peers does
-not depend on fixing local self-delivery.
+None currently.
