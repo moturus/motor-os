@@ -372,6 +372,102 @@ pub fn test_multiple_devices_and_wildcard_listener() {
     println!("ip_device::test_multiple_devices_and_wildcard_listener PASS");
 }
 
+pub fn test_removal_wakes_stream_and_datagram_writers() {
+    use crate::net_harness::{bounded, bounded_output, host_channel};
+    use moto_sdk::io::net::{
+        tcp::{TcpListener, TcpStream},
+        udp::UdpSocket,
+    };
+    let baseline = crate::tcp::read_sys_io_metric("net.num_devices");
+    for local in config(9).addresses.into_iter().map(|cidr| cidr.address) {
+        let provider = Provider::start(9);
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+            let (client, driver) = host_channel().await;
+            let listener = TcpListener::bind_reserved(
+                client.try_reserve().unwrap(),
+                &SocketAddr::new(local, 0),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            listener.post_accept(client.try_reserve().unwrap());
+            let destination = SocketAddr::new(remote(local), listener.socket_addr().port());
+            let stream = TcpStream::connect_reserved(
+                client.try_reserve().unwrap(),
+                &destination,
+                Some(Duration::from_secs(2)),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+            let (accepted, _) = bounded_output(listener.accept(), 2).await.unwrap().unwrap();
+            let udp = UdpSocket::bind_reserved(
+                client.try_reserve().unwrap(),
+                &SocketAddr::new(local, 0),
+                None,
+            )
+            .await
+            .unwrap();
+
+            // Keep the channel driver on this executor. Without yielding,
+            // fill both TX reservations so each write registers a waiter.
+            let payload = [0; 4096];
+            let mut sent = 0;
+            loop {
+                match stream.try_write(&[&payload]) {
+                    Ok(length) => {
+                        sent += length;
+                        assert!(sent <= 1_048_576);
+                    }
+                    Err(moto_rt::E_NOT_READY) => break,
+                    Err(error) => panic!("stream fill failed: {error}"),
+                }
+            }
+            for sent in 0..=64 {
+                match udp.try_send_to(&payload[..512], &destination) {
+                    Ok(512) => assert!(sent < 64),
+                    Err(moto_rt::E_NOT_READY) => break,
+                    result => panic!("datagram fill failed: {result:?}"),
+                }
+            }
+            {
+                let mut bytes = [0; 1];
+                let mut read_buffers = [&mut bytes[..]];
+                let write_buffers = [&payload[..1]];
+                let read = stream.read_future(&mut read_buffers, false);
+                let write = stream.write_future(&write_buffers);
+                let datagram = udp.send_to_future(&payload[..512], &destination);
+                futures::pin_mut!(read, write, datagram);
+                assert!(futures::poll!(&mut read).is_pending());
+                assert!(futures::poll!(&mut write).is_pending());
+                assert!(futures::poll!(&mut datagram).is_pending());
+                assert_eq!(stream.rx_waiter_count(), 1);
+                assert_eq!(stream.tx_waiter_count(), 1);
+
+                provider.stop(false);
+                assert_eq!(
+                    bounded_output(read, 2).await.unwrap(),
+                    Err(moto_rt::E_CONNECTION_RESET)
+                );
+                assert_eq!(
+                    bounded_output(write, 2).await.unwrap(),
+                    Err(moto_rt::E_CONNECTION_RESET)
+                );
+                assert_eq!(
+                    bounded_output(datagram, 2).await.unwrap(),
+                    Err(moto_rt::E_NOT_CONNECTED)
+                );
+            }
+            drop((stream, accepted, listener, udp));
+            assert!(bounded(driver, 2).await);
+        });
+        crate::tcp::wait_for_sys_io_metric("net.num_devices", |n| n == baseline);
+    }
+    println!("ip_device::test_removal_wakes_stream_and_datagram_writers PASS");
+}
+
 fn wildcard_exchange(listener: &std::net::TcpListener, peer: IpAddr) {
     let mut stream = std::net::TcpStream::connect_timeout(
         &SocketAddr::new(peer, listener.local_addr().unwrap().port()),
