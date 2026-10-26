@@ -25,6 +25,7 @@ mod fsbench;
 mod futex_stress;
 mod icmp;
 mod io_channel;
+mod ip_device;
 mod ipc_service;
 mod kernel_log;
 mod logging;
@@ -1581,6 +1582,10 @@ fn main() {
         tcp::test_native_net_cancellation();
         return;
     }
+    if args.len() == 2 && args[1] == "test-ip-device" {
+        ip_device::run_all_tests();
+        return;
+    }
     if args.len() == 2 && args[1] == "test-native-net" {
         net_driver::run_all_tests();
         tcp::run_all_tests();
@@ -1986,6 +1991,7 @@ fn main() {
     tcp::run_all_tests();
     udp::run_all_tests();
     icmp::run_all_tests();
+    ip_device::run_all_tests();
     pressure::run_all_tests();
 
     mpmc::test_mpmc();
