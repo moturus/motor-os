@@ -28,6 +28,7 @@ mod io_channel;
 mod ip_device;
 mod ip_device_admission;
 mod ip_device_live;
+mod ip_device_plain;
 mod ip_device_queues;
 mod ip_device_udp;
 mod ipc_service;
@@ -79,6 +80,7 @@ mod vsock_outgoing;
 mod wait_set;
 mod wakebench;
 mod wireguard;
+mod wireguard_load;
 mod xor_server;
 
 use std::{
@@ -1613,6 +1615,18 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "wireguard-fragmented-reply" {
         wireguard::fragmented_reply();
+        return;
+    }
+    if args.len() == 2 && args[1] == "wireguard-stale-sockets" {
+        wireguard::stale_sockets();
+        return;
+    }
+    if args.len() == 3 && args[1] == "wireguard-load" {
+        wireguard_load::run(&args[2]);
+        return;
+    }
+    if args.len() == 4 && args[1] == "ip-device-plain" {
+        ip_device_plain::run(&args[2], &args[3]);
         return;
     }
     if args.len() == 2 && args[1] == "test-ip-device" {

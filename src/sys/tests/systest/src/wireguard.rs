@@ -158,6 +158,59 @@ pub fn rejection_counters(pid: &str) {
     }
 }
 
+pub fn stale_sockets() {
+    fn removed(error: std::io::Error) {
+        assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::NotConnected
+            ),
+            "stale socket returned {error:?}"
+        );
+    }
+    let timeout = Duration::from_secs(3);
+    let sockets =
+        [("10.250.20.1", "10.250.20.2"), ("fd50:20::1", "fd50:20::2")].map(|(remote, local)| {
+            let remote: IpAddr = remote.parse().unwrap();
+            let local: IpAddr = local.parse().unwrap();
+            let tcp = TcpStream::connect_timeout(&SocketAddr::new(remote, 7000), timeout).unwrap();
+            tcp.set_read_timeout(Some(timeout)).unwrap();
+            tcp.set_write_timeout(Some(timeout)).unwrap();
+            let udp = UdpSocket::bind(SocketAddr::new(local, 0)).unwrap();
+            udp.set_read_timeout(Some(timeout)).unwrap();
+            (tcp, udp, SocketAddr::new(remote, 7001))
+        });
+    let ready = std::sync::Barrier::new(5);
+    std::thread::scope(|scope| {
+        for (tcp, udp, _) in &sockets {
+            let ready = &ready;
+            let mut tcp = tcp.try_clone().unwrap();
+            scope.spawn(move || {
+                ready.wait();
+                removed(tcp.read(&mut [0]).unwrap_err());
+            });
+            scope.spawn(move || {
+                ready.wait();
+                removed(udp.recv_from(&mut [0]).unwrap_err());
+            });
+        }
+        ready.wait();
+        println!("STALE READY");
+        std::io::stdout().flush().unwrap();
+    });
+    println!("STALE INVALIDATED");
+    std::io::stdout().flush().unwrap();
+    // The harness restarts the same device name before releasing this check.
+    std::io::stdin().read_exact(&mut [0]).unwrap();
+    for (mut tcp, udp, remote) in sockets {
+        removed(tcp.read(&mut [0]).unwrap_err());
+        assert!(tcp.write(&[1]).is_err());
+        removed(udp.recv_from(&mut [0]).unwrap_err());
+        removed(udp.send_to(&[1], remote).unwrap_err());
+    }
+    println!("wireguard stale sockets after restart PASS");
+}
+
 pub fn cleanup() {
     crate::tcp::wait_for_sys_io_metric("net.ip_device.devices", |value| value == 0);
     crate::tcp::wait_for_sys_io_metric("net.ip_device.buffer_bytes", |value| value == 0);
