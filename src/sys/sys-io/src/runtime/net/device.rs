@@ -607,6 +607,11 @@ impl moto_netstack::phy::Device for VirtioDevice {
 pub(super) enum NetstackDevice {
     VirtIo(VirtioDevice),
     Loopback(moto_netstack::phy::Loopback),
+    #[cfg_attr(
+        not(debug_assertions),
+        expect(dead_code, reason = "registration follows in step 3")
+    )]
+    Packet(super::packet_device::PacketDevice),
 }
 
 impl NetstackDevice {
@@ -622,6 +627,7 @@ impl NetstackDevice {
         match self {
             NetstackDevice::VirtIo(_) => true,
             NetstackDevice::Loopback(_) => false,
+            NetstackDevice::Packet(_) => true,
         }
     }
 }
@@ -753,9 +759,28 @@ const DEFAULT_NEIGHBOR_SOLICIT_RESERVE: u32 = 4;
 /// The netstack configuration every interface is constructed from, so that the
 /// draws above have exactly one call site and a self-test can take
 /// configurations the way two devices would.
+#[derive(Clone, Copy)]
+pub(super) struct InterfacePolicy {
+    auto_icmp_echo_reply: bool,
+    max_icmp_error_rate: std::num::NonZeroU32,
+    max_rst_rate: std::num::NonZeroU32,
+    max_syn_cookie_rate: std::num::NonZeroU32,
+}
+
+impl From<&config::NetConfig> for InterfacePolicy {
+    fn from(config: &config::NetConfig) -> Self {
+        Self {
+            auto_icmp_echo_reply: config.auto_icmp_echo_reply,
+            max_icmp_error_rate: config.max_icmp_error_rate,
+            max_rst_rate: config.max_rst_rate,
+            max_syn_cookie_rate: config.max_syn_cookie_rate,
+        }
+    }
+}
+
 fn iface_config(
     hardware_addr: moto_netstack::wire::HardwareAddress,
-    net_cfg: &config::NetConfig,
+    net_cfg: &InterfacePolicy,
     external: bool,
 ) -> moto_netstack::iface::Config {
     let auto_icmp_echo_reply = net_cfg.auto_icmp_echo_reply;
@@ -969,19 +994,31 @@ impl<'a> NetDev<'a> {
         name: &str,
         dev_cfg: &config::DeviceCfg,
         net_cfg: &config::NetConfig,
-        mut device: NetstackDevice,
+        device: NetstackDevice,
     ) -> Self {
+        Self::try_new(name.to_owned(), dev_cfg.clone(), net_cfg.into(), device)
+            .expect("cannot allocate configured network interface")
+    }
+
+    pub(super) fn try_new(
+        name: String,
+        dev_cfg: config::DeviceCfg,
+        policy: InterfacePolicy,
+        mut device: NetstackDevice,
+    ) -> std::io::Result<Self> {
         let hardware_addr = match &device {
             NetstackDevice::VirtIo(dev) => moto_netstack::wire::HardwareAddress::Ethernet(
                 moto_netstack::wire::EthernetAddress::from_bytes(dev.mac()),
             ),
-            NetstackDevice::Loopback(_) => moto_netstack::wire::HardwareAddress::Ip,
+            NetstackDevice::Loopback(_) | NetstackDevice::Packet(_) => {
+                moto_netstack::wire::HardwareAddress::Ip
+            }
         };
         let external = device.is_external();
         // Before any socket, since a socket's first SYN already carries a
         // timestamp and an unoffset one would be this machine's uptime.
         tsval::init();
-        let config = iface_config(hardware_addr, net_cfg, external);
+        let config = iface_config(hardware_addr, &policy, external);
         log::debug!("Initializing net device {name} with\nmac {hardware_addr:?}");
 
         let (mut iface, notify) = match &mut device {
@@ -1006,39 +1043,43 @@ impl<'a> NetDev<'a> {
                 // The loopback device has a self-contained runtime notify.
                 Rc::new(moto_sdk::async_runtime::LocalNotify::default()),
             ),
+            NetstackDevice::Packet(dev) => (
+                moto_netstack::iface::Interface::new(
+                    config,
+                    dev,
+                    moto_netstack::time::Instant::now(),
+                ),
+                dev.poll_ready.clone(),
+            ),
         };
         // The clock behind the cookie SYN|ACK's timestamp: the same one every
         // socket gets, so the stateless segment is indistinguishable.
         iface.set_tsval_generator(Some(tsval::generator));
 
-        // The interface's tables grow to hold whatever `/system/cfg/sys-net.toml`
-        // wrote, so installation is total: every configured address and route
-        // exists after boot or the config did not parse. The overflow behavior
-        // history here -- `unwrap()` that took sys-io down at boot (`0xbadc0de`),
-        // then drop-and-log at fixed capacity -- is retired with the capacity
-        // itself; the config loader's 64 KiB file bound is what keeps the counts
-        // finite.
-        iface.update_ip_addrs(|ip_addrs| {
-            for cidr in &dev_cfg.cidrs {
-                ip_addrs.push(moto_netstack::wire::IpCidr::new(
-                    <moto_netstack::wire::IpAddress as From<std::net::IpAddr>>::from(cidr.ip()),
-                    cidr.prefix(),
-                ));
-                log::debug!("added IP \n\t{:?} to {}", cidr.ip(), name);
-            }
-        });
-
-        iface.routes_mut().update(|storage| {
-            for route in &dev_cfg.routes {
-                storage.push(moto_netstack::iface::Route {
+        // Registration can refuse allocation without publishing a partial
+        // table. Boot configuration still installs every entry or fails.
+        let mut addresses = Vec::new();
+        addresses
+            .try_reserve_exact(dev_cfg.cidrs.len())
+            .map_err(|_| std::io::ErrorKind::OutOfMemory)?;
+        addresses.extend(dev_cfg.cidrs.iter().map(config::ip_network_to_cidr));
+        iface.update_ip_addrs(|storage| *storage = addresses);
+        let mut routes = Vec::new();
+        routes
+            .try_reserve_exact(dev_cfg.routes.len())
+            .map_err(|_| std::io::ErrorKind::OutOfMemory)?;
+        routes.extend(
+            dev_cfg
+                .routes
+                .iter()
+                .map(|route| moto_netstack::iface::Route {
                     cidr: config::ip_network_to_cidr(&route.ip_network),
                     via_router: route.gateway.map(Into::into),
                     preferred_until: None,
                     expires_at: None,
-                });
-                log::debug!("adding route \n{route:#?} to {name}");
-            }
-        });
+                }),
+        );
+        iface.routes_mut().update(|storage| *storage = routes);
 
         log::debug!("New NET device {name}.");
 
@@ -1046,9 +1087,9 @@ impl<'a> NetDev<'a> {
         let dhcp_socket = (external && dev_cfg.dhcp)
             .then(|| sockets.add(u64::MAX, moto_netstack::socket::dhcpv4::Socket::new()));
 
-        Self {
-            name: name.to_owned(),
-            config: dev_cfg.clone(),
+        Ok(Self {
+            name,
+            config: dev_cfg,
             device,
             iface,
             sockets,
@@ -1062,11 +1103,19 @@ impl<'a> NetDev<'a> {
             device_runtime_notify: notify,
             poll_waiters: Vec::new(),
             pending_tasks: 0,
-        }
+        })
     }
 
     pub(super) fn name(&self) -> &str {
         &self.name
+    }
+
+    #[cfg_attr(
+        not(debug_assertions),
+        expect(dead_code, reason = "registration follows in step 3")
+    )]
+    pub(super) fn is_packet(&self) -> bool {
+        matches!(self.device, NetstackDevice::Packet(_))
     }
 
     pub(super) fn config(&self) -> &config::DeviceCfg {
@@ -1198,6 +1247,7 @@ impl<'a> NetDev<'a> {
         tsval::tick();
 
         let waiters = std::mem::take(poll_waiters);
+        let packet_device = matches!(device, NetstackDevice::Packet(_));
         let (result, tx_exhausted) = match device {
             NetstackDevice::Loopback(loopback) => (
                 iface.poll(moto_netstack::time::Instant::now(), loopback, sockets),
@@ -1208,6 +1258,10 @@ impl<'a> NetDev<'a> {
                     iface.poll(moto_netstack::time::Instant::now(), virtio_device, sockets);
                 let tx_exhausted = virtio_device.tx_queue.borrow_mut().take_exhausted();
                 (result, tx_exhausted)
+            }
+            NetstackDevice::Packet(packet) => {
+                let result = iface.poll(moto_netstack::time::Instant::now(), packet, sockets);
+                (result, packet.take_exhausted())
             }
         };
 
@@ -1243,7 +1297,9 @@ impl<'a> NetDev<'a> {
 
         let csum_failed = iface.take_rx_csum_failed();
         if csum_failed != 0 {
-            log::warn!("{name}: dropped {csum_failed} frames with a bad TCP/UDP checksum.");
+            if !packet_device {
+                log::warn!("{name}: dropped {csum_failed} frames with a bad TCP/UDP checksum.");
+            }
             stats
                 .rx_csum_failed
                 .set(stats.rx_csum_failed.get() + csum_failed);
@@ -1251,10 +1307,12 @@ impl<'a> NetDev<'a> {
 
         let loopback_dropped = iface.take_rx_loopback_dropped();
         if loopback_dropped != 0 {
-            log::warn!(
-                "{name}: dropped {loopback_dropped} frames carrying a loopback address: \
-                 only loopback may."
-            );
+            if !packet_device {
+                log::warn!(
+                    "{name}: dropped {loopback_dropped} frames carrying a loopback address: \
+                     only loopback may."
+                );
+            }
             stats
                 .rx_loopback_dropped
                 .set(stats.rx_loopback_dropped.get() + loopback_dropped);
@@ -1391,6 +1449,9 @@ impl<'a> NetDev<'a> {
             NetstackDevice::VirtIo(virtio_device) => iface
                 .poll_delay(moto_netstack::time::Instant::now(), sockets)
                 .map(|d| d.into()),
+            NetstackDevice::Packet(_) => iface
+                .poll_delay(moto_netstack::time::Instant::now(), sockets)
+                .map(|d| d.into()),
         }
     }
 
@@ -1458,6 +1519,7 @@ impl<'a> NetDev<'a> {
         match &self.device {
             NetstackDevice::VirtIo(device) => device.capabilities().ip_mtu(),
             NetstackDevice::Loopback(device) => device.capabilities().ip_mtu(),
+            NetstackDevice::Packet(device) => device.capabilities().ip_mtu(),
         }
     }
 
@@ -1490,6 +1552,10 @@ pub(crate) mod self_test {
     use crate::self_test::{SelfTest, st_assert, st_assert_eq};
 
     pub(crate) const TESTS: &[SelfTest] = &[
+        (
+            "net::device::packet_interface_owns_its_configuration",
+            packet_interface_owns_its_configuration,
+        ),
         (
             "net::device::interfaces_do_not_share_a_seed",
             interfaces_do_not_share_a_seed,
@@ -1547,6 +1613,53 @@ pub(crate) mod self_test {
             removal_cancels_icmp_probes,
         ),
     ];
+
+    fn packet_interface_owns_its_configuration() -> Result<(), String> {
+        let stats = Rc::new(NetStats::default());
+        let packet = super::super::packet_device::PacketDevice::new(1420, stats.clone())
+            .map_err(|error| error.to_string())?;
+        let cidrs: Vec<IpNetwork> = vec![
+            "10.50.0.1/24".parse().unwrap(),
+            "fd50::1/64".parse().unwrap(),
+        ];
+        let addresses = cidrs.iter().map(IpNetwork::ip).collect::<Vec<_>>();
+        let cfg = config::DeviceCfg {
+            mac: None,
+            dhcp: false,
+            routes: cidrs
+                .iter()
+                .map(|cidr| config::IpRoute {
+                    ip_network: IpNetwork::new(cidr.network(), cidr.prefix()).unwrap(),
+                    gateway: None,
+                })
+                .collect(),
+            cidrs,
+            dns_servers: Vec::new(),
+        };
+        let mut device = NetDev::try_new(
+            "wg_fixture".into(),
+            cfg,
+            (&net_cfg()).into(),
+            NetstackDevice::Packet(packet),
+        )
+        .map_err(|error| error.to_string())?;
+        st_assert!(device.is_packet() && device.is_external());
+        st_assert_eq!(device.ip_mtu(), 1420);
+        st_assert_eq!(device.ip_addesses(), addresses);
+        st_assert!(device.dhcp_socket.is_none());
+        let mut installed = (0, false);
+        device.iface.routes_mut().update(|routes| {
+            installed = (
+                routes.len(),
+                routes.iter().all(|route| route.via_router.is_none()),
+            );
+        });
+        st_assert_eq!(installed, (2, true));
+        st_assert!(stats.packet_buffer_bytes.get() >= 1420 * 128);
+        drop(device);
+        st_assert_eq!(stats.packet_buffer_bytes.get(), 0);
+        Ok(())
+    }
 
     /// A minimal parsed `NetConfig`, carrying the compiled-in defaults for
     /// everything the caps and limits read: what a device constructed by
@@ -1653,7 +1766,11 @@ pub(crate) mod self_test {
     fn only_external_devices_rate_limit_egress() -> Result<(), String> {
         let cfg = net_cfg();
 
-        let external = iface_config(moto_netstack::wire::HardwareAddress::Ip, &cfg, true);
+        let external = iface_config(
+            moto_netstack::wire::HardwareAddress::Ip,
+            &(&cfg).into(),
+            true,
+        );
         st_assert_eq!(
             external.icmp_error_rate_limit,
             DEFAULT_MAX_ICMP_ERROR_RATE.get()
@@ -1676,7 +1793,11 @@ pub(crate) mod self_test {
             DEFAULT_NEIGHBOR_SOLICIT_RESERVE
         );
 
-        let loopback = iface_config(moto_netstack::wire::HardwareAddress::Ip, &cfg, false);
+        let loopback = iface_config(
+            moto_netstack::wire::HardwareAddress::Ip,
+            &(&cfg).into(),
+            false,
+        );
         st_assert_eq!(loopback.icmp_error_rate_limit, 0);
         st_assert_eq!(loopback.tcp_rst_rate_limit, 0);
         st_assert_eq!(loopback.tcp_cookie_rate_limit, 0);
@@ -1852,7 +1973,12 @@ pub(crate) mod self_test {
     /// Against a working RNG both checks fail with probability below 1e-8.
     fn interfaces_do_not_share_a_seed() -> Result<(), String> {
         let seeds: [u64; DEVICES] = core::array::from_fn(|_| {
-            iface_config(moto_netstack::wire::HardwareAddress::Ip, &net_cfg(), true).random_seed
+            iface_config(
+                moto_netstack::wire::HardwareAddress::Ip,
+                &(&net_cfg()).into(),
+                true,
+            )
+            .random_seed
         });
 
         all_distinct(seeds, "seed")?;
@@ -1867,7 +1993,12 @@ pub(crate) mod self_test {
     /// whole property away silently. Distinctness catches both.
     fn interfaces_do_not_share_an_isn_key() -> Result<(), String> {
         let keys: [[u8; 16]; DEVICES] = core::array::from_fn(|_| {
-            iface_config(moto_netstack::wire::HardwareAddress::Ip, &net_cfg(), true).tcp_isn_key
+            iface_config(
+                moto_netstack::wire::HardwareAddress::Ip,
+                &(&net_cfg()).into(),
+                true,
+            )
+            .tcp_isn_key
         });
 
         all_distinct(keys, "TCP ISN key")
@@ -1883,7 +2014,7 @@ pub(crate) mod self_test {
         for external in [true, false] {
             let config = iface_config(
                 moto_netstack::wire::HardwareAddress::Ip,
-                &net_cfg(),
+                &(&net_cfg()).into(),
                 external,
             );
             if config.loopback == external {
