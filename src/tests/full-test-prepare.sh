@@ -58,6 +58,7 @@ host_build() {
 
 (cd "$ROOT_DIR/src/imager" && host_build)
 host_build --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml"
+host_build --locked --manifest-path "$ROOT_DIR/src/tests/wg-peer/Cargo.toml"
 for crate in red rmux rush russhd wg; do
   (cd "$ROOT_DIR/src/bin/$crate" && host_build)
 done
