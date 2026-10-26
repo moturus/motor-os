@@ -1,5 +1,47 @@
 use std::sync::atomic::Ordering;
 
+pub fn test_remote_page_validation() {
+    use moto_sdk::ipc::io_channel::{IoPage, Msg, connect, listen};
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+        let listener = listen("systest_remote_page_validation");
+        let (client, mut client_rx) = connect("systest_remote_page_validation").unwrap();
+        let (server, mut server_rx) = listener.await.unwrap();
+        for (local, remote, receiver) in [
+            (&client, &server, &mut server_rx),
+            (&server, &client, &mut client_rx),
+        ] {
+            for via_sender in [false, true] {
+                let page = local.alloc_page(u64::MAX).await.unwrap();
+                page.bytes_mut()[0] = 42;
+                let index = IoPage::into_u16(page);
+                let mut msg = Msg::new();
+                msg.payload.shared_pages_mut()[0] = index;
+                local.send_with_owned_page(msg, index).await.unwrap();
+                let index = receiver.recv().await.unwrap().payload.shared_pages()[0];
+                // Reject our own pool, either out-of-range index and the
+                // sentinel without constructing an owning page guard.
+                for invalid in [index ^ (1 << 15), 64, (1 << 15) | 64, u16::MAX] {
+                    assert!(matches!(
+                        remote.get_remote_page(invalid),
+                        Err(moto_rt::Error::InvalidArgument)
+                    ));
+                    assert!(matches!(
+                        receiver.get_remote_page(invalid),
+                        Err(moto_rt::Error::InvalidArgument)
+                    ));
+                }
+                let page = if via_sender {
+                    remote.get_remote_page(index).unwrap()
+                } else {
+                    receiver.get_remote_page(index).unwrap()
+                };
+                assert_eq!(page.bytes()[0], 42);
+            }
+        }
+    });
+    println!("----- io_channel::test_remote_page_validation PASS");
+}
+
 pub fn test_canceled_page_send() {
     use core::future::Future;
     use core::task::Context;
@@ -757,6 +799,7 @@ pub fn test_active_channel_polls(available_cpus: usize) {
 }
 
 pub fn run_all_tests(available_cpus: usize) {
+    test_remote_page_validation();
     test_canceled_page_send();
     test_listener_cleanup();
     basic_test();

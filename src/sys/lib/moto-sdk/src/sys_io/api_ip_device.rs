@@ -1,4 +1,6 @@
 //! Registration data for a process-backed IP interface, encoded in one page.
+use super::api_net::NetCmd;
+use crate::ipc::io_channel::Msg;
 use alloc::{string::String, vec::Vec};
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use moto_rt::{Error, Result};
@@ -9,6 +11,44 @@ pub const MAX_ROUTES: usize = 128;
 pub const MAX_MTU: u16 = crate::ipc::io_channel::PAGE_SIZE as u16;
 const HEADER: usize = 8;
 const CIDR_SIZE: usize = 18;
+
+/// One page, with its byte count in word zero and page reference in word 11.
+pub fn page_message(command: NetCmd, page: u16, length: usize) -> Result<Msg> {
+    if !matches!(command, NetCmd::IpDeviceRegister | NetCmd::IpDevicePacket)
+        || length == 0
+        || length > MAX_MTU as usize
+    {
+        return Err(Error::InvalidArgument);
+    }
+    let mut msg = Msg::new();
+    msg.id = u64::from(command == NetCmd::IpDeviceRegister);
+    msg.command = command.as_u16();
+    msg.status = moto_rt::E_OK;
+    msg.payload.args_16_mut()[0] = length as u16;
+    msg.payload.shared_pages_mut()[11] = page;
+    Ok(msg)
+}
+
+pub fn page_length(msg: &Msg) -> Result<usize> {
+    let length = msg.payload.args_16()[0] as usize;
+    if msg.handle != 0
+        || msg.wake_handle != 0
+        || msg.flags != 0
+        || msg.payload.args_16()[1..11].iter().any(|word| *word != 0)
+        || length == 0
+        || length > MAX_MTU as usize
+    {
+        return Err(Error::InvalidArgument);
+    }
+    Ok(length)
+}
+
+pub fn unregister_request() -> Msg {
+    let mut msg = Msg::new();
+    msg.command = NetCmd::IpDeviceUnregister.as_u16();
+    msg.id = 2;
+    msg
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Cidr {

@@ -49,6 +49,9 @@ pub enum NetCmd {
     VsockLocalCid,
     /// Terminal loss of this UDP binding. No page or payload; id is zero.
     EvtUdpSocketInvalidated,
+    IpDeviceRegister,
+    IpDeviceUnregister,
+    IpDevicePacket,
     NetCmdMax,
 }
 

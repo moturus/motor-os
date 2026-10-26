@@ -27,7 +27,10 @@ fn test_command_values() {
     assert_eq!(NetCmd::VsockListenerDrop as u16, 0x111e);
     assert_eq!(NetCmd::VsockLocalCid as u16, 0x111f);
     assert_eq!(NetCmd::EvtUdpSocketInvalidated as u16, 0x1120);
-    assert_eq!(moto_sdk::sys_io::api_net::CMD_MAX, 0x1121);
+    assert_eq!(NetCmd::IpDeviceRegister as u16, 0x1121);
+    assert_eq!(NetCmd::IpDeviceUnregister as u16, 0x1122);
+    assert_eq!(NetCmd::IpDevicePacket as u16, 0x1123);
+    assert_eq!(moto_sdk::sys_io::api_net::CMD_MAX, 0x1124);
     assert_eq!(NetCmd::try_from(0x111e), Ok(NetCmd::VsockListenerDrop));
     assert_eq!(NetCmd::try_from(0x111f), Ok(NetCmd::VsockLocalCid));
     assert_eq!(

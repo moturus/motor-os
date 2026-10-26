@@ -1398,6 +1398,23 @@ impl Drop for IoChannelImpl {
 }
 
 impl IoChannelImpl {
+    fn get_remote_page(&self, index: u16) -> Result<IoPage> {
+        let flag = match self.endpoint_type {
+            EndpointType::Client => IoPage::SERVER_FLAG,
+            EndpointType::Server => 0,
+        };
+        if index & IoPage::SERVER_FLAG != flag
+            || (index & !IoPage::SERVER_FLAG) as usize >= CHANNEL_PAGE_COUNT
+        {
+            return Err(moto_rt::Error::InvalidArgument);
+        }
+        Ok(IoPage::from_u16(
+            index,
+            self.raw_channel(),
+            self.remote_handle,
+        ))
+    }
+
     #[inline]
     fn raw_channel(&self) -> &'static RawChannel {
         unsafe {
@@ -1496,6 +1513,11 @@ impl Sender {
 
     pub fn remote_handle(&self) -> SysHandle {
         self.inner.remote_handle
+    }
+
+    /// Recover only a page supplied by the peer, never one from our own pool.
+    pub fn get_remote_page(&self, index: u16) -> Result<IoPage> {
+        self.inner.get_remote_page(index)
     }
 
     // See enqueue() in mpmc.cc.
@@ -1795,6 +1817,11 @@ impl crate::async_runtime::SpinSource for RecvSpin {
 impl !Sync for Receiver {}
 
 impl Receiver {
+    /// Recover only a page supplied by the peer, never one from our own pool.
+    pub fn get_remote_page(&self, index: u16) -> Result<IoPage> {
+        self.inner.get_remote_page(index)
+    }
+
     #[inline]
     fn raw_channel(&self) -> &'static RawChannel {
         self.inner.raw_channel()

@@ -1480,6 +1480,7 @@ fn main() {
         return;
     }
     if args.len() == 2 && args[1] == "ipc-canceled-page-send" {
+        io_channel::test_remote_page_validation();
         io_channel::test_canceled_page_send();
         return;
     }

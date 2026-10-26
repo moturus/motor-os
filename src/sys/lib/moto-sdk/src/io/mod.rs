@@ -34,4 +34,5 @@
 //! networking protocols.
 
 pub mod fs;
+pub mod ip_device;
 pub mod net;
