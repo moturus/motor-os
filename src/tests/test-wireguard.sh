@@ -3,7 +3,7 @@ test_wireguard_case() (
   set -euo pipefail
   umask 077
   local work peer_pid="" wg_pid="" stale_pid="" peer_in peer_out wg_in wg_out
-  local stale_in stale_out guest_pid line
+  local stale_in stale_out guest_pid line provider_id
   local name="wg_gate_${BASHPID}" config uploaded=0
   local peer_binary="${WG_PEER_BINARY:-$ROOT_DIR/src/tests/wg-peer/target/$BUILD/wg-peer}"
   local bind=192.168.4.1:0 roam='[2001:db8::1]:0'
@@ -132,7 +132,7 @@ EOF
   if [ "$role" = host ]; then
     peer_ping 10.250.20.2
   fi
-  if [ "$role" != plain ]; then
+  if [ "$role" != plain ] && [ "${WG_BENCHMARK:-0}" != 1 ]; then
     printf 'padding on\n' >&"$peer_in"
     IFS= read -r -t 5 line <&"$peer_out" || fail "peer did not enable padding"
     [ "$line" = 'PADDING ON' ] || fail "unexpected peer response: $line"
@@ -141,7 +141,7 @@ EOF
     vm_ssh "/system/bin/ping -c 1 $inner"
   done
   vm_ssh "$TEST_BIN/systest wireguard-client 10.250.20.1 10.250.20.2"
-  if [ "$1" = ipv6 ] && [ "$role" != plain ]; then
+  if [ "$1" = ipv6 ] && [ "$role" != plain ] && [ "${WG_BENCHMARK:-0}" != 1 ]; then
     vm_ssh "$TEST_BIN/systest wireguard-fragmented-reply"
   else
     vm_ssh "$TEST_BIN/systest wireguard-client fd50:20::1 fd50:20::2"
@@ -149,7 +149,19 @@ EOF
   peer_ping 10.250.20.2
   peer_ping fd50:20::2
 
-  if [ "$role" != plain ]; then
+  if [ "${WG_BENCHMARK:-0}" = 1 ]; then
+    vm_ssh "$TEST_BIN/systest wireguard-measure $guest_pid 10.250.20.1:40000"
+    if [ "$role" != plain ]; then
+      provider_id="$(vm_ssh '/system/bin/sysbox stats providers' |
+        awk -v name="wg:$guest_pid" '$2 == name {print $1}')"
+      [ -n "$provider_id" ] || fail "WireGuard statistics provider is missing"
+      vm_ssh "/system/bin/sysbox stats get $provider_id"
+    fi
+    vm_ssh '/system/bin/sysbox stats get 2'
+    printf 'stats\n' >&"$peer_in"
+    IFS= read -r -t 5 line <&"$peer_out" || fail "peer did not report benchmark counters"
+    case "$line" in STATS\ *) printf 'host peer %s\n' "$line" ;; *) fail "unexpected peer counters: $line" ;; esac
+  elif [ "$role" != plain ]; then
     # Invalid traffic from a new outer address cannot authenticate a move.
     printf 'roam %s %s\n' "$roam" "$roam_endpoint" >&"$peer_in"
     IFS= read -r -t 5 line <&"$peer_out" || fail "peer did not change transport"
@@ -169,6 +181,9 @@ EOF
     vm_ssh "$TEST_BIN/systest wireguard-load $guest_pid"
   fi
 
+  if [ "${WG_BENCHMARK:-0}" = 1 ]; then
+    stop_wireguard
+  else
     mkfifo "$work/stale.in" "$work/stale.out"
     exec {stale_in}<>"$work/stale.in"
     ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 "$TEST_BIN/systest wireguard-stale-sockets" \
@@ -203,6 +218,7 @@ EOF
     vm_ssh "$TEST_BIN/systest wireguard-client 10.250.20.1 10.250.20.2"
     vm_ssh "$TEST_BIN/systest wireguard-client fd50:20::1 fd50:20::2"
     stop_wireguard
+  fi
   printf 'quit\n' >&"$peer_in"
   wait "$peer_pid"
   peer_pid=""

@@ -80,6 +80,7 @@ mod vsock_outgoing;
 mod wait_set;
 mod wakebench;
 mod wireguard;
+mod wireguard_bench;
 mod wireguard_load;
 mod xor_server;
 
@@ -1627,6 +1628,10 @@ fn main() {
     }
     if args.len() == 4 && args[1] == "ip-device-plain" {
         ip_device_plain::run(&args[2], &args[3]);
+        return;
+    }
+    if args.len() == 4 && args[1] == "wireguard-measure" {
+        wireguard_bench::run(&args[2], &args[3]);
         return;
     }
     if args.len() == 2 && args[1] == "test-ip-device" {

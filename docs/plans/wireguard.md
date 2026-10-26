@@ -1,7 +1,7 @@
 # WireGuard through a process-backed IP device
 
 Completed steps: 0 through 10.
-Current step: 11 - measurement and documentation.
+Current step: 11 - measurement and documentation (1 of 2 patches complete).
 
 2026-10-24. Design and implementation plan, grounded in the tree at
 a3d739f9. This document specifies the process-backed IP device, WireGuard
@@ -875,7 +875,9 @@ three runs, with the same workloads and VM shapes:
 The in-guest address-swapping reflector remains a correctness fixture; it
 is not this performance baseline. Match endpoint placement and inner packet
 paths between the unencrypted and WireGuard runs. Their difference measures
-incremental WireGuard cost. The physical run is an end-to-end reference with
+the WireGuard path's incremental cost, including its forwarding schedule;
+it does not isolate cryptographic operations. The physical run is an
+end-to-end reference with
 a different host TCP stack; do not attribute its entire difference from a
 packet-device run solely to IPC or crypto.
 
