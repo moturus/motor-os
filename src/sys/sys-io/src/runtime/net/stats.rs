@@ -118,6 +118,14 @@ mod ids {
     pub const NET_TCP_ABORT_FAILED: u32 = 70;
     pub const NET_UDP_TX_UNREACHABLE_DROPS: u32 = 71;
     pub const NET_NEIGHBOR_SOLICITATION_SUPPRESSED: u32 = 72;
+    pub const NET_DEVICE_SLOTS: u32 = 73;
+    pub const NET_DEVICE_SLOT_BYTES: u32 = 74;
+    pub const NET_PACKET_DEVICES: u32 = 75;
+    pub const NET_PACKET_BUFFER_BYTES: u32 = 76;
+    pub const NET_PACKET_MALFORMED: u32 = 77;
+    pub const NET_PACKET_RX_DROPPED: u32 = 78;
+    pub const NET_PACKET_RX_HIGH_WATER: u32 = 79;
+    pub const NET_PACKET_TX_HIGH_WATER: u32 = 80;
 }
 
 /// Upper bounds, in bytes, of the received-frame size histogram. A frame larger
@@ -157,9 +165,15 @@ fn rx_size_metric_name(idx: usize) -> String {
 #[derive(Default)]
 pub(super) struct NetStats {
     pub num_devices: Cell<u64>,
+    // Device tables are sampled when answering metrics. Queue bytes stay
+    // charged until their last token/adapter reference has been released.
+    pub device_slots: Cell<u64>,
+    pub device_slot_bytes: Cell<u64>,
+    pub packet_devices: Cell<u64>,
     pub packet_buffer_bytes: Cell<u64>,
     pub packet_malformed: Cell<u64>,
     pub packet_rx_dropped: Cell<u64>,
+    /// Largest per-direction occupancy seen on any packet device.
     pub packet_rx_high_water: Cell<u64>,
     pub packet_tx_high_water: Cell<u64>,
     pub active_clients: Cell<u64>,
@@ -539,6 +553,22 @@ impl NetStats {
                 self.pressure_refused_clients.get(),
             ),
         ]);
+        entries.extend([
+            MetricEntry::global(ids::NET_DEVICE_SLOTS, self.device_slots.get()),
+            MetricEntry::global(ids::NET_DEVICE_SLOT_BYTES, self.device_slot_bytes.get()),
+            MetricEntry::global(ids::NET_PACKET_DEVICES, self.packet_devices.get()),
+            MetricEntry::global(ids::NET_PACKET_BUFFER_BYTES, self.packet_buffer_bytes.get()),
+            MetricEntry::global(ids::NET_PACKET_MALFORMED, self.packet_malformed.get()),
+            MetricEntry::global(ids::NET_PACKET_RX_DROPPED, self.packet_rx_dropped.get()),
+            MetricEntry::global(
+                ids::NET_PACKET_RX_HIGH_WATER,
+                self.packet_rx_high_water.get(),
+            ),
+            MetricEntry::global(
+                ids::NET_PACKET_TX_HIGH_WATER,
+                self.packet_tx_high_water.get(),
+            ),
+        ]);
         entries
     }
 }
@@ -690,6 +720,16 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
             "net.pressure_refused_clients",
         ),
     ]);
+    descriptors.extend([
+        MetricDescWire::new(ids::NET_DEVICE_SLOTS, "net.device_slots"),
+        MetricDescWire::new(ids::NET_DEVICE_SLOT_BYTES, "net.device_slot_bytes"),
+        MetricDescWire::new(ids::NET_PACKET_DEVICES, "net.ip_device.devices"),
+        MetricDescWire::new(ids::NET_PACKET_BUFFER_BYTES, "net.ip_device.buffer_bytes"),
+        MetricDescWire::new(ids::NET_PACKET_MALFORMED, "net.ip_device.malformed"),
+        MetricDescWire::new(ids::NET_PACKET_RX_DROPPED, "net.ip_device.rx_dropped"),
+        MetricDescWire::new(ids::NET_PACKET_RX_HIGH_WATER, "net.ip_device.rx_high_water"),
+        MetricDescWire::new(ids::NET_PACKET_TX_HIGH_WATER, "net.ip_device.tx_high_water"),
+    ]);
     descriptors
 }
 
@@ -738,6 +778,21 @@ async fn stats_responder_task(
         // The receiver is gone if the polling thread stopped waiting; ignore.
         match req {
             StatsRequest::Metrics(respond_to) => {
+                {
+                    let inner = runtime.inner.borrow();
+                    runtime
+                        .stats
+                        .device_slots
+                        .set(inner.devices.slot_count() as u64);
+                    runtime
+                        .stats
+                        .device_slot_bytes
+                        .set(inner.devices.slot_bytes() as u64);
+                    runtime
+                        .stats
+                        .packet_devices
+                        .set(inner.devices.packet_count() as u64);
+                }
                 let _ =
                     respond_to.send(runtime.stats.entries(runtime.channel_budget.net_channels()));
             }

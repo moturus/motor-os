@@ -41,6 +41,10 @@ impl Devices {
         self.active.len()
     }
 
+    pub(super) fn slot_bytes(&self) -> usize {
+        self.active.capacity() * std::mem::size_of::<Option<NetDev<'static>>>()
+    }
+
     pub(super) fn push(&mut self, device: NetDev<'static>) -> usize {
         let index = self.active.len();
         self.active.push(Some(device));
