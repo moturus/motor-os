@@ -5,6 +5,8 @@ pub fn run_all_tests() {
     crate::ip_device_admission::test_admission_and_terminal_channel();
     crate::ip_device_live::test_reflected_transport_and_removal();
     crate::ip_device_live::test_provider_death_wakes_pending_ops();
+    crate::ip_device_live::test_multiple_devices_and_wildcard_listener();
+    crate::ip_device_queues::test_full_queues_recover();
 }
 
 pub fn test_registration_codec() {

@@ -28,6 +28,7 @@ mod io_channel;
 mod ip_device;
 mod ip_device_admission;
 mod ip_device_live;
+mod ip_device_queues;
 mod ipc_service;
 mod kernel_log;
 mod logging;

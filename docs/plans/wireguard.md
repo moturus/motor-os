@@ -2,7 +2,7 @@
 
 Completed steps: 0 - boringtun fork; 1 - routes without a gateway;
 2 - devices that come and go.
-Current step: 3 - packet device and registration IPC (10 of 12 patches complete).
+Current step: 3 - packet device and registration IPC (11 of 12 patches complete).
 
 2026-10-24. Design and implementation plan, grounded in the tree at
 a3d739f9. This document specifies the process-backed IP device, WireGuard

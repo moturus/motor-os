@@ -328,3 +328,70 @@ pub fn test_provider_death_wakes_pending_ops() {
     }
     println!("ip_device::test_provider_death_wakes_pending_ops PASS");
 }
+
+pub fn test_multiple_devices_and_wildcard_listener() {
+    use crate::tcp::{read_sys_io_metric as metric, wait_for_sys_io_metric as wait};
+    let slots = metric("net.device_slots");
+    let bytes = metric("net.device_slot_bytes");
+    let buffers = metric("net.ip_device.buffer_bytes");
+    let devices = metric("net.num_devices");
+    // Wildcard port zero is unsupported; acquire a free loopback port first.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let listener = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).unwrap();
+    let first = Provider::start(0);
+    let other = Provider::start(1);
+    assert_eq!(metric("net.device_slots"), slots + 2);
+    assert_eq!(metric("net.ip_device.devices"), 2);
+    assert!(metric("net.ip_device.buffer_bytes") > buffers);
+    for address in ["10.242.0.2", "10.242.1.2"] {
+        wildcard_exchange(&listener, address.parse().unwrap());
+    }
+    first.stop(true);
+    wildcard_exchange(&listener, "10.242.1.2".parse().unwrap());
+    wildcard_exchange(&listener, Ipv4Addr::LOCALHOST.into());
+    let replacement = Provider::start(0);
+    assert_eq!(metric("net.device_slots"), slots + 3);
+    wildcard_exchange(&listener, "10.242.0.2".parse().unwrap());
+    replacement.stop(true);
+    other.stop(false);
+    wait("net.ip_device.devices", |n| n == 0);
+    wait("net.ip_device.buffer_bytes", |n| n == buffers);
+    assert_eq!(metric("net.num_devices"), devices);
+    for n in 0..8 {
+        Provider::start(0).stop(n % 2 == 0);
+        wait("net.ip_device.devices", |n| n == 0);
+        wait("net.ip_device.buffer_bytes", |n| n == buffers);
+    }
+    assert_eq!(metric("net.device_slots"), slots + 11);
+    assert!(metric("net.device_slot_bytes") >= bytes);
+    wildcard_exchange(&listener, Ipv4Addr::LOCALHOST.into());
+    println!("ip_device::test_multiple_devices_and_wildcard_listener PASS");
+}
+
+fn wildcard_exchange(listener: &std::net::TcpListener, peer: IpAddr) {
+    let mut stream = std::net::TcpStream::connect_timeout(
+        &SocketAddr::new(peer, listener.local_addr().unwrap().port()),
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let (mut accepted, _) = listener.accept().unwrap();
+    for socket in [&stream, &accepted] {
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+    }
+    stream.write_all(b"device").unwrap();
+    let mut buffer = [0; 6];
+    accepted.read_exact(&mut buffer).unwrap();
+    assert_eq!(&buffer, b"device");
+    accepted.write_all(&buffer).unwrap();
+    stream.read_exact(&mut buffer).unwrap();
+    assert_eq!(&buffer, b"device");
+}
