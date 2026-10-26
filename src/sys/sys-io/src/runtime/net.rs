@@ -22,6 +22,11 @@ mod device;
 mod devices;
 mod half_open;
 mod icmp;
+#[cfg_attr(
+    not(debug_assertions),
+    expect(dead_code, reason = "registration follows in step 3")
+)]
+mod packet_device;
 mod pressure;
 #[cfg(debug_assertions)]
 mod self_test;
@@ -40,6 +45,7 @@ pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
     device::self_test::TESTS,
     devices::self_test::TESTS,
     half_open::self_test::TESTS,
+    packet_device::self_test::TESTS,
     self_test::TESTS,
     stats::self_test::TESTS,
 ];

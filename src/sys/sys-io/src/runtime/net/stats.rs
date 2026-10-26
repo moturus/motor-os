@@ -157,6 +157,11 @@ fn rx_size_metric_name(idx: usize) -> String {
 #[derive(Default)]
 pub(super) struct NetStats {
     pub num_devices: Cell<u64>,
+    pub packet_buffer_bytes: Cell<u64>,
+    pub packet_malformed: Cell<u64>,
+    pub packet_rx_dropped: Cell<u64>,
+    pub packet_rx_high_water: Cell<u64>,
+    pub packet_tx_high_water: Cell<u64>,
     pub active_clients: Cell<u64>,
     pub total_clients: Cell<u64>,
     pub tcp_sockets: Cell<u64>,
