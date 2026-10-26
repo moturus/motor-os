@@ -470,18 +470,49 @@ builds the system, its external sources, and the VM images from a clean checkout
 toolchain. Cloud Hypervisor and Firecracker are not installed; QEMU is enough to build
 and test.</p>
 
+<h2>Build the toolchain first</h2>
+<p>The toolchain is built separately and does not need a Motor OS checkout. On
+Ubuntu 24.04 or 26.04, create the development root and clone the toolchain
+repository inside it:</p>
+<pre><code>sudo apt-get update
+sudo apt-get install git zstd
+mkdir motor-dev
+cd motor-dev
+git clone https://github.com/moturus/motor-os-toolchain.git
+cd motor-os-toolchain
+./build-toolchain.sh --provision
+cd ..</code></pre>
+<p><code>--provision</code> installs missing build packages with <code>sudo</code>
+and installs rustup. The build fetches the sources selected by the toolchain
+repository's <code>versions.sh</code> and builds both the Linux-host cross
+toolchain and the native Motor OS toolchain. It writes these files into its
+parent directory, <code>motor-dev</code>, where the commands above leave you:</p>
+<pre><code>motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux.tar.zst
+motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux.tar.zst.sha256
+motor-toolchain-x86_64-unknown-motor-1.99.1.tar.zst
+motor-toolchain-x86_64-unknown-motor-1.99.1.tar.zst.sha256</code></pre>
+<p>Each toolchain build starts from scratch, replaces archives of the same name,
+and removes its <code>build/</code> directory after success. Allow about 30 GB of
+disk space during the build; the toolchain README estimates about 50 minutes on
+24 cores. See its
+<a href="https://github.com/moturus/motor-os-toolchain#building">build instructions</a>
+for details. The resulting toolchain name must match <code>rust-toolchain.toml</code>
+in the Motor OS checkout.</p>
+<p>Alternatively, download both archives and their checksum files from a matching
+toolchain release into <code>motor-dev</code>, then enter that directory. GNU tar
+needs <code>zstd</code> on the host to extract the <code>.tar.zst</code> archive.</p>
+
 <h2>The one-script build</h2>
-<p>The toolchain is built separately; this script consumes its archives and builds
-Motor OS. GNU tar needs <code>zstd</code> on the host to extract the downloaded
-<code>.tar.zst</code> archive.</p>
 <p>Install rustup before the host toolchain. If it is not installed yet:</p>
 <pre><code>curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
   sh -s -- -y --default-toolchain none
 . "$HOME/.cargo/env"</code></pre>
-<p>If rustup is already installed, ensure it is on <code>PATH</code>. With the two
-toolchain archives downloaded into the development root:</p>
-<pre><code>mkdir motor-dev
-cd motor-dev
+<p>If rustup was installed by <code>--provision</code>, load it into your current
+shell with <code>. "$HOME/.cargo/env"</code>; otherwise ensure it is on
+<code>PATH</code>. From <code>motor-dev</code>, verify both archives, install the
+host toolchain, and build Motor OS:</p>
+<pre><code>sha256sum -c motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux.tar.zst.sha256
+sha256sum -c motor-toolchain-x86_64-unknown-motor-1.99.1.tar.zst.sha256
 git clone https://github.com/moturus/motor-os.git
 tar -xaf motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux.tar.zst
 motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux/install.sh
