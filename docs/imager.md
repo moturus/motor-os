@@ -21,7 +21,7 @@ imager publish-www <SITE DIRECTORY> --ssh-password <PASSWORD> \
 
 Examples below use `imager` for the host executable. Every image target in
 the Makefile installs a statically linked copy as `vm_images/PROFILE/tools/imager`,
-whose editing commands need neither the Motor toolchain nor a checkout. To invoke it through
+whose editing commands need neither the Motor OS toolchain nor a checkout. To invoke it through
 Cargo, use the repository-selected toolchain, change to `src/imager`, and
 run `cargo run --release -- <arguments>`. That directory's Cargo configuration
 supplies the required build flags. Cargo's `--release` selects the host tool's
@@ -52,7 +52,7 @@ environment variable for the checkout's parent development directory.
 
 Creation packages already-built binaries from `REPO ROOT/build/bin/PROFILE/`
 and the configured file trees. It assembles the MBR, boot loader, initrd,
-and Motor FS data partition. It does not compile the guest binaries.
+and Motor OS filesystem data partition. It does not compile the guest binaries.
 `REPO ROOT/vm_images/PROFILE/` must already exist. The image is written there
 under `img_name`, alongside `initrd` and `kloader` boot artifacts. An existing
 output can be replaced. Scratch files under
@@ -162,7 +162,7 @@ imager resize -i original.qcow2 -o larger.qcow2 --size 4G
 imager resize -i original.qcow2 -o smaller.img --size 512M
 ```
 
-`resize` copies the input into an output whose **Motor FS data partition**
+`resize` copies the input into an output whose **Motor OS filesystem data partition**
 has the requested size. `SIZE` is a positive decimal integer followed by
 uppercase `M` or `G`: `M` means MiB and `G` means GiB. This is not the total
 image size or its allocated host disk space. Fractions, lowercase suffixes,
@@ -174,7 +174,7 @@ for raw. Format conversion can accompany resizing. Input and output must
 refer to different files, including through hard links or symlinks. An
 existing output is replaced only after the new image is complete.
 
-The input must contain exactly one Motor FS partition, and that partition
+The input must contain exactly one Motor OS filesystem partition, and that partition
 must be last. Both growth and shrinking are supported; shrinking fails if
 the contents and filesystem metadata do not fit. Guest files and their
 metadata are copied to a newly formatted filesystem. Earlier boot contents

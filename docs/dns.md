@@ -63,7 +63,7 @@ small speedup for stale answers.
 The existing resolver statuses remain unchanged: success, not found,
 temporary failure, timeout, out of memory, unsupported family, system failure,
 resolver failure, invalid request, and busy. The VDSO maps those to stable
-Motor errors. Combined lookups preserve IPv4-before-IPv6 collection before the
+Motor OS errors. Combined lookups preserve IPv4-before-IPv6 collection before the
 existing destination-ordering policy is applied.
 
 `dns-resolver --self-test` covers numeric and hosts-file lookup, malformed

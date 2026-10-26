@@ -9,7 +9,7 @@ image contains no WireGuard keys or configurations.
 
 ### Prepare the configuration and keys
 
-Create a WireGuard key pair for the Motor instance and obtain the other
+Create a WireGuard key pair for the Motor OS instance and obtain the other
 peer's public key. From the repository root on the Linux host, the included
 host helper can generate the pair:
 
@@ -20,7 +20,7 @@ cargo run --release --locked --manifest-path src/tests/wg-peer/Cargo.toml -- \
 
 This creates new files without overwriting existing ones. `wg0.key` holds
 the private key; give only `wg0.pub` to the other peer. Keys are single
-base64 values encoding 32 bytes. Motor's `wg` command takes a TOML filename;
+base64 values encoding 32 bytes. Motor OS's `wg` command takes a TOML filename;
 key generation is provided by the host helper above.
 
 Create `wg0.toml` alongside the key, replacing the example physical addresses
@@ -42,9 +42,9 @@ allowed_ips = ["10.20.0.0/24"]
 `transport_addresses` must name an address already assigned to a physical
 interface on Motor OS. `endpoint` is the other peer's reachable UDP address;
 `cidrs` supplies this tunnel's local addresses, and `allowed_ips` supplies
-destinations routed to that peer. Configure the other peer with Motor's
+destinations routed to that peer. Configure the other peer with Motor OS's
 public key, an inner address such as `10.20.0.1`, and an allowed prefix
-covering Motor's `10.20.0.2/32`. Permit the configured UDP port on the outer
+covering Motor OS's `10.20.0.2/32`. Permit the configured UDP port on the outer
 network. If using a preshared key, configure the same value at both ends.
 
 Both inner and outer traffic support IPv4 and IPv6 independently. For inner
@@ -64,7 +64,7 @@ device name, and the adjacent `.key` file is mandatory. Names contain up to
 
 Keep **both files unreadable by None**, including configurations without a
 preshared key. For files uploaded by Interactive under `/user/cfg/`, these
-Motor shell commands retain System read/write access, give Interactive read
+Motor OS shell commands retain System read/write access, give Interactive read
 access, and exclude None:
 
 ```sh
@@ -75,8 +75,8 @@ ls -l wg0.toml wg0.key
 
 A System-only instance can use `r--------` on both files, set by System.
 Protect the parent directory as well when lower roles must not replace
-files. Motor's `chmod` uses the nine-character System/Interactive/None
-permission word. SFTP translates numeric modes into Motor permissions;
+files. Motor OS's `chmod` uses the nine-character System/Interactive/None
+permission word. SFTP translates numeric modes into Motor OS permissions;
 `chmod 660` when uploading as Interactive also excludes None. See
 [filesystem permissions](fs-permissions.md) for the role and directory rules.
 
@@ -90,7 +90,7 @@ wg /user/cfg/wireguard/wg0.toml
 
 The process stays in the foreground and prints `wg0: active (pid=...)`
 after registration. This confirms that addresses and routes are installed;
-it does not confirm a handshake. From a second Motor terminal, probe the
+it does not confirm a handshake. From a second Motor OS terminal, probe the
 other peer's configured inner address:
 
 ```sh
@@ -194,7 +194,7 @@ V1 supports IPv4/IPv6 IP packets, one device per registration channel and
 MTU 1420 for WireGuard. Multiple devices, such as `wg0` and `wg1`, may be
 registered concurrently and unregistered independently, within the device
 quota. This is an IP device, not an Ethernet/TAP device.
-V1 includes Motor's `ping`: ICMPv4/ICMPv6 Echo Request/Reply through the
+V1 includes Motor OS's `ping`: ICMPv4/ICMPv6 Echo Request/Reply through the
 tunnel, both guest-initiated probes and policy-controlled replies to peers
 that ping a local tunnel address.
 Inter-interface forwarding, bridging, automatic transport failover,
@@ -431,7 +431,7 @@ within the available outer address families.
 
 ## Ping / ICMP echo (v1)
 
-Motor's `ping` keeps its existing `IcmpEchoClient` connection to sys-io.
+Motor OS's `ping` keeps its existing `IcmpEchoClient` connection to sys-io.
 The `NetCmd::IcmpEcho` handler selects the packet device and an inner source
 address, then sends via its ICMP socket and the ordinary packet IPC path.
 Both ICMPv4 and ICMPv6 work independently of the outer UDP family; no
@@ -477,7 +477,7 @@ ordinary sys-io client-channel cleanup.
 ## WireGuard process and protocol
 
 `wg` has a separate `src/bin/wg` workspace and lockfile, using standard Rust
-and native Motor APIs. Each process loads one config/key pair and registers
+and native Motor OS APIs. Each process loads one config/key pair and registers
 one device; multiple processes provide independently managed devices.
 boringtun and its crypto dependencies stay outside the core sys workspace.
 
@@ -515,12 +515,12 @@ workspace/lockfile.
 `getrandom` 0.2 uses a custom backend over
 `moto_sdk::rt::fill_random_bytes`, following
 [russhd's adapter](../src/bin/russhd/src/lib.rs). The standalone workspace
-uses the existing Motor `ring` port from
-[russhd's manifest](../src/bin/russhd/Cargo.toml), plus the Motor
+uses the existing Motor OS `ring` port from
+[russhd's manifest](../src/bin/russhd/Cargo.toml), plus the Motor OS
 `parking_lot` and `parking_lot_core` patches already used in
 [the core manifest](../src/sys/Cargo.toml); these patches are not
 inherited from other workspaces. The Makefile builds `ring`'s C/assembly
-sources with the selected Motor toolchain's `motor-clang` and `ar`.
+sources with the selected Motor OS toolchain's `motor-clang` and `ar`.
 
 ### Peer ownership, dispatch and roaming
 

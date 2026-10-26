@@ -1,6 +1,6 @@
 # Filesystem permissions in Motor OS images
 
-Motor OS images are built with a declarative Motor FS permission policy. The
+Motor OS images are built with a declarative Motor OS filesystem permission policy. The
 development image contains the complete policy surface; the base, standard,
 and System-tty images contain subsets of the same destination paths and apply
 the same mode to every shared entry.
@@ -30,7 +30,7 @@ partition; memfs usage appears in the listing and the `fs.memfs.*` totals.
 
 ## Permission model
 
-A Motor FS mode contains three permission triplets in **System, Interactive,
+A Motor OS filesystem mode contains three permission triplets in **System, Interactive,
 None** order. For example, `rw-r-----` grants System read/write, Interactive
 read, and None no access. The legal triplets are `rwx`, `rw-`, `r-x`, `r--`,
 and `---`. Permissions are monotonic:
@@ -68,9 +68,9 @@ The initial image policy follows these principles:
   own `/none/cfg` and `/none/tmp`. Lower-role services submit logs over IPC;
   None cannot traverse `/user/cfg`, `/user/tmp`, `/system/tmp`, or
   `/system/logs`.
-- Host owner/group/other read and write bits do not map to Motor roles. Host
+- Host owner/group/other read and write bits do not map to Motor OS roles. Host
   execute bits select which files require script or ELF classification; the
-  image policy supplies all three complete Motor permission triplets.
+  image policy supplies all three complete Motor OS permission triplets.
 
 ## Development-image policy
 
@@ -232,9 +232,9 @@ Source classification uses the host execute bits only as a gate:
 4. Any other executable source is rejected.
 
 Host read/write bits and host owner/group/other classes never influence the
-Motor mode.
+Motor OS mode.
 
-The Motor FS root and every explicit or implicit directory are created with
+The Motor OS filesystem root and every explicit or implicit directory are created with
 their resolved policy modes. Files whose final mode lets System write are
 created with that final mode. Files whose final mode denies System write are
 created temporarily as `rw-------`, populated, and atomically changed through
@@ -251,7 +251,7 @@ classification.
 
 Imager tests cover policy parsing and validation, rule precedence, source
 classification, content overlays, the root mode, and file finalization by
-building and reopening a small Motor FS image.
+building and reopening a small Motor OS filesystem image.
 
 Guest acceptance tests intentionally limit exhaustive mode checks to direct
 entries matching `/*/bin/*`:
@@ -410,13 +410,13 @@ after they are accepted.
    resolved entry. Guest tests concentrate on executable installation
    boundaries and functional access checks, avoiding a brittle duplicate of
    the complete image manifest.
-9. **`rmux` creates `$TMPDIR` only when it is absent.** On Motor, rmux's
+9. **`rmux` creates `$TMPDIR` only when it is absent.** On Motor OS, rmux's
    client and server meet over the SDK's IPC (`moto_sdk::ipc`) and need no port file. The client
    still creates a caller-selected, absent `TMPDIR` before it starts a server,
    because panes inherit it and Rush stages pipelines there. Blindly calling
-   `create_dir_all` on an existing directory first asks Motor FS to create
-   it, and Motor FS checks write access to the parent before detecting the
-   existing child, so a role that may not write the parent is refused.
+   `create_dir_all` on an existing directory first asks the Motor OS filesystem
+   to create it, and the filesystem checks write access to the parent before
+   detecting the existing child, so a role that may not write the parent is refused.
    Testing whether the directory exists first avoids that request.
 10. **Denial acceptance tests assert filesystem postconditions.** During
     implementation, the sysbox `mkdir` and `mv` applets printed a permission
@@ -448,8 +448,8 @@ after they are accepted.
 13. **Systest creates its temporary directory only when it is absent.** A
     role's temporary directory can be writable while its parent is not, as
     with `/none/tmp` for None. Unconditionally calling
-    `create_dir_all` for that existing directory asks Motor FS for create
-    permission on the non-writable parent before it observes the child, so
+    `create_dir_all` for that existing directory asks the Motor OS filesystem
+    for create permission on the non-writable parent before it observes the child, so
     the systest receives `PermissionDenied`. Making the parent writable
     would broaden the image policy, and changing
     `create_dir_all` semantics is outside image-policy scope. A shared systest
@@ -458,8 +458,8 @@ after they are accepted.
 14. **Lorry likewise preserves a non-writable parent of an existing staging
     directory.** Lorry's atomic-output helper used `create_dir_all` on every
     staging parent, including an existing temporary directory used for
-    admission, review, and vendoring scratch. Motor FS consequently required
-    create permission on that directory's parent before Lorry could create a
+    admission, review, and vendoring scratch. The Motor OS filesystem consequently
+    required create permission on that directory's parent before Lorry could create a
     private child inside it. The helper now creates the parent only when it is
     not already a directory. This preserves absent custom staging paths,
     Lorry's private-child and atomic-publication behavior, and the image's
