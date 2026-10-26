@@ -283,7 +283,7 @@ impl Drop for HalfOpenGuard {
         // The slot this socket held is what a deferred replenishment was
         // waiting for. `release` hands it back rather than sending it itself,
         // so nothing inside the budget is borrowed while a task is woken.
-        if let Some(connected_tx) = self.budget.release(self.listener_id) {
+        if let Some((_, connected_tx)) = self.budget.release(self.listener_id) {
             let _ = connected_tx.send(());
         }
     }
@@ -890,7 +890,9 @@ impl MotoSocket {
                 let _ = connected_tx.send(());
             } else {
                 log::debug!("tcp: listen: half-open cap reached; deferring pool replenishment");
-                runtime.half_open.defer(listener_id, connected_tx);
+                runtime
+                    .half_open
+                    .defer(listener_id, (device_idx, connected_tx));
                 // The cap is what engages SYN cookies: while it holds the
                 // pool empty, this endpoint answers requests statelessly.
                 let sizes = weak_socket

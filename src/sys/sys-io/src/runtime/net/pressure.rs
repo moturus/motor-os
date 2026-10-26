@@ -140,6 +140,12 @@ impl Pressure {
         }
     }
 
+    pub(super) fn remove_device(&self, device_idx: usize) {
+        self.parked
+            .borrow_mut()
+            .retain(|_, p| p.device_idx != device_idx);
+    }
+
     fn rearm(&self, runtime: &super::NetRuntime) {
         let parked = core::mem::take(&mut *self.parked.borrow_mut());
         for (key, p) in parked {

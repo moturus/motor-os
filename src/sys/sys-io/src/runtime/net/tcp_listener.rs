@@ -100,6 +100,12 @@ impl TcpListener {
         (bound.is_unspecified() && bound.is_ipv4() == address.is_ipv4()) || bound == address
     }
 
+    pub(super) fn has_device(&self, device_idx: usize) -> bool {
+        self.listening_on
+            .iter()
+            .any(|(_, index)| *index == device_idx)
+    }
+
     pub(super) fn add_address(this: &Rc<RefCell<Self>>, address: IpAddr, device_idx: usize) {
         let (runtime, endpoint, key) = {
             let mut listener = this.borrow_mut();
@@ -150,6 +156,42 @@ impl TcpListener {
             .notify_one();
     }
 
+    pub(super) fn detach_device(
+        this: &Rc<RefCell<Self>>,
+        device_idx: usize,
+    ) -> VecDeque<PendingAccept> {
+        let mut listener = this.borrow_mut();
+        let runtime = listener.runtime.clone();
+        let before = listener.pending_sockets.len();
+        listener.pending_sockets.retain(|(socket_id, _, _)| {
+            !runtime
+                .inner
+                .borrow()
+                .sockets
+                .get(socket_id)
+                .is_some_and(|socket| socket.borrow().device_index() == Some(device_idx))
+        });
+        for _ in listener.pending_sockets.len()..before {
+            runtime.completed.release(listener.listener_id);
+        }
+        if listener.socket_addr.ip().is_unspecified() || !listener.listening_on.is_empty() {
+            return VecDeque::new();
+        }
+
+        // Address hooks have already closed this listener's pools. Removing
+        // its maps now prevents a later accept or replenishment reviving it.
+        let mut inner = runtime.inner.borrow_mut();
+        inner.tcp_listeners.remove(&listener.listener_id);
+        if let Some(client) = inner
+            .clients
+            .get_mut(&listener.client_sender.remote_handle())
+        {
+            client.tcp_listeners.remove(&listener.listener_id);
+        }
+        listener.listening_sockets.clear();
+        std::mem::take(&mut listener.pending_accepts)
+    }
+
     // Called on conn drop.
     pub(super) async fn hard_reset(this: Rc<RefCell<Self>>) {
         let pending_accepts = {
@@ -164,7 +206,7 @@ impl TcpListener {
         Self::cancel_pending_accepts(pending_accepts).await;
     }
 
-    async fn cancel_pending_accepts(mut pending: VecDeque<PendingAccept>) {
+    pub(super) async fn cancel_pending_accepts(mut pending: VecDeque<PendingAccept>) {
         while let Some((mut msg, client)) = pending.pop_front() {
             msg.status = moto_rt::E_NOT_CONNECTED;
             let _ = client.send(msg).await;

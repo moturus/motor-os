@@ -46,7 +46,8 @@ pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
 
 /// What a deferred listening-pool replenishment needs to resume: the oneshot
 /// the replacement task is parked on (see `socket/tcp.rs`).
-type HalfOpenBudget = half_open::HalfOpenBudget<moto_sdk::async_runtime::oneshot::Sender<()>>;
+type HalfOpenBudget =
+    half_open::HalfOpenBudget<(usize, moto_sdk::async_runtime::oneshot::Sender<()>)>;
 
 struct ClientConnection {
     sender: channel_budget::ClientSender,
@@ -801,6 +802,71 @@ impl NetRuntime {
             for listener in &listeners {
                 tcp_listener::TcpListener::add_address(listener, address, device_idx);
             }
+        }
+    }
+
+    #[cfg_attr(
+        not(debug_assertions),
+        expect(dead_code, reason = "registration follows in step 3")
+    )]
+    async fn remove_device(&self, device_idx: usize) {
+        if !self.inner.borrow_mut().devices.retire(device_idx) {
+            return;
+        }
+        self.half_open
+            .discard_deferred(|(index, _)| *index == device_idx);
+        self.pressure.remove_device(device_idx);
+        let (listeners, sockets) = {
+            let inner = self.inner.borrow();
+            (
+                inner
+                    .tcp_listeners
+                    .values()
+                    .filter(|listener| listener.borrow().has_device(device_idx))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                inner
+                    .sockets
+                    .values()
+                    .filter(|socket| socket.borrow().device_index() == Some(device_idx))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+        };
+        self.rebuild_ip_addresses();
+        self.stats.num_devices.set(self.stats.num_devices.get() - 1);
+        let mut accepts = Vec::new();
+        for listener in listeners {
+            accepts.push(tcp_listener::TcpListener::detach_device(
+                &listener, device_idx,
+            ));
+        }
+        let mut notices = Vec::new();
+        for socket in sockets {
+            // A retired device cannot transmit a reset, so socket teardown
+            // completes without waiting for either the device or the client.
+            if let Some(notice) = MotoSocket::invalidate_ip_socket(socket).await {
+                notices.push(notice);
+            }
+        }
+        futures::join!(
+            futures::future::join_all(notices.into_iter().map(|notice| notice.send())),
+            futures::future::join_all(
+                accepts
+                    .into_iter()
+                    .map(tcp_listener::TcpListener::cancel_pending_accepts)
+            ),
+        );
+        let notify = self.inner.borrow().devices[device_idx]
+            .device_runtime_notify
+            .clone();
+        self.inner.borrow_mut().devices.finish_removal(device_idx);
+        loop {
+            let changed = notify.notified();
+            if !self.inner.borrow().devices.is_retiring(device_idx) {
+                break;
+            }
+            changed.await;
         }
     }
 

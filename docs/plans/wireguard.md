@@ -1,16 +1,8 @@
 # WireGuard through a process-backed IP device
 
-Completed steps: 0 - boringtun fork; 1 - routes without a gateway.
-Current step: 2 - devices that come and go.
-Device-index lifetime and client UDP invalidation are complete.
-UDP and ICMP cancellation are complete.
-The preexisting TCP port-selection and UDP self-delivery prerequisites
-are complete.
-TCP cancellation, socket-publication ordering and device-task lifetime
-accounting and server-side socket invalidation are complete.
-Listener removal is in progress.
-Parallel work: steps 6-8 - standalone `wg` and the independent host peer.
-The preexisting sys-tty and strobe allocation failures are fixed.
+Completed steps: 0 - boringtun fork; 1 - routes without a gateway;
+2 - devices that come and go.
+Current step: 3 - packet device and registration IPC.
 
 2026-10-24. Design and implementation plan, grounded in the tree at
 a3d739f9. This document specifies the process-backed IP device, WireGuard

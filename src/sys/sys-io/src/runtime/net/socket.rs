@@ -274,10 +274,13 @@ impl Drop for MotoSocket {
 }
 
 impl MotoSocket {
-    #[cfg_attr(
-        not(debug_assertions),
-        expect(dead_code, reason = "device removal follows in step 2")
-    )]
+    pub(super) fn device_index(&self) -> Option<usize> {
+        match &self.base.backend {
+            SocketBackend::Ip(ip) => Some(ip.device_idx),
+            _ => None,
+        }
+    }
+
     pub(super) async fn invalidate_ip_socket(socket: Rc<RefCell<Self>>) -> Option<RemovalNotice> {
         use moto_sdk::{ipc::io_channel::Msg, sys_io::api_net};
 

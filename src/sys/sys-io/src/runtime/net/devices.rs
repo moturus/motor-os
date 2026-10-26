@@ -43,10 +43,6 @@ impl Devices {
 
     /// Withdraw from discovery before detaching users. Existing socket handles
     /// still index the retiring entry until their final cleanup releases it.
-    #[cfg_attr(
-        not(debug_assertions),
-        expect(dead_code, reason = "removal follows in step 2")
-    )]
     pub(super) fn retire(&mut self, index: usize) -> bool {
         let Some(mut device) = self.active.get_mut(index).and_then(Option::take) else {
             return false;
@@ -62,10 +58,6 @@ impl Devices {
 
     /// Keep removal notifications charged to the retiring-device quota even
     /// when their clients are slow and all netstack sockets are already gone.
-    #[cfg_attr(
-        not(debug_assertions),
-        expect(dead_code, reason = "removal follows in step 2")
-    )]
     pub(super) fn finish_removal(&mut self, index: usize) {
         self.retiring.get_mut(&index).unwrap().cleanup_complete = true;
         self.reap(index);
@@ -82,6 +74,10 @@ impl Devices {
         }) {
             self.retiring.remove(&index);
         }
+    }
+
+    pub(super) fn is_retiring(&self, index: usize) -> bool {
+        self.retiring.contains_key(&index)
     }
 
     pub(super) fn retained_mut(&mut self, index: usize) -> Option<&mut NetDev<'static>> {
