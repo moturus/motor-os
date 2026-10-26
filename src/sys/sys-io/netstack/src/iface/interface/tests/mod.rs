@@ -28,6 +28,61 @@ fn fill_slice(s: &mut [u8], val: u8) {
     }
 }
 
+#[test]
+#[cfg(all(
+    feature = "medium-ip",
+    feature = "socket-udp",
+    feature = "proto-ipv4-fragmentation",
+    feature = "proto-ipv6-fragmentation"
+))]
+fn address_withdrawal_discards_pending_fragments() {
+    use crate::socket::udp;
+    for (local, remote, other) in [
+        (
+            IpAddress::v4(192, 0, 2, 1),
+            IpAddress::v4(192, 0, 2, 2),
+            IpAddress::v4(192, 0, 2, 3),
+        ),
+        (
+            IpAddress::v6(0xfd80, 0, 0, 0, 0, 0, 0, 1),
+            IpAddress::v6(0xfd80, 0, 0, 0, 0, 0, 0, 2),
+            IpAddress::v6(0xfd80, 0, 0, 0, 0, 0, 0, 3),
+        ),
+    ] {
+        let prefix = if matches!(local, IpAddress::Ipv4(_)) {
+            24
+        } else {
+            64
+        };
+        let (mut iface, mut sockets, mut device) = setup(Medium::Ip);
+        iface.update_ip_addrs(|addresses| *addresses = vec![IpCidr::new(local, prefix)]);
+        device.tx_capacity = Some(1);
+        let buffer = || udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 2], vec![0; 4096]);
+        let handle = sockets.add(1, udp::Socket::new(buffer(), buffer()));
+        sockets.udp_bind(handle, (local, 1234)).unwrap();
+        sockets
+            .get_mut::<udp::Socket>(handle)
+            .send_slice(&[7; 3000], (remote, 1234))
+            .unwrap();
+        iface.poll(Instant::ZERO, &mut device, &mut sockets);
+        assert_eq!(device.tx_queue.len(), 1);
+        assert!(!iface.fragmenter.is_empty());
+        iface.update_ip_addrs(|addresses| addresses.push(IpCidr::new(other, prefix)));
+        assert!(
+            !iface.fragmenter.is_empty(),
+            "adding an address must preserve staged output"
+        );
+        iface.update_ip_addrs(|addresses| addresses.retain(|address| address.address() != local));
+        assert!(iface.fragmenter.is_empty());
+        device.tx_queue.clear();
+        iface.poll(Instant::from_millis(1), &mut device, &mut sockets);
+        assert!(
+            device.tx_queue.is_empty(),
+            "remaining fragments retained a withdrawn source"
+        );
+    }
+}
+
 #[allow(unused)]
 fn recv_all(device: &mut crate::tests::TestingDevice, timestamp: Instant) -> Vec<Vec<u8>> {
     let mut pkts = Vec::new();

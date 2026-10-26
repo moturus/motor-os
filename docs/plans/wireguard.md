@@ -1,7 +1,7 @@
 # WireGuard through a process-backed IP device
 
-Completed steps: 0 through 3.
-Current step: 4 - UDP rules and the physical transport (3 of 4 patches complete).
+Completed steps: 0 through 4.
+Current step: 5 - ping through packet devices.
 
 2026-10-24. Design and implementation plan, grounded in the tree at
 a3d739f9. This document specifies the process-backed IP device, WireGuard

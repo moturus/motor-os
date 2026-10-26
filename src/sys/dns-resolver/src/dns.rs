@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::os::fd::FromRawFd;
 use std::time::{Duration, Instant};
 
 use moto_dns::Status;
@@ -33,16 +34,12 @@ pub(super) fn lookup(name: &[u8], qtype: u16, servers: &[IpAddr]) -> Result<Vec<
 fn udp_attempt(name: &[u8], qtype: u16, server: IpAddr) -> Result<Vec<IpAddr>, Status> {
     let id = random_id();
     let query = build_query(name, qtype, id)?;
-    let bind_ip = match server {
-        IpAddr::V4(address) if address.is_loopback() => IpAddr::V4(Ipv4Addr::LOCALHOST),
-        IpAddr::V6(address) if address.is_loopback() => IpAddr::V6(Ipv6Addr::LOCALHOST),
-        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-        IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-    };
-    let socket = UdpSocket::bind(SocketAddr::new(bind_ip, 0)).map_err(map_io_error)?;
-    socket
-        .connect(SocketAddr::new(server, DNS_PORT))
-        .map_err(map_io_error)?;
+    let remote = SocketAddr::new(server, DNS_PORT);
+    let fd =
+        moto_rt::net::udp_bind_for_remote(&remote.into()).map_err(|_| Status::TemporaryFailure)?;
+    // The successful bind returns a new descriptor owned by this query.
+    let socket = unsafe { UdpSocket::from_raw_fd(fd) };
+    socket.connect(remote).map_err(map_io_error)?;
     socket.send(&query).map_err(map_io_error)?;
 
     let deadline = Instant::now() + ATTEMPT_TIMEOUT;
@@ -283,6 +280,99 @@ pub(super) fn self_test() {
     ));
 
     transport_self_test();
+    packet_device_self_test();
+}
+
+fn packet_device_self_test() {
+    use moto_sdk::sys_io::api_ip_device::{Cidr, Registration};
+    use std::future::Future;
+    use std::task::Poll;
+
+    let (ready, started) = std::sync::mpsc::channel();
+    let (stop, mut stopped) = moto_sdk::async_runtime::oneshot();
+    let provider = std::thread::spawn(move || {
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+            let addresses = vec![
+                Cidr {
+                    address: "10.243.12.1".parse().unwrap(),
+                    prefix_len: 24,
+                },
+                Cidr {
+                    address: "fd43:12::1".parse().unwrap(),
+                    prefix_len: 64,
+                },
+            ];
+            let config = Registration {
+                name: "dns_test_wg".into(),
+                mtu: 1420,
+                routes: addresses
+                    .iter()
+                    .map(|cidr| cidr.network().unwrap())
+                    .collect(),
+                addresses,
+            };
+            let mut device = moto_sdk::io::ip_device::IpDevice::register(&config)
+                .await
+                .unwrap();
+            ready.send(()).unwrap();
+            {
+                let (sender, mut receiver) = device.split();
+                let mut bytes = [0; 1420];
+                loop {
+                    let length = std::future::poll_fn(|cx| {
+                        if std::pin::Pin::new(&mut stopped).poll(cx).is_ready() {
+                            return Poll::Ready(None);
+                        }
+                        receiver.poll_receive(cx, &mut bytes).map(Some)
+                    })
+                    .await;
+                    let Some(length) = length else {
+                        break;
+                    };
+                    let length = length.unwrap();
+                    let (start, size) = match bytes[0] >> 4 {
+                        4 => (12, 4),
+                        6 => (8, 16),
+                        _ => unreachable!(),
+                    };
+                    // Reflection preserves checksums while making the remote
+                    // DNS server and the query socket distinct IP endpoints.
+                    for index in 0..size {
+                        bytes.swap(start + index, start + size + index);
+                    }
+                    sender.send(&bytes[..length]).await.unwrap();
+                }
+            }
+            device.unregister().await.unwrap();
+        });
+    });
+    started.recv_timeout(Duration::from_secs(3)).unwrap();
+    for (local, remote) in [("10.243.12.1", "10.243.12.2"), ("fd43:12::1", "fd43:12::2")] {
+        let remote: IpAddr = remote.parse().unwrap();
+        let server = UdpSocket::bind(SocketAddr::new(local.parse().unwrap(), DNS_PORT)).unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let server = std::thread::spawn(move || {
+            let mut packet = [0; UDP_RESPONSE_MAX];
+            let (length, peer) = server.recv_from(&mut packet).unwrap();
+            assert_eq!(peer.ip(), remote);
+            let mut response = packet[..length].to_vec();
+            response[2..4].copy_from_slice(&0x8180u16.to_be_bytes());
+            response[6..8].copy_from_slice(&1u16.to_be_bytes());
+            response.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4, 192, 0, 2, 9]);
+            server.send_to(&response, peer).unwrap();
+            // Keep the queued reply alive until the lookup finishes and joins.
+            server
+        });
+        assert_eq!(
+            lookup(b"tunnel.test", 1, &[remote]).unwrap(),
+            ["192.0.2.9".parse::<IpAddr>().unwrap()]
+        );
+        server.join().unwrap();
+    }
+    stop.send(()).unwrap();
+    provider.join().unwrap();
 }
 
 fn transport_self_test() {

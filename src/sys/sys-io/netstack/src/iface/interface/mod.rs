@@ -967,6 +967,21 @@ impl Interface {
         }
         InterfaceInner::check_ip_addrs(&self.inner.ip_addrs);
 
+        // A partially emitted datagram must not retain a withdrawn source
+        // after its socket and the device's queued frames have been removed.
+        #[cfg(feature = "proto-ipv4-fragmentation")]
+        if self.fragmenter.ip_version == Some(IpVersion::Ipv4)
+            && !self.inner.has_ip_addr(self.fragmenter.ipv4.repr.src_addr)
+        {
+            self.fragmenter.reset();
+        }
+        #[cfg(feature = "proto-ipv6-fragmentation")]
+        if self.fragmenter.ip_version == Some(IpVersion::Ipv6)
+            && !self.inner.has_ip_addr(self.fragmenter.ipv6.repr.src_addr)
+        {
+            self.fragmenter.reset();
+        }
+
         #[cfg(all(
             feature = "proto-ipv6",
             feature = "multicast",
