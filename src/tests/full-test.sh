@@ -234,13 +234,13 @@ echo "full-test: runner=$TEST_VM_RUNNER profile=$TEST_VM_PROFILE target=$IMG_TAR
 # Build the image under test before running the tests.
 if [ "$BUILD" = "release" ]; then
   bash "$WD/test-moto-ipc-sync.sh" --release
-  make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" systest mio-test tokio-tests \
+  make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" systest mio-test tokio-tests wg-self-test \
     crossterm-smoke BUILD=release -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test --release)
   bash "$WD/test-kloader-image.sh" --release
 else
   bash "$WD/test-moto-ipc-sync.sh"
-  make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" systest mio-test tokio-tests \
+  make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" systest mio-test tokio-tests wg-self-test \
     crossterm-smoke -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test)
   bash "$WD/test-kloader-image.sh"
@@ -629,6 +629,7 @@ remove_test_roots vm_ssh
   if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
     printf '%s\n' \
       "put $ROOT_DIR/build/bin/$BUILD/systest $TEST_BIN/systest" \
+      "put $ROOT_DIR/build/bin/$BUILD/wg-self-test $TEST_BIN/wg-self-test" \
       "put $ROOT_DIR/build/bin/$BUILD/mio-test $TEST_BIN/mio-test" \
       "put $ROOT_DIR/build/bin/$BUILD/tokio-tests $TEST_BIN/tokio-tests" \
       "put $ROOT_DIR/build/bin/$BUILD/crossterm-smoke $TEST_BIN/crossterm-smoke" \
@@ -775,6 +776,9 @@ vm_ssh /system/bin/ping -c 1 localhost
 
 test_udp_fragmentation
 test_wireguard
+for address in 192.168.4.2 2001:db8::2; do
+  vm_ssh "$TEST_BIN/wg-self-test $address"
+done
 test_ssh_client_host
 
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then

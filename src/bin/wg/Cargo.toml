@@ -5,6 +5,14 @@ edition = "2024"
 
 [workspace]
 
+[features]
+native-tests = ["moto-sdk/test-support"]
+
+[[bin]]
+name = "wg-self-test"
+path = "src/native_main.rs"
+required-features = ["native-tests"]
+
 [dependencies]
 base64 = "0.22"
 boringtun = { git = "https://github.com/moturus/boringtun.git", rev = "dcad5645547a89b278b346a399dbc0fae19a02f4" }

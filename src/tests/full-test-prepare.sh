@@ -47,7 +47,7 @@ if [ "$TEST_VM_PHASE" = standard ]; then
 fi
 
 make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" boot core sys-base user-base systest mio-test tokio-tests \
-  crossterm-smoke BUILD="$BUILD" -j"$(nproc)"
+  crossterm-smoke wg-self-test BUILD="$BUILD" -j"$(nproc)"
 
 # The host-side test binaries the suite runs. --no-run builds exactly what a
 # later `cargo test` with the same flags then runs; --quiet only keeps the

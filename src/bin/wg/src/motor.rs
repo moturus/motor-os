@@ -21,6 +21,10 @@ mod queue;
 #[path = "motor_stats.rs"]
 mod stats;
 
+#[cfg(feature = "native-tests")]
+#[path = "motor_tests.rs"]
+pub mod native_tests;
+
 #[derive(Default)]
 struct Ready(Mutex<Option<Waker>>);
 

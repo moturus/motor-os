@@ -1,7 +1,7 @@
 # WireGuard through a process-backed IP device
 
 Completed steps: 0 through 9.
-Current step: 10 - expanded VM coverage (2 of 4 patches complete).
+Current step: 10 - expanded VM coverage (3 of 4 patches complete).
 
 2026-10-24. Design and implementation plan, grounded in the tree at
 a3d739f9. This document specifies the process-backed IP device, WireGuard

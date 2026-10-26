@@ -65,7 +65,7 @@ sys: sys-base dns-resolver
 user-base: sysbox rush red rmux russhd
 user: user-base kibim httpd httpd-axum ssh wg
 user-dev: user curl gears gears-mock-provider gix lorry mdbg rnetbench crossbench \
-	systest mio-test tokio-tests crossterm-smoke
+	systest mio-test tokio-tests crossterm-smoke wg-self-test
 
 .PHONY: all images boot core sys-base sys user-base user user-dev
 .PHONY: base.img main.img raw.img dev.img wasm.img system-tty.img vsock-test.img
@@ -73,7 +73,7 @@ user-dev: user curl gears gears-mock-provider gix lorry mdbg rnetbench crossbenc
 .PHONY: strobe sys-io sys-init sys-tty dns-resolver
 .PHONY: sysbox systest mio-test tokio-tests crossterm-smoke
 .PHONY: rush kibim red rmux russhd ssh httpd httpd-axum gears gears-mock-provider
-.PHONY: gix lorry curl wg
+.PHONY: gix lorry curl wg wg-self-test
 .PHONY: mdbg rnetbench crossbench
 .PHONY: clean clippy assembly-resolved
 
@@ -183,6 +183,15 @@ wg: assembly-resolved
 	cd src/bin/wg && CC_x86_64_unknown_motor="$$assembly_sysroot/bin/motor-clang" \
 		AR_x86_64_unknown_motor=ar CARGO_TARGET_DIR="$(OBJ_DIR)/wg" $(DO_BUILD) --locked
 	strip -o "$(BIN_DIR)/wg" "$(OBJ_DIR)/wg/$(SUB_DIR)/wg"
+
+wg-self-test: assembly-resolved
+	mkdir -p $(BIN_DIR)
+	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
+	assembly_sysroot="$$(realpath "$$assembly_image_root/../sysroot")" && \
+	cd src/bin/wg && CC_x86_64_unknown_motor="$$assembly_sysroot/bin/motor-clang" \
+		AR_x86_64_unknown_motor=ar CARGO_TARGET_DIR="$(OBJ_DIR)/wg" $(DO_BUILD) \
+		--locked --features native-tests --bin wg-self-test
+	strip -o "$(BIN_DIR)/wg-self-test" "$(OBJ_DIR)/wg/$(SUB_DIR)/wg-self-test"
 
 russhd:
 	mkdir -p $(BIN_DIR)
