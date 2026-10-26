@@ -63,7 +63,7 @@ core: kernel vdso
 sys-base: strobe sys-io sys-init sys-tty
 sys: sys-base dns-resolver
 user-base: sysbox rush red rmux russhd
-user: user-base kibim httpd httpd-axum ssh
+user: user-base kibim httpd httpd-axum ssh wg
 user-dev: user curl gears gears-mock-provider gix lorry mdbg rnetbench crossbench \
 	systest mio-test tokio-tests crossterm-smoke
 
@@ -73,7 +73,7 @@ user-dev: user curl gears gears-mock-provider gix lorry mdbg rnetbench crossbenc
 .PHONY: strobe sys-io sys-init sys-tty dns-resolver
 .PHONY: sysbox systest mio-test tokio-tests crossterm-smoke
 .PHONY: rush kibim red rmux russhd ssh httpd httpd-axum gears gears-mock-provider
-.PHONY: gix lorry curl
+.PHONY: gix lorry curl wg
 .PHONY: mdbg rnetbench crossbench
 .PHONY: clean clippy assembly-resolved
 
@@ -175,6 +175,11 @@ rush:
 	mkdir -p $(BIN_DIR)
 	cd src/bin/rush && CARGO_TARGET_DIR="$(OBJ_DIR)/rush" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/rush" "$(OBJ_DIR)/rush/$(SUB_DIR)/rush"
+
+wg:
+	mkdir -p "$(BIN_DIR)"
+	cd src/bin/wg && CARGO_TARGET_DIR="$(OBJ_DIR)/wg" $(DO_BUILD) --locked
+	strip -o "$(BIN_DIR)/wg" "$(OBJ_DIR)/wg/$(SUB_DIR)/wg"
 
 russhd:
 	mkdir -p $(BIN_DIR)
@@ -389,6 +394,7 @@ clippy: vdso
 	cd src/sys/tests/tokio-tests && $(DO_CLIPPY)
 	cd src/bin/rush && $(DO_CLIPPY)
 	cd src/bin/russhd && $(DO_CLIPPY)
+	cd src/bin/wg && $(DO_CLIPPY) --locked
 	cd src/bin/httpd && $(DO_CLIPPY)
 	cd src/bin/httpd-axum && $(DO_CLIPPY) --locked
 	cd src/bin/kibim && $(DO_CLIPPY)

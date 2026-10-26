@@ -1,7 +1,7 @@
 # WireGuard through a process-backed IP device
 
-Completed steps: 0 through 5.
-Current step: 6 - wg crate and configuration (1 of 2 patches complete).
+Completed steps: 0 through 6.
+Current step: 7 - peers dispatch and timers.
 
 2026-10-24. Design and implementation plan, grounded in the tree at
 a3d739f9. This document specifies the process-backed IP device, WireGuard

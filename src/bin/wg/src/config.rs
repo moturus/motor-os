@@ -65,6 +65,19 @@ fn unicast(address: IpAddr) -> bool {
 }
 
 impl Config {
+    pub fn load(path: &std::path::Path) -> Result<Self> {
+        if path.extension().and_then(|value| value.to_str()) != Some("toml") {
+            return Err("configuration filename must end in .toml");
+        }
+        let name = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .ok_or("configuration filename is not UTF-8")?;
+        let text = crate::files::read(path)?;
+        let private_key = crate::files::read(&path.with_extension("key"))?;
+        Self::parse(name, &text, &private_key)
+    }
+
     pub fn parse(name: &str, text: &str, private_key: &str) -> Result<Self> {
         if name.is_empty()
             || name.len() > MAX_NAME_BYTES

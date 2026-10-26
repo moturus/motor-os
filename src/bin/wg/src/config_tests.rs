@@ -90,3 +90,81 @@ fn endpoint_and_address_validation() {
         .replace("10.20.0.0/24", "fd00::/64");
     assert!(parse(&ipv6).is_ok());
 }
+
+#[test]
+fn prefix_ownership_is_canonical_and_allows_nested_owners() {
+    let base = format!("{}{}", header(), peer(8, "'0.0.0.0/0'"));
+    assert!(parse(&format!("{base}{}", peer(9, "'10.20.0.0/24'"))).is_ok());
+    assert!(parse(&format!("{base}{}", peer(8, "'10.20.0.0/24'"))).is_err());
+    let duplicate = format!(
+        "{}{}{}",
+        header(),
+        peer(8, "'10.20.0.0/24'"),
+        peer(9, "'10.20.0.99/24'")
+    );
+    assert!(parse(&duplicate).is_err());
+}
+
+#[test]
+fn bounded_input_and_runtime_admission() {
+    assert!(parse(&" ".repeat(MAX_FILE_BYTES + 1)).is_err());
+    assert!(Config::parse(&"w".repeat(MAX_NAME_BYTES + 1), &text(), &private_key()).is_err());
+    assert!(Config::parse("../wg0", &text(), &private_key()).is_err());
+    let peers: String = (0..MAX_PEERS + 1)
+        .map(|id| peer(id as u8, &format!("'10.20.{id}.0/24'")))
+        .collect();
+    assert!(parse(&format!("{}{peers}", header())).is_err());
+    let prefixes = (0..MAX_PREFIXES + 1)
+        .map(|id| format!("'10.20.{id}.0/24'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    assert!(parse(&format!("{}{}", header(), peer(8, &prefixes))).is_err());
+}
+
+#[test]
+#[cfg(unix)]
+fn checks_both_files_and_their_actual_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!("wg-config-{}-{unique}", std::process::id()));
+    std::fs::create_dir(&directory).unwrap();
+    let config = directory.join("wg0.toml");
+    let key = directory.join("wg0.key");
+    let chmod = |path: &std::path::Path, mode| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
+    };
+    std::fs::write(&key, format!("{}\n", private_key())).unwrap();
+    for psk in [false, true] {
+        let mut contents = text();
+        if psk {
+            contents += &format!("preshared_key = '{}'\n", STANDARD.encode([9; 32]));
+        }
+        if config.exists() {
+            chmod(&config, 0o600);
+        }
+        std::fs::write(&config, contents).unwrap();
+        for mode in [0o400, 0o440, 0o600, 0o640] {
+            chmod(&config, mode);
+            chmod(&key, mode);
+            assert!(Config::load(&config).is_ok());
+        }
+        for exposed in [&config, &key] {
+            chmod(&config, 0o600);
+            chmod(&key, 0o600);
+            chmod(exposed, 0o604);
+            assert!(Config::load(&config).err().unwrap().contains("None role"));
+        }
+    }
+    chmod(&config, 0o600);
+    chmod(&key, 0o600);
+    std::fs::write(&key, vec![b'A'; MAX_FILE_BYTES + 1]).unwrap();
+    assert!(Config::load(&config).is_err());
+    std::fs::remove_file(&key).unwrap();
+    assert!(Config::load(&config).is_err());
+    std::fs::create_dir(&key).unwrap();
+    assert!(Config::load(&config).is_err());
+    std::fs::remove_dir_all(directory).unwrap();
+}
