@@ -14,3 +14,6 @@ getrandom::register_custom_getrandom!(motor_getrandom);
 
 #[cfg(test)]
 mod config_tests;
+
+#[cfg(test)]
+mod crypto_tests;
