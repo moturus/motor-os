@@ -278,7 +278,7 @@ fi
 # rush's are here because its line editor is testable only over a terminal, and
 # a pty is the one this host has -- including a resize, which on a pty is a
 # `SIGWINCH` and on a Motor console is the answer to an `ESC[6n`.
-for crate in red rmux rush russhd; do
+for crate in red rmux rush russhd wg; do
   profile_args=()
   if [ "$BUILD" = "release" ]; then
     profile_args+=(--release)
