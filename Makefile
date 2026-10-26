@@ -176,9 +176,12 @@ rush:
 	cd src/bin/rush && CARGO_TARGET_DIR="$(OBJ_DIR)/rush" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/rush" "$(OBJ_DIR)/rush/$(SUB_DIR)/rush"
 
-wg:
-	mkdir -p "$(BIN_DIR)"
-	cd src/bin/wg && CARGO_TARGET_DIR="$(OBJ_DIR)/wg" $(DO_BUILD) --locked
+wg: assembly-resolved
+	mkdir -p $(BIN_DIR)
+	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
+	assembly_sysroot="$$(realpath "$$assembly_image_root/../sysroot")" && \
+	cd src/bin/wg && CC_x86_64_unknown_motor="$$assembly_sysroot/bin/motor-clang" \
+		AR_x86_64_unknown_motor=ar CARGO_TARGET_DIR="$(OBJ_DIR)/wg" $(DO_BUILD) --locked
 	strip -o "$(BIN_DIR)/wg" "$(OBJ_DIR)/wg/$(SUB_DIR)/wg"
 
 russhd:
@@ -394,7 +397,10 @@ clippy: vdso
 	cd src/sys/tests/tokio-tests && $(DO_CLIPPY)
 	cd src/bin/rush && $(DO_CLIPPY)
 	cd src/bin/russhd && $(DO_CLIPPY)
-	cd src/bin/wg && $(DO_CLIPPY) --locked
+	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
+	assembly_sysroot="$$(realpath "$$assembly_image_root/../sysroot")" && \
+	cd src/bin/wg && CC_x86_64_unknown_motor="$$assembly_sysroot/bin/motor-clang" \
+		AR_x86_64_unknown_motor=ar $(DO_CLIPPY) --locked
 	cd src/bin/httpd && $(DO_CLIPPY)
 	cd src/bin/httpd-axum && $(DO_CLIPPY) --locked
 	cd src/bin/kibim && $(DO_CLIPPY)
