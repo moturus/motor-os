@@ -20,7 +20,7 @@ Provenance. Findings were gathered against:
   `/home/posk/motor-dev/` (`rust` @ `motor-os-rustc`, LLVM 23 fork, mlibc
   sysroot).
 
-Verified vs. assumed: "compiles and links for Motor" is *measured* (Round 27
+Verified vs. assumed: "compiles and links for Motor OS" is *measured* (Round 27
 built unmodified `aws-lc-sys` 0.43.0 cross with the mlibc/LLVM toolchain,
 tracing only the C compiler and archiver). **No AWS-LC code has ever
 executed on Motor OS.** Everything runtime-related in this plan is
@@ -83,7 +83,7 @@ FIPS, and bindgen not required, it picks the **cc builder**
   (`third_party/jitterentropy/...`) is compiled by default; its x86_64 timer
   is RDTSC (no OS call), but `AWS_LC_SYS_NO_JITTER_ENTROPY=1` is the
   first-bring-up fallback.
-* **The `cc` crate maps unknown Motor to `x86_64-unknown-none-elf`**
+* **The `cc` crate maps unknown Motor OS to `x86_64-unknown-none-elf`**
   (Round 27, `work-in-progress.md:2810-2814`), so the C compiler must be
   given explicitly with `--target=x86_64-unknown-motor --sysroot=...` —
   unlike ring, AWS-LC's C is *not* freestanding: it includes `pthread.h`,
@@ -97,7 +97,7 @@ FIPS, and bindgen not required, it picks the **cc builder**
   `ring_core_0_17_14_`; `build_script.rs:165` sets
   `CARGO_MANIFEST_LINKS`) — only the metadata directives are the problem.
 * **Rust layer.** `aws-lc-rs/src/` has zero `cfg(target_os)`/`cfg(unix)`
-  code; it requires `std` (which the Motor port satisfies) plus `zeroize`
+  code; it requires `std` (which the Motor OS port satisfies) plus `zeroize`
   and optionally `untrusted`. No changes expected.
 * Symbols are version-prefixed (`aws_lc_0_43_0_*`), the static library is
   `libaws_lc_0_43_0_crypto.a` — a stale archive against a newer sys crate
@@ -110,11 +110,11 @@ aws-lc-sys 0.43.0 vs ring 0.17.14, both under rustls 0.23.42:
 
 | Measured property | AWS-LC | ring |
 | --- | ---: | ---: |
-| Non-root packages (Linux-musl/Motor union) | 19 | 15 |
+| Non-root packages (Linux-musl/Motor OS union) | 19 | 15 |
 | Extracted source | ~76 MiB | ~16 MiB |
 | Provider source tree | 66.7 MB / 2,011 files | 7.8 MB / 392 files |
-| Motor release fixture (unstripped) | 3,707,256 B | 1,975,464 B |
-| Motor native objects / archives | 366 / ~13.7 MB | 45 / ~2.6 MB |
+| Motor OS release fixture (unstripped) | 3,707,256 B | 1,975,464 B |
+| Motor OS native objects / archives | 366 / ~13.7 MB | 45 / ~2.6 MB |
 | Build-script captured output | ~286 KiB | ~7 KiB |
 
 Round 27 chose ring for the lorry curl graph on size/review-surface grounds
@@ -127,7 +127,7 @@ avoids reopening the Stage-2 boundary (see Phase 2 and Rejected options).
 1. **Entropy (unavoidable).** AWS-LC's platform gate
    (`include/openssl/target.h`) is happy with an unknown OS, but the
    entropy chain (`crypto/rand_extra/internal.h`) then falls through to
-   `OPENSSL_RAND_URANDOM` → `open("/dev/urandom")` — absent on Motor →
+   `OPENSSL_RAND_URANDOM` → `open("/dev/urandom")` — absent on Motor OS →
    runtime failure. Fix: classify `defined(__motor__)` into the existing
    `OPENSSL_RAND_GETENTROPY` branch; mlibc declares `getentropy` in
    `unistd.h`, backed by `moto_rt_fill_random_bytes` (RDRAND with retries,
@@ -142,7 +142,7 @@ avoids reopening the Stage-2 boundary (see Phase 2 and Rejected options).
    `OPENSSL_NANOLIBC`/`CROS_EC`/`OPENSSL_WASM_WASI` template in
    `include/openssl/target.h`: add an `OPENSSL_MOTOR` block, and add it
    beside `OPENSSL_WINDOWS || OPENSSL_TRUSTY` in
-   `crypto/ube/fork_ube_detect.c` (`AWSLC_PLATFORM_DOES_NOT_FORK`; Motor
+   `crypto/ube/fork_ube_detect.c` (`AWSLC_PLATFORM_DOES_NOT_FORK`; Motor OS
    has no `fork`). Without this AWS-LC falls back to re-randomizing DRBG
    state per request — correct but slower. Can land after Phase 1
    validation; a genuine upstream-patch candidate.
@@ -168,7 +168,7 @@ submodule carrying the C patch), mirroring the moturus/ring arrangement.
   fixture and native lorry's vendoring fetch tool; it cannot "forget
   lorry". It stays on ring until Phase 2.
 
-## Phase 1: cargo cross-builds (Linux => Motor)
+## Phase 1: cargo cross-builds (Linux => Motor OS)
 
 Steps, each a small reviewable patch per AGENTS.md:
 
@@ -178,7 +178,7 @@ Steps, each a small reviewable patch per AGENTS.md:
 2. `httpd-axum`: switch rustls provider feature from `ring` to the aws-lc
    provider, add `[patch.crates-io]` for `aws-lc-sys` → fork, drop the ring
    patch; Makefile target gains `CC_x86_64_unknown_motor` /
-   `AR_x86_64_unknown_motor` (Motor clang with
+   `AR_x86_64_unknown_motor` (Motor OS clang with
    `--target=x86_64-unknown-motor --sysroot=...`, llvm-ar) and the
    mlibc-aware link recipe — precedent at `Makefile:106-116`
    (dns-resolver: `-C linker=<motor-clang> -C link-self-contained=no
@@ -202,11 +202,11 @@ four Rust crates (`aws-lc-rs`, `aws-lc-sys`, `zeroize`, `untrusted`) are
 plain Rust that lorry compiles happily.
 
 1. **Prebuild `libaws_lc_0_43_0_crypto.a` on Linux** with a pinned script
-   (patched sources from the Phase 1 fork, Motor clang, `llvm-ar`,
+   (patched sources from the Phase 1 fork, Motor OS clang, `llvm-ar`,
    `-ffile-prefix-map` for reproducibility, recorded sha256) and stage it
    inside the motor-sysroot. Trust class: identical to `libc.a`,
    `libunwind.a`, `libmoto_rt_cabi.a` — prebuilt sysroot artifacts already
-   consumed by every C-linking Motor binary. Staging inside the sysroot
+   consumed by every C-linking Motor OS binary. Staging inside the sysroot
    also rides lorry's existing read-only `--sysroot` sandbox allowance on
    Linux.
 2. **Patched vendored `aws-lc-sys`** (ring-precedent path patch): replace
@@ -223,7 +223,7 @@ plain Rust that lorry compiles happily.
    rest of that build script already emits only allowed directives.
 4. Seed entries + policy grants (`allow-build-script`, pinned
    `source-tree-sha256`) in the lorry bootstrap seeds, as ring has today.
-5. Native variant (optional, later): rebuild the archive *on* Motor with a
+5. Native variant (optional, later): rebuild the archive *on* Motor OS with a
    rush script driving `/devtools/bin/cc` + `llvm ar` over the ~366-file list
    (generated from a Linux cc-builder trace, not hand-written). Only needed
    for self-hosting completeness; the staged cross-built archive serves
@@ -239,8 +239,8 @@ plain Rust that lorry compiles happily.
 * **Prebuild the Rust layers as rlibs with cargo on Linux.** Verified
   enabling fact: the cross stage-2 rustc reports exactly
   `rustc 1.99.0-dev, commit-hash: unknown` (dev channel, hash omitted), and
-  the native Motor rustc is built from the same checkout/`src/version`, so
-  rlibs are mutually loadable across Linux-cross and native-Motor
+  the native Motor OS rustc is built from the same checkout/`src/version`, so
+  rlibs are mutually loadable across Linux-cross and native-Motor OS
   compilers — the usual version-stamp barrier is absent. Rejected anyway:
   (a) lorry has no prebuilt-artifact input mechanism, and adding
   resolver-level substitution (+ `--extern` wiring + policy/schema) is at
@@ -272,7 +272,7 @@ plain Rust that lorry compiles happily.
      other's allocations.
    * `__thread` in AWS-LC C → emulated TLS via `__emutls_get_address`
      (provided by `libmoto_rt_cabi.a`).
-   * jitter-entropy library behavior on Motor (disable first, enable
+   * jitter-entropy library behavior on Motor OS (disable first, enable
      deliberately).
 2. **Flag interactions**: `-D__EXTENSIONS__=1` and `-pthread` against mlibc
    headers (expected harmless; verify in step 2 build logs).
@@ -305,7 +305,7 @@ plain Rust that lorry compiles happily.
   each in debug and release before any commit, and any new test must be
   reachable from it directly or transitively.
 * **Phase 2**: `src/bin/lorry/tests/test-all.sh` covers Lorry's unit, Cargo
-  identity, registry, curl, and native Motor boundaries once curl adopts the
+  identity, registry, curl, and native Motor OS boundaries once curl adopts the
   patched graph.
 
 ## Effort estimate

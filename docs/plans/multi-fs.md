@@ -11,7 +11,7 @@ questions and the original plan) is in git history:
 ## What works
 
 sys-io serves several filesystems at once through a mount table. The
-Motor FS data partition is mount 0 at `/`. Every image mounts an
+Motor OS filesystem data partition is mount 0 at `/`. Every image mounts an
 in-memory filesystem (memfs) at `/none/tmp`, so `/none/tmp` is empty after
 every boot. `/user/tmp` and `/system/tmp` stay on disk.
 
@@ -45,7 +45,7 @@ type = "memfs"
 
 ### Entry IDs
 
-- sys-io puts a 24-bit mount id into bits that Motor FS IDs never use.
+- sys-io puts a 24-bit mount id into bits that Motor OS filesystem IDs never use.
   memfs IDs leave the same bits clear.
 - Clients see opaque IDs. Each boot picks AES-128 (with AES-NI) or a
   weaker XOR fallback, which is obfuscation only. The root ID is always 0.
@@ -78,7 +78,7 @@ type = "memfs"
 ### memfs
 
 - A standalone crate, `src/sys/lib/memfs`. It shares its permission and
-  filename checks with Motor FS through moto-sdk's `async_fs`, so the
+  filename checks with the Motor OS filesystem through moto-sdk's `async_fs`, so the
   permission rules are the same.
 - Files are truly sparse: holes cost nothing. Reads and writes go one 4 KiB
   block at a time; a failed block-bounded write changes nothing. Multi-block
@@ -150,7 +150,7 @@ User-facing behavior is also described in `docs/fs-permissions.md`.
    inside the source and check mount boundaries before traversing children
    during both copying and source cleanup, using entry identity rather
    than paths. Define copy and source-removal failure behavior separately.
-3. **More mounts.** A second block device, several Motor FS partitions,
+3. **More mounts.** A second block device, several Motor OS filesystem partitions,
    virtio-fs, read-only and nested mounts, and runtime mount and unmount
    that Interactive users can run under their own role (there is no
    privilege escalation). Runtime mounts need a lifecycle design: busy

@@ -139,7 +139,7 @@ and test work. Within each group, order is the suggested pickup order.
   and the toolchain std together (see the ECONNRESET precedent).
 - Fail a UDP send to an unroutable destination instead of dropping it
   silently without an ack; a queue of such datagrams never yields WRITABLE.
-- Try every resolved address in std `TcpStream::connect` (Motor's std takes
+- Try every resolved address in std `TcpStream::connect` (Motor OS's std takes
   only the first); return the bound address from `local_addr` during a
   nonblocking connect; make `SO_KEEPALIVE` configurable (always on today).
 - Raise DNS capacity: one IPC connection per lookup into four synchronous

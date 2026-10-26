@@ -31,14 +31,14 @@ excluded from `wasmtime-smoke`. rush pipelines do not show it: rush runs
 stages one at a time through temp files, so `writer | head` never starts
 `head` while the writer runs.
 
-## Motor FS behavior that WASI guests see (2026-10-09)
+## Motor OS filesystem behavior that WASI guests see (2026-10-09)
 
 `moto_rt::Error` has no "directory not empty": sys-io's `map_err_into_native`
 sends `DirectoryNotEmpty` as `FileTooLarge`, so native `std::fs::remove_dir`
 on a non-empty directory reports `FileTooLarge`. The Wasmtime adapter maps it
 back for directory removal and rename. A lookup under a deleted directory's
 handle fails with `InvalidData` rather than `NotFound`, which WASI reports as
-`io`. Motor checks write permission on each write, not at open, so an open
+`io`. Motor OS checks write permission on each write, not at open, so an open
 for writing succeeds where POSIX would fail with `EACCES`, and the guest's
 libc reports the failed write as `EIO`. A proper fix for the first needs a
 `moto_rt::Error` variant and std's mapping.
@@ -74,7 +74,7 @@ listening pool can still complete a handshake. On the ESTABLISHED edge,
 `src/sys/sys-io/netstack/src/storage/ring_buffer.rs`, added in `2d9f8d26`).
 `growth_deferred()` looks only at the TCP state, never at memory pressure,
 although `pressure.rs` states that sys-io must stop growing before the kernel
-refuses it. The allocation is refused, `rust_oom` aborts sys-io, and Motor's
+refuses it. The allocation is refused, `rust_oom` aborts sys-io, and Motor OS's
 std implements abort as `exit(-1)`, hence the status. The frames:
 `process_ethernet` → `process_ipv4` → `process_tcp` → `Socket::set_state` →
 `RingBuffer::grow_to` → `handle_alloc_error` → `rust_oom`. sys-io's panic hook
@@ -169,7 +169,7 @@ any process, even one with no capabilities, can kill every process that lacks
 
 This predates the `CAP_NET`/`CAP_FS_WRITE` work. It was found by a review of
 the new-caps IPC fixes, not by a failure. Current callers are Rush's `kill`
-builtin, gears on Motor, and systest (`spawn_wait_kill`, `ipc_service`).
+builtin, gears on Motor OS, and systest (`spawn_wait_kill`, `ipc_service`).
 
 Possible rules, to choose from when this is picked up:
 
@@ -305,7 +305,7 @@ entry first, the listing reports one error and ends, so later entries are
 never returned. POSIX lets a listing skip or repeat only the entries that
 change during it.
 
-This keeps Lorry from pipelining builds on Motor. A dependent's rustc lists
+This keeps Lorry from pipelining builds on Motor OS. A dependent's rustc lists
 each dependency directory while a library's rustc still removes temporary
 files there, so the listing could miss a library and the build would fail
 with "can't find crate". Lorry pipelines on Linux only, until `readdir` keeps
@@ -313,7 +313,7 @@ going past a removed entry.
 
 ## A process can take an rmux server's name first (2026-09-27)
 
-rmux on Motor finds its server by a service name made of the server's mask
+rmux on Motor OS finds its server by a service name made of the server's mask
 (`src/bin/rmux/details.md` §4.2.1). Any process may register that name before
 the real server starts. The client checks the holder's mask before sending
 anything, so the impostor learns nothing. But the real server cannot start

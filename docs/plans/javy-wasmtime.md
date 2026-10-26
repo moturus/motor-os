@@ -3,7 +3,7 @@
 Promote the prototype into maintained forks in small, tested milestones.
 Preserve working engine/platform integrations and regressions; replace
 fixture-specific helpers with shared production code. Milestones 0–2 are
-delivered: the maintained Motor branches are published, and Javy/Wasmi and the
+delivered: the maintained Motor OS branches are published, and Javy/Wasmi and the
 runtime-only `wasmtime-rt` build through the normal add-on workflow, ship in
 the developer and small wasm images, and pass their installed-tool checks on
 both images at 256 and 224 MiB. HTTP serving (milestone 3) and the full
@@ -86,16 +86,16 @@ Ship all four tools in both the developer image and a new small wasm image:
 | --- | --- |
 | `javy` with Wasmi | Compile JS with default/custom plugins to core Wasm; write its own output. |
 | `wasmi` | Execute raw core Wasm and Javy plugin linkage; support invocation, exits and optional fuel. |
-| Wasmtime full | Upstream `run`/`serve`/`compile`, Pulley precompilation, native core/component compilation and a separate Motor ELF packaging subcommand. |
+| Wasmtime full | Upstream `run`/`serve`/`compile`, Pulley precompilation, native core/component compilation and a separate Motor OS ELF packaging subcommand. |
 | Wasmtime runtime-only | Precompiled Pulley command/HTTP execution and the installed native core/component ELF template; no Cranelift. |
 
 - Every tool must work as role **None**, at **256 MiB and an actual 224 MiB
   margin VM**, on both images. Hello and the 9,112,951-byte TypeScript workload
   are mandatory. The small image has `data_partition_size_mb: 1024` (1 GiB).
-- Build tools externally with the selected Motor Rust/C/C++ toolchain. Run JS
-  compilation, Wasm execution, Pulley/native compilation and packaging on Motor;
+- Build tools externally with the selected Motor OS Rust/C/C++ toolchain. Run JS
+  compilation, Wasm execution, Pulley/native compilation and packaging on Motor OS;
   the small image needs no Cargo, rustc, Clang or SDK.
-- Use standard Rust/native Motor APIs for integration; retain upstream QuickJS,
+- Use standard Rust/native Motor OS APIs for integration; retain upstream QuickJS,
   Binaryen and CXX. Link unchanged in-tree moto-rt. No rt.vdso, kernel or
   toolchain API change is planned.
 - Use existing native networking behavior. No networking API/service changes,
@@ -128,13 +128,13 @@ not establish them.
   artifact section selects its CLI; a populated section executes embedded
   native core/component code. Core programs do not require componentization.
 - Preserve upstream canonical ABI, resources, rights and protocol state
-  machines. Narrow filesystem/socket adapters use native Motor APIs, with
+  machines. Narrow filesystem/socket adapters use native Motor OS APIs, with
   Tokio -> Mio for asynchronous TCP/UDP and guarded, pooled fiber stacks.
 - OS roles/capabilities bound process authority. Engine-enforced WASI grants,
   memory limits and HTTP deadlines/concurrency/buffering restrict guest use.
 
 ```text
- External host: maintained forks + Motor toolchain + pinned guest fixtures
+ External host: maintained forks + Motor OS toolchain + pinned guest fixtures
                                   |
                          release builds/images
                                   v
@@ -155,7 +155,7 @@ not establish them.
  |           Shared command/HTTP host: p1/p2, opt-in p3               |
  |           WASI grants, resource limits, guarded stacks             |
  |                            |                                       |
- |          Motor FS adapter       Tokio -> Mio -> Motor TCP/UDP      |
+ |          motor-fs adapter       Tokio -> Mio -> Motor OS TCP/UDP   |
  |          moto-rt path calls      native clocks/entropy             |
  +----------------------------+---------------------------------------+
                               | native calls / existing IPC
@@ -202,7 +202,7 @@ requests intermittently reset before a status line, which remains unexplained,
 and graceful shutdown and Ctrl-C were not qualified.
 
 The owner published the six maintained branches on 2026-10-07. Each is a real
-upstream repository with a Motor branch. The tree checks out only `javy` and
+upstream repository with a Motor OS branch. The tree checks out only `javy` and
 `wasmtime`, beside this repository, at the revisions pinned in
 `src/build-addon-sources.sh`; the other four, and the Motor OS crates, are git
 dependencies that the forks' lockfiles pin (since 2026-10-20; the heads below
@@ -228,11 +228,11 @@ What the branches carry:
   and the runner fixes (stdin read lazily inside `fd_read`; mistyped
   `wasi_snapshot_preview1` imports rejected at instantiation).
 - `moturus/wasmtime`: Wizer instrumentation decoupled from the runtime,
-  allocator-backed compilation and loading, Motor filesystem/socket/clock/entropy
+  allocator-backed compilation and loading, Motor OS filesystem/socket/clock/entropy
   adapters (path-based directory capabilities over `moto-rt`),
   target-resolved native defaults and `Config::motor_runtime()` for
   Pulley, immutable native ELF templates with a publisher, bounded guarded
-  stacks, shared command/HTTP hosts, Motor's `P3_DEFAULT=false`, the runtime-only
+  stacks, shared command/HTTP hosts, Motor OS's `P3_DEFAULT=false`, the runtime-only
   CLI with an explicit ELF layout, and build/check scripts. The role/mask guard
   runs only in the runtime-only (`motor-template`) build; the full CLI has none
   yet. These implementations still need the qualification and image delivery
@@ -253,7 +253,7 @@ Build and images:
 - `src/build-javy.sh`, called from `src/build-motor-os.sh` (the normal
   `build_addons` stage or `--javy-only`), follows the published `javy`, `wasmi`
   and `wasmtime` branches with the add-on checkout helper, fetches under the
-  Motor toolchain named by `rust-toolchain.toml`, sizes `JOBS` by available
+  Motor OS toolchain named by `rust-toolchain.toml`, sizes `JOBS` by available
   memory, downloads the plugin and TypeScript inputs by digest, and records the
   resolved source graph in `/devtools/javy/sources.txt`. Reuse is keyed on
   that manifest, so a new fork head rebuilds the add-on.
@@ -305,11 +305,11 @@ zero admission refusals; four boots take about 4.5 minutes per VMM.
 
 Still open from this milestone and planned below as its close-out: R1–R6,
 the retained custom GC/p2 plugin and forced-exhaustion matrix, compressed
-Linux/Motor byte identity, streaming plugin validation and lazy-backing timing.
+Linux/Motor OS byte identity, streaming plugin validation and lazy-backing timing.
 
 ### Review findings: 2026-10-08
 
-Review covered the 12 Motor integration commits `582ce13c` through `02893284`
+Review covered the 12 Motor OS integration commits `582ce13c` through `02893284`
 and relevant code at the maintained fork heads above. Both release VMM matrices
 passed again: eight boots, 328 smoke commands and zero admission refusals.
 Thirty-five imager tests passed (three existing tests remained ignored), as did
@@ -324,12 +324,12 @@ the same code confirmed all six; severities below are from that review.
 
 | ID | Severity | Location | Finding and evidence | Follow-up |
 | --- | --- | --- | --- | --- |
-| R1 | Medium | Motor `src/build-javy.sh`; Javy `motor-build.sh` | Both overwrite the selected `RUSTUP_TOOLCHAIN` with the checked-in managed selector, and the fork script resolves the managed assembly. An authoring assembly can receive managed-toolchain binaries while its manifest records authoring provenance. Only full builds in authoring mode are affected. Wasmtime's `motor-build.sh` has the same override. | 1j, 2a |
+| R1 | Medium | Motor OS `src/build-javy.sh`; Javy `motor-build.sh` | Both overwrite the selected `RUSTUP_TOOLCHAIN` with the checked-in managed selector, and the fork script resolves the managed assembly. An authoring assembly can receive managed-toolchain binaries while its manifest records authoring provenance. Only full builds in authoring mode are affected. Wasmtime's `motor-build.sh` has the same override. | 1j, 2a |
 | R2 | Low | Javy `crates/motor-engine/src/wasmi_backend.rs`, `define_host_imports` | A valid module importing `wasi_snapshot_preview1::proc_exit` twice fails with a duplicate-definition error; the runner exits 1 instead of 0. Toolchains merge duplicate imports and Javy never emits them. | 1k |
 | R3 | Low–medium | Same file, `Vm::call`; runner invocation loop | `proc_exit(0)` becomes ordinary success. `--invoke exit-zero --invoke trap` executes the later trap and exits 1 instead of terminating successfully. | 1k |
 | R4 | Low | Same file, `wasi` descriptor handling | `fd_close` reports success without changing guest descriptor state. Closing stdin twice returned 0 twice; the second close should return `BADF` (8). Reads, writes and descriptor queries also lack closure checks. Only descriptors 0–2 exist. | 1k |
 | R5 | Medium–low | Same file, `wasi` clock handling | `clock_time_get` ignores the clock ID and always supplies wall-clock time, so the monotonic clock is not monotonic. ID 999 returned success instead of `INVAL` (28). | 1k |
-| R6 | Low | Motor `src/tests/test-javy.sh` | The shared evidence directory is cleared before the launcher acquires its VM lock, and that lock is taken per boot. An overlapping invocation can erase an active run's evidence, including its Cloud Hypervisor runtime directory, even when its boot is refused. | 1l |
+| R6 | Low | Motor OS `src/tests/test-javy.sh` | The shared evidence directory is cleared before the launcher acquires its VM lock, and that lock is taken per boot. An overlapping invocation can erase an active run's evidence, including its Cloud Hypervisor runtime directory, even when its boot is refused. | 1l |
 
 Review evidence is retained under `build/javy-review.Sa2dn9/`: the
 [QEMU](../../build/javy-review.Sa2dn9/qemu.log) and
@@ -366,7 +366,7 @@ contract governs it and the later Wasmtime integration:
 - Use the owned-buffer/allocator hook in Wasmi/wasmi_core for `Memory::new`,
   shared by Javy and the runner. Keep `Memory::new_static`'s explicit
   caller-owned buffer semantics; it bypasses the allocator. Do not leak
-  mappings or invent unconstrained static lifetimes; preserve non-Motor/no-std
+  mappings or invent unconstrained static lifetimes; preserve non-Motor OS/no-std
   behavior. Wasmtime's `Config::with_host_memory` integration must satisfy its
   reservation/guard contract and retain explicit bounds checks.
 - `F_LAZY` is a hint, and lazy mappings are already in production use:
@@ -426,7 +426,7 @@ Retain the explicit coalescing policy already passed from resolved target
 configuration into module translation. The maintained fork selects native
 defaults in `Tunables::default_for_target` and exposes `Config::motor_runtime()`
 for the explicit Pulley profile. Qualify the policy for
-`x86_64-unknown-motor` and the **Motor Pulley runtime profile**, on Linux or Motor
+`x86_64-unknown-motor` and the **Motor OS Pulley runtime profile**, on Linux or Motor OS
 compiler hosts. A Pulley architecture alone does not identify its destination
 OS. Apply the same policy to raw run, precompilation and core modules inside
 components; preserve other targets' defaults and keep `memory_init_cow(false)`.
@@ -444,7 +444,7 @@ ordering, passive data, empty/out-of-bounds behavior, start ordering and fallbac
 The heuristic counts overlapping bytes, permits large dense images and adds
 page padding; it is not a resource limit. Sparse/dynamic fallback can still
 produce large initializers. Bound compilation and image/instance resources.
-Test Linux/Motor compiler hosts, Motor Pulley, sparse extents below/at/above the
+Test Linux/Motor OS compiler hosts, Motor OS Pulley, sparse extents below/at/above the
 old 16 MiB threshold, dense images and multiple memories. Record initializer
 choice, artifact size, copy cost and resolved policy with artifact identity.
 
@@ -556,7 +556,7 @@ lock, since the native calls use the descriptor's position) and keep the
 object they were opened on; identity for `metadata-hash`, `is-same-file` and
 p1 inodes is `FileAttr::entry_id`. Confinement is unchanged: absolute paths,
 NULs, overlong names and `..` above the preopen are refused before I/O, and
-Motor has no symlinks. What is given up is handle-follows-rename and
+Motor OS has no symlinks. What is given up is handle-follows-rename and
 replacement confinement, which no upstream fixture in the smoke suite needs;
 the fork's `motor-host-tests` now pin the path semantics instead. `moto-io`,
 `moto-async`, `moto-ipc` and `moto-sys-io` left the fork with the rewrite.
@@ -575,9 +575,9 @@ and moto-sdk's `io::net` rejects a wildcard address with port zero
 
 | Accepted TCP behavior | Required coverage |
 | --- | --- |
-| Bound-connect returns `not-supported`; ordinary unbound connect works. | Motor variants of `test_tcp_connect_explicit_bind` in `p2_tcp_connect.rs` and `p3_sockets_tcp_connect.rs`. |
+| Bound-connect returns `not-supported`; ordinary unbound connect works. | Motor OS variants of `test_tcp_connect_explicit_bind` in `p2_tcp_connect.rs` and `p3_sockets_tcp_connect.rs`. |
 | Native bind starts listening; peers may queue before WASI listen, but no guest data is exposed. | Focused bind/listen ordering regression. |
-| `0.0.0.0:0`, `[::]:0` and p3 implicit listen-bind return `not-supported`; `127.0.0.1:0` works. | Motor variants of unspecified-address ephemeral cases in `p2_tcp_bind.rs` and `p3_sockets_tcp_bind.rs`. |
+| `0.0.0.0:0`, `[::]:0` and p3 implicit listen-bind return `not-supported`; `127.0.0.1:0` works. | Motor OS variants of unspecified-address ephemeral cases in `p2_tcp_bind.rs` and `p3_sockets_tcp_bind.rs`. |
 
 Modify assertions in these monolithic fixtures; do not skip entire binaries.
 Use existing no-delay, TTL, linger and TCP buffer support. Report actual
@@ -592,18 +592,18 @@ grow-only ring capacities and size the p2 host write queue accordingly.
 These values reflect native 20 s probes and 300 s timeout on established
 connections, set in `src/sys/sys-io/src/runtime/net/socket/tcp.rs`; listening
 sockets use 5 s and 15 s until established. Reference that file beside copied
-constants, keep them synchronized and carry Motor variants of
+constants, keep them synchronized and carry Motor OS variants of
 `p2_tcp_sockopts.rs` and its p3 twin. No new native keepalive option is needed.
 
-Reuse the Motor Tokio/Mio ports in the wasm dependency closure without
-upgrading the Motor workspace or existing users/forks; Helix pins its own
+Reuse the Motor OS Tokio/Mio ports in the wasm dependency closure without
+upgrading the Motor OS workspace or existing users/forks; Helix pins its own
 Tokio/Mio revisions and does not move. Keep version/API adaptation in owned
 wasm dependency copies. Preserve native readiness/lifecycle and nonconsuming
 UDP peek; qualify the versions actually linked.
 
 Delegate UDP binding, route selection and close to existing native APIs. Native
 unspecified-address bind selects one local address; report that behavior in the
-Motor fixture variants. The prototype's all-interface endpoint fan-out,
+Motor OS fixture variants. The prototype's all-interface endpoint fan-out,
 discovery query and route cache are removed; no local-address query API is
 added. Explicit loopback/external-address binding remains available. UDP
 send/drop retains native semantics: accepted traffic may be discarded on close,
@@ -616,7 +616,7 @@ denial, cancellation, teardown and finite resource tests.
 ### Fibers, resource limits and HTTP
 
 Guard host fiber stacks using `Config::with_host_stack`, `StackCreator` and
-`StackMemory::guard_range`, with Motor-specific code calling moto-sys's
+`StackMemory::guard_range`, with Motor OS-specific code calling moto-sys's
 guarded heap maps:
 
 ```text
@@ -658,7 +658,7 @@ close deliberately sends reset; shutdown checks accept that native close result.
 Audit outbound HTTP grants independently of socket grants.
 
 Compile p3 through `component-model-async`; `P3_DEFAULT` in `src/common.rs`
-follows that feature upstream, and Motor sets it to `false` and requires
+follows that feature upstream, and Motor OS sets it to `false` and requires
 `-S p3`. Label it experimental and test default rejection. Retain selected p3
 regressions, updating/dropping fixtures on rebase only with a recorded upstream
 reason. Do not freeze p3 behavior or promise broader conformance/patch support.
@@ -697,24 +697,24 @@ reject a different running image. Deploy the native graph as a matched whole.
 | Owner | Maintained work |
 | --- | --- |
 | `moturus/javy` | Wasmi integration, phase lifetimes, local C++ TLS shim, plugins/direct outputs, the `wasmi` runner. |
-| `moturus/wasmtime` | Motor adapters, target policy, shared host/CLI, full/runtime-only builds, packager, p2/p3. |
-| `moturus/target-lexicon` | Motor target/System V ABI recognition. |
+| `moturus/wasmtime` | Motor OS adapters, target policy, shared host/CLI, full/runtime-only builds, packager, p2/p3. |
+| `moturus/target-lexicon` | Motor OS target/System V ABI recognition. |
 | `moturus/wasmi` | IR backward-branch correction and Linux reproducer/upstream report, owned backing. |
-| `moturus/tokio`, `moturus/mio` | The versions Wasmtime requires; existing Motor users keep their pinned versions. |
+| `moturus/tokio`, `moturus/mio` | The versions Wasmtime requires; existing Motor OS users keep their pinned versions. |
 | Brotli | Use upstream. The prototype's compression-determinism workaround is not an approved production fork. |
-| Ring/getrandom | Reuse the published Motor Ring port and upstream getrandom's custom entropy hook. |
-| Motor tree | Build/image wiring and integration tests of delivered tools; any filesystem API proposal requires separate review. |
+| Ring/getrandom | Reuse the published Motor OS Ring port and upstream getrandom's custom entropy hook. |
+| Motor OS tree | Build/image wiring and integration tests of delivered tools; any filesystem API proposal requires separate review. |
 
-Dependency work is **outside the Motor repository** in maintained forks;
+Dependency work is **outside the Motor OS repository** in maintained forks;
 `/tmp` experiments are migration inputs, not production dependencies. Do not
-commit Motor build/image/test wiring that depends on a manually prepared source
+commit Motor OS build/image/test wiring that depends on a manually prepared source
 directory, unpublished commits or private fixture/cache contents. There is no
 `src/wasm` source/patch/bootstrap subtree and no Python test or preparation
 driver. Engine unit/regression tests belong in the owning dependency
 repositories, with one exception: the `moturus/javy` fork stays minimal, so
 new Javy and `wasmi` runner regressions go into `src/tests/javy-smoke` and
 exercise the installed tools. Its existing native test crate and host tests are
-kept but not extended. Motor integration tests must be Rust crates called by shell
+kept but not extended. Motor OS integration tests must be Rust crates called by shell
 scripts and exercise tools produced by the normal reproducible build and
 installed in the image. Keep generated evidence under `build/` and distinguish
 prototype results from delivered implementation. Keep Wasmi's core/IR crates in
@@ -745,11 +745,11 @@ unnecessary.
 
 Build release add-ons with `panic="abort"`, `lto="fat"`, `codegen-units=1` and
 `strip=true` at each owning workspace root; record C/C++ settings and verify
-stripped/populated templates on Motor. The full and runtime-only Wasmtime graphs
+stripped/populated templates on Motor OS. The full and runtime-only Wasmtime graphs
 use separate output directories so compiler features do not leak into the
 runtime template. Avoid recompiling Binaryen or both Wasmtime variants during
 every debug gate. Install digest-verified plugins/adapters and a selected
-prebuilt guest fixture set with sources and external-host recipes; no new Motor
+prebuilt guest fixture set with sources and external-host recipes; no new Motor OS
 wasm32 targets, `--ignore-rust-version` or test-time downloads. Budget all four
 tools/templates, populated ELFs, fixtures and simultaneous scratch/output files
 within 1 GiB. Track file/loadable bytes and spawn/compiler peaks separately;
@@ -769,13 +769,13 @@ the p1-to-p2 adapter as a component-I/O fixture, not a native-core prerequisite.
 Retain/review the Javy-local C++ TLS shim (ABI/alignment, destructor order,
 reentrancy, allocation/unwind failure and Binaryen/CXX coverage), its
 128-destructor regression, allocator-backed loading and Wasmtime Rust TLS hooks.
-Preserve non-Motor/no-std behavior and broaden determinism fixtures. The
+Preserve non-Motor OS/no-std behavior and broaden determinism fixtures. The
 recorded `f32::log2` differences came from Rust's bundled libm (FreeBSD msun's
 `log2f`) versus glibc's (Arm optimized-routines, also in musl), which differ on
 11,575,817 of the 2^32 inputs; upstream Brotli's compressed source bytes
 followed them. Since toolchain `dev.2-abb676f7` (motor-os `3d98cd10`) both
-Motor's Rust libm and mlibc use glibc's algorithm, bit-identical to glibc 2.43
-on all inputs, and `javy-smoke` checks Motor Javy's output against Linux
+Motor OS's Rust libm and mlibc use glibc's algorithm, bit-identical to glibc 2.43
+on all inputs, and `javy-smoke` checks Motor OS Javy's output against Linux
 Javy's. The prototype's f64-then-round workaround stays retired. Preserve C++ TLS teardown and QuickJS/WIT diagnostics. The
 unresolved Pulley invalid-opcode event requires an explicit disposition in 2f;
 later passing matrices alone do not explain the original failure.
@@ -796,7 +796,7 @@ them; any branch of this tree must build with any version of the forks and of
 the toolchain; upgrading or switching must be easy for a human. Until
 2026-10-19 the wasm forks patched Tokio, Mio, target-lexicon, Wasmi, Wizer and
 the Motor OS crates in by sibling path (`../tokio`, `../motor-os/src/sys/lib`),
-unlike the older Motor branches of Mio and Tokio, which took `moto-rt` from
+unlike the older Motor OS branches of Mio and Tokio, which took `moto-rt` from
 crates.io. A path dependency pins the sibling's version in the fork's
 lockfile, so one tree branch's moto-rt bump broke `cargo build --locked` of
 the fork for every other branch.
@@ -889,7 +889,7 @@ Alternatives considered:
   follows `dev`. A one-line change per manifest plus `cargo update`.
 - **Pin ripgrep, Helix and sed by revision** the same way (`repo:branch:rev`
   in `src/build-addon-sources.sh`); they still follow their branch heads.
-- **Move the Motor WASI host out of the fork** into a tree-owned crate that
+- **Move the Motor OS WASI host out of the fork** into a tree-owned crate that
   depends on Wasmtime by git, so that the tree's own path dependencies serve
   it. Too large: the adapters implement `wasmtime-wasi`'s internal backends.
 
@@ -906,7 +906,7 @@ fetched, local commits never left). `src/build-motor-os.sh --javy-only` and
 `--wasmtime-only` rebuilt both add-ons from the pins (Javy 1 m 43 s, Cargo
 reusing Binaryen). Fork tests: Wasmi's regressions and no-std check, Wasmtime's
 compiler-policy and ELF tests, `motor-wasi-tests` and Javy's `motor-tests`
-built for Motor. VM gates on the rebuilt images: `test-wasm.sh` under Cloud
+built for Motor OS. VM gates on the rebuilt images: `test-wasm.sh` under Cloud
 Hypervisor PASS (97 `wasmtime-smoke` commands per VM) and
 `full-test-dev.sh --release` ALL PASS (QEMU wasm:224 and dev:256 included,
 about 41 min). Logs: `build/claude-targets/deps/`.
@@ -928,9 +928,9 @@ build/javy-prototype/artifacts/javy-linux build "$input" \
   -C deterministic -o "$output"
 ```
 
-Use identical input/plugin bytes and flags on Motor, with default static linkage,
+Use identical input/plugin bytes and flags on Motor OS, with default static linkage,
 compression and optimization. Compare bytes and execute both outputs; record
-arguments, all digests, status and stdio. Compare Motor's embedded-default path
+arguments, all digests, status and stdio. Compare Motor OS's embedded-default path
 with its explicit-plugin path; pin custom plugins individually. Linux's embedded
 plugin differs, so never compare defaults implicitly. Diagnose mismatches rather
 than replacing golden outputs to pass.
@@ -938,7 +938,7 @@ than replacing golden outputs to pass.
 ## Milestones ahead
 
 Implement in 100–300 LOC review units including tests. Each item names where
-its output lands: **fork** (reviewed commits on the named Motor branch, with
+its output lands: **fork** (reviewed commits on the named Motor OS branch, with
 the engine tests that belong there; for `moturus/javy`, code only, with its
 regressions in `src/tests/javy-smoke`), **tree** (commits in this repository:
 build, imager, docs and integration tests) or **evidence** (measurements under
@@ -1047,7 +1047,7 @@ no new dependency.
    took about 490 s of `test-wasm.sh`'s 600 s bound; its two VMs now take
    238 s.
 2. **1g — byte identity (done 2026-10-09).** Rule, set by the owner's choice
-   of a toolchain fix: Motor output equals upstream Linux Javy 9.1.0
+   of a toolchain fix: Motor OS output equals upstream Linux Javy 9.1.0
    (digest-pinned release, same explicit plugin, `-C deterministic`) byte for
    byte in every source mode. The only earlier difference, compressed
    TypeScript's `javy_source` (1,151,218 against 1,151,115 bytes), came from
@@ -1056,7 +1056,7 @@ no new dependency.
    `javy-smoke/fixtures/hello.js` (compressed, uncompressed, omitted) and the
    TypeScript workload (compressed) and stages the four digests as
    `linux-reference.txt` with the test inputs; `javy-smoke --linux-identity`
-   compiles the same four on Motor and requires equal digests. The four
+   compiles the same four on Motor OS and requires equal digests. The four
    compiles take about 32 s, so they run once per `full-test-dev.sh`, which
    passes `test-wasm.sh --linux-identity` to the first VM; `full-test.sh`
    and standalone `test-wasm.sh` runs skip them.
@@ -1135,8 +1135,8 @@ gated ([the resume point](#status-and-resume-point-2026-10-19)).
   link operations. A three-level parent-ID walk costs 41–54 µs against
   98–101 µs for a native path `stat`. A stale handle fails with
   `InvalidData` instead of `NotFound` (`InternalError` until 2026-10-09, when
-  the lookup misread every sys-io error response): Motor FS refuses the stale
-  generation, so confinement holds, but WASI sees an I/O error; mapping it
+  the lookup misread every sys-io error response): the Motor OS filesystem refuses
+  the stale generation, so confinement holds, but WASI sees an I/O error; mapping it
   better is a `src/sys` question and is not changed here.
 - **2e:** the stack check passes (teardown, yield, eight-slot limit,
   zeroing), a deliberate overflow kills only its process, and a 2 MiB stack
@@ -1156,7 +1156,7 @@ gated ([the resume point](#status-and-resume-point-2026-10-19)).
 
 **2d and 2f, 2026-10-08.** `src/build-motor-os.sh` installs a pinned upstream
 Rust (`WASM_GUEST_TOOLCHAIN`, 1.99.0) with `wasm32-wasip1`/`wasm32-wasip2` for
-guest programs; the Motor toolchain still has no wasm32 targets. The Wasmtime
+guest programs; the Motor OS toolchain still has no wasm32 targets. The Wasmtime
 add-on builds a host Pulley `compile` tool from its own sources and precompiles
 22 fixtures (about 12 MiB, staged outside the images since 2026-10-09): the
 fork's lifecycle, limit and memory WAT modules, a native-target artifact for
@@ -1170,13 +1170,13 @@ refusals, about 4.6 minutes per VMM). TypeScript through `wasmtime-rt` peaks at
 89.6/99.9 MiB at 224/256 MiB.
 
 The fork commits `62a4ed98a..113ca953f` are published. Running upstream's
-socket programs on Motor found four adapter defects, now fixed: every WASI UDP
+socket programs on Motor OS found four adapter defects, now fixed: every WASI UDP
 socket was bound at creation (upstream's writability wait reached the lazy
 bind), native in-use and non-local binds surfaced as `unknown`/
 `invalid-argument`, accepted TCP sockets ignored listener options, and without
 `CAP_NET` guests saw `invalid-state` instead of `access-denied`. Twelve upstream
-programs gain Motor branches under a `motor` test-programs feature, plus a
-bind/listen ordering program; the non-Motor builds still pass on Linux under
+programs gain Motor OS branches under a `motor` test-programs feature, plus a
+bind/listen ordering program; the non-Motor OS builds still pass on Linux under
 upstream Wasmtime 48.0.1.
 
 Native behaviors found and left unchanged (`src/sys`): a wildcard UDP bind
@@ -1201,7 +1201,7 @@ sys-io error responses as protocol errors, paths ending in `/` or `/.` did not
 have to name a directory, directories opened for writing, a read-only handle
 could be truncated, a non-empty directory surfaced as `EFBIG` (sys-io encodes
 it as `FileTooLarge`), and rename replaced a destination of the other kind.
-Seventeen programs are excluded for missing Motor features: symlinks (9), hard
+Seventeen programs are excluded for missing Motor OS features: symlinks (9), hard
 links (2), settable times (2), a host-set extreme mtime (1), read-only
 preopens, which the CLI cannot grant (2), and `EPIPE` for a writer whose reader
 is gone (1). The native behaviors behind these are in `future-work.md`. The
@@ -1242,7 +1242,7 @@ completes 2f.
    tests with the missing interleavings and lifecycle cases. Measure ownership,
    cancellation, stale connections and IPC cost of the existing narrow `CMD_STAT`
    lookup before final acceptance. Output: fork tests/fixes, evidence.
-4. **2d — networking subset.** Carry the Motor variants of the p2 fixtures in
+4. **2d — networking subset.** Carry the Motor OS variants of the p2 fixtures in
    the accepted-TCP and keepalive tables, the bind/listen ordering regression,
    the UDP unspecified-bind and immediate-close cases, and the ring-capacity
    report for the host write queue. Constants reference the sys-io source.
@@ -1276,7 +1276,7 @@ completes 2f.
    `build/javy-prototype/logs/vm-serial.log` shows the kernel's
    `INVALID OPCODE in uspace` (an x86 `#UD` in some user process, which the
    kernel does not name), not a Pulley decoder error. Native panics and
-   `abort()` on Motor no longer raise `#UD` (both exit -1, checked), and no run
+   `abort()` on Motor OS no longer raise `#UD` (both exit -1, checked), and no run
    in this milestone raised one. The likely sources are native code: wasm
    traps compiled as `ud2` under signal-based traps, which
    `Config::motor_runtime()` now disables, or CPU features missing in the VM.
@@ -1570,7 +1570,7 @@ kills the thread.
    fragmented/different-header requests before this item exits; it is not
    retried away. Output: fork, evidence.
 3. **3c — p3 opt-in.** Preserve the existing `component-model-async` build and
-   Motor `P3_DEFAULT=false`. Qualify installed default rejection and explicit
+   Motor OS `P3_DEFAULT=false`. Qualify installed default rejection and explicit
    `-S p3` operation, retaining selected p3 regressions with recorded upstream
    reasons. Output: fork/tree tests and any fixes, evidence.
 4. **3d — TLS.** Rustls/Ring over native clocks/entropy, trusting the image's
@@ -1599,7 +1599,7 @@ complete matrix.
 1. **4a — compiler policy qualification.** Retain the existing target-resolved
    coalescing defaults, `Config::motor_runtime()` Pulley profile,
    `memory_guaranteed_dense_image_size(0)` and `memory_init_cow(false)`.
-   Extend the fork's `motor-tests` coverage on Linux and Motor hosts: sparse
+   Extend the fork's `motor-tests` coverage on Linux and Motor OS hosts: sparse
    extents below/at/above 16 MiB, dense images, multiple memories, passive data, start
    ordering and fallback, recording initializer choice, artifact size and copy
    cost. Qualify the policy through delivered CLI paths, bound compiler

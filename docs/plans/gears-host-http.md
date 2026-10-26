@@ -58,7 +58,7 @@ recent_tail_tokens = 8192
 ```
 
 Remove the existing `allow_plain_http_loopback` setting and its test helper.
-It was inert on Motor OS only because Motor curl refused HTTP; once curl
+It was inert on Motor OS only because Motor OS curl refused HTTP; once curl
 speaks HTTP it would be a second, undocumented plaintext gate, and
 `plain_http_allowlist = ["127.0.0.1"]` says the same thing through the one
 documented list. A plaintext `base_url` whose host is not on both lists is
@@ -100,7 +100,7 @@ new feature.
 Aim for 100–300 changed lines per patch, including tests. Keep all changes
 local until a commit is requested.
 
-1. Generalize the Motor curl URL and protocol handling.
+1. Generalize the Motor OS curl URL and protocol handling.
    - Rename its URL type to reflect HTTP and HTTPS support. The type is
      public but has no callers outside the curl crate; Lorry's `HttpsUrl` is
      a separate type in its own redirect module and is untouched.
@@ -112,7 +112,7 @@ local until a commit is requested.
      `=http,https`. Default to HTTPS only, and reject a disallowed request
      before DNS or TCP work. Cover these cases with unit tests.
 
-2. Add plaintext transfer to Motor curl.
+2. Add plaintext transfer to Motor OS curl.
    - Reuse the existing TCP connection, bounded I/O, HTTP request writing,
      response framing, output streaming, and transfer metadata.
    - Perform TLS setup and certificate loading only for HTTPS. Share the
@@ -126,7 +126,7 @@ local until a commit is requested.
    - Parse and validate the new host list, wire it into `EgressPolicy`, and
      retain default refusal and exact matching.
    - Pass `--proto` matching the request scheme to both upstream curl and
-     Motor curl.
+     Motor OS curl.
    - Refuse implicit default-file fallback over plain HTTP, as described
      above.
    - Test default refusal, the host address 192.168.4.1, unlisted hosts,

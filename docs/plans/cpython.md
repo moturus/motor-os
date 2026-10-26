@@ -6,7 +6,7 @@ cross-repository and are called out as such below.
 
 Scope: CPython 3.14 as a fully static, Linux-cross-built interpreter for
 `x86_64-unknown-motor`, shipped on the developer image with the pure-Python
-standard library and the built-in extension modules Motor can support. Out
+standard library and the built-in extension modules Motor OS can support. Out
 of scope: `ctypes`, loadable extension modules, fork-based
 `multiprocessing`, and OpenSSL, which is a separate port (§8).
 
@@ -16,7 +16,7 @@ Provenance. Findings were gathered against:
   `MOTOR_MLIBC_REV` `0cece7e5` (`../toolchain-src/mlibc`); the standalone
   host LLVM 23.1.0-rc1 (moturus/llvm-project `7c2a7b21`) under
   `../build/toolchain/standalone-llvm/`; the assembly sysroot under
-  `../assemblies/<key>/sysroot/devtools/llvm`; the Motor Rust std port under
+  `../assemblies/<key>/sysroot/devtools/llvm`; the Motor OS Rust std port under
   `../toolchain-src/rust/library/std/src/sys/*/motor*`.
 * CPython `3.14` branch files fetched from GitHub on 2026-09-10:
   `configure.ac`, `Lib/site.py`, `Lib/subprocess.py`,
@@ -32,14 +32,14 @@ Provenance. Findings were gathered against:
 A first interpreter (`python3 -c`, scripts, `import` of the pure-Python
 standard library, `.pyc` caching, sockets, threads) is a few days of work
 and is closer to CPython's WASI port than to a Linux build. In several ways
-it is easier than WASI: Motor has real threads, TCP/UDP sockets, a
+it is easier than WASI: Motor OS has real threads, TCP/UDP sockets, a
 filesystem with mtimes and inodes, and `posix_spawn`.
 
 The work splits three ways:
 
 1. **One hard startup blocker.** mlibc aborts the process, rather than
    returning ENOSYS, when `getuid`, `geteuid`, `getgid`, `getegid`,
-   `getppid`, or `gettid` is called without a Motor sysdep, and CPython's
+   `getppid`, or `gettid` is called without a Motor OS sysdep, and CPython's
    `site.py` calls `os.geteuid()` and `os.getuid()` during startup. Six
    one-line sysdeps in `sysdeps/motor` fix it for every C program; a
    CPython-only `config.site` workaround also exists (§6.2).
@@ -100,7 +100,7 @@ CPython's platform surface, in the order it bites during a port:
 * **Terminals.** The 3.13+ REPL uses `termios` and falls back to the basic
   REPL when it cannot.
 
-## 3. Background B: what Motor provides
+## 3. Background B: what Motor OS provides
 
 The C runtime is documented in `docs/libc.md`. From the application down:
 libc++ and libunwind; mlibc `sysdeps/motor`; compiler-rt builtins with
@@ -191,7 +191,7 @@ terminal; that is correct behavior.
 
 ## 5. Gap analysis
 
-| CPython need | Motor today | Fix | Where | Size |
+| CPython need | Motor OS today | Fix | Where | Size |
 | --- | --- | --- | --- | --- |
 | `os.getuid`/`geteuid`/`getgid`/`getegid` at startup (`site.py` lines 275, 279) | abort | sysdeps returning 0 | mlibc `sysdeps/motor` | 6 lines |
 | `os.getppid`, `gettid` | abort | sysdeps returning pid and VDSO tid | mlibc | 2 lines |
@@ -206,7 +206,7 @@ terminal; that is correct behavior.
 | `os.pipe`, `os.dup`, `Popen.poll`, `subprocess` pipes | ENOSYS/EINVAL | see §7.1 | VDSO or shim, mlibc, `subprocess.py` | 300 to 500 lines |
 | `asyncio` self-pipe | `socketpair` ENOSYS | `ac_cv_func_socketpair=no`; CPython falls back to a loopback TCP pair; moto-netstack has `127.0.0.1/8` (`docs/networking.md`) | `config.site` | 1 line |
 | `KeyboardInterrupt` | Ctrl+C kills a Default process with 130 | helper thread on `ctrl_c_wait` calling `PyErr_SetInterrupt` | shim export plus `Modules/signalmodule.c` | ~80 lines |
-| `shutil.copy2`, `copytree`, `os.utime` | `utimensat` ENOSYS, no VDSO set-times | VDSO set-times, or Motor-tolerant `copystat` | VDSO plus mlibc, or `Lib/shutil.py` | see §7.3 |
+| `shutil.copy2`, `copytree`, `os.utime` | `utimensat` ENOSYS, no VDSO set-times | VDSO set-times, or Motor OS-tolerant `copystat` | VDSO plus mlibc, or `Lib/shutil.py` | see §7.3 |
 | `os.chmod(path)`, `os.umask`, `os.uname` | ENOSYS | `Chmod` over `fs::set_perm`; `Umask` bookkeeping; `Uname` constant | mlibc | 30 lines |
 | `termios`, `tty`, `_pyrepl` | no termios by design | none; basic REPL | n/a | 0 |
 | `ssl`, `hashlib` via OpenSSL | no C TLS library ported | separate port | outside this plan | weeks |
@@ -347,7 +347,7 @@ arguments and return the pipe fds, matching `SpawnArgs`; add
 actions consisting of `addopen`/`adddup2` onto fds 0 to 2 and translates
 them into the stdio slots; `Waitpid` honors `WNOHANG` via `try_wait`;
 `Dup` and `Dup2` map onto `duplicate`. `pipe()` stays unsupported, so
-`os.pipe` stays absent. On the CPython side, `subprocess.py` gains a Motor
+`os.pipe` stays absent. On the CPython side, `subprocess.py` gains a Motor OS
 branch that always uses `os.posix_spawn` with `file_actions` and never
 `fork_exec`, and `Popen.communicate` works because the pipe ends are
 ordinary fds that `select` and `poll` already handle
@@ -376,8 +376,8 @@ package installers break on ENOSYS. Options: a VDSO set-times operation
 or a `Lib/shutil.py` change that treats `NotImplementedError`/ENOSYS from
 `utime` as "unsupported" the way it already does for `chflags`. The second
 is a 10-line change and needs no runtime work; the first is the correct
-long-term answer if Motor FS wants settable times at all. Add `Chmod` over
-`fs::set_perm`, `Umask` as pure bookkeeping, and `Uname` returning
+long-term answer if the Motor OS filesystem wants settable times at all. Add
+`Chmod` over `fs::set_perm`, `Umask` as pure bookkeeping, and `Uname` returning
 `Motor`/`x86_64` to mlibc in the same patch.
 
 ## 8. Phase 3: optional libraries
@@ -388,7 +388,7 @@ with the Appendix A recipe; each is a static archive staged next to libc.
 OpenSSL is the one that matters for `ssl`, `hashlib` acceleration, and `pip`
 against PyPI, and it is a port of its own: a Perl-driven configure, a new
 OS target, `no-dso no-shared`, and its own libc expectations. No C TLS
-library exists on Motor today; `curl`, `httpd`, and `russhd` are Rust on
+library exists on Motor OS today; `curl`, `httpd`, and `russhd` are Rust on
 rustls. Until OpenSSL lands, `hashlib` uses CPython's built-in
 implementations and `pip` can install only local wheels.
 
@@ -409,7 +409,7 @@ platform checks that a `motor` platform name can reuse.
   the image, and the whole CPython build assumes them. Cross-build only.
 * **Enabling mlibc's glibc option to get `sys/ioctl.h`.** It drags in a
   large surface (`sys/epoll.h`, `sys/timerfd.h`, `resolv`, `execinfo` with
-  aborting stubs) that no Motor sysdep backs. A one-file `sys/ioctl.h` is
+  aborting stubs) that no Motor OS sysdep backs. A one-file `sys/ioctl.h` is
   the smaller change.
 * **Running the interpreter on a large pthread instead of setting
   `Py_C_STACK_SIZE`.** Works, since spawned threads get what they ask for,
