@@ -18,6 +18,8 @@ use std::time::Instant;
 
 #[path = "motor_queue.rs"]
 mod queue;
+#[path = "motor_stats.rs"]
+mod stats;
 
 #[derive(Default)]
 struct Ready(Mutex<Option<Waker>>);
@@ -189,6 +191,7 @@ async fn drive(
     mut writer: Pin<&mut impl Future<Output = Result<()>>>,
     ready: &Ready,
 ) -> Result<()> {
+    let mut stats = stats::Stats::start();
     let mut timer = None;
     loop {
         let deadline = scheduler.deadline();
@@ -205,8 +208,10 @@ async fn drive(
             }
             let before = scheduler.counters.batches;
             if let Poll::Ready(result) = scheduler.poll(cx, io, Instant::now()) {
+                stats.publish(scheduler);
                 return Poll::Ready(result);
             }
+            stats.publish(scheduler);
             if scheduler.counters.batches != before || scheduler.deadline() != deadline {
                 return Poll::Ready(Ok(()));
             }

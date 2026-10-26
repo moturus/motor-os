@@ -1603,6 +1603,18 @@ fn main() {
         wireguard::cleanup();
         return;
     }
+    if args.len() == 4 && args[1] == "wireguard-readable-secrets" {
+        wireguard::reject_readable_secrets(&args[2..]);
+        return;
+    }
+    if args.len() == 3 && args[1] == "wireguard-rejections" {
+        wireguard::rejection_counters(&args[2]);
+        return;
+    }
+    if args.len() == 2 && args[1] == "wireguard-fragmented-reply" {
+        wireguard::fragmented_reply();
+        return;
+    }
     if args.len() == 2 && args[1] == "test-ip-device" {
         ip_device::run_all_tests();
         return;

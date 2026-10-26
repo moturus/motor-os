@@ -18,6 +18,69 @@ pub fn permissions(paths: &[String]) {
     println!("wireguard permissions PASS");
 }
 
+pub fn reject_readable_secrets(paths: &[String]) {
+    use moto_sdk::io::fs::{AccessPermissions, FsClient};
+    use std::process::{Command, Stdio};
+    assert_eq!(paths.len(), 2);
+    let original = std::fs::read_to_string(&paths[0]).unwrap();
+    let secret = std::fs::read_to_string(&paths[1]).unwrap();
+    std::fs::write(
+        &paths[0],
+        format!("{original}\npreshared_key = '{}'\n", secret.trim()),
+    )
+    .unwrap();
+    for readable in [1, 0] {
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+            let fs = FsClient::connect().unwrap();
+            for (index, path) in paths.iter().enumerate() {
+                let entry = fs.stat(path).await.unwrap().0;
+                let mut permissions = fs.metadata(entry).await.unwrap().permissions().unwrap();
+                permissions.none = if index == readable {
+                    AccessPermissions::R
+                } else {
+                    AccessPermissions::None
+                };
+                fs.set_all_permissions(entry, permissions).await.unwrap();
+            }
+        });
+        let mut child = Command::new("/system/bin/wg")
+            .arg(&paths[0])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("wg did not reject a None-readable secret");
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let output = String::from_utf8([output.stdout, output.stderr].concat()).unwrap();
+        assert!(output.contains("must not be readable by the None role"));
+        assert!(!output.contains(secret.trim()));
+        assert!(!output.contains("active"));
+    }
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+        let fs = FsClient::connect().unwrap();
+        for path in paths {
+            let entry = fs.stat(path).await.unwrap().0;
+            let mut permissions = fs.metadata(entry).await.unwrap().permissions().unwrap();
+            permissions.none = AccessPermissions::None;
+            fs.set_all_permissions(entry, permissions).await.unwrap();
+        }
+    });
+    std::fs::write(&paths[0], original).unwrap();
+    permissions(paths);
+    cleanup();
+    println!("wireguard readable-secret rejection PASS");
+}
+
 pub fn exchange(remote: &str, local: &str) {
     let remote: IpAddr = remote.parse().unwrap();
     let local: IpAddr = local.parse().unwrap();
@@ -48,6 +111,51 @@ pub fn exchange(remote: &str, local: &str) {
         assert_eq!(&received[..length], payload);
     }
     println!("wireguard exchange {local} -> {} PASS", remote.ip());
+}
+
+pub fn fragmented_reply() {
+    let before = crate::tcp::read_sys_io_metric("net.ipv6.fragments_rx");
+    // A 1420-byte inner packet pads to 1424, making 1504 outer IPv6 bytes.
+    // The fixture sends it over the tap's 1500-byte path.
+    exchange("fd50:20::1", "fd50:20::2");
+    assert!(crate::tcp::read_sys_io_metric("net.ipv6.fragments_rx") > before);
+    println!("wireguard padded reply over smaller outer path PASS");
+}
+
+pub fn rejection_counters(pid: &str) {
+    use moto_sdk::stats::Collector;
+    let pid: u64 = pid.parse().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if let Some(provider) = Collector::provider_by_name(&format!("wg:{pid}")) {
+            assert_eq!(provider.id, pid);
+            let descriptions = Collector::describe(&provider).unwrap();
+            let values = Collector::query(&provider).unwrap();
+            let read = |name| {
+                let id = descriptions
+                    .iter()
+                    .find(|metric| metric.name == name)
+                    .unwrap()
+                    .id;
+                values
+                    .iter()
+                    .find(|metric| metric.metric == id)
+                    .unwrap()
+                    .value
+            };
+            if read("wg.malformed") >= 1 && read("wg.unauthenticated") >= 2 {
+                assert!(read("wg.timer_ticks") > 0);
+                assert_eq!(read("wg.transport_failures"), 0);
+                println!("wireguard malformed, tamper and replay counters PASS");
+                return;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "wg did not publish rejection counters"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 pub fn cleanup() {

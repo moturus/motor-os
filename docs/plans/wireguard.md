@@ -1,7 +1,7 @@
 # WireGuard through a process-backed IP device
 
 Completed steps: 0 through 9.
-Current step: 10 - expanded VM coverage.
+Current step: 10 - expanded VM coverage (1 of 4 patches complete).
 
 2026-10-24. Design and implementation plan, grounded in the tree at
 a3d739f9. This document specifies the process-backed IP device, WireGuard
@@ -851,7 +851,8 @@ exercise bounded queues, pending flush resumption and timer progress while
 unrelated networking and filesystem work continues. Long timer transitions
 use mock clocks rather than multi-minute VM sleeps.
 
-Also cover transport-address loss waking `wg` and causing its clean exit,
+Also cover physical-address withdrawal and its invalidation notification
+waking `wg`, causing fatal transport exit and device cleanup,
 unaffected physical UDP with multiple NICs, and rejection of either a
 None-readable key or config, including a PSK-bearing TOML. Verify sanitized
 errors without exposing secret values. No Internet destinations.
