@@ -174,6 +174,7 @@ wg:
 	cd src/bin/wg && CC_x86_64_unknown_motor="$(MOTOR_SYSROOT)/bin/motor-clang" \
 		AR_x86_64_unknown_motor=ar CARGO_TARGET_DIR="$(OBJ_DIR)/wg" $(DO_BUILD) --locked
 	strip -o "$(BIN_DIR)/wg" "$(OBJ_DIR)/wg/$(SUB_DIR)/wg"
+	strip -o "$(BIN_DIR)/wg-tool" "$(OBJ_DIR)/wg/$(SUB_DIR)/wg-tool"
 
 wg-self-test:
 	mkdir -p $(BIN_DIR)
@@ -326,7 +327,7 @@ define BUILD_TEST_IMAGE
 endef
 
 # A small test-only image whose later overlay selects a System serial console.
-system-tty.img: boot core sys-base user-base
+system-tty.img: boot core sys-base user-base wg
 	$(call BUILD_TEST_IMAGE,system-tty)
 
 # An isolated System-console image for vsock tests that must run without IP.

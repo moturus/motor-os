@@ -14,6 +14,7 @@ pub const MAX_NAME_BYTES: usize = 31;
 pub type Result<T> = std::result::Result<T, &'static str>;
 
 // Deliberately no Debug: a config contains the private key and optional PSKs.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Config {
     pub name: String,
     pub private_key: [u8; 32],
@@ -23,6 +24,7 @@ pub struct Config {
     pub peers: Vec<Peer>,
 }
 
+#[derive(Clone, PartialEq, Eq)]
 pub struct Peer {
     pub public_key: [u8; 32],
     pub preshared_key: Option<[u8; 32]>,
@@ -34,9 +36,13 @@ pub struct Peer {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
+    name: String,
+    private_key: String,
+    public_key: Option<String>,
     transport_addresses: Vec<IpAddr>,
     listen_port: u16,
     cidrs: Vec<IpNetwork>,
+    #[serde(default)]
     peers: Vec<RawPeer>,
 }
 
@@ -50,7 +56,7 @@ struct RawPeer {
     persistent_keepalive: Option<u16>,
 }
 
-fn key(encoded: &str) -> Result<[u8; 32]> {
+pub fn key(encoded: &str) -> Result<[u8; 32]> {
     let mut bytes = [0; 32];
     if STANDARD.decode_slice(encoded.trim(), &mut bytes) != Ok(bytes.len()) {
         return Err("keys must be base64 values encoding exactly 32 bytes");
@@ -58,7 +64,7 @@ fn key(encoded: &str) -> Result<[u8; 32]> {
     Ok(bytes)
 }
 
-fn unicast(address: IpAddr) -> bool {
+pub fn unicast(address: IpAddr) -> bool {
     !address.is_unspecified()
         && !address.is_multicast()
         && !matches!(address, IpAddr::V4(address) if address.is_broadcast())
@@ -69,29 +75,32 @@ impl Config {
         if path.extension().and_then(|value| value.to_str()) != Some("toml") {
             return Err("configuration filename must end in .toml");
         }
-        let name = path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .ok_or("configuration filename is not UTF-8")?;
         let text = crate::files::read(path)?;
-        let private_key = crate::files::read(&path.with_extension("key"))?;
-        Self::parse(name, &text, &private_key)
+        Self::parse(&text)
     }
 
-    pub fn parse(name: &str, text: &str, private_key: &str) -> Result<Self> {
-        if name.is_empty()
-            || name.len() > MAX_NAME_BYTES
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
-        {
-            return Err("invalid device name in config filename");
-        }
-        if text.len() > MAX_FILE_BYTES || private_key.len() > MAX_FILE_BYTES {
-            return Err("config and key files are limited to 64 KiB each");
+    pub fn public_key(&self) -> [u8; 32] {
+        public_key(self.private_key)
+    }
+
+    pub fn parse(text: &str) -> Result<Self> {
+        if text.len() > MAX_FILE_BYTES {
+            return Err("configuration is limited to 64 KiB");
         }
         let raw: RawConfig =
             toml::from_str(text).map_err(|_| "invalid WireGuard TOML configuration")?;
+        validate_name(&raw.name)?;
+        let private_key = key(&raw.private_key)?;
+        let own_key = public_key(private_key);
+        if raw
+            .public_key
+            .as_deref()
+            .map(key)
+            .transpose()?
+            .is_some_and(|key| key != own_key)
+        {
+            return Err("public_key does not match private_key");
+        }
         if raw.listen_port == 0 {
             return Err("listen_port must be nonzero");
         }
@@ -113,14 +122,17 @@ impl Config {
                 return Err("tunnel addresses must be unique unicast addresses");
             }
         }
-        if raw.peers.is_empty() || raw.peers.len() > MAX_PEERS {
-            return Err("configure between 1 and 16 peers");
+        if raw.peers.len() > MAX_PEERS {
+            return Err("configure at most 16 peers");
         }
         let mut keys = HashSet::new();
         let mut prefixes = HashSet::new();
         let mut peers = Vec::with_capacity(raw.peers.len());
         for raw_peer in raw.peers {
             let public_key = key(&raw_peer.public_key)?;
+            if public_key == own_key {
+                return Err("peer public key is the interface's own key");
+            }
             if !keys.insert(public_key) {
                 return Err("duplicate peer public key");
             }
@@ -174,12 +186,29 @@ impl Config {
             });
         }
         Ok(Self {
-            name: name.to_owned(),
-            private_key: key(private_key)?,
+            name: raw.name,
+            private_key,
             transport_addresses: raw.transport_addresses,
             listen_port: raw.listen_port,
             cidrs: raw.cidrs,
             peers,
         })
     }
+}
+
+pub fn validate_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.len() > MAX_NAME_BYTES
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+    {
+        return Err("interface name must be 1–31 ASCII letters, digits, underscores or hyphens");
+    }
+    Ok(())
+}
+
+pub fn public_key(private: [u8; 32]) -> [u8; 32] {
+    use boringtun::x25519::{PublicKey, StaticSecret};
+    PublicKey::from(&StaticSecret::from(private)).to_bytes()
 }

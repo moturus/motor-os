@@ -19,16 +19,26 @@ const NAMES: [&str; 12] = [
     "wg.timer_ticks",
     "wg.transport_failures",
 ];
-type Snapshot = Arc<Mutex<[u64; NAMES.len()]>>;
+pub(super) struct Published {
+    metrics: [u64; NAMES.len()],
+    pub snapshot: crate::control::Snapshot,
+    pub cleanup: Option<crate::config::Result<()>>,
+}
+pub(super) type Shared = Arc<Mutex<Published>>;
 
 pub(super) struct Stats {
-    values: Snapshot,
+    pub(super) values: Shared,
     tick: u64,
+    started: std::time::Instant,
 }
 
 impl Stats {
-    pub(super) fn start() -> Self {
-        let values = Arc::new(Mutex::new([0; NAMES.len()]));
+    pub(super) fn start(config: &crate::config::Config, path: &str) -> Self {
+        let values = Arc::new(Mutex::new(Published {
+            metrics: [0; NAMES.len()],
+            snapshot: crate::control::Snapshot::new(config, path),
+            cleanup: None,
+        }));
         let snapshot = values.clone();
         if std::thread::Builder::new()
             .name("wg:stats".into())
@@ -44,7 +54,12 @@ impl Stats {
         Self {
             values,
             tick: u64::MAX,
+            started: std::time::Instant::now(),
         }
+    }
+
+    pub(super) fn state(&self, state: crate::control::State) {
+        self.values.lock().unwrap().snapshot.interface.state = state;
     }
 
     pub(super) fn publish(&mut self, scheduler: &Scheduler) {
@@ -55,7 +70,9 @@ impl Stats {
         let crypto = &scheduler.crypto.counters;
         let counters = &scheduler.counters;
         // One short copy per timer tick avoids locks in the per-packet path.
-        *self.values.lock().unwrap() = [
+        let mut values = self.values.lock().unwrap();
+        values.snapshot.refresh(scheduler, self.started);
+        values.metrics = [
             crypto.malformed,
             crypto.unauthenticated,
             crypto.unknown_peer,
@@ -72,7 +89,7 @@ impl Stats {
     }
 }
 
-fn serve(values: Snapshot) -> Result<(), u16> {
+fn serve(values: Shared) -> Result<(), u16> {
     let pid = sys::current_pid();
     let url = format!("wg-stats-{pid}");
     let mut server = LocalServer::new(&url, ChannelSize::Small, 4, 2)?;
@@ -98,7 +115,7 @@ fn serve(values: Snapshot) -> Result<(), u16> {
             };
             match (version, command) {
                 (0, stats::CMD_QUERY_METRICS) => {
-                    let snapshot = *values.lock().unwrap();
+                    let snapshot = values.lock().unwrap().metrics;
                     let entries: [_; NAMES.len()] = std::array::from_fn(|index| {
                         MetricEntry::global(index as u32, snapshot[index])
                     });

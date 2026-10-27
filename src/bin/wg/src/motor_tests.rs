@@ -58,6 +58,7 @@ pub fn transport_invalidation(address: &str) {
         let wakes = Arc::new(Wakes::default());
         let waker = Waker::from(wakes.clone());
         let mut cx = Context::from_waker(&waker);
+        let mut stats = stats::Stats::start(&config, "/user/cfg/wireguard/invalidation.toml");
         {
             let mut forwarding = std::pin::pin!(forward(
                 device,
@@ -65,6 +66,7 @@ pub fn transport_invalidation(address: &str) {
                 vec![socket.clone()],
                 queue::Queue::new().unwrap(),
                 ready,
+                &mut stats,
             ));
             assert!(forwarding.as_mut().poll(&mut cx).is_pending());
             let before = wakes.0.load(Ordering::Relaxed);

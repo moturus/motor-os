@@ -86,7 +86,7 @@ trap 'exit 143' TERM
 
 select_test_vm "$SCRATCH" "$BUILD" system-console "$VMM"
 export MOTO_IMAGE="$TEST_VM_IMAGE"
-make -C "$ROOT_DIR" "$TEST_VM_IMG_TARGET" systest BUILD="$BUILD" \
+make -C "$ROOT_DIR" "$TEST_VM_IMG_TARGET" systest wg-self-test BUILD="$BUILD" \
   TEST_IMAGE_ROOT="$SCRATCH" -j"$(nproc)"
 
 CHECK_STDERR="$SCRATCH/check-console-stderr"
@@ -194,6 +194,22 @@ system_caps_output="$(vm_ssh /system/bin/cat /user/tmp/system-caps.log)"
 [ "$system_caps_output" = $'spawn_wait_kill::test_system_parent_cannot_grant_unheld PASS\nfs_permissions::test_write_capability(System) PASS\nnet_caps::check_denied(System) PASS' ] ||
   fail "System capability tests did not finish: '$system_caps_output'"
 printf '%s\n' "$system_caps_output"
+
+# WireGuard derives roles from the complete capability word, including when
+# CAP_SYS and CAP_INTERACTIVE are both present. This needs the System console.
+scp -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
+  -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
+  -i "$WD/test.key" "$ROOT_DIR/build/bin/$BUILD/wg-self-test" \
+  motor@192.168.4.2:/none/tmp/wg-role-self-test
+run_console /user/tmp/wg-role-done \
+  'MOTOR_OS_CAPS=0x365 /none/tmp/wg-role-self-test system > /user/tmp/wg-role.log 2> /user/tmp/wg-role.err; echo $? > /user/tmp/wg-role.status'
+wg_role_status="$(vm_ssh /system/bin/cat /user/tmp/wg-role.status)"
+wg_role_output="$(vm_ssh /system/bin/cat /user/tmp/wg-role.log)"
+[ "$wg_role_status" = 0 ] ||
+  fail "WireGuard role tests exited $wg_role_status: '$wg_role_output' $(vm_ssh /system/bin/cat /user/tmp/wg-role.err)"
+[ "$wg_role_output" = 'wg-tool System role and permission preservation PASS' ] ||
+  fail "WireGuard role tests did not finish: '$wg_role_output'"
+printf '%s\n' "$wg_role_output"
 
 # An exported mask wins over Rush's ordinary System grant, even when it omits
 # CAP_NET; without one, the grant keeps the console's own bits.

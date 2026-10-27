@@ -5,7 +5,7 @@ use std::time::Duration;
 
 pub fn permissions(paths: &[String]) {
     use moto_sdk::io::fs::{AccessPermissions, EntryKind, FsClient};
-    assert_eq!(paths.len(), 2);
+    assert_eq!(paths.len(), 1);
     moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let fs = FsClient::connect().unwrap();
         for path in paths {
@@ -21,51 +21,50 @@ pub fn permissions(paths: &[String]) {
 pub fn reject_readable_secrets(paths: &[String]) {
     use moto_sdk::io::fs::{AccessPermissions, FsClient};
     use std::process::{Command, Stdio};
-    assert_eq!(paths.len(), 2);
+    assert_eq!(paths.len(), 1);
     let original = std::fs::read_to_string(&paths[0]).unwrap();
-    let secret = std::fs::read_to_string(&paths[1]).unwrap();
+    let secret = original
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("private_key = "))
+        .unwrap()
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_owned();
     std::fs::write(
         &paths[0],
         format!("{original}\npreshared_key = '{}'\n", secret.trim()),
     )
     .unwrap();
-    for readable in [1, 0] {
-        moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
-            let fs = FsClient::connect().unwrap();
-            for (index, path) in paths.iter().enumerate() {
-                let entry = fs.stat(path).await.unwrap().0;
-                let mut permissions = fs.metadata(entry).await.unwrap().permissions().unwrap();
-                permissions.none = if index == readable {
-                    AccessPermissions::R
-                } else {
-                    AccessPermissions::None
-                };
-                fs.set_all_permissions(entry, permissions).await.unwrap();
-            }
-        });
-        let mut child = Command::new("/system/bin/wg")
-            .arg(&paths[0])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while child.try_wait().unwrap().is_none() {
-            if std::time::Instant::now() >= deadline {
-                child.kill().unwrap();
-                child.wait().unwrap();
-                panic!("wg did not reject a None-readable secret");
-            }
-            std::thread::sleep(Duration::from_millis(1));
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+        let fs = FsClient::connect().unwrap();
+        let entry = fs.stat(&paths[0]).await.unwrap().0;
+        let mut permissions = fs.metadata(entry).await.unwrap().permissions().unwrap();
+        permissions.none = AccessPermissions::R;
+        fs.set_all_permissions(entry, permissions).await.unwrap();
+    });
+    let mut child = Command::new("/system/bin/wg")
+        .arg(&paths[0])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("wg did not reject a None-readable secret");
         }
-        let output = child.wait_with_output().unwrap();
-        assert_eq!(output.status.code(), Some(1));
-        let output = String::from_utf8([output.stdout, output.stderr].concat()).unwrap();
-        assert!(output.contains("must not be readable by the None role"));
-        assert!(!output.contains(secret.trim()));
-        assert!(!output.contains("active"));
+        std::thread::sleep(Duration::from_millis(1));
     }
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let output = String::from_utf8([output.stdout, output.stderr].concat()).unwrap();
+    assert!(output.contains("must not be readable by the None role"));
+    assert!(!output.contains(secret.trim()));
+    assert!(!output.contains("active"));
     moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let fs = FsClient::connect().unwrap();
         for path in paths {

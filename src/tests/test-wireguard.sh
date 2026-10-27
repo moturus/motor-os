@@ -1,9 +1,10 @@
+#!/bin/bash
 # Sourced by full-test.sh with its existing VM, SSH helper and test directories.
 test_wireguard_case() (
   set -euo pipefail
   umask 077
   local work peer_pid="" wg_pid="" stale_pid="" peer_in peer_out wg_in wg_out
-  local stale_in stale_out guest_pid line provider_id
+  local stale_in stale_out guest_pid="" line provider_id learned_endpoint=""
   local name="wg_gate_${BASHPID}" config uploaded=0
   local peer_binary="${WG_PEER_BINARY:-$ROOT_DIR/src/tests/wg-peer/target/$BUILD/wg-peer}"
   local bind=192.168.4.1:0 roam='[2001:db8::1]:0'
@@ -19,6 +20,7 @@ test_wireguard_case() (
   [ "$role" != host ] || peer_args=(--endpoint "$guest_endpoint")
   work="$(mktemp -d /tmp/test-wireguard.XXXXXX)"
   config="/user/cfg/wireguard/$name.toml"
+  [ "$role" != managed ] || config="/user/cfg/wireguard/$name-office.toml"
   cleanup_wireguard() {
     local status=$?
     trap - EXIT
@@ -30,13 +32,15 @@ test_wireguard_case() (
       kill "$wg_pid" 2>/dev/null || true
       wait "$wg_pid" 2>/dev/null || true
     fi
+    if [ "$role" = managed ] && [ -n "$guest_pid" ]; then
+      vm_ssh "/system/bin/wg-tool down $name" || true
+    fi
     if [ -n "$peer_pid" ]; then
       kill "$peer_pid" 2>/dev/null || true
       wait "$peer_pid" 2>/dev/null || true
     fi
     if [ "$uploaded" = 1 ]; then
       vm_ssh "/system/bin/rm $config" || true
-      vm_ssh "/system/bin/rm /user/cfg/wireguard/$name.key" || true
     fi
     rm -rf "$work"
     exit "$status"
@@ -48,7 +52,18 @@ test_wireguard_case() (
     name=wg_plain
   else
     "$peer_binary" keygen "$work/host.key" "$work/host.pub"
-    "$peer_binary" keygen "$work/guest.key" "$work/guest.pub"
+    if [ "$role" = managed ]; then
+      local created
+      created="$(printf '%s\n' "$name" "$config" 51820 '10.250.20.2/24, fd50:20::2/64' \
+        '192.168.4.2, 2001:db8::2' yes | vm_ssh '/system/bin/wg-tool new')"
+      uploaded=1
+      printf '%s\n' "$created"
+      printf '%s\n' "$created" | awk '/^Public key: / {print $3}' > "$work/guest.pub"
+      [ "$(wc -c < "$work/guest.pub")" = 45 ] || fail 'wg-tool new omitted the public key'
+      vm_ssh "[ ! -e /user/cfg/wireguard/$name-office.key ]" || fail 'wg-tool created a key sidecar'
+    else
+      "$peer_binary" keygen "$work/guest.key" "$work/guest.pub"
+    fi
     peer_args+=(--private-key "$work/host.key" --peer-key "$work/guest.pub")
   fi
   coproc WG_GATE_PEER {
@@ -66,9 +81,14 @@ test_wireguard_case() (
     *) fail "unexpected WireGuard peer banner: $banner" ;;
   esac
   local guest_command="$TEST_BIN/systest ip-device-plain $guest_endpoint $endpoint"
-  if [ "$role" != plain ]; then
+  if [ "$role" = managed ]; then
+    printf '%s\n' 'hermetic host' "$(cat "$work/host.pub")" "$endpoint" \
+      '10.250.20.0/24, fd50:20::/64' 0 '' yes | vm_ssh "/system/bin/wg-tool add-peer $config"
+  elif [ "$role" != plain ]; then
     guest_command="/system/bin/wg $config"
     cat > "$work/config.toml" <<EOF
+name = "$name"
+private_key = "$(cat "$work/guest.key")"
 transport_addresses = ["192.168.4.2", "2001:db8::2"]
 listen_port = 51820
 cidrs = ["10.250.20.2/24", "fd50:20::2/64"]
@@ -79,22 +99,31 @@ EOF
     if [ "$role" = guest ]; then
       printf 'endpoint = "%s"\n' "$endpoint" >> "$work/config.toml"
     fi
-    vm_ssh "/system/bin/rush -c '[ -d /user/cfg/wireguard ] || mkdir /user/cfg/wireguard'"
-    printf 'put %s %s\nput %s %s\nchmod 660 %s\nchmod 660 %s\n' \
-      "$work/config.toml" "$config" "$work/guest.key" "/user/cfg/wireguard/$name.key" \
-      "$config" "/user/cfg/wireguard/$name.key" > "$work/upload"
+    vm_ssh "/system/bin/rush -c 'if [ ! -d /user/cfg/wireguard ]; then mkdir /user/cfg/wireguard; chmod rwxrwx--- /user/cfg/wireguard; fi'"
+    printf 'put %s %s\nchmod 660 %s\n' "$work/config.toml" "$config" "$config" > "$work/upload"
     uploaded=1
     sftp -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
       -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
       -i "$WD/test.key" -b "$work/upload" motor@192.168.4.2
-    vm_ssh "$TEST_BIN/systest wireguard-permissions $config /user/cfg/wireguard/$name.key"
-    vm_ssh "$TEST_BIN/systest wireguard-readable-secrets $config /user/cfg/wireguard/$name.key"
+  fi
+  if [ "$role" != plain ]; then
+    vm_ssh "$TEST_BIN/systest wireguard-permissions $config"
+    vm_ssh "$TEST_BIN/systest wireguard-readable-secrets $config"
   fi
   vm_ssh "$TEST_BIN/systest wireguard-cleanup"
 
   mkfifo "$work/wg.in" "$work/wg.out"
   exec {wg_in}<>"$work/wg.in"
   start_wireguard() {
+    if [ "$role" = managed ]; then
+      line="$(vm_ssh "/system/bin/wg-tool up $config")"
+      printf '%s\n' "$line"
+      [[ "$line" =~ pid=([0-9]+) ]] || fail 'wg-tool up omitted its process id'
+      guest_pid="${BASH_REMATCH[1]}"
+      # The launcher and its SSH session have both exited before any traffic.
+      vm_ssh '/system/bin/wg-tool status'
+      return
+    fi
     ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 "$guest_command" \
       < "$work/wg.in" > "$work/wg.out" 2>&1 &
     wg_pid="$!"
@@ -110,6 +139,12 @@ EOF
     guest_pid="${BASH_REMATCH[1]}"
   }
   stop_wireguard() {
+    if [ "$role" = managed ]; then
+      vm_ssh "/system/bin/wg-tool down $name"
+      guest_pid=""
+      vm_ssh "$TEST_BIN/systest wireguard-cleanup"
+      return
+    fi
     printf '\003' >&"$wg_in"
     cat <&"$wg_out"
     exec {wg_out}<&-
@@ -166,6 +201,7 @@ EOF
     printf 'roam %s %s\n' "$roam" "$roam_endpoint" >&"$peer_in"
     IFS= read -r -t 5 line <&"$peer_out" || fail "peer did not change transport"
     case "$line" in "ROAM "*) ;; *) fail "unexpected peer response: $line" ;; esac
+    learned_endpoint="${line#ROAM }"
     for invalid in replay tamper malformed; do
       printf '%s\n' "$invalid" >&"$peer_in"
       IFS= read -r -t 5 line <&"$peer_out" || fail "peer did not send $invalid"
@@ -179,6 +215,14 @@ EOF
     vm_ssh "$TEST_BIN/systest wireguard-client 10.250.20.1 10.250.20.2"
     vm_ssh "$TEST_BIN/systest wireguard-client fd50:20::1 fd50:20::2"
     vm_ssh "$TEST_BIN/systest wireguard-load $guest_pid"
+    if [ "$role" = managed ]; then
+      local live_status
+      live_status="$(vm_ssh '/system/bin/wg-tool status')"
+      printf '%s\n' "$live_status"
+      [[ "$live_status" == *"endpoint: $learned_endpoint"* ]] || fail 'status did not report the authenticated roaming endpoint'
+      [[ "$live_status" != *'handshake: none'* ]] || fail 'status omitted the active session'
+      [[ "$live_status" != *'transfer: 0 bytes received'* ]] || fail 'status omitted received tunnel data'
+    fi
   fi
 
   if [ "${WG_BENCHMARK:-0}" = 1 ]; then
@@ -226,9 +270,50 @@ EOF
 )
 
 test_wireguard() {
+  vm_ssh "MOTOR_OS_CAPS=0x364 $TEST_BIN/wg-self-test tool"
   for family in ipv4 ipv6; do
-    for initiator in guest host plain; do
+    for initiator in guest host plain managed; do
       test_wireguard_case "$family" "$initiator"
     done
   done
 }
+
+# This file is also a focused guest gate; the full suite sources the same tests.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  set -euo pipefail
+  ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+  WD="$ROOT_DIR/src/tests"
+  BUILD=debug
+  case "${1:-}" in --release) BUILD=release ;; '') ;; *) echo 'usage: test-wireguard.sh [--release]' >&2; exit 2 ;; esac
+  make -C "$ROOT_DIR" -j"$(nproc)" BUILD="$BUILD" main.img systest wg-self-test
+  peer_args=()
+  [ "$BUILD" != release ] || peer_args=(--release)
+  cargo build --locked "${peer_args[@]}" --manifest-path "$ROOT_DIR/src/tests/wg-peer/Cargo.toml"
+  work="$(mktemp -d /tmp/wg-component.XXXXXX)"
+  VMM_PID=""
+  TEST_BIN=/user/tmp/wg-component
+  . "$WD/vm-console-filter.sh"
+  . "$WD/vm-test-boot.sh"
+  . "$WD/vm-cleanup.sh"
+  fail() { echo "$*" >&2; exit 1; }
+  cleanup_wg_component() {
+    local status=$?
+    trap - EXIT
+    stop_vm "$VMM_PID"
+    rm -rf "$work"
+    exit "$status"
+  }
+  trap cleanup_wg_component EXIT
+  test_vm_configure_ssh
+  start_test_vm "$ROOT_DIR/vm_images/$BUILD/run-qemu.sh" QEMU "$work/console.log" -snapshot
+  printf 'mkdir %s\n' "$TEST_BIN" > "$work/upload"
+  for binary in systest wg-self-test; do
+    printf 'put %s %s/%s\nchmod 700 %s/%s\n' "$ROOT_DIR/build/bin/$BUILD/$binary" "$TEST_BIN" "$binary" "$TEST_BIN" "$binary" >> "$work/upload"
+  done
+  sftp -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
+    -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
+    -i "$WD/test.key" -b "$work/upload" motor@192.168.4.2
+  test_wireguard
+  for address in 192.168.4.2 2001:db8::2; do vm_ssh "$TEST_BIN/wg-self-test $address"; done
+  echo 'WireGuard component gate PASS'
+fi

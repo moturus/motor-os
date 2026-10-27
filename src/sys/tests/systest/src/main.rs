@@ -1598,7 +1598,7 @@ fn main() {
         wireguard::exchange(&args[2], &args[3]);
         return;
     }
-    if args.len() == 4 && args[1] == "wireguard-permissions" {
+    if args.len() == 3 && args[1] == "wireguard-permissions" {
         wireguard::permissions(&args[2..]);
         return;
     }
@@ -1606,7 +1606,7 @@ fn main() {
         wireguard::cleanup();
         return;
     }
-    if args.len() == 4 && args[1] == "wireguard-readable-secrets" {
+    if args.len() == 3 && args[1] == "wireguard-readable-secrets" {
         wireguard::reject_readable_secrets(&args[2..]);
         return;
     }
