@@ -8,15 +8,98 @@ runtime-only `wasmtime-rt` build through the normal external-source workflow, sh
 the developer and small wasm images, and pass their installed-tool checks on
 both images at 256 and 224 MiB. HTTP serving (milestone 3) and the full
 compiler with native packaging (milestone 4) are ahead; see
-[Status and resume point](#status-and-resume-point-2026-10-19).
+[Status and resume point](#status-and-resume-point-2026-10-26).
 
 This document records the requirements, the design contracts, a short account
 of the completed work and the detailed plan for the milestones ahead. The
 settled points of the earlier plan reviews are folded in.
 
-## Status and resume point (2026-10-19)
+## Status and resume point (2026-10-26)
 
 Evidence under `build/` is host-local and not required.
+
+Code review against Motor OS `99ca2b45`, Javy `12a6c52d` and Wasmtime
+`633e7de36`:
+
+| Work | Delivered code and remaining work |
+| --- | --- |
+| 0–1: Javy/Wasmi | Done, including 1f–1l and R1–R6. Build/image integration, custom plugins, byte identity, runner regressions and exhaustion checks are maintained in `build-javy.sh` and `javy-smoke`. |
+| 2: runtime-only Wasmtime | Done. Both images install `wasmtime-rt`; `wasmtime-smoke` covers commands, lifecycle, limits, artifacts, p2 sockets, filesystem and stdio. |
+| 3a: HTTP resource defaults | Done at the published pins: sparse memories, lazy guarded stacks, TIME-WAIT release and the owner's upstream-default decisions. The publication and SDK prerequisites below are historical, not blockers. |
+| 3b / 3f: serving lifecycle and integration | In progress. The fork has the shared host, p3 worker lifetime tracking and graceful shutdown. The continuation below adds installed hello/echo, concurrent and fragmented traffic, Ctrl-C and active-request shutdown tests. Slow readers, disconnects/cancellation, diagnosis of the retained reset and a TypeScript HTTP fixture remain. |
+| 3c: opt-in p3 | Build support and `P3_DEFAULT=false` are present. The continuation below checks installed default rejection and explicit p3 hello/echo, including instance turnover and post-return streaming. Further selected p3 regressions remain. |
+| 3d: TLS | System CA loading is implemented at `633e7de36`; only the recorded local-CA probe is qualified. The maintained hermetic success/failure and streaming/cancellation matrix remains. |
+| 3e: service masks | Open tests, with no forced-`CAP_LOG` blocker: sys-init requires an explicit decimal mask and passes it through unchanged. Qualify a `svc:256:` wasm server under the existing guard, and audit outgoing HTTP grants separately from socket grants. |
+| 4: compiler and native packaging | Prototype compiler/publisher and policy tests exist in the fork. Full CLI image delivery and authority checks, production `package` subcommand, publisher hardening/version identity, masked flows, resource budgets and final matrix remain. |
+
+**Current build/test layout.** External checkouts are
+`external-sources/javy` and `external-sources/wasmtime`, never sibling
+directories. `src/build-motor-os.sh --javy-only --wasmtime-only` uses the
+repository-selected toolchain, pinned fork revisions and lockfiles; builds
+are incremental through Cargo, without build stamps. Outputs live in
+`build/assembly/{build,images,tests}`. `src/tests/test-wasm.sh --prepare`
+builds the release images and smoke binaries in `build/obj/release`; its
+execution phase uploads fixtures to `/none/wasm-tests` and verifies the
+installed tools against the assembly. The release developer gate calls it
+for `wasm:224` and `dev:256`; standalone qualification covers both images
+at both sizes, under QEMU and Cloud Hypervisor. The smoke harness uses the
+published `moto-sdk = "0.1"`; that migration is complete.
+
+**Continuation, 2026-10-26 (3b/3c/3f, tree `c8a8dce3`).**
+`src/build-scripts/build-wasmtime.sh` now builds four published upstream
+handlers from `external-sources/wasmtime` at the existing pin: p2/p3
+`cli_serve_hello_world`, p2 `api_proxy_streaming` and p3 `http_echo`.
+Their Pulley artifacts add 1,840,496 bytes to the uploaded test inputs,
+not to either image. No fork or `src/sys` source is changed.
+
+`src/tests/wasmtime-smoke/src/native/http.rs` uses only standard Rust and
+the existing smoke harness. Each server runs as None with `CAP_NET`, on
+loopback ephemeral ports, with four concurrent requests and eight allowed
+connections. Per protocol it checks 144 hello responses (crossing p3's
+128-request instance turnover), sixteen 256 KiB streaming echoes, and one
+additional echo held open across background shutdown. Half of the concurrent
+requests fragment headers into seven-byte writes. Responses must have valid
+framing and exact bytes, with bounded socket waits and response storage;
+there are no request retries. Hello servers exit on foreground Ctrl-C.
+Echo servers report that they are waiting for child tasks before the client
+sends the rest of the body; the complete echo and clean process exit are
+required. P3 without `-S p3` is rejected, with async component support
+explicitly enabled so the check exercises missing p3 bindings. The p3 echo
+fixture retains upstream's post-return future/stream path.
+
+The cases join `test-wasm.sh` and its existing release developer-gate wiring.
+Sampled HTTP whole-VM peaks include the concurrent client and services;
+the extra shutdown request is outside that sampling loop. The initial QEMU
+matrix passed both images at both sizes, including Linux/Javy byte identity.
+The expanded active-shutdown/p3-rejection matrix passed on QEMU and Cloud
+Hypervisor: both images at 224 and 256 MiB, 103 Wasmtime commands and 322
+HTTP requests per VM, zero unexpected admission refusals. Javy's deliberate
+fault-exhaustion refusal remains separately expected on each VM. Maximum
+sampled HTTP whole-VM use across the four servers:
+
+| Image | RAM (MiB) | QEMU peak (MiB) | Cloud Hypervisor peak (MiB) |
+| --- | ---: | ---: | ---: |
+| wasm | 224 | 63.64 | 64.32 |
+| wasm | 256 | 74.73 | 75.63 |
+| developer | 224 | 63.74 | 64.28 |
+| developer | 256 | 74.48 | 76.48 |
+
+Validation also passed `test-external-sources.sh`, `test-wasmtime-fetch.sh`,
+`test-dev-memory-contract.sh`, repository-toolchain formatting and Motor
+release Clippy with warnings denied. Evidence is in `build/wasm-m3-review/`:
+`qemu-lifecycle-matrix.log`, `chv-lifecycle-matrix.log`, the matching preserved
+per-VM evidence directories, and `qemu-matrix.log` for the initial byte-identity
+run. The focused gate follows this plan's wasm-only validation rule; no
+`src/sys` or full developer-source gate was needed.
+
+**Resume after this slice:** complete the remaining 3b/3f lifecycle and
+TypeScript cases, then the hermetic TLS and service tests. The original
+prototype reset evidence is absent in this checkout; new fragmented-request
+passes do not resolve that failure. Locate its logs/source revision before
+closing 3b. Further runtime fixes, if needed, belong explicitly in the
+separate Wasmtime repository under `external-sources/`.
+
+Prior qualification and owner decisions:
 
 - **Forks:** pushed on 2026-10-20, branches at these heads: mio `motor-1.2.0`
   `87e045c`, tokio `motor-1.51.1` `860f25ca`, wasmi `motor-1.1.0` `18be00bc`,
@@ -39,8 +122,8 @@ Evidence under `build/` is host-local and not required.
   `make images BUILD=release` and a one-off hermetic HTTPS check of its
   source: it accepts a server certified by a local CA in the image's bundle
   and refuses one certified outside it, where `08a09edea` refused the first
-  too (2026-10-22, the owner limited testing to small checks). Tree work is on
-  the `wasm` branch.
+  too (2026-10-22, the owner limited testing to small checks). Those changes
+  are now merged into the reviewed tree.
 - **Done: Linux-parity memory limits** (owner rulings 2026-10-18, in
   [the memory contract](#javy-pipeline-and-memory-backing)). Those fork heads
   and tree `c4e44de3..c3ecb975` replace 96 MiB per memory, 128 MiB per
@@ -60,17 +143,17 @@ Evidence under `build/` is host-local and not required.
   `wasmtime-rt` execution equal). TypeScript compile peaks at 224 MiB are now
   181–189 MiB with either set of tools, down from 201.6–204.2 MiB on
   2026-10-11; the newer kernel and assembly account for that.
-- **Now milestone 3, step 3a, waiting on publication.** 3a's measurements
+- **Milestone 3, step 3a delivered.** 3a's measurements
   found two limits at 224 MiB. Closed connections exhausted the VM through
   sys-io's TIME-WAIT memory; that is fixed by the standalone sys-io patch
   `4ee0cf22`. Eager fiber stacks allowed only 8 in-flight p2 requests; the
   owner ruled (2026-10-19) for lazily committed guarded stacks, as on Linux,
   and Wasmtime `5d9818f3c` (pushed 2026-10-20) builds them on the kernel's
   guarded heap maps (`fc48f27d`). Its local build passes `stack-check` and
-  serves 64 concurrent p2 requests at 224 MiB. **Resume** with the "Next"
-  item of "Lazy guarded fiber stacks" under
-  [Milestone 3](#milestone-3-httphttps-and-opt-in-p3): once the owner pushes,
-  rebuild the external source and gate it. The other 3a rulings (2026-10-19):
+  serves 64 concurrent p2 requests at 224 MiB. The fork was published and
+  gated on 2026-10-20; the current pin includes it. Continue with 3b/3f under
+  [Milestone 3](#milestone-3-httphttps-and-opt-in-p3).
+  The other 3a rulings (2026-10-19):
   deadlines follow Linux, and connection timeouts and accept errors follow
   upstream.
 - **Working rules from the owner:** commit messages are one line with no
@@ -280,7 +363,8 @@ Tests:
   exits/traps/fuel, runner WASI behavior from hand-written modules and
   role/capability/output denial. It samples whole-VM memory and reports the
   admission-refusal delta.
-- `src/tests/test-javy.sh` (`--prepare`, `--image`, `--memory`,
+- The original `src/tests/test-javy.sh` (replaced by `test-wasm.sh` in
+  milestone 2; `--prepare`, `--image`, `--memory`,
   `--vmm qemu|chv`) builds both images and the crate, boots each image at 256
   and 224 MiB from a QEMU snapshot or a disposable Cloud Hypervisor copy,
   checks that the installed binaries equal the staged bytes, and runs
@@ -303,9 +387,10 @@ together. The 2026-10-08 rerun after the runner fix passed eight boots (both
 images at 256/224 MiB under QEMU and Cloud Hypervisor), 41 commands each, with
 zero admission refusals; four boots take about 4.5 minutes per VMM.
 
-Still open from this milestone and planned below as its close-out: R1–R6,
+At this stage the remaining close-out work was R1–R6,
 the retained custom GC/p2 plugin and forced-exhaustion matrix, compressed
 Linux/Motor OS byte identity, streaming plugin validation and lazy-backing timing.
+All closed on 2026-10-09; see the milestone 1 close-out below.
 
 ### Review findings: 2026-10-08
 
@@ -316,7 +401,8 @@ Thirty-five imager tests passed (three existing tests remained ignored), as did
 `test-external-sources.sh`, `test-dev-memory-contract.sh` and `test-full-test-size.sh`.
 The review used the installed binaries and did not rebuild an authoring toolchain.
 
-The following findings remain open. R1 was confirmed with a hermetic
+The following findings were open at review time and are now fixed by 1j–1l.
+R1 was confirmed with a hermetic
 build-script probe; R2–R5 were reproduced against the installed runner as None
 with mask `0` in a disposable 224 MiB VM; R6 was found by code inspection.
 The passing smoke matrix does not exercise these failures. A second review of
@@ -467,10 +553,13 @@ Before reading/parsing/deserializing input, plugins or embedded artifacts, check
 are exempt. Check populated ELFs even when invoked from an Interactive shell.
 Caps are immutable; tools do not demote/relaunch themselves.
 
-Services are the exception to settle in milestone 3: sys-init's default None
-child receives `CAP_LOG`, and dns-resolver runs with `0x108`. A wasm service
-started by sys-init therefore carries a bit the check rejects. Decide whether
-`CAP_LOG` is an accepted bit before the first service-mask test.
+Services use an explicit decimal mask in `svc:MASK:COMMAND`:
+`src/sys/sys-init/src/lib.rs` requires it, and `spawn_service` in `main.rs`
+passes it through unchanged. There is no implicit `CAP_LOG`; dns-resolver's
+`0x108` is its configured mask, not a service default. A wasm HTTP service
+can use `svc:256:` (`CAP_NET`) under the existing guard. Keep `CAP_LOG`
+rejected unless the owner separately approves widening the guard; this is
+not a prerequisite for the first service-mask test.
 
 Writes fail through ordinary sys-io permission errors. Do not pre-validate WASI
 writable preopens against OS path policy. None with `CAP_FS_WRITE` can write
@@ -644,7 +733,9 @@ follow Linux, as the memory contract above describes. Include image
 copies and temporary growth buffers. Store limits do not cover every host/
 Cranelift allocation; global admission and sampled watchdogs are not worker
 quotas. `run` may remain indefinite but interruptible, with optional fuel/time
-controls. `serve` requires per-request deadlines and bounded concurrency/buffering.
+controls. The 2026-10-19 ruling keeps upstream `serve` defaults: bounded
+concurrency, optional per-request deadlines, no default deadline or connection
+timeout. Qualify buffering and aggregate resource use under those defaults.
 Command-runtime defaults are a milestone 2 exit requirement (2g); milestone 3
 adds HTTP-specific limits and concurrency sizing, and milestone 4 adds compiler
 input/output limits. Later measurements may refine the defaults.
@@ -718,8 +809,8 @@ kept but not extended. Motor OS integration tests must be Rust crates called by 
 scripts and exercise tools produced by the normal reproducible build and
 installed in the image. Keep generated evidence under `build/` and distinguish
 prototype results from delivered implementation. Keep Wasmi's core/IR crates in
-its workspace and Wizer in Wasmtime's `crates/wizer`. Native libraries are git
-dependencies on `moturus/motor-os` pinned by the forks' lockfiles; no fork
+its workspace and Wizer in Wasmtime's `crates/wizer`. Native libraries are
+dependencies from crates.io pinned by the forks' lockfiles; no fork
 refers to a sibling checkout by path, and the tree's own `src/sys/lib` is not
 an input of the external sources (owner rule 2026-10-19, scheme below).
 
@@ -791,7 +882,8 @@ Mio 1.2.0, Ring 0.17.14, getrandom 0.2.15 and Brotli 8.0.4.
 ### Fork dependency scheme, 2026-10-20
 
 Owner rules (2026-10-19): no cross-repository path dependencies anywhere;
-only `build-motor-os.sh` clones other repositories into `../` and works with
+only `build-motor-os.sh` manages external checkouts (now under
+`./external-sources/`) and works with
 them; any branch of this tree must build with any version of the forks and of
 the toolchain; upgrading or switching must be easy for a human. Until
 2026-10-19 the wasm forks patched Tokio, Mio, target-lexicon, Wasmi, Wizer and
@@ -848,7 +940,8 @@ lockfiles recorded the owner's moto-sys 0.3.2 bump (`32756ef6`).
 
 **Update 2026-10-22:** moto-sdk 0.1.0 is published, and rmux, russhd, rnetbench
 and the smoke suites take it from crates.io. The in-tree moto-rt is 0.17.9.
-`src/toolchain-runtime.sh` still describes the pre-ruling layout.
+The later build refactoring removed `src/toolchain-runtime.sh` and moved
+external checkouts under `external-sources/`; see the current layout above.
 
 What a human does:
 
@@ -862,8 +955,8 @@ What a human does:
   fork's `MOTOR_*_REV` in `src/build-scripts/external-sources.sh` and gate.
 - **Change Mio, Tokio, target-lexicon or Wasmi:** push the fork; in Wasmtime
   or Javy `cargo update -p <crate>`; then as above.
-- **Switch tree branches:** `build-motor-os.sh` moves a clean `../javy` or
-  `../wasmtime` to the branch's pinned revision (fast-forward on the fork
+- **Switch tree branches:** `build-motor-os.sh` moves a clean
+  `external-sources/javy` or `external-sources/wasmtime` to the branch's pinned revision (fast-forward on the fork
   branch when possible, otherwise detached, `git checkout <branch>` resumes
   work). It never leaves commits that are on no branch of the fork; an
   exported `MOTOR_JAVY_REV`/`MOTOR_WASMTIME_REV` builds a committed but
@@ -950,7 +1043,7 @@ causes; no retries, longer timeouts or weakened assertions conceal defects.
 
 For each delivered row, test **both images at 256 and 224 MiB**, with matching
 tools, services, workload settings, caps and concurrency, under the existing
-`test-javy.sh` pattern. Require correct output, normal completion, zero
+`test-wasm.sh` driver. Require correct output, normal completion, zero
 admission-refusal deltas, cleanup and VM responsiveness; record expected
 refusal/trap cases separately. Record usable RAM, role/mask, resolved
 binaries/features/profile/policy, service/image digests, cold/warm startup,
@@ -1120,7 +1213,7 @@ qualified with locally built binaries on both images at 224 MiB (evidence in
 `build/wasm-milestone2/`). 2d is done and 2f is partly done (below); since
 2026-10-09 the delivered runtime passes the matrix under both VMMs. Since
 2026-10-11 all items are done, and since 2026-10-18 the published heads are
-gated ([the resume point](#status-and-resume-point-2026-10-19)).
+gated ([the resume point](#status-and-resume-point-2026-10-26)).
 
 - **2b:** owned lazy reservations (then 96 MiB per memory, 128 MiB and four
   per process; 4 GiB and no total or count since 2026-10-18) back every
@@ -1490,8 +1583,8 @@ moto-rt or kernel code and adds no statics.
 4. **Accept errors** (ruled 2026-10-19: upstream). `serve` exits on any
    accept error, including a transient `OutOfMemory`.
 
-**Lazy guarded fiber stacks, 2026-10-19 (fork `5d9818f3c`, not yet
-published).** The kernel's guarded heap maps (`fc48f27d`, merged into `wasm`
+**Lazy guarded fiber stacks, 2026-10-19 (fork `5d9818f3c`, published
+2026-10-20).** The kernel's guarded heap maps (`fc48f27d`, merged into `wasm`
 at `832be142`) made the planned lazy map at a fixed address unnecessary.
 `SysMem::F_GUARDED` with `F_READABLE | F_WRITABLE | F_LAZY` maps
 `num_pages + 2` small pages at an automatic address, with a page at each end
@@ -1545,17 +1638,17 @@ kills the thread.
   no default deadline (`-W timeout` needs epoch-compiled artifacts), no
   header-read or idle timeout, and exit on accept errors. `MOTOR.md` needs
   nothing for behavior that matches upstream.
-- **Next.** The forks are pushed (2026-10-20: mio, tokio, wasmi, javy
+- **Delivery.** The forks are pushed (2026-10-20: mio, tokio, wasmi, javy
   `12a6c52`, wasmtime `08a09edea`, which carries `8804845d7` and `5d9818f3c`);
-  the tree changes of that day are staged for the owner's commit. The moto-rt
+  the tree changes of that day are now merged. The moto-rt
   0.17.9 lock that blocked `--locked` builds on 2026-10-19 is gone with
   [the dependency scheme](#fork-dependency-scheme-2026-10-20): Javy and
   Wasmtime take `moto-rt` 0.17.9 and `moto-sys` 0.3.2 from crates.io. The
   external sources rebuilt from the pinned revisions through `src/build-motor-os.sh
   --javy-only` and `--wasmtime-only`; the wasm matrices passed under QEMU and
-  Cloud Hypervisor with wasmtime `08a09edea`, so 3a closes once the owner's
-  commit lands; 3b and 3f follow the moto-sdk merge
-  ([Motor OS crates](../crates.md)).
+  Cloud Hypervisor with wasmtime `08a09edea`, closing 3a. The moto-sdk merge
+  and publication are also complete ([Motor OS crates](../crates.md)),
+  so 3b and 3f have no remaining publication prerequisite.
 
 1. **3a — HTTP resource defaults.** Extend milestone 2's finite command defaults
    with request, body/buffer and serving-concurrency limits; size the stack pool
@@ -1578,8 +1671,8 @@ kills the thread.
    [docs/imager.md](../imager.md)); hermetic local-CA tests for success, wrong
    name/IP, expired/not-yet-valid, invalid chain, and streaming
    failure/cancellation; no Internet. Output: fork, tree fixtures.
-5. **3e — service masks.** Decide the `CAP_LOG` question in the authority
-   contract, then test a wasm service started by sys-init with its service mask
+5. **3e — service masks.** Test a wasm service started by sys-init with an
+   explicit allowed service mask (`svc:256:` for network-only authority)
    and outbound HTTP grants audited separately from socket grants. Output:
    tree.
 6. **3f — integration tests.** Extend the wasm integration crate with hello,
@@ -1641,7 +1734,7 @@ image and the developer image within the RAM and disk requirements.
 
 ### Order and prerequisites
 
-Recommended next steps: 3a, 3b and 3f, with 3c–3e after them; 4a and 4c can
+Recommended next steps: 3b and 3f, with 3c–3e after them; 4a and 4c can
 proceed in the fork alongside. Retain one image-matrix driver and use the common acceptance
 rules above for every milestone. Keep Wasmtime engine regressions in its fork;
 Javy/Wasmi regressions live in `javy-smoke`.
@@ -1650,7 +1743,7 @@ Javy/Wasmi regressions live in `javy-smoke`.
 | --- | --- |
 | 1 | Done 2026-10-09. |
 | 2 | Done; gated with the memory-limit change on 2026-10-18. |
-| 3 | In progress; 3a waits on publishing Wasmtime `5d9818f3c` and its gate, and precedes 3f. |
+| 3 | In progress; 3a is delivered and gated, and moto-sdk is published. Continue 3b/3f. |
 | 4 | 4a and 4c can start in the fork after 2a; 4b, 4d–4f need the milestone 3 host and the milestone 2 template. |
 
 Production changes follow [AGENTS.md](../../AGENTS.md). Application changes use
