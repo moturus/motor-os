@@ -885,6 +885,8 @@ fn find_ephemeral_port(start: u16, taken: impl Fn(u16) -> bool) -> Option<u16> {
 pub(super) struct NetDev<'a> {
     name: String,
     config: config::DeviceCfg,
+    /// Authenticated external provider, retained until device retirement ends.
+    pub(super) provider_pid: Option<u64>,
 
     device: NetstackDevice,
     iface: moto_netstack::iface::Interface,
@@ -1111,6 +1113,7 @@ impl<'a> NetDev<'a> {
         Ok(Self {
             name,
             config: dev_cfg,
+            provider_pid: None,
             device,
             iface,
             sockets,
@@ -1258,6 +1261,7 @@ impl<'a> NetDev<'a> {
             poll_waiters,
             pending_tasks: _,
             external: _,
+            provider_pid: _,
         } = self;
         // Every segment this poll emits reads the timestamp clock, so it is
         // advanced once here rather than per segment.

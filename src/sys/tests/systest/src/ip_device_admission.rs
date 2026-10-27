@@ -36,6 +36,16 @@ pub fn run_child(args: &[String]) -> bool {
         }
         let config = super::ip_device_live::config(7);
         if args[2] == "no-role" || args[2] == "no-net" {
+            let discovery = moto_sdk::sys_io::stats::IoStatsService::connect()
+                .unwrap()
+                .list_external_net_device_pids(Some(
+                    moto_rt::time::Instant::now() + std::time::Duration::from_secs(2),
+                ));
+            if args[2] == "no-net" {
+                assert_eq!(discovery, Err(moto_rt::E_NOT_ALLOWED));
+            } else {
+                assert!(discovery.unwrap().is_empty());
+            }
             let result = bounded_output(IpDevice::register(&config), 2)
                 .await
                 .unwrap();

@@ -125,6 +125,37 @@ pub const CMD_TCP_STATS: u16 = 1000;
 /// no self-tests compiled in and answers this with `E_INVALID_ARGUMENT`.
 pub const CMD_SELF_TEST: u16 = 1001;
 
+/// List all external network-device providers in one small-channel reply.
+pub const CMD_LIST_EXTERNAL_NET_DEVICE_PIDS: u16 = 1002;
+
+pub const MAX_EXTERNAL_NET_DEVICE_PIDS: usize =
+    (moto_sys::sys_mem::PAGE_SIZE_SMALL as usize - size_of::<ResponseHeader>() - size_of::<u64>())
+        / size_of::<u64>();
+
+#[repr(C)]
+pub struct ListExternalNetDevicePidsResponse {
+    pub header: ResponseHeader,
+    pub num_results: u64,
+    pub pids: [u64; MAX_EXTERNAL_NET_DEVICE_PIDS],
+}
+
+const _: () = assert!(
+    size_of::<ListExternalNetDevicePidsResponse>() == moto_sys::sys_mem::PAGE_SIZE_SMALL as usize
+);
+
+impl ListExternalNetDevicePidsResponse {
+    pub fn pids(&self) -> Result<&[u64], ErrorCode> {
+        if self.header.result != moto_rt::E_OK {
+            return Err(self.header.result);
+        }
+        let count = self.num_results;
+        if self.header.ver != 0 || count > self.pids.len() as u64 {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        Ok(&self.pids[..count as usize])
+    }
+}
+
 /// The longest failure message [`SelfTestResponse`] carries back.
 pub const MAX_SELF_TEST_FAILURE_LEN: usize = 512;
 
@@ -163,6 +194,29 @@ impl IoStatsService {
             crate::ipc::sync::ClientConnection::new(crate::ipc::sync::ChannelSize::Small)?;
         conn.connect(URL_IO_STATS)?;
         Ok(Self { conn })
+    }
+
+    /// Return unique owner PIDs of active and retiring external IP devices.
+    /// Requires CAP_NET. Physical NICs and loopback have no external owner.
+    /// The complete list is copied from one reply; there is no paging.
+    /// A transport error closes this service connection.
+    pub fn list_external_net_device_pids(
+        &mut self,
+        deadline: Option<moto_rt::time::Instant>,
+    ) -> Result<std::vec::Vec<u64>, ErrorCode> {
+        let req = self.conn.req::<RequestHeader>();
+        req.cmd = CMD_LIST_EXTERNAL_NET_DEVICE_PIDS;
+        req.ver = 0;
+        req.flags = 0;
+        if let Err(error) = self.conn.do_rpc(deadline) {
+            self.conn.disconnect();
+            return Err(error);
+        }
+        Ok(self
+            .conn
+            .resp::<ListExternalNetDevicePidsResponse>()
+            .pids()?
+            .to_vec())
     }
 
     /// Get existing TCP socket info for sockets with IDs >= start_id.

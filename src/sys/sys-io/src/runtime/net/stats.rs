@@ -8,18 +8,19 @@
 //! built snapshot. Best effort, never precise.
 //!
 //! This module also hosts the `sys-io-stats-service` sync-RPC service (see
-//! [`moto_sdk::sys_io::stats`]) that lists live TCP sockets. It runs on its own
-//! thread and reuses the same cross-thread polling mechanism to read the socket
-//! table out of the net runtime.
+//! [`moto_sdk::sys_io::stats`]) that lists live TCP sockets and external device
+//! providers. It reuses the same request path into the net runtime; provider
+//! discovery reports query failures rather than returning an empty list.
 
-use moto_sdk::ipc::sync::{ChannelSize, LocalServer, ResponseHeader};
+use moto_sdk::ipc::sync::{ChannelSize, LocalServer, RequestHeader, ResponseHeader};
 use moto_sdk::stats::{MetricDescWire, MetricEntry};
-#[cfg(debug_assertions)]
-use moto_sdk::sys_io::stats::{CMD_SELF_TEST, MAX_SELF_TEST_FAILURE_LEN, SelfTestResponse};
 use moto_sdk::sys_io::stats::{
-    CMD_TCP_STATS, GetTcpSocketStatsRequest, GetTcpSocketStatsResponse, MAX_TCP_SOCKET_STATS,
+    CMD_LIST_EXTERNAL_NET_DEVICE_PIDS, CMD_TCP_STATS, GetTcpSocketStatsRequest,
+    GetTcpSocketStatsResponse, ListExternalNetDevicePidsResponse, MAX_TCP_SOCKET_STATS,
     TcpSocketStatsV1, URL_IO_STATS,
 };
+#[cfg(debug_assertions)]
+use moto_sdk::sys_io::stats::{CMD_SELF_TEST, MAX_SELF_TEST_FAILURE_LEN, SelfTestResponse};
 use moto_sys::SysHandle;
 use std::{cell::Cell, rc::Rc, sync::OnceLock};
 
@@ -752,6 +753,7 @@ enum StatsRequest {
         start_id: u64,
         respond_to: moto_sdk::async_runtime::oneshot::Sender<Vec<TcpSocketStatsV1>>,
     },
+    ExternalNetDevicePids(moto_sdk::async_runtime::oneshot::Sender<Vec<u64>>),
 }
 
 /// Sender half of the request channel. Set once, when the net runtime spawns its
@@ -810,6 +812,9 @@ async fn stats_responder_task(
             } => {
                 let _ = respond_to.send(collect_tcp_socket_stats(&runtime, start_id));
             }
+            StatsRequest::ExternalNetDevicePids(respond_to) => {
+                let _ = respond_to.send(runtime.inner.borrow().devices.external_net_device_pids());
+            }
         }
     }
 }
@@ -857,6 +862,18 @@ fn query_tcp_socket_stats(start_id: u64) -> Vec<TcpSocketStatsV1> {
             return Vec::new();
         }
         response.await.unwrap_or_default()
+    })
+}
+
+fn query_external_net_device_pids() -> Result<Vec<u64>, moto_rt::ErrorCode> {
+    let requests = STATS_REQUESTS.get().ok_or(moto_rt::E_NOT_READY)?;
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
+        let (respond_to, response) = moto_sdk::async_runtime::oneshot();
+        requests
+            .send(StatsRequest::ExternalNetDevicePids(respond_to))
+            .await
+            .map_err(|_| moto_rt::E_NOT_READY)?;
+        response.await.map_err(|_| moto_rt::E_NOT_READY)
     })
 }
 
@@ -923,14 +940,14 @@ fn process_socket_stats(server: &mut LocalServer, waker: SysHandle) {
         return;
     }
 
-    let (cmd, start_id) = {
-        let raw = conn.raw_channel();
-        let req = unsafe { raw.get::<GetTcpSocketStatsRequest>() };
-        (req.header.cmd, req.start_id)
+    let (cmd, version, flags) = {
+        let req = conn.req::<RequestHeader>();
+        (req.cmd, req.ver, req.flags)
     };
 
     match cmd {
         CMD_TCP_STATS => {
+            let start_id = conn.req::<GetTcpSocketStatsRequest>().start_id;
             let stats = query_tcp_socket_stats(start_id);
             let raw = conn.raw_channel();
             let resp = unsafe { raw.get_mut::<GetTcpSocketStatsResponse<MAX_TCP_SOCKET_STATS>>() };
@@ -938,6 +955,32 @@ fn process_socket_stats(server: &mut LocalServer, waker: SysHandle) {
             resp.num_results = stats.len() as u64;
             resp.socket_stats[..stats.len()].copy_from_slice(&stats);
             resp.header.result = moto_rt::E_OK;
+        }
+        CMD_LIST_EXTERNAL_NET_DEVICE_PIDS => {
+            let result = (|| {
+                if version != 0 || flags != 0 {
+                    return Err(moto_rt::E_INVALID_ARGUMENT);
+                }
+                let caps = moto_sys::SysObj::get_capabilities(conn.handle())?;
+                if caps & moto_sys::caps::CAP_NET == 0 {
+                    return Err(moto_rt::E_NOT_ALLOWED);
+                }
+                query_external_net_device_pids()
+            })();
+            // Request flags occupy the response header's reserved bytes.
+            conn.resp::<RequestHeader>().flags = 0;
+            let resp = conn.resp::<ListExternalNetDevicePidsResponse>();
+            resp.header.ver = 0;
+            resp.num_results = 0;
+            resp.pids.fill(0);
+            resp.header.result = match result {
+                Ok(pids) => {
+                    resp.pids[..pids.len()].copy_from_slice(&pids);
+                    resp.num_results = pids.len() as u64;
+                    moto_rt::E_OK
+                }
+                Err(error) => error,
+            };
         }
         // Runs on this thread. Tests needing FS state dispatch to that runtime;
         // the pure tests run here without blocking the network runtime.
