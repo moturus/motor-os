@@ -276,7 +276,7 @@ fn sys_map(
             opts |= MappingOptions::WRITABLE;
             flags &= !SysMem::F_WRITABLE;
         }
-        // F_EXECUTABLE applies to the target side only (ELF text loading);
+        // F_EXECUTABLE applies to the target side only (ELF text or JIT code);
         // the caller's side of the sharing is always mapped R+W, which is
         // how loaders write text into a mapping the target can't write.
         if (flags & SysMem::F_EXECUTABLE) != 0 {
@@ -299,10 +299,6 @@ fn sys_map(
         }
         let target_is_self =
             core::ptr::eq(address_space, curr_thread.owner().address_space().as_ref());
-        if target_is_self && opts.contains(MappingOptions::EXECUTABLE) && !io_manager {
-            log::debug!("sys_mem_impl: self executable mapping w/o CAP_IO_MAN");
-            return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
-        }
 
         if phys_addr != u64::MAX {
             return sys_share_existing(
