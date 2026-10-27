@@ -203,6 +203,10 @@ Engine regressions remain in the owning forks. Upstream Brotli is used; the
 Linux identity checks require equal output bytes, including compressed source,
 with the same inputs and plugin.
 
+For a focused change, `--suite wasmtime` or `--suite javy` selects the
+smoke binary to build and run; `--suite both` is the default. Image and
+memory selection work the same way with either suite.
+
 For the external sources, the build stages, and their outputs, see
 [Building Motor OS with its external sources](build-motor-os.md); for how the
 toolchain is installed, selected, and changed, see [toolchain.md](toolchain.md).

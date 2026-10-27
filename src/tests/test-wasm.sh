@@ -6,6 +6,7 @@ ROOT_DIR="$(cd "$WD/../.." && pwd)"
 image=both
 memory=both
 vmm=qemu
+selection=both
 prepare=false
 vms=()
 linux_identity=()
@@ -18,8 +19,9 @@ while [ "$#" -gt 0 ]; do
     --vmm) vmm="${2:?missing vmm}"; shift 2 ;;
     --vmm=*) vmm="${1#--vmm=}"; shift ;;
     --prepare) prepare=true; shift ;;
+    --suite) selection="${2:?missing suite}"; shift 2 ;;
     --linux-identity) linux_identity=(--linux-identity); shift ;;
-    *) echo "usage: $0 [--release] [--prepare] [--image wasm|dev|both] [--memory 224|256|both] [--vm IMAGE:MIB]... [--vmm qemu|chv] [--linux-identity]" >&2; exit 2 ;;
+    *) echo "usage: $0 [--release] [--prepare] [--suite javy|wasmtime|both] [--image wasm|dev|both] [--memory 224|256|both] [--vm IMAGE:MIB]... [--vmm qemu|chv] [--linux-identity]" >&2; exit 2 ;;
   esac
 done
 case "$image" in wasm) images=(wasm);; dev) images=(dev);; both) images=(wasm dev);; *) exit 2;; esac
@@ -35,7 +37,12 @@ case "$vmm" in qemu) vmm_label=QEMU;; chv) vmm_label="Cloud Hypervisor";; *) exi
 # rust-toolchain.toml names the toolchain, so build from the root whatever the
 # caller's directory is.
 cd "$ROOT_DIR"
-suites=(javy-smoke wasmtime-smoke)
+case "$selection" in
+  javy) suites=(javy-smoke);;
+  wasmtime) suites=(wasmtime-smoke);;
+  both) suites=(javy-smoke wasmtime-smoke);;
+  *) echo "test-wasm: unknown suite $selection" >&2; exit 2;;
+esac
 binary() { echo "$ROOT_DIR/build/obj/release/$1/x86_64-unknown-motor/release/$1"; }
 if [ "$prepare" = true ]; then
   targets=()
@@ -55,7 +62,7 @@ done
 if [ "${WASM_TEST_TIMED:-0}" != 1 ]; then
   vm_args=()
   for vm in "${vms[@]}"; do vm_args+=(--vm "$vm"); done
-  exec timeout 600s env WASM_TEST_TIMED=1 "$0" --vmm "$vmm" "${linux_identity[@]}" "${vm_args[@]}"
+  exec timeout 600s env WASM_TEST_TIMED=1 "$0" --suite "$selection" --vmm "$vmm" "${linux_identity[@]}" "${vm_args[@]}"
 fi
 . "$WD/vm-console-filter.sh"
 . "$WD/vm-test-boot.sh"
