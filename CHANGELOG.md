@@ -4,6 +4,7 @@ All notable changes to this project will be documented in this file.
 
 # 2026-10
 
+* wireguard
 * Motor OS toolchain is now 1.99 Rust stable
 * moto-sdk + toolchain refactoring
 * sparse alloc + spawn

@@ -479,6 +479,7 @@ rejected; omit a key to keep its default.</p>
   <tr><td>UDP</td><td>Unicast, connected and unconnected, IPv4 and IPv6, with bounded receive queues.</td><td>Multicast and broadcast.</td></tr>
   <tr><td>ICMP</td><td>Echo request and reply (<code>ping</code>), with automatic replies configurable; incoming errors are validated before they affect a flow.</td><td>Raw sockets.</td></tr>
   <tr><td>Names</td><td>The <a href="dns.html">DNS resolver service</a>, a hosts file, and <code>resolv.conf</code> maintained by sys-io.</td><td></td></tr>
+  <tr><td>VPN</td><td><a href="wireguard.html">WireGuard</a> tunnels with IPv4/IPv6, peer configuration, detached daemons, status and diagnostics.</td><td>Inter-interface forwarding, live reload and a persistent kill switch.</td></tr>
 </table>
 </div>
 <p>Socket options exposed to programs: <code>TCP_NODELAY</code>, TTL, <code>SO_LINGER</code>,
