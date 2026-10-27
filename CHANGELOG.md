@@ -2,8 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+# 2026-10
+
+* Motor OS toolchain is now 1.99 Rust stable
+* moto-sdk + toolchain refactoring
+* sparse alloc + spawn
+* lorry improvements (cargo workspaces)
+
+# 2026-09
+
+* CAP_NET, CAP_FS_WRITE
+* boot time optimizations
+* native helix, rust analyzer, rustfmt
+* gix
+* vsock
+* ssh client
+
 ## 2026-08
 
+* process roles, filesystem permissions
+* rg, less, wc, which, chmod, sed
 * rmux
 * crossterm port
 * improved oom handling
