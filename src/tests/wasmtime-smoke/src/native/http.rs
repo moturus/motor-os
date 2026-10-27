@@ -8,6 +8,7 @@ use wasm_smoke_suite::{Job, Result, Suite, process_active, used_memory};
 
 use super::{FIXTURES, RUNTIME, runtime_pid};
 
+mod deadline;
 mod lifecycle;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -137,7 +138,7 @@ pub(super) fn run(suite: &mut Suite) -> Result<()> {
             return Err(format!("{program}: runtime survived active Ctrl-C").into());
         }
     }
-    Ok(())
+    deadline::run(suite)
 }
 
 fn address(log: &str, prefix: &str) -> Result<SocketAddr> {

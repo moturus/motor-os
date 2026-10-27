@@ -29,7 +29,7 @@ WASMTIME_CORE_FIXTURES=(lifecycle limits-elements limits-memories limits-tables 
 	memory64-grow memory-too-large)
 # Published upstream handlers; the in-VM client checks serving and shutdown.
 WASMTIME_HTTP_PROGRAMS=(p2_cli_serve_hello_world p2_api_proxy_streaming
-	p3_cli_serve_hello_world p3_http_echo)
+	p3_cli_serve_hello_world p3_http_echo p2_cli_serve_sleep p3_cli_serve_sleep)
 
 # Fixtures are precompiled by a host compiler built from the runtime's own
 # sources, so their engine version and configuration always match it.
@@ -72,6 +72,10 @@ build_wasmtime_fixtures() {
 		"${WASMTIME_HTTP_PROGRAMS[@]}"; do
 		"$compile" pulley64 component "$build/guests/wasm32-wasip2/release/$name.wasm" \
 			"$out/$name.cwasm"
+	done
+	for name in p2_cli_serve_sleep p3_cli_serve_sleep; do
+		"$compile" pulley64 component "$build/guests/wasm32-wasip2/release/$name.wasm" \
+			"$out/$name-epoch.cwasm" --epoch
 	done
 	"$javy_linux" build "$typescript" -C plugin="$plugin" -C deterministic \
 		-o "$build/typescript.wasm"

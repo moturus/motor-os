@@ -26,7 +26,7 @@ Code review against Motor OS `99ca2b45`, Javy `12a6c52d` and Wasmtime
 | 0–1: Javy/Wasmi | Done, including 1f–1l and R1–R6. Build/image integration, custom plugins, byte identity, runner regressions and exhaustion checks are maintained in `build-javy.sh` and `javy-smoke`. |
 | 2: runtime-only Wasmtime | Done. Both images install `wasmtime-rt`; `wasmtime-smoke` covers commands, lifecycle, limits, artifacts, p2 sockets, filesystem and stdio. |
 | 3a: HTTP resource defaults | Done at the published pins: sparse memories, lazy guarded stacks, TIME-WAIT release and the owner's upstream-default decisions. The publication and SDK prerequisites below are historical, not blockers. |
-| 3b / 3f: serving lifecycle and integration | In progress. Installed tests cover hello/echo, concurrent and fragmented traffic, slow readers, disconnect recovery, and foreground/background active-request shutdown. Deadline/cancellation checks before a response, diagnosis of the retained reset and a TypeScript HTTP fixture remain. |
+| 3b / 3f: serving lifecycle and integration | In progress. Installed tests cover hello/echo, concurrent and fragmented traffic, slow readers, disconnect recovery, foreground/background active-request shutdown, and optional request deadlines with capacity recovery. Diagnosis of the retained reset and a TypeScript HTTP fixture remain. |
 | 3c: opt-in p3 | Build support and `P3_DEFAULT=false` are present. The continuation below checks installed default rejection and explicit p3 hello/echo, including instance turnover and post-return streaming. Further selected p3 regressions remain. |
 | 3d: TLS | System CA loading is implemented at `633e7de36`; only the recorded local-CA probe is qualified. The maintained hermetic success/failure and streaming/cancellation matrix remains. |
 | 3e: service masks | Open tests, with no forced-`CAP_LOG` blocker: sys-init requires an explicit decimal mask and passes it through unchanged. Qualify a `svc:256:` wasm server under the existing guard, and audit outgoing HTTP grants separately from socket grants. |
@@ -52,7 +52,7 @@ default. Its host regression is called by `full-test.sh` and checks build
 selection, invalid selections and forwarding through the existing timeout.
 It enables focused Wasmtime matrices with the same image/fixture verification.
 
-The next lifecycle slice uses the same published p2/p3 echo handlers. Four
+Tree `50dfb4a7` uses the same published p2/p3 echo handlers. Four
 concurrent slow clients read 1 KiB per millisecond and verify complete
 256 KiB echoes. Each server then sees three rounds of four disconnects:
 before any bytes, during headers, during upload after response headers, and
@@ -67,9 +67,26 @@ and Cloud Hypervisor: 105 commands per VM, zero admission refusals.
 Motor release Clippy with warnings denied and formatting passed as well.
 Evidence is in `build/wasm-m3-lifecycle/` (`qemu.log`, `chv.log` and preserved
 per-VM evidence).
-Next is deadline enforcement and capacity recovery for handlers that never
-produce a response. The older reset remains open, but missing historical
-evidence does not block the other wasm work (owner instruction 2026-10-27).
+
+The deadline slice adds published p2/p3 `cli_serve_sleep` handlers, compiled
+both with and without epoch instrumentation. Installed `serve` must reject
+both directions of an instrumentation/timeout mismatch. With `-W timeout=1s`,
+two batches of three requests through a two-request limit must return complete
+HTTP 500 responses after their deadlines. The repeated batch checks slot
+recovery. Two clients then abandon complete requests before a response; a
+subsequent request and server shutdown must still complete within existing
+bounds. This qualifies bounded completion with deadlines, not immediate
+cancellation of an abandoned handler.
+
+Both images at 224 and 256 MiB passed on QEMU and Cloud Hypervisor: 111
+commands per VM, zero admission refusals. The 112 observed timeout responses
+took 1.002–2.012 seconds, including queueing. Formatting, Motor release
+Clippy with warnings denied, and the external-source and suite-selection
+host checks passed. Evidence is in `build/wasm-m3-deadline/`; all handlers
+come from the existing published Wasmtime pin, with no fork changes.
+Next are selected upstream p3 lifetime/resource regressions. The older reset
+remains open, but missing historical evidence does not block the other wasm
+work (owner instruction 2026-10-27).
 
 **Continuation, 2026-10-26 (3b/3c/3f, tree `c8a8dce3`).**
 `src/build-scripts/build-wasmtime.sh` now builds four published upstream
