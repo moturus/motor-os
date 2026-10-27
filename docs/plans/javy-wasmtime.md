@@ -29,7 +29,7 @@ Code review against Motor OS `99ca2b45`, Javy `12a6c52d` and Wasmtime
 | 3b / 3f: serving lifecycle and integration | In progress. Installed tests cover hello/echo, concurrent and fragmented traffic, slow readers, disconnect recovery, foreground/background active-request shutdown, and optional request deadlines with capacity recovery. Diagnosis of the retained reset and a TypeScript HTTP fixture remain. |
 | 3c: opt-in p3 | Done at the current pin. Installed command/serve default rejection and explicit p3 operation pass, including instance turnover, post-return streaming/work, command lifetime, stream-resource reuse and task-resource limits. P3 remains experimental; retain the selected upstream regressions across rebases. |
 | 3d: TLS | System CA loading is implemented at `633e7de36`; only the recorded local-CA probe is qualified. The maintained hermetic success/failure and streaming/cancellation matrix remains. |
-| 3e: service masks | Outgoing HTTP/socket grant separation is qualified below. The `svc:256:` service test remains; sys-init requires an explicit decimal mask and passes it through unchanged, so there is no forced-`CAP_LOG` blocker. |
+| 3e: service masks | Done. Both p2/p3 servers start through sys-init with `svc:256:`, pass the existing guard as None, serve requests and shut down. Outgoing HTTP/socket grant separation is qualified separately. No guard widening or sys-init change was needed. |
 | 4: compiler and native packaging | Prototype compiler/publisher and policy tests exist in the fork. Full CLI image delivery and authority checks, production `package` subcommand, publisher hardening/version identity, masked flows, resource budgets and final matrix remain. |
 
 **Current build/test layout.** External checkouts are
@@ -106,7 +106,7 @@ QEMU and Cloud Hypervisor: 118 commands per VM, zero admission refusals.
 Formatting, Motor release Clippy with warnings denied, and external-source
 host checks pass; matrix evidence is in `build/wasm-m3-p3/`.
 
-**Outgoing HTTP grant audit (3e).** Published p2/p3
+**Outgoing HTTP grant audit (3e, tree `17784888`).** Published p2/p3
 `http_outbound_request_get` programs run against a bounded standard-Rust
 loopback server. Socket grants alone cannot link their HTTP imports, with
 HTTP left at its default or explicitly disabled. Enabling HTTP while disabling
@@ -122,9 +122,25 @@ Both images at both sizes pass under QEMU and Cloud Hypervisor: 127 commands
 per VM, zero admission refusals. Formatting, Motor release Clippy with warnings
 denied and the external-source host checks pass. Evidence is in
 `build/wasm-m3-grants/`. No runtime or fork changes were needed.
-Next is the sys-init service-mask test. The older reset remains open, but
-missing historical evidence does not block other wasm work (owner instruction
-2026-10-27).
+
+**Sys-init service masks (3e).** `test-wasm.sh --services --suite wasmtime`
+uses separate test-image variants; preparation adds published p2/p3 hello
+artifacts and `svc:256:` entries. Native process metadata must show both
+servers as active None-role children of sys-init. Each serves four fragmented
+HTTP requests with exact responses, then both must exit after their control
+connections initiate shutdown. The release developer gate includes this
+phase for `wasm:224` and `dev:256`; selector/forwarding and developer-memory
+host regressions cover the driver changes. The smoke crate uses the already
+locked published moto-sdk directly for process metadata.
+
+Both services passed on both images at both sizes under QEMU and Cloud
+Hypervisor. A normal-image QEMU run at 224 MiB still passes all 127 commands.
+The runs report zero admission-refusal delta. Formatting, Motor release Clippy
+with warnings denied, shell syntax and the two host regressions pass. Evidence
+is in `build/wasm-m3-service/` (`qemu.log`, `chv.log`, `normal.log`). No
+production boot configuration, runtime, external fork or `src/sys` code changed.
+The older reset remains open, but missing historical evidence does not block
+other wasm work (owner instruction 2026-10-27).
 
 **Continuation, 2026-10-26 (3b/3c/3f, tree `c8a8dce3`).**
 `src/build-scripts/build-wasmtime.sh` now builds four published upstream

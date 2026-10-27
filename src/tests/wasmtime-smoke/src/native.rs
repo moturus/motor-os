@@ -258,6 +258,11 @@ fn runtime_pid(job: &Job) -> Result<u64> {
 
 pub fn run() -> Result<()> {
     let mut suite = Suite::new("wasmtime-smoke", "/devtools/wasmtime/sources.txt")?;
-    run_suite(&mut suite)?;
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    match args.as_slice() {
+        [] => run_suite(&mut suite)?,
+        [arg] if arg == "--services" => http::services()?,
+        _ => return Err("usage: wasmtime-smoke [--services]".into()),
+    }
     suite.finish()
 }

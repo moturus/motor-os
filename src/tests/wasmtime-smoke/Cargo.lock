@@ -219,5 +219,6 @@ dependencies = [
 name = "wasmtime-smoke"
 version = "0.1.0"
 dependencies = [
+ "moto-sdk",
  "wasm-smoke-suite",
 ]

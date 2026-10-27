@@ -207,6 +207,18 @@ For a focused change, `--suite wasmtime` or `--suite javy` selects the
 smoke binary to build and run; `--suite both` is the default. Image and
 memory selection work the same way with either suite.
 
+The sys-init service-mask checks use separate test images:
+
+```sh
+src/tests/test-wasm.sh --prepare --services --suite wasmtime
+src/tests/test-wasm.sh --services --suite wasmtime
+```
+
+These variants add p2/p3 servers configured with `svc:256:`. The client
+checks their None role and sys-init parent, serves requests, and shuts them
+down. The same image, memory and VMM selectors apply; the release developer
+gate runs this phase on `wasm:224` and `dev:256` too.
+
 For the external sources, the build stages, and their outputs, see
 [Building Motor OS with its external sources](build-motor-os.md); for how the
 toolchain is installed, selected, and changed, see [toolchain.md](toolchain.md).

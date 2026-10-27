@@ -12,10 +12,15 @@ mod deadline;
 mod grants;
 mod lifecycle;
 mod post_return;
+mod service;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const RESPONSE_LIMIT: u64 = 1024 * 1024;
 const CONCURRENCY: usize = 4;
+
+pub(super) fn services() -> Result<()> {
+    service::run()
+}
 
 pub(super) fn run(suite: &mut Suite) -> Result<()> {
     grants::run(suite)?;

@@ -47,6 +47,21 @@ for selection in default both javy wasmtime; do
     fail "$selection was not forwarded through timeout"
 done
 : > "$WASM_SELECTION_LOG"
+"$runner" --services --suite wasmtime --vm wasm:224 --vmm chv
+[ "$(cat "$WASM_SELECTION_LOG")" = \
+  "timeout 600s env WASM_TEST_TIMED=1 $runner --suite wasmtime --vmm chv --services --vm wasm:224" ] ||
+  fail 'service mode was not forwarded through timeout'
+cat > "$temporary/src/tests/wasm-service-images.sh" <<'SH'
+prepare_wasm_service_images() { printf 'services %s\n' "$*" >> "$WASM_SELECTION_LOG"; }
+SH
+: > "$WASM_SELECTION_LOG"
+"$runner" --prepare --services --suite wasmtime --vm wasm:224 --vm wasm:256 --vm dev:256
+grep -qxF "services $temporary wasm dev" "$WASM_SELECTION_LOG" || fail 'service images lost VM selection'
+: > "$WASM_SELECTION_LOG"
+status=0
+"$runner" --prepare --services --suite javy > "$temporary/invalid-service.log" 2>&1 || status=$?
+[ "$status" = 2 ] && [ ! -s "$WASM_SELECTION_LOG" ] || fail 'invalid service suite started work'
+: > "$WASM_SELECTION_LOG"
 status=0
 "$runner" --prepare --suite missing > "$temporary/invalid.log" 2>&1 || status=$?
 [ "$status" = 2 ] && [ ! -s "$WASM_SELECTION_LOG" ] || fail "invalid suite started work"
