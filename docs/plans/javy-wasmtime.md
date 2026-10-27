@@ -30,7 +30,7 @@ Code review against Motor OS `99ca2b45`, Javy `12a6c52d` and Wasmtime
 | 3c: opt-in p3 | Done at the current pin. Installed command/serve default rejection and explicit p3 operation pass, including instance turnover, post-return streaming/work, command lifetime, stream-resource reuse and task-resource limits. P3 remains experimental; retain the selected upstream regressions across rebases. |
 | 3d: TLS | System CA loading is implemented at `633e7de36`; only the recorded local-CA probe is qualified. The maintained hermetic success/failure and streaming/cancellation matrix remains. |
 | 3e: service masks | Done. Both p2/p3 servers start through sys-init with `svc:256:`, pass the existing guard as None, serve requests and shut down. Outgoing HTTP/socket grant separation is qualified separately. No guard widening or sys-init change was needed. |
-| 4: compiler and native packaging | Prototype compiler/publisher and policy tests exist in the fork. Full CLI image delivery and authority checks, production `package` subcommand, publisher hardening/version identity, masked flows, resource budgets and final matrix remain. |
+| 4: compiler and native packaging | Active, starting with full CLI authority checks and delivery. Prototype compiler/publisher and policy tests exist in the fork. Production `package` integration, publisher hardening/version identity, masked flows and resource budgets remain. |
 
 **Current build/test layout.** External checkouts are
 `external-sources/javy` and `external-sources/wasmtime`, never sibling
@@ -142,13 +142,28 @@ production boot configuration, runtime, external fork or `src/sys` code changed.
 The older reset remains open, but missing historical evidence does not block
 other wasm work (owner instruction 2026-10-27).
 
-**Next decision (3f).** The remaining TypeScript HTTP fixture needs an
-adapter because pinned Javy cannot export the HTTP interface directly.
-[The composition proposal](javy-typescript-http-fixture.md) describes bounded
-Rust I/O and p2/p3 wrappers around the Javy command, with a small feasibility
-patch first. It is pending owner review under AGENTS.md's non-obvious-decision
-rule; no adapter implementation has started. Hermetic TLS (3d), the retained
-reset diagnosis, and milestone 4 also remain open.
+**Milestone 4 continuation (owner direction, 2026-10-27).** Defer the extra
+milestone 3 qualification work and the
+[TypeScript adapter proposal](javy-typescript-http-fixture.md); proceed with
+production compiler and packaging work. Keep focused validation of each
+production patch, without expanding the unrelated HTTP fixture matrix.
+
+The first fork patch is explicitly in `external-sources/wasmtime/`: share the
+existing Motor role/capability guard between the full and runtime-only CLIs,
+and apply the existing native network-capability check to both hosts. The
+Motor OS build then needs to build/stage the full CLI in its separate Cargo
+output directory and install it in both images. Existing memory/stack policy
+must also be shared before full CLI execution is delivered. Keep local fork
+qualification separate from the published main-tree pin; the owner pushes
+the fork, as agreed above.
+
+`wasmtime package` is a planned Motor extension, not an upstream Linux
+subcommand. Upstream `compile` emits a serialized `.cwasm` artifact that
+Wasmtime loads. Motor's native path packages that artifact with its matching
+runtime template into an OS-loadable ELF, so native code executes from the
+kernel-loaded RX segment without granting Wasmtime executable-memory authority.
+The compiler and WASI semantics are shared; the executable packaging/loading
+mechanism is deliberately Motor-specific.
 
 **Continuation, 2026-10-26 (3b/3c/3f, tree `c8a8dce3`).**
 `src/build-scripts/build-wasmtime.sh` now builds four published upstream
@@ -1839,8 +1854,9 @@ image and the developer image within the RAM and disk requirements.
 
 ### Order and prerequisites
 
-Recommended next steps: 3b and 3f, with 3c–3e after them; 4a and 4c can
-proceed in the fork alongside. Retain one image-matrix driver and use the common acceptance
+Current owner direction: deliver 4b, then continue compiler policy and native
+packaging in 4a/4c–4e. Remaining milestone 3 qualification is deferred. Retain
+one image-matrix driver and use the common acceptance
 rules above for every milestone. Keep Wasmtime engine regressions in its fork;
 Javy/Wasmi regressions live in `javy-smoke`.
 
@@ -1848,8 +1864,8 @@ Javy/Wasmi regressions live in `javy-smoke`.
 | --- | --- |
 | 1 | Done 2026-10-09. |
 | 2 | Done; gated with the memory-limit change on 2026-10-18. |
-| 3 | In progress; 3a is delivered and gated, and moto-sdk is published. Continue 3b/3f. |
-| 4 | 4a and 4c can start in the fork after 2a; 4b, 4d–4f need the milestone 3 host and the milestone 2 template. |
+| 3 | Remaining qualification deferred by the owner on 2026-10-27. |
+| 4 | Active: the delivered shared host and template support full CLI delivery and packaging work. |
 
 Production changes follow [AGENTS.md](../../AGENTS.md). Application changes use
 focused tests; any separately approved src/sys change requires three debug and

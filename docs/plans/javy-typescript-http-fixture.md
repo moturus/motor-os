@@ -1,6 +1,7 @@
 # TypeScript HTTP fixture: proposed component composition
 
-Pending owner review, 2026-10-27. This resolves the open fixture design in
+Deferred by owner direction, 2026-10-27, in favor of milestone 4 production
+work. This proposal addresses the open fixture design in
 [milestone 3f](javy-wasmtime.md#milestone-3-httphttps-and-opt-in-p3).
 No implementation of this proposal has started.
 
