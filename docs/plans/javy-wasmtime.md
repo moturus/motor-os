@@ -6,8 +6,9 @@ fixture-specific helpers with shared production code. Milestones 0–2 are
 delivered: the maintained Motor OS branches are published, and Javy/Wasmi and the
 runtime-only `wasmtime-rt` build through the normal external-source workflow, ship in
 the developer and small wasm images, and pass their installed-tool checks on
-both images at 256 and 224 MiB. HTTP serving (milestone 3) and the full
-compiler with native packaging (milestone 4) are ahead; see
+both images at 256 and 224 MiB. HTTP serving is implemented, with remaining
+milestone 3 qualification deferred. Full compiler delivery is locally qualified;
+native packaging and the remaining milestone 4 work are ahead. See
 [Status and resume point](#status-and-resume-point-2026-10-27).
 
 This document records the requirements, the design contracts, a short account
@@ -30,7 +31,7 @@ Code review against Motor OS `99ca2b45`, Javy `12a6c52d` and Wasmtime
 | 3c: opt-in p3 | Done at the current pin. Installed command/serve default rejection and explicit p3 operation pass, including instance turnover, post-return streaming/work, command lifetime, stream-resource reuse and task-resource limits. P3 remains experimental; retain the selected upstream regressions across rebases. |
 | 3d: TLS | System CA loading is implemented at `633e7de36`; only the recorded local-CA probe is qualified. The maintained hermetic success/failure and streaming/cancellation matrix remains. |
 | 3e: service masks | Done. Both p2/p3 servers start through sys-init with `svc:256:`, pass the existing guard as None, serve requests and shut down. Outgoing HTTP/socket grant separation is qualified separately. No guard widening or sys-init change was needed. |
-| 4: compiler and native packaging | Active, starting with full CLI authority checks and delivery. Prototype compiler/publisher and policy tests exist in the fork. Production `package` integration, publisher hardening/version identity, masked flows and resource budgets remain. |
+| 4: compiler and native packaging | 4b is locally qualified with fork `4eede7f3e2`: the full CLI and shared authority/resource policy pass on both images at both sizes. Main-tree integration awaits fork publication. Compiler bounds/policy, production `package`, publisher hardening/version identity, native masked flows, budgets and the final matrix remain. |
 
 **Current build/test layout.** External checkouts are
 `external-sources/javy` and `external-sources/wasmtime`, never sibling
@@ -148,14 +149,49 @@ milestone 3 qualification work and the
 production compiler and packaging work. Keep focused validation of each
 production patch, without expanding the unrelated HTTP fixture matrix.
 
-The first fork patch is explicitly in `external-sources/wasmtime/`: share the
-existing Motor role/capability guard between the full and runtime-only CLIs,
-and apply the existing native network-capability check to both hosts. The
-Motor OS build then needs to build/stage the full CLI in its separate Cargo
-output directory and install it in both images. Existing memory/stack policy
-must also be shared before full CLI execution is delivered. Keep local fork
-qualification separate from the published main-tree pin; the owner pushes
-the fork, as agreed above.
+The first fork patch is `4eede7f3e23371317b2da19514b117ab17447381` in
+`external-sources/wasmtime/`. It shares the existing role/capability guard,
+native network-capability check, lazy linear memories and guarded fiber stacks
+between the full and runtime-only CLIs. It also enables upstream CLI help and
+Wasm text parsing in the full build and updates the standalone build's sysroot
+instructions for the refactored toolchain layout.
+
+The full CLI passed 16 focused commands in the 224 MiB wasm VM: authority
+refusals before option parsing, all four accepted masks, unmasked help/version,
+on-VM Pulley/native compilation of the existing TypeScript and p3 hello inputs,
+and loading the Pulley results in both full and runtime-only Wasmtime. Native
+TypeScript compilation peaked at 172,392,448 sampled whole-VM bytes; there were
+no memory-admission refusals. The first run exposed disabled Clap help in the
+prototype feature selection; enabling `clap/default` fixes that delivered-CLI
+gap. Preserve that failure in `build/wasm-m4-cli/help-failure.log`; passing
+candidate evidence is `candidate.log` and `candidate.sha256` there.
+
+The main-tree build/image integration also passes with that local revision:
+`build-wasmtime.sh` builds separate full/runtime Cargo graphs, stages both tools
+with checksums/provenance, and both image manifests require them. The normal
+`wasmtime-smoke` suite includes compiler checks; `test-wasm.sh --compiler
+--suite wasmtime` selects just those checks. They reuse the existing TypeScript
+and p3 hello programs, with raw Wasm execution under mask 0 added to the
+candidate's 16 cases. All 18 commands pass on QEMU for each configuration:
+
+| Image | RAM MiB | Native TypeScript sampled whole-VM peak bytes |
+| --- | --- | --- |
+| wasm | 224 | 171,560,960 |
+| wasm | 256 | 187,117,568 |
+| dev | 224 | 171,528,192 |
+| dev | 256 | 185,618,432 |
+
+Every VM reports zero admission-refusal delta and shuts down cleanly. Installed
+binaries match the staged files. Main-tree release Clippy with warnings denied,
+formatting, shell syntax and existing build/fetch/driver regressions pass. The
+full CLI is 24,090,168 file bytes; runtime-only is 13,887,352. Evidence is in
+`build/wasm-m4-cli/installed/` and `installed-matrix.log`. Image preparation
+initially lacked sandbox KVM access; `prepare-sandbox-failure.log` preserves
+that environment failure, and preparation with KVM access passes.
+
+The integration and pin are ready to commit after the owner publishes the fork,
+as agreed above. Compiler bounds/policy qualification, production packaging,
+native execution and the final budget/matrix remain open.
 
 `wasmtime package` is a planned Motor extension, not an upstream Linux
 subcommand. Upstream `compile` emits a serialized `.cwasm` artifact that
@@ -436,10 +472,10 @@ What the branches carry:
   target-resolved native defaults and `Config::motor_runtime()` for
   Pulley, immutable native ELF templates with a publisher, bounded guarded
   stacks, shared command/HTTP hosts, Motor OS's `P3_DEFAULT=false`, the runtime-only
-  CLI with an explicit ELF layout, and build/check scripts. The role/mask guard
-  runs only in the runtime-only (`motor-template`) build; the full CLI has none
-  yet. These implementations still need the qualification and image delivery
-  specified in milestones 2–4.
+  CLI with an explicit ELF layout, and build/check scripts. Fork `4eede7f3e2`
+  shares the role/mask guard and memory/stack policy with the full CLI; see
+  the local milestone 4b qualification above. Compiler policy, production
+  packaging and the remaining milestone 3/4 qualification are still open.
   `moturus/target-lexicon`, `moturus/tokio` and `moturus/mio` carry the target
   and asynchronous networking ports.
 
