@@ -27,7 +27,7 @@ Code review against Motor OS `99ca2b45`, Javy `12a6c52d` and Wasmtime
 | 2: runtime-only Wasmtime | Done. Both images install `wasmtime-rt`; `wasmtime-smoke` covers commands, lifecycle, limits, artifacts, p2 sockets, filesystem and stdio. |
 | 3a: HTTP resource defaults | Done at the published pins: sparse memories, lazy guarded stacks, TIME-WAIT release and the owner's upstream-default decisions. The publication and SDK prerequisites below are historical, not blockers. |
 | 3b / 3f: serving lifecycle and integration | In progress. Installed tests cover hello/echo, concurrent and fragmented traffic, slow readers, disconnect recovery, foreground/background active-request shutdown, and optional request deadlines with capacity recovery. Diagnosis of the retained reset and a TypeScript HTTP fixture remain. |
-| 3c: opt-in p3 | Build support and `P3_DEFAULT=false` are present. The continuation below checks installed default rejection and explicit p3 hello/echo, including instance turnover and post-return streaming. Further selected p3 regressions remain. |
+| 3c: opt-in p3 | Done at the current pin. Installed command/serve default rejection and explicit p3 operation pass, including instance turnover, post-return streaming/work, command lifetime, stream-resource reuse and task-resource limits. P3 remains experimental; retain the selected upstream regressions across rebases. |
 | 3d: TLS | System CA loading is implemented at `633e7de36`; only the recorded local-CA probe is qualified. The maintained hermetic success/failure and streaming/cancellation matrix remains. |
 | 3e: service masks | Open tests, with no forced-`CAP_LOG` blocker: sys-init requires an explicit decimal mask and passes it through unchanged. Qualify a `svc:256:` wasm server under the existing guard, and audit outgoing HTTP grants separately from socket grants. |
 | 4: compiler and native packaging | Prototype compiler/publisher and policy tests exist in the fork. Full CLI image delivery and authority checks, production `package` subcommand, publisher hardening/version identity, masked flows, resource budgets and final matrix remain. |
@@ -68,7 +68,7 @@ Motor release Clippy with warnings denied and formatting passed as well.
 Evidence is in `build/wasm-m3-lifecycle/` (`qemu.log`, `chv.log` and preserved
 per-VM evidence).
 
-The deadline slice adds published p2/p3 `cli_serve_sleep` handlers, compiled
+Tree `cba80ac4` adds published p2/p3 `cli_serve_sleep` handlers, compiled
 both with and without epoch instrumentation. Installed `serve` must reject
 both directions of an instrumentation/timeout mismatch. With `-W timeout=1s`,
 two batches of three requests through a two-request limit must return complete
@@ -84,9 +84,30 @@ took 1.002–2.012 seconds, including queueing. Formatting, Motor release
 Clippy with warnings denied, and the external-source and suite-selection
 host checks passed. Evidence is in `build/wasm-m3-deadline/`; all handlers
 come from the existing published Wasmtime pin, with no fork changes.
-Next are selected upstream p3 lifetime/resource regressions. The older reset
-remains open, but missing historical evidence does not block the other wasm
-work (owner instruction 2026-10-27).
+
+**Selected p3 regressions (3c).** Five more published upstream programs are
+built from `633e7de36`. `p3_cli_hello_stdout` checks command opt-in and stdout.
+`p3_cli_hello_stdout_post_return` checks the upstream command lifetime:
+`run` returns before suspended post-return output runs, including explicit
+invocation. `p3_cli_many_stream` creates/drops 200 stream pairs under a
+100-resource cap, while `p3_cli_many_tasks` must reject unfinished tasks at
+that same cap. These retain the upstream resource-reuse and exhaustion
+regressions. `p3_cli_serve_post_return` yields ten times after returning an
+empty HTTP response, then prints a marker. Eight responses with instance
+reuse limited to one must yield exactly eight markers before clean shutdown,
+retaining the upstream exhausted-instance/post-return regression.
+
+The initial invoke check failed because building these fixtures for
+`wasm32-wasip2` exports both p2 and p3 `run` functions. The test now selects
+`wasi:cli/run.run@0.3.0()` explicitly; it retains the upstream output assertion.
+The original failure is preserved in `build/wasm-m3-p3/qemu-first-failure.log`.
+The corrected focused matrix passes on both images at both sizes under
+QEMU and Cloud Hypervisor: 118 commands per VM, zero admission refusals.
+Formatting, Motor release Clippy with warnings denied, and external-source
+host checks pass; matrix evidence is in `build/wasm-m3-p3/`.
+Next is the separate outgoing HTTP/socket grant audit (3e). The older reset
+remains open, but missing historical evidence does not block other wasm work
+(owner instruction 2026-10-27).
 
 **Continuation, 2026-10-26 (3b/3c/3f, tree `c8a8dce3`).**
 `src/build-scripts/build-wasmtime.sh` now builds four published upstream

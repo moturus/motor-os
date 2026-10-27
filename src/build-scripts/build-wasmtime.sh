@@ -29,7 +29,11 @@ WASMTIME_CORE_FIXTURES=(lifecycle limits-elements limits-memories limits-tables 
 	memory64-grow memory-too-large)
 # Published upstream handlers; the in-VM client checks serving and shutdown.
 WASMTIME_HTTP_PROGRAMS=(p2_cli_serve_hello_world p2_api_proxy_streaming
-	p3_cli_serve_hello_world p3_http_echo p2_cli_serve_sleep p3_cli_serve_sleep)
+	p3_cli_serve_hello_world p3_http_echo p2_cli_serve_sleep p3_cli_serve_sleep
+	p3_cli_serve_post_return)
+# Selected upstream p3 command lifetime and resource-table regressions.
+WASMTIME_P3_PROGRAMS=(p3_cli_hello_stdout p3_cli_hello_stdout_post_return
+	p3_cli_many_stream p3_cli_many_tasks)
 
 # Fixtures are precompiled by a host compiler built from the runtime's own
 # sources, so their engine version and configuration always match it.
@@ -52,7 +56,7 @@ build_wasmtime_fixtures() {
 		cargo fetch --locked
 		local bins=() program
 		for program in "${WASMTIME_GUEST_PROGRAMS[@]}" "${WASMTIME_FILESYSTEM_PROGRAMS[@]}" \
-			"${WASMTIME_HTTP_PROGRAMS[@]}"; do
+			"${WASMTIME_HTTP_PROGRAMS[@]}" "${WASMTIME_P3_PROGRAMS[@]}"; do
 			bins+=(--bin "$program")
 		done
 		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$build/guests" cargo build --locked --release \
@@ -69,7 +73,7 @@ build_wasmtime_fixtures() {
 	"$compile" x86_64-unknown-motor core "$root/motor-runtime/fixtures/lifecycle.wat" \
 		"$out/lifecycle-native.cwasm"
 	for name in "${WASMTIME_GUEST_PROGRAMS[@]}" "${WASMTIME_FILESYSTEM_PROGRAMS[@]}" \
-		"${WASMTIME_HTTP_PROGRAMS[@]}"; do
+		"${WASMTIME_HTTP_PROGRAMS[@]}" "${WASMTIME_P3_PROGRAMS[@]}"; do
 		"$compile" pulley64 component "$build/guests/wasm32-wasip2/release/$name.wasm" \
 			"$out/$name.cwasm"
 	done

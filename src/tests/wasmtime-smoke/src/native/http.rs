@@ -10,6 +10,7 @@ use super::{FIXTURES, RUNTIME, runtime_pid};
 
 mod deadline;
 mod lifecycle;
+mod post_return;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const RESPONSE_LIMIT: u64 = 1024 * 1024;
@@ -138,7 +139,8 @@ pub(super) fn run(suite: &mut Suite) -> Result<()> {
             return Err(format!("{program}: runtime survived active Ctrl-C").into());
         }
     }
-    deadline::run(suite)
+    deadline::run(suite)?;
+    post_return::run(suite)
 }
 
 fn address(log: &str, prefix: &str) -> Result<SocketAddr> {
