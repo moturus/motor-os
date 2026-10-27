@@ -13,8 +13,12 @@ const DEFAULT_NUM_LISTENING_SOCKETS: usize = 4;
 const MAX_NUM_LISTENING_SOCKETS: usize = 32;
 const MAX_PENDING_ACCEPTS: usize = 1024;
 
-type PendingSocket = (u64, SocketAddr, moto_async::oneshot::Sender<()>);
-type PendingAccept = (moto_ipc::io_channel::Msg, ClientSender);
+type PendingSocket = (
+    u64,
+    SocketAddr,
+    moto_sdk::async_runtime::oneshot::Sender<()>,
+);
+type PendingAccept = (moto_sdk::ipc::io_channel::Msg, ClientSender);
 
 pub(super) struct TcpListener {
     listener_id: u64,
@@ -91,9 +95,54 @@ impl TcpListener {
         self.listening_on.contains(&(socket_addr, device_idx))
     }
 
-    fn accepts_address(&self, address: IpAddr) -> bool {
+    pub(super) fn accepts_address(&self, address: IpAddr) -> bool {
         let bound = self.socket_addr.ip();
         (bound.is_unspecified() && bound.is_ipv4() == address.is_ipv4()) || bound == address
+    }
+
+    pub(super) fn has_device(&self, device_idx: usize) -> bool {
+        self.listening_on
+            .iter()
+            .any(|(_, index)| *index == device_idx)
+    }
+
+    pub(super) fn port(&self) -> u16 {
+        self.socket_addr.port()
+    }
+
+    /// Registration must fail if an expanded endpoint cannot be constructed;
+    /// the caller rolls back every endpoint belonging to the new device.
+    pub(super) fn try_add_address(
+        this: &Rc<RefCell<Self>>,
+        address: IpAddr,
+        device_idx: usize,
+    ) -> std::io::Result<()> {
+        let (endpoint, count) = {
+            let mut listener = this.borrow_mut();
+            if !listener.accepts_address(address) {
+                return Ok(());
+            }
+            let endpoint = SocketAddr::new(address, listener.socket_addr.port());
+            let count = listener.initial_pool_size;
+            listener
+                .listening_on
+                .try_reserve(1)
+                .map_err(|_| ErrorKind::OutOfMemory)?;
+            listener
+                .listening_sockets
+                .try_reserve(count)
+                .map_err(|_| ErrorKind::OutOfMemory)?;
+            listener
+                .runtime
+                .backlog
+                .try_open((listener.listener_id, endpoint), count)?;
+            listener.listening_on.push((endpoint, device_idx));
+            (endpoint, count)
+        };
+        for _ in 0..count {
+            MotoSocket::create_tcp_listening_socket(Rc::downgrade(this), device_idx, endpoint)?;
+        }
+        Ok(())
     }
 
     pub(super) fn add_address(this: &Rc<RefCell<Self>>, address: IpAddr, device_idx: usize) {
@@ -146,6 +195,42 @@ impl TcpListener {
             .notify_one();
     }
 
+    pub(super) fn detach_device(
+        this: &Rc<RefCell<Self>>,
+        device_idx: usize,
+    ) -> VecDeque<PendingAccept> {
+        let mut listener = this.borrow_mut();
+        let runtime = listener.runtime.clone();
+        let before = listener.pending_sockets.len();
+        listener.pending_sockets.retain(|(socket_id, _, _)| {
+            !runtime
+                .inner
+                .borrow()
+                .sockets
+                .get(socket_id)
+                .is_some_and(|socket| socket.borrow().device_index() == Some(device_idx))
+        });
+        for _ in listener.pending_sockets.len()..before {
+            runtime.completed.release(listener.listener_id);
+        }
+        if listener.socket_addr.ip().is_unspecified() || !listener.listening_on.is_empty() {
+            return VecDeque::new();
+        }
+
+        // Address hooks have already closed this listener's pools. Removing
+        // its maps now prevents a later accept or replenishment reviving it.
+        let mut inner = runtime.inner.borrow_mut();
+        inner.tcp_listeners.remove(&listener.listener_id);
+        if let Some(client) = inner
+            .clients
+            .get_mut(&listener.client_sender.remote_handle())
+        {
+            client.tcp_listeners.remove(&listener.listener_id);
+        }
+        listener.listening_sockets.clear();
+        std::mem::take(&mut listener.pending_accepts)
+    }
+
     // Called on conn drop.
     pub(super) async fn hard_reset(this: Rc<RefCell<Self>>) {
         let pending_accepts = {
@@ -160,7 +245,7 @@ impl TcpListener {
         Self::cancel_pending_accepts(pending_accepts).await;
     }
 
-    async fn cancel_pending_accepts(mut pending: VecDeque<PendingAccept>) {
+    pub(super) async fn cancel_pending_accepts(mut pending: VecDeque<PendingAccept>) {
         while let Some((mut msg, client)) = pending.pop_front() {
             msg.status = moto_rt::E_NOT_CONNECTED;
             let _ = client.send(msg).await;
@@ -392,7 +477,7 @@ impl TcpListener {
     pub(super) async fn on_socket_connected(
         this: Rc<RefCell<Self>>,
         moto_socket: Rc<RefCell<MotoSocket>>,
-        accepted_tx: moto_async::oneshot::Sender<()>,
+        accepted_tx: moto_sdk::async_runtime::oneshot::Sender<()>,
     ) {
         let (socket_id, remote_addr) = {
             let socket_ref = moto_socket.borrow();
@@ -433,6 +518,7 @@ impl TcpListener {
         };
 
         if let Some((accept_req, accepted_tx, client)) = accepted {
+            drop(moto_socket);
             Self::process_matched_accept(
                 this,
                 socket_id,
@@ -452,8 +538,8 @@ impl TcpListener {
         this: Rc<RefCell<Self>>,
         socket_id: u64,
         remote_addr: SocketAddr,
-        accepted_tx: moto_async::oneshot::Sender<()>,
-        accept_req: moto_ipc::io_channel::Msg,
+        accepted_tx: moto_sdk::async_runtime::oneshot::Sender<()>,
+        accept_req: moto_sdk::ipc::io_channel::Msg,
         client_sender: ClientSender,
     ) {
         let moto_socket = this
@@ -501,28 +587,30 @@ impl TcpListener {
 
         let mut resp = accept_req;
         resp.handle = socket_id;
-        moto_sys_io::api_net::put_socket_addr(&mut resp.payload, &remote_addr);
+        moto_sdk::sys_io::api_net::put_socket_addr(&mut resp.payload, &remote_addr);
         resp.status = moto_rt::E_OK;
 
-        let _ = client_sender.send(resp).await;
-        accepted_tx.send(()).unwrap();
+        drop(this);
+        if MotoSocket::publish_ip_socket(moto_socket, resp).await {
+            let _ = accepted_tx.send(());
+        }
     }
 
     /* ----------------------------------- API calls ------------------------------------ */
     pub(super) async fn bind(
         runtime: &super::NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
+        msg: moto_sdk::ipc::io_channel::Msg,
         client_sender: &ClientSender,
     ) -> std::io::Result<()> {
         runtime.pressure.admit()?;
         let mut resp = msg;
-        let mut socket_addr = moto_sys_io::api_net::get_socket_addr(&msg.payload);
+        let mut socket_addr = moto_sdk::sys_io::api_net::get_socket_addr(&msg.payload);
 
         let (listening_on, ephemeral_tcp_port) =
             Self::resolve_bind_addresses(runtime, &mut socket_addr)?;
 
         if ephemeral_tcp_port.is_some() {
-            moto_sys_io::api_net::put_socket_addr(&mut resp.payload, &socket_addr);
+            moto_sdk::sys_io::api_net::put_socket_addr(&mut resp.payload, &socket_addr);
         }
 
         let num_listeners = if msg.flags == 0 {
@@ -610,7 +698,7 @@ impl TcpListener {
     /// handles always differ.
     fn check_same_process(
         tcp_listener: &Rc<RefCell<Self>>,
-        sender: &moto_ipc::io_channel::Sender,
+        sender: &moto_sdk::ipc::io_channel::Sender,
         what: &str,
         listener_id: u64,
     ) -> std::io::Result<()> {
@@ -641,7 +729,7 @@ impl TcpListener {
 
     pub(super) async fn accept(
         runtime: &super::NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
+        msg: moto_sdk::ipc::io_channel::Msg,
         sender: &ClientSender,
     ) -> std::io::Result<()> {
         let listener_id = msg.handle;
@@ -684,8 +772,8 @@ impl TcpListener {
 
     pub(super) async fn get_option(
         runtime: &super::NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        msg: moto_sdk::ipc::io_channel::Msg,
+        sender: &moto_sdk::ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
         let listener_id = msg.handle;
         let tcp_listener = runtime
@@ -707,16 +795,16 @@ impl TcpListener {
         let options = msg.payload.args_64()[0];
         let mut resp = msg;
         match options {
-            moto_sys_io::api_net::TCP_OPTION_TTL => {
+            moto_sdk::sys_io::api_net::TCP_OPTION_TTL => {
                 resp.payload.args_8_mut()[23] = tcp_listener.borrow().ttl;
             }
-            moto_sys_io::api_net::TCP_OPTION_RCVBUF => {
+            moto_sdk::sys_io::api_net::TCP_OPTION_RCVBUF => {
                 resp.payload.args_64_mut()[1] = tcp_listener.borrow().buffer_sizes.rx as u64;
             }
-            moto_sys_io::api_net::TCP_OPTION_SNDBUF => {
+            moto_sdk::sys_io::api_net::TCP_OPTION_SNDBUF => {
                 resp.payload.args_64_mut()[1] = tcp_listener.borrow().buffer_sizes.tx as u64;
             }
-            moto_sys_io::api_net::TCP_OPTION_ONLY_V6 => {
+            moto_sdk::sys_io::api_net::TCP_OPTION_ONLY_V6 => {
                 if !tcp_listener.borrow().socket_addr.is_ipv6() {
                     return Err(ErrorKind::Unsupported.into());
                 }
@@ -732,8 +820,8 @@ impl TcpListener {
 
     pub(super) async fn set_option(
         runtime: &super::NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        msg: moto_sdk::ipc::io_channel::Msg,
+        sender: &moto_sdk::ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
         let listener_id = msg.handle;
         let tcp_listener = runtime
@@ -755,7 +843,7 @@ impl TcpListener {
         let options = msg.payload.args_64()[0];
         let mut resp = msg;
         match options {
-            moto_sys_io::api_net::TCP_OPTION_TTL => {
+            moto_sdk::sys_io::api_net::TCP_OPTION_TTL => {
                 let ttl = msg.payload.args_8()[23];
                 if ttl == 0 {
                     return Err(ErrorKind::InvalidInput.into());
@@ -765,17 +853,17 @@ impl TcpListener {
             // Applies to accepts served by backlog sockets constructed after
             // this call (the 2026-08-11 review ruling); sockets already in
             // the pool keep the sizes and scale they were built with.
-            moto_sys_io::api_net::TCP_OPTION_RCVBUF => {
+            moto_sdk::sys_io::api_net::TCP_OPTION_RCVBUF => {
                 let bytes = super::socket::tcp::TcpBufferSizes::normalize(msg.payload.args_64()[1]);
                 tcp_listener.borrow_mut().buffer_sizes.rx = bytes;
                 resp.payload.args_64_mut()[1] = bytes as u64;
             }
-            moto_sys_io::api_net::TCP_OPTION_SNDBUF => {
+            moto_sdk::sys_io::api_net::TCP_OPTION_SNDBUF => {
                 let bytes = super::socket::tcp::TcpBufferSizes::normalize(msg.payload.args_64()[1]);
                 tcp_listener.borrow_mut().buffer_sizes.tx = bytes;
                 resp.payload.args_64_mut()[1] = bytes as u64;
             }
-            moto_sys_io::api_net::TCP_OPTION_ONLY_V6 => {
+            moto_sdk::sys_io::api_net::TCP_OPTION_ONLY_V6 => {
                 if msg.payload.args_8()[23] > 1 {
                     return Err(ErrorKind::InvalidInput.into());
                 }
@@ -793,8 +881,8 @@ impl TcpListener {
 
     pub(super) async fn drop_from_client(
         runtime: &super::NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        msg: moto_sdk::ipc::io_channel::Msg,
+        sender: &moto_sdk::ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
         let listener_id = msg.handle;
         let tcp_listener = runtime

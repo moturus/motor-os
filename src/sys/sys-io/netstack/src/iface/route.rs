@@ -7,12 +7,13 @@ use crate::wire::{Ipv4Address, Ipv4Cidr};
 #[cfg(feature = "proto-ipv6")]
 use crate::wire::{Ipv6Address, Ipv6Cidr};
 
-/// A prefix of addresses that should be routed via a router
+/// A prefix routed through this interface, optionally via a router.
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Route {
     pub cidr: IpCidr,
-    pub via_router: IpAddress,
+    /// `None` sends directly to the destination, for example on an IP device.
+    pub via_router: Option<IpAddress>,
     /// `None` means "forever".
     pub preferred_until: Option<Instant>,
     /// `None` means "forever".
@@ -148,12 +149,22 @@ impl PmtuCache {
 }
 
 impl Route {
+    /// Returns a route through this interface without a gateway or expiry.
+    pub fn new_interface(cidr: IpCidr) -> Route {
+        Route {
+            cidr,
+            via_router: None,
+            preferred_until: None,
+            expires_at: None,
+        }
+    }
+
     /// Returns a route to 0.0.0.0/0 via the `gateway`, with no expiry.
     #[cfg(feature = "proto-ipv4")]
     pub fn new_ipv4_gateway(gateway: Ipv4Address) -> Route {
         Route {
             cidr: IPV4_DEFAULT,
-            via_router: gateway.into(),
+            via_router: Some(gateway.into()),
             preferred_until: None,
             expires_at: None,
         }
@@ -164,7 +175,7 @@ impl Route {
     pub fn new_ipv6_gateway(gateway: Ipv6Address) -> Route {
         Route {
             cidr: IPV6_DEFAULT,
-            via_router: gateway.into(),
+            via_router: Some(gateway.into()),
             preferred_until: None,
             expires_at: None,
         }
@@ -173,13 +184,13 @@ impl Route {
     /// Returns `true` if the route is a default route for IPv6.
     #[cfg(feature = "proto-ipv6")]
     pub fn is_ipv6_gateway(&self) -> bool {
-        self.cidr == IPV6_DEFAULT
+        self.cidr == IPV6_DEFAULT && self.via_router.is_some()
     }
 
     /// Returns `true` if the route is a default route for IPv4.
     #[cfg(feature = "proto-ipv4")]
     pub fn is_ipv4_gateway(&self) -> bool {
-        self.cidr == IPV4_DEFAULT
+        self.cidr == IPV4_DEFAULT && self.via_router.is_some()
     }
 }
 
@@ -226,13 +237,13 @@ impl Routes {
         let invalid_ipv6 = !self.ipv6_eligible
             && self.storage.iter().any(|route| {
                 matches!(route.cidr, IpCidr::Ipv6(_))
-                    || matches!(route.via_router, IpAddress::Ipv6(_))
+                    || matches!(route.via_router, Some(IpAddress::Ipv6(_)))
             });
         #[cfg(feature = "proto-ipv6")]
         if invalid_ipv6 {
             self.storage.retain(|route| {
                 !matches!(route.cidr, IpCidr::Ipv6(_))
-                    && !matches!(route.via_router, IpAddress::Ipv6(_))
+                    && !matches!(route.via_router, Some(IpAddress::Ipv6(_)))
             });
         }
         self.reorder();
@@ -363,7 +374,7 @@ impl Routes {
             {
                 return false;
             }
-            route.via_router == *addr
+            route.via_router == Some(*addr)
         })
     }
 
@@ -375,9 +386,8 @@ impl Routes {
             return None;
         }
 
-        // Most-specific-first order: the first live match wins, except that
-        // among routes of equal prefix length the last matching one is kept,
-        // which is what `max_by_key` over the unordered table returned.
+        // Most-specific-first, with interface routes ahead of gateways at an
+        // equal prefix length. Preserve the last-match tie rule for gateways.
         let mut best: Option<&Route> = None;
         for route in &self.storage {
             if let Some(found) = best
@@ -390,11 +400,13 @@ impl Routes {
             {
                 continue;
             }
-            if route.cidr.contains_addr(addr) {
+            if route.cidr.contains_addr(addr)
+                && best.is_none_or(|found| route.via_router.is_none() || found.via_router.is_some())
+            {
                 best = Some(route);
             }
         }
-        best.map(|route| route.via_router)
+        best.map(|route| route.via_router.unwrap_or(*addr))
     }
 }
 
@@ -437,6 +449,67 @@ mod test {
 
     use self::mock::*;
 
+    #[test]
+    fn interface_routes_compete_with_gateways_and_expire() {
+        let cases = [
+            #[cfg(feature = "proto-ipv4")]
+            (
+                IPV4_DEFAULT,
+                IpAddress::v4(10, 20, 0, 7),
+                IpAddress::v4(192, 0, 2, 1),
+                32,
+            ),
+            #[cfg(feature = "proto-ipv6")]
+            (
+                IPV6_DEFAULT,
+                IpAddress::v6(0x2001, 0xdb8, 20, 0, 0, 0, 0, 7),
+                IpAddress::v6(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+                128,
+            ),
+        ];
+        for (cidr, destination, gateway, host_prefix) in cases {
+            let interface = Route {
+                expires_at: Some(Instant::from_millis(10)),
+                ..Route::new_interface(cidr)
+            };
+            let gateway = Route {
+                via_router: Some(gateway),
+                ..Route::new_interface(cidr)
+            };
+            for entries in [[interface, gateway], [gateway, interface]] {
+                let mut routes = Routes::new();
+                routes.update(|storage| storage.extend(entries));
+                assert_eq!(
+                    routes.lookup(&destination, Instant::ZERO),
+                    Some(destination)
+                );
+                assert!(!routes.is_active_router(&destination, Instant::ZERO));
+                assert_eq!(
+                    routes.lookup(&destination, Instant::from_millis(11)),
+                    gateway.via_router
+                );
+
+                // A more-specific gateway wins even while the interface route is live.
+                routes.update(|storage| {
+                    storage.push(Route {
+                        cidr: IpCidr::new(destination, host_prefix),
+                        ..gateway
+                    })
+                });
+                assert_eq!(
+                    routes.lookup(&destination, Instant::ZERO),
+                    gateway.via_router
+                );
+                routes.update(|storage| storage.retain(|route| route.via_router.is_none()));
+                assert_eq!(routes.lookup(&destination, Instant::from_millis(11)), None);
+                #[cfg(feature = "proto-ipv4")]
+                assert!(routes.get_default_ipv4_route().is_none());
+                #[cfg(feature = "proto-ipv6")]
+                assert!(routes.get_default_ipv6_route().is_none());
+            }
+        }
+    }
+
     /// The table grows far past the fixed capacity it used to have, and the
     /// lookup semantics hold at size: of sixty-four nested prefixes that all
     /// contain the address, the most specific one wins.
@@ -448,7 +521,7 @@ mod test {
             for len in 1..=64u8 {
                 storage.push(Route {
                     cidr: Ipv6Cidr::new(Ipv6Address::new(0xfe80, 0, 0, 2, 0, 0, 0, 0), len).into(),
-                    via_router: Ipv6Address::new(0xfe80, 0, 0, 2, 0, 0, 1, len as u16).into(),
+                    via_router: Some(Ipv6Address::new(0xfe80, 0, 0, 2, 0, 0, 1, len as u16).into()),
                     preferred_until: None,
                     expires_at: None,
                 });
@@ -472,7 +545,7 @@ mod test {
         routes.update(|storage| {
             storage.push(Route {
                 cidr: cidr_1().into(),
-                via_router: ADDR_1A.into(),
+                via_router: Some(ADDR_1A.into()),
                 preferred_until: None,
                 expires_at: None,
             });
@@ -502,7 +575,7 @@ mod test {
         routes.update(|storage| {
             storage.push(Route {
                 cidr: cidr_1().into(),
-                via_router: ADDR_1A.into(),
+                via_router: Some(ADDR_1A.into()),
                 preferred_until: None,
                 expires_at: Some(Instant::from_millis(10)),
             });
@@ -542,7 +615,7 @@ mod test {
 
         let route = Route {
             cidr: cidr_1().into(),
-            via_router: ADDR_1A.into(),
+            via_router: Some(ADDR_1A.into()),
             preferred_until: None,
             expires_at: None,
         };
@@ -573,7 +646,7 @@ mod test {
 
         let route2 = Route {
             cidr: cidr_2().into(),
-            via_router: ADDR_2A.into(),
+            via_router: Some(ADDR_2A.into()),
             preferred_until: Some(Instant::from_millis(10)),
             expires_at: Some(Instant::from_millis(10)),
         };

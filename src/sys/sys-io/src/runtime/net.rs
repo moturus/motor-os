@@ -1,7 +1,7 @@
 use ipnetwork::IpNetwork;
 use moto_netstack::wire::{IpCidr, IpEndpoint, Ipv4Cidr, Ipv6Cidr};
+use moto_sdk::sys_io::api_net::{self, NetCmd};
 use moto_sys::SysHandle;
-use moto_sys_io::api_net::{self, NetCmd};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -19,9 +19,14 @@ mod backlog;
 mod completed;
 mod config;
 mod device;
+mod devices;
 mod half_open;
 mod icmp;
+mod packet_device;
 mod pressure;
+mod registration;
+#[cfg(debug_assertions)]
+mod self_test;
 mod socket;
 pub(crate) mod stats;
 mod tcp_listener;
@@ -35,13 +40,20 @@ pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
     completed::self_test::TESTS,
     config::self_test::TESTS,
     device::self_test::TESTS,
+    device::udp_policy_tests::TESTS,
+    devices::self_test::TESTS,
     half_open::self_test::TESTS,
+    icmp::self_test::TESTS,
+    packet_device::self_test::TESTS,
+    registration::self_test::TESTS,
+    self_test::TESTS,
     stats::self_test::TESTS,
 ];
 
 /// What a deferred listening-pool replenishment needs to resume: the oneshot
 /// the replacement task is parked on (see `socket/tcp.rs`).
-type HalfOpenBudget = half_open::HalfOpenBudget<moto_async::oneshot::Sender<()>>;
+type HalfOpenBudget =
+    half_open::HalfOpenBudget<(usize, moto_sdk::async_runtime::oneshot::Sender<()>)>;
 
 struct ClientConnection {
     sender: channel_budget::ClientSender,
@@ -83,9 +95,7 @@ struct NetRuntimeInner {
     sockets: HashMap<u64, Rc<RefCell<socket::MotoSocket>>>,
     tcp_listeners: HashMap<u64, Rc<RefCell<tcp_listener::TcpListener>>>,
 
-    // In the future, Motor OS may use Vec<Option<NetDev>>, but at the moment
-    // Motor OS does not support device hot (un)plug.
-    devices: Vec<device::NetDev<'static>>,
+    devices: devices::Devices,
 
     // IP => Dev idx.
     ip_addresses: HashMap<IpAddr, usize>,
@@ -100,6 +110,26 @@ struct NetRuntimeInner {
 }
 
 impl NetRuntimeInner {
+    fn find_route(&self, ip_addr: &IpAddr) -> Option<(usize, IpAddr)> {
+        if let Some(device_idx) = self.ip_addresses.get(ip_addr) {
+            return Some((*device_idx, *ip_addr));
+        }
+        config::find_route(
+            self.devices
+                .iter()
+                .map(|(device_idx, device)| (device_idx, device.config())),
+            *ip_addr,
+        )
+    }
+
+    fn udp_route_allowed(&self, device_idx: usize, destination: &IpAddr) -> bool {
+        let packet_device = self.devices[device_idx].is_packet();
+        let Some((selected, _)) = self.find_route(destination) else {
+            return !packet_device;
+        };
+        selected == device_idx || (!packet_device && !self.devices[selected].is_packet())
+    }
+
     fn next_socket_id(&mut self) -> u64 {
         let result = self.next_socket_id;
         self.next_socket_id += 1;
@@ -129,6 +159,7 @@ impl NetRuntimeInner {
 
 #[derive(Clone)]
 struct NetRuntime {
+    interface_policy: device::InterfacePolicy,
     inner: Rc<RefCell<NetRuntimeInner>>,
 
     stats: Rc<stats::NetStats>,
@@ -149,16 +180,50 @@ struct NetRuntime {
     orphan_lingers: Rc<Cell<usize>>,
 
     // Filesystem is used to write log/stats.
-    fs: Rc<moto_async::LocalRwLock<super::fs::FS>>,
+    fs: super::fs::RootFs,
 
     // A fixed temporary filename is safe only while resolver publications are
     // serialized; the newest waiter recomputes the aggregate after acquiring.
-    dns_write_lock: Rc<moto_async::LocalMutex<()>>,
+    dns_write_lock: Rc<moto_sdk::async_runtime::LocalMutex<()>>,
 
     channel_budget: Rc<channel_budget::ChannelBudget>,
 }
 
+// A canceled task may still own pages or queues after its socket disappears.
+// Count it before spawning, including the interval before its first poll.
+struct DeviceTask {
+    inner: Rc<RefCell<NetRuntimeInner>>,
+    device_idx: usize,
+}
+
+impl Drop for DeviceTask {
+    fn drop(&mut self) {
+        let mut inner = self.inner.borrow_mut();
+        inner.devices[self.device_idx].pending_tasks -= 1;
+        inner.devices.reap(self.device_idx);
+    }
+}
+
 impl NetRuntime {
+    fn spawn_device_task(&self, device_idx: usize, task: impl Future<Output = ()> + 'static) {
+        {
+            let mut inner = self.inner.borrow_mut();
+            let Some(device) = inner.devices.get_mut(device_idx) else {
+                return;
+            };
+            device.pending_tasks += 1;
+        }
+        let work = DeviceTask {
+            inner: self.inner.clone(),
+            device_idx,
+        };
+        // Map keeps the task in place rather than duplicating its storage in
+        // another async block, and needs no additional heap allocation.
+        moto_sdk::async_runtime::LocalRuntime::spawn(futures::FutureExt::map(task, move |()| {
+            drop(work);
+        }));
+    }
+
     fn client_is_active(&self, handle: SysHandle) -> bool {
         self.inner
             .borrow()
@@ -170,7 +235,7 @@ impl NetRuntime {
     fn vsock_availability_status(
         &self,
         handle: SysHandle,
-        msg: &moto_ipc::io_channel::Msg,
+        msg: &moto_sdk::ipc::io_channel::Msg,
     ) -> moto_rt::ErrorCode {
         let inner = self.inner.borrow();
         if inner.clients.get(&handle).unwrap().capabilities & moto_sys::caps::CAP_VSOCK == 0 {
@@ -187,7 +252,7 @@ impl NetRuntime {
 
     async fn vsock_availability(
         &self,
-        mut msg: moto_ipc::io_channel::Msg,
+        mut msg: moto_sdk::ipc::io_channel::Msg,
         sender: &channel_budget::ClientSender,
     ) {
         msg.status = self.vsock_availability_status(sender.remote_handle(), &msg);
@@ -201,9 +266,8 @@ impl NetRuntime {
     async fn spawn_net_runtime(&self) {
         const NUM_LISTENERS: usize = 8;
 
-        let num_devices = self.inner.borrow().devices.len();
-
-        for idx in 0..num_devices {
+        let num_slots = self.inner.borrow().devices.slot_count();
+        for idx in 0..num_slots {
             self.spawn_device_runtime(idx);
         }
 
@@ -217,22 +281,33 @@ impl NetRuntime {
     fn spawn_device_runtime(&self, device_idx: usize) {
         let this = self.clone();
 
-        let _ = moto_async::LocalRuntime::spawn(async move {
-            let notify = this.inner.borrow().devices[device_idx]
-                .device_runtime_notify
-                .clone();
-            let name = this.inner.borrow().devices[device_idx].name().to_owned();
+        self.spawn_device_task(device_idx, async move {
+            let (notify, name) = {
+                let inner = this.inner.borrow();
+                let Some(device) = inner.devices.get(device_idx) else {
+                    return;
+                };
+                (
+                    device.device_runtime_notify.clone(),
+                    device.name().to_owned(),
+                )
+            };
 
             // The timer armed for poll_delay(), kept across iterations. Under
             // load the notify branch below wins nearly every time, so arming a
             // fresh timer per iteration would queue -- and immediately cancel
             // -- ~80K timers/sec.
-            let mut timer: Option<moto_async::Sleep> = None;
+            let mut timer: Option<moto_sdk::async_runtime::Sleep> = None;
 
             loop {
                 this.stats.poll_runs.set(this.stats.poll_runs.get() + 1);
-                let outcome =
-                    this.inner.borrow_mut().devices[device_idx].poll(&this.stats, &this.backlog);
+                let outcome = {
+                    let mut inner = this.inner.borrow_mut();
+                    let Some(device) = inner.devices.get_mut(device_idx) else {
+                        return;
+                    };
+                    device.poll(&this.stats, &this.backlog)
+                };
                 if outcome.addresses_changed {
                     this.rebuild_ip_addresses();
                 }
@@ -256,7 +331,7 @@ impl NetRuntime {
                         this.inner.borrow_mut().devices[device_idx].take_tcp_cookie_restores();
                     for restore in restores {
                         let runtime = this.clone();
-                        moto_async::LocalRuntime::spawn(async move {
+                        this.spawn_device_task(device_idx, async move {
                             socket::MotoSocket::create_tcp_restored_socket(
                                 &runtime, device_idx, restore,
                             )
@@ -288,13 +363,13 @@ impl NetRuntime {
                             // measured from now, an unchanged delay moves the
                             // deadline *later* every iteration, which is
                             // exactly the case this keeps out of the queue.
-                            let now = moto_async::Instant::now();
+                            let now = moto_sdk::async_runtime::Instant::now();
                             let deadline = now + delay;
                             let reusable = timer.as_ref().is_some_and(|armed| {
                                 armed.deadline() > now && armed.deadline() <= deadline
                             });
                             if !reusable {
-                                timer = Some(moto_async::sleep_until(deadline));
+                                timer = Some(moto_sdk::async_runtime::sleep_until(deadline));
                             }
 
                             // Dropping the select! only drops the borrow, so
@@ -311,7 +386,7 @@ impl NetRuntime {
                     moto_netstack::iface::PollResult::SocketStateChanged => {
                         // Yield back to the executor: this allows the awakened socket tasks
                         // to run and read their data.
-                        moto_async::yield_now().await;
+                        moto_sdk::async_runtime::yield_now().await;
                     }
                 }
             }
@@ -319,10 +394,10 @@ impl NetRuntime {
     }
 
     async fn spawn_new_listener(&self) {
-        let (started_tx, started_rx) = moto_async::oneshot();
+        let (started_tx, started_rx) = moto_sdk::async_runtime::oneshot();
 
         let this = self.clone();
-        moto_async::LocalRuntime::spawn(async move {
+        moto_sdk::async_runtime::LocalRuntime::spawn(async move {
             // net_listener() replenishes the accept pool itself once a client
             // connects (before serving it), so a consumed listener is replaced
             // at connect time rather than at disconnect time. An Err is a
@@ -339,7 +414,10 @@ impl NetRuntime {
                     Ok(()) => return,
                     Err(err) => {
                         log::debug!("net_listener() failed: {err:?}");
-                        moto_async::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                        moto_sdk::async_runtime::sleep(std::time::Duration::from_millis(
+                            backoff_ms,
+                        ))
+                        .await;
                         backoff_ms = (backoff_ms * 10).min(1000);
                     }
                 }
@@ -358,13 +436,14 @@ impl NetRuntime {
     /// channel closes; the wait is bounded so a client that never sends
     /// cannot pin the slot.
     async fn refuse_client(
-        sender: moto_ipc::io_channel::Sender,
-        mut receiver: moto_ipc::io_channel::Receiver,
+        sender: moto_sdk::ipc::io_channel::Sender,
+        mut receiver: moto_sdk::ipc::io_channel::Receiver,
     ) {
         use futures::FutureExt;
 
-        let mut deadline =
-            core::pin::pin!(moto_async::sleep(std::time::Duration::from_secs(2)).fuse());
+        let mut deadline = core::pin::pin!(
+            moto_sdk::async_runtime::sleep(std::time::Duration::from_secs(2)).fuse()
+        );
         let mut first_rpc = core::pin::pin!(receiver.recv().fuse());
         futures::select! {
             msg = first_rpc => {
@@ -380,9 +459,9 @@ impl NetRuntime {
 
     async fn net_listener(
         &self,
-        started_tx: Option<moto_async::oneshot::Sender<()>>,
+        started_tx: Option<moto_sdk::async_runtime::oneshot::Sender<()>>,
     ) -> Result<()> {
-        let mut listener = core::pin::pin!(moto_ipc::io_channel::listen("sys-io"));
+        let mut listener = core::pin::pin!(moto_sdk::ipc::io_channel::listen("sys-io"));
 
         // Do a poll to ensure the listener has started listening.
         let (sender, mut receiver) = {
@@ -420,8 +499,9 @@ impl NetRuntime {
         // pressure refuses the same way, now with the explicit error rather
         // than a silent drop.
         let at_floor = self.stats.net_listeners_armed.get() == 0;
-        if at_floor || pressure::active() {
-            if pressure::active() {
+        let pressured = self.pressure.active();
+        if at_floor || pressured {
+            if pressured {
                 self.pressure.client_refused();
             }
             self.stats
@@ -485,6 +565,20 @@ impl NetRuntime {
         // extra listener into the pool.
         self.spawn_new_listener().await;
 
+        let first = match receiver.recv().await {
+            Ok(first) => first,
+            Err(_) => {
+                self.on_connection_done(sender.remote_handle()).await;
+                return Ok(());
+            }
+        };
+        if first.command == NetCmd::IpDeviceRegister.as_u16() {
+            self.serve_packet_provider(first, &sender, receiver).await;
+            self.on_connection_done(sender.remote_handle()).await;
+            return Ok(());
+        }
+        let mut first = Some(first);
+
         // We want to process more than one message at a time (due to I/O
         // waits), but with bounded concurrency for backpressure, so we use
         // mpsc "tickets".
@@ -497,7 +591,7 @@ impl NetRuntime {
         const MAX_IN_FLIGHT: usize = 64;
         const INLINE_DATA_YIELD_BUDGET: u8 = 32;
 
-        let (ticket_tx, mut ticket_rx) = moto_async::channel(MAX_IN_FLIGHT);
+        let (ticket_tx, mut ticket_rx) = moto_sdk::async_runtime::channel(MAX_IN_FLIGHT);
         // Pre-populate.
         for _ in 0..MAX_IN_FLIGHT {
             let _ = ticket_tx.send(()).await;
@@ -505,7 +599,10 @@ impl NetRuntime {
 
         let mut inline_data_messages = 0_u8;
         loop {
-            match receiver.recv().await {
+            match match first.take() {
+                Some(first) => Ok(first),
+                None => receiver.recv().await,
+            } {
                 Ok(msg) => {
                     // Data-path fast path: TcpStreamTx and TcpStreamRxAck
                     // handlers complete synchronously (they never await;
@@ -526,7 +623,7 @@ impl NetRuntime {
                             // A client can keep this ring permanently ready.
                             // Poll kernel I/O and put this task behind work
                             // discovered there before draining another batch.
-                            moto_async::yield_to_io().await;
+                            moto_sdk::async_runtime::yield_to_io().await;
                         }
                         continue;
                     }
@@ -538,7 +635,7 @@ impl NetRuntime {
                     let sender = sender.clone();
                     let this = self.clone();
                     let ticket_tx = ticket_tx.clone();
-                    moto_async::LocalRuntime::spawn(async move {
+                    moto_sdk::async_runtime::LocalRuntime::spawn(async move {
                         let remote_handle = sender.remote_handle();
                         if this.client_is_active(remote_handle) {
                             this.on_msg(msg, sender).await;
@@ -695,21 +792,7 @@ impl NetRuntime {
 
     // Find the device to route through.
     fn find_route(&self, ip_addr: &IpAddr) -> Option<(usize, IpAddr)> {
-        let inner = self.inner.borrow();
-
-        // First, look through local addresses.
-        if let Some(device_idx) = inner.ip_addresses.get(ip_addr) {
-            return Some((*device_idx, *ip_addr));
-        }
-
-        config::find_route(
-            inner
-                .devices
-                .iter()
-                .enumerate()
-                .map(|(device_idx, device)| (device_idx, device.config())),
-            *ip_addr,
-        )
+        self.inner.borrow().find_route(ip_addr)
     }
 
     fn rebuild_ip_addresses(&self) {
@@ -718,7 +801,6 @@ impl NetRuntime {
             let addresses: HashMap<IpAddr, usize> = inner
                 .devices
                 .iter()
-                .enumerate()
                 .flat_map(|(device_idx, device)| {
                     device
                         .ip_addesses()
@@ -743,14 +825,99 @@ impl NetRuntime {
         };
 
         for (address, device_idx) in removed {
+            if let Some(device) = self.inner.borrow_mut().devices.get_mut(device_idx) {
+                device.discard_queued_source(address);
+            }
             for listener in &listeners {
                 tcp_listener::TcpListener::remove_address(listener, address, device_idx);
+            }
+            let transports = self
+                .inner
+                .borrow()
+                .sockets
+                .values()
+                .filter(|socket| socket.borrow().is_udp_transport_on(address, device_idx))
+                .cloned()
+                .collect::<Vec<_>>();
+            for transport in transports {
+                if let Some(notice) = MotoSocket::invalidate_udp_socket(transport) {
+                    self.spawn_device_task(device_idx, notice.send());
+                }
             }
         }
         for (address, device_idx) in added {
             for listener in &listeners {
                 tcp_listener::TcpListener::add_address(listener, address, device_idx);
             }
+        }
+    }
+
+    async fn remove_device(&self, device_idx: usize) {
+        self.remove_device_inner(device_idx, true).await;
+    }
+
+    // A failed registration may briefly expand a listener whose old physical
+    // address was withdrawn. Rollback preserves that listener and its accepts.
+    async fn remove_device_inner(&self, device_idx: usize, detach_listeners: bool) {
+        if !self.inner.borrow_mut().devices.retire(device_idx) {
+            return;
+        }
+        self.half_open
+            .discard_deferred(|(index, _)| *index == device_idx);
+        self.pressure.remove_device(device_idx);
+        let (listeners, sockets) = {
+            let inner = self.inner.borrow();
+            (
+                inner
+                    .tcp_listeners
+                    .values()
+                    .filter(|listener| listener.borrow().has_device(device_idx))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                inner
+                    .sockets
+                    .values()
+                    .filter(|socket| socket.borrow().device_index() == Some(device_idx))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+        };
+        self.rebuild_ip_addresses();
+        self.stats.num_devices.set(self.stats.num_devices.get() - 1);
+        let mut accepts = Vec::new();
+        if detach_listeners {
+            for listener in listeners {
+                accepts.push(tcp_listener::TcpListener::detach_device(
+                    &listener, device_idx,
+                ));
+            }
+        }
+        let mut notices = Vec::new();
+        for socket in sockets {
+            // A retired device cannot transmit a reset, so socket teardown
+            // completes without waiting for either the device or the client.
+            if let Some(notice) = MotoSocket::invalidate_ip_socket(socket).await {
+                notices.push(notice);
+            }
+        }
+        futures::join!(
+            futures::future::join_all(notices.into_iter().map(|notice| notice.send())),
+            futures::future::join_all(
+                accepts
+                    .into_iter()
+                    .map(tcp_listener::TcpListener::cancel_pending_accepts)
+            ),
+        );
+        let notify = self.inner.borrow().devices[device_idx]
+            .device_runtime_notify
+            .clone();
+        self.inner.borrow_mut().devices.finish_removal(device_idx);
+        loop {
+            let changed = notify.notified();
+            if !self.inner.borrow().devices.is_retiring(device_idx) {
+                break;
+            }
+            changed.await;
         }
     }
 
@@ -764,7 +931,7 @@ impl NetRuntime {
         }
 
         let this = self.clone();
-        moto_async::LocalRuntime::spawn(async move {
+        moto_sdk::async_runtime::LocalRuntime::spawn(async move {
             let _writer = this.dns_write_lock.lock().await;
             let servers = {
                 let inner = this.inner.borrow();
@@ -791,13 +958,26 @@ impl NetRuntime {
     ) -> Option<Rc<EphemeralTcpPort>> {
         let mut inner = self.inner.borrow_mut();
         let NetRuntimeInner {
-            devices, sockets, ..
+            devices,
+            sockets,
+            tcp_listeners,
+            ..
         } = &mut *inner;
         let local_port = devices[device_idx].get_ephemeral_tcp_port(&ip_addr, |port| {
             let local_addr = SocketAddr::new(ip_addr, port);
-            sockets.values().any(|socket| {
-                socket::MotoSocket::occupies_tcp_tuple(socket, device_idx, local_addr, remote_addr)
-            })
+            // Explicit listener ports have no ephemeral reservation. Exclude
+            // their endpoints too, including each address of a wildcard bind.
+            tcp_listeners
+                .values()
+                .any(|listener| listener.borrow().listens_on(local_addr, device_idx))
+                || sockets.values().any(|socket| {
+                    socket::MotoSocket::occupies_tcp_tuple(
+                        socket,
+                        device_idx,
+                        local_addr,
+                        remote_addr,
+                    )
+                })
         })?;
         Some(Rc::new(EphemeralTcpPort {
             dev_idx: device_idx,
@@ -806,7 +986,11 @@ impl NetRuntime {
         }))
     }
 
-    async fn on_msg(&self, msg: moto_ipc::io_channel::Msg, sender: channel_budget::ClientSender) {
+    async fn on_msg(
+        &self,
+        msg: moto_sdk::ipc::io_channel::Msg,
+        sender: channel_budget::ClientSender,
+    ) {
         let Ok(net_cmd) = NetCmd::try_from(msg.command) else {
             let remote_handle = sender.remote_handle();
 
@@ -910,16 +1094,16 @@ impl NetRuntime {
 pub(super) async fn init(
     mut virtio_devices: Vec<Rc<virtio_async::virtio_net::NetDevice>>,
     vsock_device: Option<virtio_async::VirtioDevice>,
-    fs: Rc<moto_async::LocalRwLock<super::fs::FS>>,
+    fs: super::fs::FsRuntime,
     channel_budget: Rc<channel_budget::ChannelBudget>,
 ) -> Result<Vec<Rc<virtio_async::virtio_net::NetDevice>>> {
-    let config = config::load(&fs).await?;
+    let config = config::load(&fs.root_fs()).await?;
     log::debug!("NET cfg loaded:\n{config:#?}.");
 
     // Created before the devices: their rx/tx tasks bump the device counters.
     let net_stats = Rc::new(stats::NetStats::default());
 
-    let mut devices = vec![];
+    let mut devices = devices::Devices::default();
 
     if config.loopback {
         let mut loopback_cfg = config::DeviceCfg::new("02:00:00:00:00:01");
@@ -963,7 +1147,7 @@ pub(super) async fn init(
         log::warn!("VirtioNET device {:?} not configured.", device.mac());
     }
 
-    if devices.is_empty() && vsock_device.is_none() {
+    if devices.iter().next().is_none() && vsock_device.is_none() {
         log::warn!(
             "NET runtime intentionally disabled: valid configuration produced zero usable devices."
         );
@@ -972,18 +1156,19 @@ pub(super) async fn init(
 
     let mut device_idx = 0;
     let mut ip_addresses = HashMap::new();
-    for device in &devices {
+    for (index, device) in devices.iter() {
         for address in device.ip_addesses() {
-            ip_addresses.insert(address, device_idx);
+            ip_addresses.insert(address, index);
         }
         device_idx += 1;
     }
 
     let dns_servers = devices
         .iter()
-        .map(|device| device.config().dns_servers.clone())
+        .map(|(_, device)| device.config().dns_servers.clone())
         .collect::<Vec<_>>();
     let runtime = NetRuntime {
+        interface_policy: (&config).into(),
         inner: Rc::new(RefCell::new(NetRuntimeInner {
             next_socket_id: 1,
             sockets: HashMap::new(),
@@ -1009,10 +1194,13 @@ pub(super) async fn init(
             config::ram_scaled(completed::DEFAULT_MAX_GLOBAL),
             config::ram_scaled(completed::DEFAULT_MAX_PER_LISTENER),
         )),
-        pressure: Rc::new(pressure::Pressure::new(net_stats.clone())),
+        pressure: Rc::new(pressure::Pressure::new(
+            net_stats.clone(),
+            fs.free_caches.clone(),
+        )),
         orphan_lingers: Rc::new(Cell::new(0)),
-        fs: fs.clone(),
-        dns_write_lock: Rc::new(moto_async::LocalMutex::new(())),
+        fs: fs.root_fs(),
+        dns_write_lock: Rc::new(moto_sdk::async_runtime::LocalMutex::new(())),
         channel_budget,
     };
 
@@ -1029,7 +1217,7 @@ pub(super) async fn init(
                 .filter(|server| seen.insert(*server))
                 .collect::<Vec<_>>()
         };
-        config::write_resolv_conf(&fs, &initial_dns_servers).await?;
+        config::write_resolv_conf(&runtime.fs, &initial_dns_servers).await?;
         stats::spawn_stats_responder(runtime.clone());
         pressure::spawn_recovery(runtime.clone());
     }
@@ -1049,6 +1237,9 @@ struct EphemeralTcpPort {
 impl Drop for EphemeralTcpPort {
     fn drop(&mut self) {
         let mut inner = self.runtime.inner.borrow_mut();
-        inner.devices[self.dev_idx].free_ephemeral_tcp_port(self.port);
+        // The socket's last drop can already have reaped the whole device.
+        if let Some(device) = inner.devices.retained_mut(self.dev_idx) {
+            device.free_ephemeral_tcp_port(self.port);
+        }
     }
 }

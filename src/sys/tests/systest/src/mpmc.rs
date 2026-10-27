@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use moto_mpmc as crossbeam_channel;
+use moto_sdk::mpmc as crossbeam_channel;
 
 use crossbeam_channel::Receiver;
 use crossbeam_channel::Sender;
@@ -36,7 +36,7 @@ fn recv_t(receiver: Receiver<Msg>) {
 }
 
 pub fn test_mpmc() {
-    use moto_mpmc::bounded;
+    use moto_sdk::mpmc::bounded;
     use std::thread;
 
     let (s1, r1) = bounded(64);

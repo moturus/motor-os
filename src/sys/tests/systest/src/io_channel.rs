@@ -1,9 +1,118 @@
 use std::sync::atomic::Ordering;
 
+pub fn test_remote_page_validation() {
+    use moto_sdk::ipc::io_channel::{IoPage, Msg, connect, listen};
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+        let listener = listen("systest_remote_page_validation");
+        let (client, mut client_rx) = connect("systest_remote_page_validation").unwrap();
+        let (server, mut server_rx) = listener.await.unwrap();
+        for (local, remote, receiver) in [
+            (&client, &server, &mut server_rx),
+            (&server, &client, &mut client_rx),
+        ] {
+            for via_sender in [false, true] {
+                let page = local.alloc_page(u64::MAX).await.unwrap();
+                page.bytes_mut()[0] = 42;
+                let index = IoPage::into_u16(page);
+                let mut msg = Msg::new();
+                msg.payload.shared_pages_mut()[0] = index;
+                local.send_with_owned_page(msg, index).await.unwrap();
+                let index = receiver.recv().await.unwrap().payload.shared_pages()[0];
+                // Reject our own pool, either out-of-range index and the
+                // sentinel without constructing an owning page guard.
+                for invalid in [index ^ (1 << 15), 64, (1 << 15) | 64, u16::MAX] {
+                    assert!(matches!(
+                        remote.get_remote_page(invalid),
+                        Err(moto_rt::Error::InvalidArgument)
+                    ));
+                    assert!(matches!(
+                        receiver.get_remote_page(invalid),
+                        Err(moto_rt::Error::InvalidArgument)
+                    ));
+                }
+                let page = if via_sender {
+                    remote.get_remote_page(index).unwrap()
+                } else {
+                    receiver.get_remote_page(index).unwrap()
+                };
+                assert_eq!(page.bytes()[0], 42);
+            }
+        }
+    });
+    println!("----- io_channel::test_remote_page_validation PASS");
+}
+
+pub fn test_canceled_page_send() {
+    use core::future::Future;
+    use core::task::Context;
+    use futures::FutureExt;
+    use moto_sdk::ipc::io_channel::{ClientConnection, IoPage, Msg, listen};
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    struct WakeFlag(AtomicBool);
+    impl std::task::Wake for WakeFlag {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+        let listener = listen("systest_canceled_page_send");
+        let client = ClientConnection::connect("systest_canceled_page_send").unwrap();
+        let (sender, _receiver) = listener.await.unwrap();
+        for _ in 0..moto_sdk::ipc::io_channel::QUEUE_SIZE {
+            assert_eq!(sender.send(Msg::new()).now_or_never(), Some(Ok(())));
+        }
+        assert!(sender.send(Msg::new()).now_or_never().is_none());
+        for polled in [false, true] {
+            let page = sender.alloc_page(1).await.unwrap();
+            let mut msg = Msg::new();
+            let index = IoPage::into_u16(page);
+            msg.payload.shared_pages_mut()[0] = index;
+            let mut pending = Box::pin(sender.send_with_owned_page(msg, index));
+            let flag = Arc::new(WakeFlag(AtomicBool::new(false)));
+            let waker = std::task::Waker::from(flag.clone());
+            let mut cx = Context::from_waker(&waker);
+            if polled {
+                assert!(pending.as_mut().poll(&mut cx).is_pending());
+            }
+            let mut allocation = Box::pin(sender.alloc_page(1));
+            assert!(allocation.as_mut().poll(&mut cx).is_pending());
+            drop(pending);
+            assert!(
+                flag.0.load(Ordering::Acquire),
+                "local page allocator was not woken"
+            );
+            drop(
+                crate::net_harness::bounded_output(allocation, 2)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        for _ in 0..moto_sdk::ipc::io_channel::QUEUE_SIZE {
+            client.recv().unwrap();
+        }
+        assert_eq!(client.recv().err(), Some(moto_rt::Error::NotReady));
+        let page = sender.alloc_page(1).await.unwrap();
+        page.bytes_mut()[0] = 42;
+        let mut msg = Msg::new();
+        let index = IoPage::into_u16(page);
+        msg.payload.shared_pages_mut()[0] = index;
+        sender.send_with_owned_page(msg, index).await.unwrap();
+        let received = client.recv().unwrap();
+        let page = client.get_page(received.payload.shared_pages()[0]).unwrap();
+        assert_eq!(page.bytes()[0], 42);
+        drop(page);
+        drop(sender.alloc_page(1).await.unwrap());
+    });
+    println!("----- io_channel::test_canceled_page_send PASS");
+}
+
 pub fn test_listener_cleanup() {
     use core::future::{Future, poll_fn};
     use core::task::Poll;
-    use moto_ipc::io_channel::{ClientConnection, Msg, listen};
+    use moto_sdk::ipc::io_channel::{ClientConnection, Msg, listen};
 
     let url = format!("systest_listener_cleanup_{}", std::process::id());
 
@@ -14,7 +123,7 @@ pub fn test_listener_cleanup() {
         Some(moto_rt::Error::NotFound)
     );
 
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         for polled in [false, true] {
             for connected in [false, true] {
                 let mut listener = Box::pin(listen(&url));
@@ -80,8 +189,8 @@ fn basic_test() {
     let waiter = server_started.clone();
 
     let server_thread = std::thread::spawn(move || {
-        moto_async::LocalRuntime::new().block_on(async move {
-            let listener = moto_ipc::io_channel::listen("systest_foo");
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
+            let listener = moto_sdk::ipc::io_channel::listen("systest_foo");
             server_started.store(true, Ordering::Release);
 
             let (sender, mut receiver) = listener.await.unwrap();
@@ -100,11 +209,11 @@ fn basic_test() {
     }
 
     let client_thread = std::thread::spawn(move || {
-        moto_async::LocalRuntime::new().block_on(async move {
-            let (sender, mut receiver) = moto_ipc::io_channel::connect("systest_foo").unwrap();
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
+            let (sender, mut receiver) = moto_sdk::ipc::io_channel::connect("systest_foo").unwrap();
 
             // Send ping.
-            let mut msg = moto_ipc::io_channel::Msg::new();
+            let mut msg = moto_sdk::ipc::io_channel::Msg::new();
             msg.id = 1;
             sender.send(msg).await.unwrap();
 
@@ -127,8 +236,8 @@ fn test_ping_pong() {
     let waiter = server_started.clone();
 
     let server_thread = std::thread::spawn(move || {
-        moto_async::LocalRuntime::new().block_on(async move {
-            let listener = moto_ipc::io_channel::listen("systest_foo");
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
+            let listener = moto_sdk::ipc::io_channel::listen("systest_foo");
             server_started.store(true, Ordering::Release);
 
             let (sender, mut receiver) = listener.await.unwrap();
@@ -151,12 +260,12 @@ fn test_ping_pong() {
 
     let client_thread = std::thread::spawn(move || {
         let start = std::time::Instant::now();
-        moto_async::LocalRuntime::new().block_on(async move {
-            let (sender, mut receiver) = moto_ipc::io_channel::connect("systest_foo").unwrap();
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
+            let (sender, mut receiver) = moto_sdk::ipc::io_channel::connect("systest_foo").unwrap();
 
             for idx in 0..ITERS {
                 // Send ping.
-                let mut msg = moto_ipc::io_channel::Msg::new();
+                let mut msg = moto_sdk::ipc::io_channel::Msg::new();
                 msg.id = idx * 2;
                 sender.send(msg).await.unwrap();
 
@@ -181,7 +290,7 @@ fn test_ping_pong() {
 
 fn test_pipelined_queue_wakeups() {
     const ROUNDS: u64 = 250;
-    const BATCH: u64 = moto_ipc::io_channel::QUEUE_SIZE * 2;
+    const BATCH: u64 = moto_sdk::ipc::io_channel::QUEUE_SIZE * 2;
     const DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
     let server_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -190,8 +299,8 @@ fn test_pipelined_queue_wakeups() {
     let server_done = done_tx.clone();
 
     let server = std::thread::spawn(move || {
-        moto_async::LocalRuntime::new().block_on(async move {
-            let listener = moto_ipc::io_channel::listen("systest_pipelined_wakeups");
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
+            let listener = moto_sdk::ipc::io_channel::listen("systest_pipelined_wakeups");
             server_started.store(true, Ordering::Release);
             let (sender, mut receiver) = listener.await.unwrap();
 
@@ -211,13 +320,13 @@ fn test_pipelined_queue_wakeups() {
 
     let client_done = done_tx;
     let client = std::thread::spawn(move || {
-        moto_async::LocalRuntime::new().block_on(async move {
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
             let (sender, mut receiver) =
-                moto_ipc::io_channel::connect("systest_pipelined_wakeups").unwrap();
+                moto_sdk::ipc::io_channel::connect("systest_pipelined_wakeups").unwrap();
 
             for round in 0..ROUNDS {
                 for index in 0..BATCH {
-                    let mut msg = moto_ipc::io_channel::Msg::new();
+                    let mut msg = moto_sdk::ipc::io_channel::Msg::new();
                     msg.id = (round * BATCH + index) * 2;
                     sender.send(msg).await.unwrap();
                 }
@@ -252,8 +361,8 @@ fn test_page_alloc() {
     let step_synchronizer_allocator = step_synchronizer_receiver.clone();
 
     let server_thread = std::thread::spawn(move || {
-        moto_async::LocalRuntime::new().block_on(async move {
-            let listener = moto_ipc::io_channel::listen("systest_foo");
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
+            let listener = moto_sdk::ipc::io_channel::listen("systest_foo");
             server_started.store(true, Ordering::Release);
 
             let (sender, mut receiver) = listener.await.unwrap();
@@ -278,10 +387,10 @@ fn test_page_alloc() {
     }
 
     let client_thread = std::thread::spawn(move || {
-        moto_async::LocalRuntime::new().block_on(async move {
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
             use futures::FutureExt;
 
-            let (sender, mut receiver) = moto_ipc::io_channel::connect("systest_foo").unwrap();
+            let (sender, mut receiver) = moto_sdk::ipc::io_channel::connect("systest_foo").unwrap();
 
             let mut pages = vec![];
 
@@ -292,11 +401,11 @@ fn test_page_alloc() {
             }
 
             let sender_allocator = sender.clone();
-            let join_handle = moto_async::LocalRuntime::spawn(async move {
+            let join_handle = moto_sdk::async_runtime::LocalRuntime::spawn(async move {
                 // Can't allocate another page now.
                 let allocated = futures::select! {
                     _ = sender_allocator.alloc_page(7).fuse() => true,
-                    _ = moto_async::sleep(std::time::Duration::from_millis(20)).fuse() => false,
+                    _ = moto_sdk::async_runtime::sleep(std::time::Duration::from_millis(20)).fuse() => false,
                 };
                 assert!(!allocated);
 
@@ -314,15 +423,15 @@ fn test_page_alloc() {
 
             // Wait for the send flag.
             while step_synchronizer_sender.load(Ordering::Relaxed) != 1 {
-                moto_async::sleep(std::time::Duration::from_millis(1)).await;
+                moto_sdk::async_runtime::sleep(std::time::Duration::from_millis(1)).await;
             }
 
             // Send a page.
-            let mut msg = moto_ipc::io_channel::Msg::new();
+            let mut msg = moto_sdk::ipc::io_channel::Msg::new();
             msg.id = 1;
             let page = pages.pop().unwrap();
             page.bytes_mut()[0] = 42;
-            msg.payload.shared_pages_mut()[0] = moto_ipc::io_channel::IoPage::into_u16(page);
+            msg.payload.shared_pages_mut()[0] = moto_sdk::ipc::io_channel::IoPage::into_u16(page);
             sender.send(msg).await.unwrap();
 
             // Receive pong.
@@ -347,8 +456,8 @@ fn test_local_page_free_wakes_waiter() {
     let server_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let waiter = server_started.clone();
     let server = std::thread::spawn(move || {
-        moto_async::LocalRuntime::new().block_on(async move {
-            let listener = moto_ipc::io_channel::listen("systest_local_page_free");
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
+            let listener = moto_sdk::ipc::io_channel::listen("systest_local_page_free");
             server_started.store(true, Ordering::Release);
             let (_sender, mut receiver) = listener.await.unwrap();
             receiver.recv().await.unwrap();
@@ -359,15 +468,15 @@ fn test_local_page_free_wakes_waiter() {
     }
 
     let client = std::thread::spawn(move || {
-        moto_async::LocalRuntime::new().block_on(async move {
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
             let (sender, _receiver) =
-                moto_ipc::io_channel::connect("systest_local_page_free").unwrap();
+                moto_sdk::ipc::io_channel::connect("systest_local_page_free").unwrap();
             let mut pages = sender.alloc_pages(3, 7).await.unwrap();
             let (pending_tx, pending_rx) = std::sync::mpsc::sync_channel(0);
             let (allocated_tx, allocated_rx) = std::sync::mpsc::channel();
             let allocator_sender = sender.clone();
             let allocator = std::thread::spawn(move || {
-                moto_async::LocalRuntime::new().block_on(async move {
+                moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
                     let mut allocation = Box::pin(allocator_sender.alloc_pages(2, 7));
                     futures::future::poll_fn(|cx| match allocation.as_mut().poll(cx) {
                         Poll::Pending => {
@@ -389,7 +498,7 @@ fn test_local_page_free_wakes_waiter() {
             drop(allocated);
             allocator.join().unwrap();
 
-            let mut done = moto_ipc::io_channel::Msg::new();
+            let mut done = moto_sdk::ipc::io_channel::Msg::new();
             done.id = 1;
             sender.send(done).await.unwrap();
         });
@@ -414,8 +523,8 @@ fn test_remote_page_free_preserves_other_waiters() {
     let server_done = done_tx.clone();
 
     let server = std::thread::spawn(move || {
-        moto_async::LocalRuntime::new().block_on(async move {
-            let listener = moto_ipc::io_channel::listen("systest_remote_page_free");
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
+            let listener = moto_sdk::ipc::io_channel::listen("systest_remote_page_free");
             server_started.store(true, Ordering::Release);
             let (_sender, mut receiver) = listener.await.unwrap();
             let msg = receiver.recv().await.unwrap();
@@ -425,19 +534,19 @@ fn test_remote_page_free_preserves_other_waiters() {
             server_stage.store(1, Ordering::Release);
 
             while server_stage.load(Ordering::Acquire) < 2 {
-                moto_async::sleep(Duration::from_millis(1)).await;
+                moto_sdk::async_runtime::sleep(Duration::from_millis(1)).await;
             }
             drop(pages.pop());
             server_stage.store(3, Ordering::Release);
 
             while server_stage.load(Ordering::Acquire) < 4 {
-                moto_async::sleep(Duration::from_millis(1)).await;
+                moto_sdk::async_runtime::sleep(Duration::from_millis(1)).await;
             }
             drop(pages);
             server_stage.store(5, Ordering::Release);
 
             while server_stage.load(Ordering::Acquire) < 6 {
-                moto_async::sleep(Duration::from_millis(1)).await;
+                moto_sdk::async_runtime::sleep(Duration::from_millis(1)).await;
             }
         });
         server_done.send(()).unwrap();
@@ -449,25 +558,26 @@ fn test_remote_page_free_preserves_other_waiters() {
 
     let client_stage = stage;
     let client = std::thread::spawn(move || {
-        moto_async::LocalRuntime::new().block_on(async move {
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
             let (sender, _receiver) =
-                moto_ipc::io_channel::connect("systest_remote_page_free").unwrap();
+                moto_sdk::ipc::io_channel::connect("systest_remote_page_free").unwrap();
             let pages = sender.alloc_pages(3, PAGE_MASK).await.unwrap();
-            let mut msg = moto_ipc::io_channel::Msg::new();
+            let mut msg = moto_sdk::ipc::io_channel::Msg::new();
             for (idx, page) in pages.into_iter().enumerate() {
-                msg.payload.shared_pages_mut()[idx] = moto_ipc::io_channel::IoPage::into_u16(page);
+                msg.payload.shared_pages_mut()[idx] =
+                    moto_sdk::ipc::io_channel::IoPage::into_u16(page);
             }
             sender.send(msg).await.unwrap();
 
             while client_stage.load(Ordering::Acquire) < 1 {
-                moto_async::sleep(Duration::from_millis(1)).await;
+                moto_sdk::async_runtime::sleep(Duration::from_millis(1)).await;
             }
 
             let poll_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
             let allocator_poll_count = poll_count.clone();
             let allocator_sender = sender.clone();
-            let (pending_tx, pending_rx) = moto_async::oneshot();
-            let allocator = moto_async::LocalRuntime::spawn(async move {
+            let (pending_tx, pending_rx) = moto_sdk::async_runtime::oneshot();
+            let allocator = moto_sdk::async_runtime::LocalRuntime::spawn(async move {
                 let mut allocation = Box::pin(allocator_sender.alloc_pages(2, PAGE_MASK));
                 let mut pending_tx = Some(pending_tx);
                 core::future::poll_fn(move |cx| {
@@ -490,7 +600,7 @@ fn test_remote_page_free_preserves_other_waiters() {
             client_stage.store(2, Ordering::Release);
             while client_stage.load(Ordering::Acquire) < 3 || poll_count.load(Ordering::Acquire) < 2
             {
-                moto_async::sleep(Duration::from_millis(1)).await;
+                moto_sdk::async_runtime::sleep(Duration::from_millis(1)).await;
             }
 
             // This succeeds from the one free page. It must not clear the
@@ -498,7 +608,7 @@ fn test_remote_page_free_preserves_other_waiters() {
             let single_page = sender.alloc_page(PAGE_MASK).await.unwrap();
             client_stage.store(4, Ordering::Release);
             while client_stage.load(Ordering::Acquire) < 5 {
-                moto_async::sleep(Duration::from_millis(1)).await;
+                moto_sdk::async_runtime::sleep(Duration::from_millis(1)).await;
             }
 
             let allocated = allocator.await;
@@ -533,23 +643,23 @@ fn test_error_handler_on_double_free() {
     static CALLED: AtomicBool = AtomicBool::new(false);
     static REMOTE: AtomicU64 = AtomicU64::new(0);
 
-    fn on_error(remote: moto_sys::SysHandle, error: moto_ipc::io_channel::ChannelError) {
+    fn on_error(remote: moto_sys::SysHandle, error: moto_sdk::ipc::io_channel::ChannelError) {
         assert!(matches!(
             error,
-            moto_ipc::io_channel::ChannelError::FreeingUnusedPage { .. }
+            moto_sdk::ipc::io_channel::ChannelError::FreeingUnusedPage { .. }
         ));
         REMOTE.store(u64::from(remote), Ordering::SeqCst);
         CALLED.store(true, Ordering::SeqCst);
     }
-    moto_ipc::io_channel::set_error_handler(on_error);
+    moto_sdk::ipc::io_channel::set_error_handler(on_error);
 
     // A server that accepts and holds the connection, so the client's recovered
     // pages carry a live remote handle (the client the handler would drop).
     let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
     let (accepted_tx, accepted_rx) = std::sync::mpsc::sync_channel(0);
     let server = std::thread::spawn(move || {
-        moto_async::LocalRuntime::new().block_on(async move {
-            let listener = moto_ipc::io_channel::listen("systest_err_handler");
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
+            let listener = moto_sdk::ipc::io_channel::listen("systest_err_handler");
             started_tx.send(()).unwrap();
             let (_sender, mut receiver) = listener.await.unwrap();
             accepted_tx.send(()).unwrap();
@@ -559,21 +669,22 @@ fn test_error_handler_on_double_free() {
     started_rx.recv().unwrap();
 
     let client = std::thread::spawn(move || {
-        moto_async::LocalRuntime::new().block_on(async move {
-            let (sender, _receiver) = moto_ipc::io_channel::connect("systest_err_handler").unwrap();
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
+            let (sender, _receiver) =
+                moto_sdk::ipc::io_channel::connect("systest_err_handler").unwrap();
             accepted_rx.recv().unwrap();
 
             // into_u16 disarms this owner's Drop and leaves the shared in-use
             // bit set, so both get_page handles free the same page on drop.
             let page = sender.alloc_page(u64::MAX).await.unwrap();
-            let idx = moto_ipc::io_channel::IoPage::into_u16(page);
+            let idx = moto_sdk::ipc::io_channel::IoPage::into_u16(page);
             let p1 = sender.get_page(idx).unwrap();
             let p2 = sender.get_page(idx).unwrap();
 
             drop(p1); // First free: the page was in use -> cleared, no error.
             drop(p2); // Second free: not in use -> the handler fires (no panic).
 
-            let mut done = moto_ipc::io_channel::Msg::new();
+            let mut done = moto_sdk::ipc::io_channel::Msg::new();
             done.id = 1;
             let _ = sender.send(done).await; // Release the server.
         });
@@ -631,11 +742,11 @@ fn test_concurrent_spawn_reads() {
 }
 
 /// Both runtimes poll a recently active channel instead of parking (the
-/// Receiver registers a moto_async::SpinSource), so a ping-pong costs a
+/// Receiver registers a moto_sdk::async_runtime::SpinSource), so a ping-pong costs a
 /// small fraction of a wait syscall per round trip instead of about two.
-/// Polling only pays off when the peer runs on another CPU: on one CPU each
-/// turn hands the CPU over, so the count is reported but not asserted.
-fn test_active_channel_polls() {
+/// Polling only pays off when the peer runs on another available CPU: when
+/// vCPUs share one host CPU, the count is also reported but not asserted.
+pub fn test_active_channel_polls(available_cpus: usize) {
     const ITERS: u64 = 20000;
     let pid = moto_sys::current_pid();
     let waits_0 = crate::kernel_metric("sys_cpu_waits", pid);
@@ -643,8 +754,8 @@ fn test_active_channel_polls() {
     let server_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let waiter = server_started.clone();
     let server_thread = std::thread::spawn(move || {
-        moto_async::LocalRuntime::new().block_on(async move {
-            let listener = moto_ipc::io_channel::listen("systest_polls");
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
+            let listener = moto_sdk::ipc::io_channel::listen("systest_polls");
             server_started.store(true, Ordering::Release);
             let (sender, mut receiver) = listener.await.unwrap();
             for idx in 0..ITERS {
@@ -659,10 +770,11 @@ fn test_active_channel_polls() {
         core::hint::spin_loop();
     }
     let client_thread = std::thread::spawn(move || {
-        moto_async::LocalRuntime::new().block_on(async move {
-            let (sender, mut receiver) = moto_ipc::io_channel::connect("systest_polls").unwrap();
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
+            let (sender, mut receiver) =
+                moto_sdk::ipc::io_channel::connect("systest_polls").unwrap();
             for idx in 0..ITERS {
-                let mut msg = moto_ipc::io_channel::Msg::new();
+                let mut msg = moto_sdk::ipc::io_channel::Msg::new();
                 msg.id = idx * 2;
                 sender.send(msg).await.unwrap();
                 msg = receiver.recv().await.unwrap();
@@ -677,7 +789,7 @@ fn test_active_channel_polls() {
     println!(
         "      io_channel::test_active_channel_polls: {ITERS} roundtrips, {waits} wait syscalls"
     );
-    if !crate::under_load() && moto_sys::num_cpus() >= 2 {
+    if !crate::under_load() && available_cpus >= 2 {
         assert!(
             waits < ITERS / 2,
             "{waits} wait syscalls for {ITERS} roundtrips"
@@ -686,7 +798,9 @@ fn test_active_channel_polls() {
     println!("----- io_channel::test_active_channel_polls PASS");
 }
 
-pub fn run_all_tests() {
+pub fn run_all_tests(available_cpus: usize) {
+    test_remote_page_validation();
+    test_canceled_page_send();
     test_listener_cleanup();
     basic_test();
     test_ping_pong();
@@ -696,7 +810,7 @@ pub fn run_all_tests() {
     test_remote_page_free_preserves_other_waiters();
     test_error_handler_on_double_free();
     test_concurrent_spawn_reads();
-    test_active_channel_polls();
+    test_active_channel_polls(available_cpus);
 
     println!("io_channel: ALL PASS");
 }

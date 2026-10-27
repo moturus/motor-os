@@ -49,10 +49,14 @@ pub(super) struct Pressure {
     recovery_waker: Cell<Option<Waker>>,
 
     stats: Rc<NetStats>,
+    free_caches: Rc<crate::runtime::fs::admission::FreeCaches>,
 }
 
 impl Pressure {
-    pub(super) fn new(stats: Rc<NetStats>) -> Self {
+    pub(super) fn new(
+        stats: Rc<NetStats>,
+        free_caches: Rc<crate::runtime::fs::admission::FreeCaches>,
+    ) -> Self {
         // The watermarks are kernel policy; queried once, for metrics only.
         let adm = moto_sys::stats::AdmissionStats::get()
             .expect("the admission-stats query cannot fail on a live kernel");
@@ -64,13 +68,14 @@ impl Pressure {
             parked: RefCell::new(BTreeMap::new()),
             recovery_waker: Cell::new(None),
             stats,
+            free_caches,
         }
     }
 
     /// The synchronous check before a memory-growing request. Refusal must
     /// not allocate; the caller sends the error on the existing channel.
     pub(super) fn admit(&self) -> std::io::Result<()> {
-        if !active() {
+        if !self.active() {
             return Ok(());
         }
 
@@ -79,6 +84,10 @@ impl Pressure {
             .pressure_refused
             .set(self.stats.pressure_refused.get() + 1);
         Err(ErrorKind::OutOfMemory.into())
+    }
+
+    pub(super) fn active(&self) -> bool {
+        self.free_caches.pressure()
     }
 
     /// A new client connection arrived under pressure and is being dropped.
@@ -98,7 +107,7 @@ impl Pressure {
         device_idx: usize,
         socket_addr: SocketAddr,
     ) -> bool {
-        if !active() {
+        if !self.active() {
             return false;
         }
 
@@ -131,6 +140,12 @@ impl Pressure {
         }
     }
 
+    pub(super) fn remove_device(&self, device_idx: usize) {
+        self.parked
+            .borrow_mut()
+            .retain(|_, p| p.device_idx != device_idx);
+    }
+
     fn rearm(&self, runtime: &super::NetRuntime) {
         let parked = core::mem::take(&mut *self.parked.borrow_mut());
         for (key, p) in parked {
@@ -149,7 +164,7 @@ impl Pressure {
 /// every [`RECOVERY_POLL`] until the kernel clears it, re-arms what was
 /// parked, and parks itself again.
 pub(super) fn spawn_recovery(runtime: super::NetRuntime) {
-    moto_async::LocalRuntime::spawn(async move {
+    moto_sdk::async_runtime::LocalRuntime::spawn(async move {
         let pressure = runtime.pressure.clone();
         loop {
             core::future::poll_fn(|cx| {
@@ -163,7 +178,7 @@ pub(super) fn spawn_recovery(runtime: super::NetRuntime) {
             .await;
 
             while active() {
-                moto_async::sleep(RECOVERY_POLL).await;
+                moto_sdk::async_runtime::sleep(RECOVERY_POLL).await;
             }
 
             // Reset the edge before re-arming: an episode starting mid-rearm

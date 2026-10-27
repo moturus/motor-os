@@ -352,6 +352,16 @@ fn cpu_main(this_cpu: u64) -> ! {
         crate::mm::phys::huge_frame_self_test();
         #[cfg(debug_assertions)]
         crate::mm::user::huge_mapping_self_test();
+        #[cfg(debug_assertions)]
+        crate::mm::user::share_validation_self_test();
+        #[cfg(debug_assertions)]
+        crate::mm::user::sparse_lazy_self_test();
+        #[cfg(debug_assertions)]
+        crate::mm::user::guarded_heap_self_test();
+        #[cfg(debug_assertions)]
+        crate::mm::user::shared_alloc_cleanup_self_test();
+        #[cfg(debug_assertions)]
+        crate::arch::paging::retired_tables_self_test();
         crate::uspace::init();
 
         // If we print the boot logo before init_clock(), KVM in the host misbehaves and

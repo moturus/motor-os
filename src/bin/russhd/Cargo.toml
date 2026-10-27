@@ -7,7 +7,7 @@ edition = "2024"
 env_logger   = "=0.11.8"
 hex          = "0.4.3"
 log          = "=0.4.28"
-moto-tooling = { path = "../../sys/lib/moto-tooling", features = ["std"] }
+moto-sdk     = "0.1"
 rand         = "0.10"
 russh        = { git = "https://github.com/moturus/russh.git", branch = "server-window", default-features = false, features = ["flate2", "ring", "rsa"] }
 russh-sftp   = "=2.1.1"
@@ -21,11 +21,6 @@ libc = "=0.2.189"
 
 [target.'cfg(target_os = "motor")'.dependencies]
 getrandom    = { version = "=0.2.17", features = ["custom"] }
-moto-log     = { path = "../../sys/lib/moto-log" }
-moto-async   = { path = "../../sys/lib/moto-async" }
-moto-io      = { path = "../../sys/lib/moto-io" }
-moto-rt      = { path = "../../sys/lib/moto-rt"  }
-moto-sys     = { path = "../../sys/lib/moto-sys" }
 
 # Proc-macros (const-random-macro, via russh-sftp -> flurry -> ahash) use
 # getrandom 0.2 on the host; a native Motor OS host has no backend but RDRAND.
@@ -36,8 +31,7 @@ getrandom = { version = "=0.2.17", features = ["rdrand"] }
 tokio = { version = "=1.47.1", features = ["test-util"] }
 
 [patch.crates-io]
-moto-rt = { path = "../../sys/lib/moto-rt" }
-mio     = { git = "https://github.com/moturus/mio.git"  , branch = "mio-motor-v1.0.4_2025-10-07"   }
+mio     ={ git = "https://github.com/moturus/mio.git"  , branch = "mio-motor-v1.0.4_2025-10-07"   }
 ring    = { git = "https://github.com/moturus/ring.git" , branch = "motor-os-0.17.14"              }
 tokio   = { git = "https://github.com/moturus/tokio.git", branch = "tokio-motor-1.47.1_2025-10-07" }
 

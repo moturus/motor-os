@@ -58,15 +58,12 @@ prepared '1:128:release qemu' env MOTO_SMP=bad MOTO_MEMORY_MIB=bad \
 # and forward only arguments understood by these existing component interfaces.
 : > "$scratch/src/tests/test-dev-path-locks.py"
 for runner in src/tests/full-test.sh src/tests/test-dev-sources.sh \
-  src/bin/httpd-axum/tests/run.sh; do
+  src/tests/test-native-toolchain-install.sh src/bin/httpd-axum/tests/run.sh; do
   cat > "$scratch/$runner" <<'SH'
 #!/bin/bash
 printf '%s:%s:%s\n' "$MOTO_SMP" "$MOTO_MEMORY_MIB" "$*" >> "$MOTO_SIZE_TEST_LOG"
 SH
   chmod +x "$scratch/$runner"
-done
-for runner in test-gears-http.sh test-gears-batteries.sh; do
-  printf '#!/bin/bash\n[ "$#" = 1 ] && [ "$1" = --release ]\n' > "$scratch/src/tests/$runner"
 done
 printf '#!/bin/sh\nexit 0\n' > "$scratch/src/bin/lorry/tests/test-all.sh"
 chmod +x "$scratch/src/bin/lorry/tests/test-all.sh"
@@ -83,6 +80,7 @@ developer() {
   "$@" > "$scratch/output" 2>&1 || { cat "$scratch/output"; exit 1; }
   printf '%s\n' "$cpus:$repository_memory:--release --vmm qemu" \
     "$cpus:$source_memory:--motor --release --vmm qemu" \
+    "$cpus:$source_memory:--release --vmm qemu" \
     "$cpus:$source_memory:--release --vmm qemu" \
     'test-wasm.sh:--prepare --vm wasm:224 --vm dev:256 --release --vmm qemu' \
     'test-wasm.sh:--vm wasm:224 --vm dev:256 --linux-identity --release --vmm qemu' > "$scratch/expected"

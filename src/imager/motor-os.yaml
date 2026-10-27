@@ -1,6 +1,7 @@
 permission_policy: "motor-os-permissions.yaml"
 input_files:
   - "/system/services/russhd"
+  - "/system/bin/wg"
   - "/system/services/strobe"
   - "/system/services/sys-init"
   - "/system/services/sys-tty"
@@ -36,8 +37,12 @@ static_dirs:
 assembly_dirs:
   - "libc"
   - "rg"
+  - "tar"
 assembly_required_executables:
   - "rg/system/bin/rg"
+  - "tar/system/bin/tar"
+  - "tar/system/bin/zstd"
+ca_bundle: "/etc/ssl/certs/ca-certificates.crt"
 filesystem: "motor-fs"
 img_name: "motor-os.qcow2"
 image_format: "qcow2"

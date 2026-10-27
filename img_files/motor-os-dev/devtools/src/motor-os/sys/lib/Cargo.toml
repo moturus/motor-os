@@ -1,0 +1,15 @@
+# Motor OS library sources, staged for native tests: run `lorry test` here.
+# `make dev.img` adds Cargo.lock, admits the workspace, and compiles its
+# dependencies into the Interactive Lorry cache; see
+# src/build-scripts/prepare-dev-image.sh.
+[workspace]
+members = ["moto-sdk"]
+# moto-rt and moto-sys are members too, as path dependencies below this root,
+# but are not tested here.
+default-members = ["moto-sdk"]
+resolver = "2"
+
+# moto-sdk depends on tokio only on Unix, and Motor OS never builds it. The
+# lock still needs a tokio entry: this empty package fills it.
+[patch.crates-io]
+tokio = { path = "tokio-placeholder" }

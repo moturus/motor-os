@@ -8,6 +8,6 @@ description = "Motor OS DNS resolver IPC protocol and client."
 edition = "2021"
 
 [dependencies]
-moto-ipc = { path = "../moto-ipc" }
 moto-rt  = { path = "../moto-rt"  }
+moto-sdk = { path = "../moto-sdk", default-features = false }
 

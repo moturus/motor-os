@@ -479,12 +479,12 @@ consumes the key during spawn and it never becomes process state. Consequently:<
   null streams, and ordinary pipes answer false;</li>
   <li>changing the environment of a running process changes nothing.</li>
 </ul>
-<p>Motor reserves descriptor 3 as the terminal stream (<code>moto_rt::FD_TERMINAL</code>).
+<p>Motor OS reserves descriptor 3 as the terminal stream (<code>moto_rt::FD_TERMINAL</code>).
 It is present exactly when a process belongs to a terminal session but its stdin is not
 that terminal, for example the last stage of a pipeline, or <code>program &lt; file</code>.
 Keys and size reports arrive on it; it is read-only. The spawning runtime creates it
 automatically, so a full-screen program at the end of a pipeline still gets its keys.
-Background jobs do not get it, because Motor has no way to stop them from stealing
+Background jobs do not get it, because Motor OS has no way to stop them from stealing
 input, and a spawner can suppress it with <code>MOTURUS_STDIO_NO_TERMINAL</code>.</p>
 
 <h2>Terminal size</h2>
@@ -517,9 +517,9 @@ one-shot <code>CSI 18 t</code> question; and finally the cursor-position probe i
 bottom-right corner. Polling backs off from 250 ms to ten seconds and then thirty, and a
 confirmed subscription silences polling entirely. russhd answers the sequences itself and
 swallows them, because a sequence passed through would be answered a second time by the
-user's own terminal with a different size. crossterm's Motor backend does all of this for
+user's own terminal with a different size. crossterm's Motor OS backend does all of this for
 every TUI program, turning a report into <code>Event::Resize</code>, so red, rush, and the
-rmux client need no Motor-specific code.</p>
+rmux client need no Motor OS-specific code.</p>
 
 <h2>Ctrl+C</h2>
 <p>Ctrl+C is terminal control, not terminal data. The provider that writes terminal
@@ -545,7 +545,7 @@ ordinary pipe or file stays an ordinary byte.</p>
 </ul>
 <p>rush treats an exit status of 130 as an interrupt: <code>$?</code> stays 130, a pending
 <code>trap INT</code> runs once, and the rest of the pipeline, list, or loop is
-abandoned. Motor has no process groups, so foreground ownership is the relay route, not
+abandoned. Motor OS has no process groups, so foreground ownership is the relay route, not
 a group broadcast.</p>
 
 <h2>Stdio redirection</h2>
@@ -578,7 +578,7 @@ capturing the child's output and writing the file afterwards.</p>
 <h2>Security properties</h2>
 <p><code>is_terminal()</code> guarantees descriptor consistency, nothing more. It does not
 prove a human is present, identify the peer, or grant authority; a process creator can
-always construct an endpoint that claims terminal behavior, on Motor as on systems with
+always construct an endpoint that claims terminal behavior, on Motor OS as on systems with
 ptys. Programs may use it to decide whether prompting, colors, or raw-mode editing are
 practical; code that authorizes an operation must use an explicit policy.</p>
 

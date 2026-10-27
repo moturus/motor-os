@@ -14,18 +14,19 @@ use core::ops::Deref;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicU8, AtomicU64};
 use core::sync::atomic::{AtomicUsize, Ordering};
-use moto_async::AsFuture;
-use moto_io::fs::{
-    AccessPermissions, EntryId, EntryKind, FsClient, ROOT_ID, Role, RolePermissions,
-};
-use moto_ipc::io_channel;
 use moto_rt::Result;
 use moto_rt::fs::HANDLE_URL_PREFIX;
 use moto_rt::fs::MAX_PATH_LEN;
+use moto_sdk::async_runtime::AsFuture;
+use moto_sdk::io::fs::{
+    AccessPermissions, EntryId, EntryKind, FsClient, ROOT_ID, Role, RolePermissions,
+};
+use moto_sdk::ipc::io_channel;
 use moto_sys::SysHandle;
 
 type IoTask = Box<
-    dyn FnOnce(alloc::rc::Rc<moto_io::fs::FsClient>) -> Pin<Box<dyn Future<Output = ()>>> + Send,
+    dyn FnOnce(alloc::rc::Rc<moto_sdk::io::fs::FsClient>) -> Pin<Box<dyn Future<Output = ()>>>
+        + Send,
 >;
 
 fn current_fs_role() -> Role {
@@ -163,7 +164,7 @@ impl CanonicalPath {
 }
 
 pub struct AsyncFsClient {
-    tasks_tx: moto_async::channel::Sender<IoTask>,
+    tasks_tx: moto_sdk::async_runtime::channel::Sender<IoTask>,
     cwd: moto_rt::mutex::Mutex<String>, // Current Working Directory.
 }
 
@@ -217,23 +218,23 @@ impl AsyncFsClient {
     }
 
     async fn main_runtime_task(
-        mut tasks_rx: moto_async::channel::Receiver<IoTask>,
-        fs_client: Rc<moto_io::fs::FsClient>,
+        mut tasks_rx: moto_sdk::async_runtime::channel::Receiver<IoTask>,
+        fs_client: Rc<moto_sdk::io::fs::FsClient>,
     ) {
         fs_client.enable_response_pump();
-        moto_async::LocalRuntime::spawn(fs_client.clone().run_response_pump());
+        moto_sdk::async_runtime::LocalRuntime::spawn(fs_client.clone().run_response_pump());
         loop {
             let io_task = tasks_rx.recv().await.unwrap();
             let fs_client = fs_client.clone();
-            moto_async::LocalRuntime::spawn(async move {
+            moto_sdk::async_runtime::LocalRuntime::spawn(async move {
                 io_task(fs_client).await;
             });
         }
     }
 
     fn create() -> Result<&'static Self> {
-        let fs_client = moto_io::fs::FsClient::connect()?;
-        let (tasks_tx, tasks_rx) = moto_async::channel(8);
+        let fs_client = moto_sdk::io::fs::FsClient::connect()?;
+        let (tasks_tx, tasks_rx) = moto_sdk::async_runtime::channel(8);
 
         let this = alloc::boxed::Box::leak(alloc::boxed::Box::new(AsyncFsClient {
             tasks_tx,
@@ -249,7 +250,7 @@ impl AsyncFsClient {
         let addr = this as *mut _ as usize;
 
         // The Rc is uniquely owned until it reaches the runtime thread.
-        struct SendFsClient(Rc<moto_io::fs::FsClient>);
+        struct SendFsClient(Rc<moto_sdk::io::fs::FsClient>);
         unsafe impl Send for SendFsClient {}
         let carrier = SendFsClient(fs_client);
 
@@ -354,7 +355,7 @@ impl AsyncFsClient {
                     return Err(moto_rt::Error::NotFound);
                 }
                 (
-                    self.create_internal(&path, moto_io::fs::EntryKind::File)?,
+                    self.create_internal(&path, moto_sdk::io::fs::EntryKind::File)?,
                     true,
                 )
             }
@@ -397,7 +398,7 @@ impl AsyncFsClient {
         F: FnOnce(Rc<FsClient>) -> Fut + Send + 'static,
         Fut: Future<Output = T> + 'static,
     {
-        moto_async::block_on_sync(self.async_run(io_task))
+        moto_sdk::async_runtime::block_on_sync(self.async_run(io_task))
     }
 
     /// Run `io_task` on the core I/O runtime without blocking the caller's
@@ -408,7 +409,7 @@ impl AsyncFsClient {
         F: FnOnce(Rc<FsClient>) -> Fut + Send + 'static,
         Fut: Future<Output = T> + 'static,
     {
-        let (tx_result, rx_result) = moto_async::oneshot();
+        let (tx_result, rx_result) = moto_sdk::async_runtime::oneshot();
         let task: IoTask = Box::new(move |fs_client: Rc<FsClient>| {
             Box::pin(async move {
                 let _ = tx_result.send(io_task(fs_client).await);
@@ -532,8 +533,8 @@ impl AsyncFsClient {
         self.metadata(entry_id)
     }
 
-    /// See `moto_io::fs::FsClient::spawn`.
-    pub(crate) fn spawn_child(&self, req: moto_sys_io::api_fs::SpawnRequest) -> Result<u64> {
+    /// See `moto_sdk::io::fs::FsClient::spawn`.
+    pub(crate) fn spawn_child(&self, req: moto_sdk::sys_io::api_fs::SpawnRequest) -> Result<u64> {
         self.blocking_run(move |fs_client| async move { fs_client.spawn(&req).await })
     }
 
@@ -545,8 +546,8 @@ impl AsyncFsClient {
         file_attr.size = metadata.size;
         file_attr.perm = access_to_perm(metadata.access(current_fs_role())?);
         file_attr.file_type = match metadata.kind() {
-            moto_io::fs::EntryKind::Directory => moto_rt::fs::FILETYPE_DIRECTORY,
-            moto_io::fs::EntryKind::File => moto_rt::fs::FILETYPE_FILE,
+            moto_sdk::io::fs::EntryKind::Directory => moto_rt::fs::FILETYPE_DIRECTORY,
+            moto_sdk::io::fs::EntryKind::File => moto_rt::fs::FILETYPE_FILE,
         };
         file_attr.created = metadata.created.as_nanos();
         file_attr.modified = metadata.modified.as_nanos();
@@ -597,7 +598,7 @@ impl AsyncFsClient {
             // A finished mode the higher roles' bytes cannot hold is refused
             // before any data moves, not after the copy.
             let completed = copied_permissions(destination, source);
-            if !moto_io::fs::perms_monotonic(completed) {
+            if !moto_sdk::io::fs::perms_monotonic(completed) {
                 return Err(moto_rt::Error::NotAllowed);
             }
             let mut staging = destination;
@@ -742,7 +743,7 @@ impl AsyncFsClient {
 }
 
 pub(crate) struct File {
-    entry_id: moto_io::fs::EntryId,
+    entry_id: moto_sdk::io::fs::EntryId,
     open_id: u64,
     pos: moto_rt::mutex::Mutex<PosState>,
     // `O_APPEND`: every write through this handle starts at the current end
@@ -1195,12 +1196,12 @@ impl PosixFile for File {
 // `id` itself, so a cursor pointing at an already-deleted entry is dead.
 enum ReadDirCursor {
     NotStarted,
-    Next(moto_io::fs::EntryId),
+    Next(moto_sdk::io::fs::EntryId),
     Done,
 }
 
 struct ReadDir {
-    dir_id: moto_io::fs::EntryId,
+    dir_id: moto_sdk::io::fs::EntryId,
     cursor: moto_rt::mutex::Mutex<ReadDirCursor>,
 }
 
@@ -1699,7 +1700,7 @@ pub extern "C" fn mkdir(path_ptr: *const u8, path_size: usize) -> moto_rt::Error
 
     AsyncFsClient::get()
         .unwrap()
-        .create_internal(&path, moto_io::fs::EntryKind::Directory)
+        .create_internal(&path, moto_sdk::io::fs::EntryKind::Directory)
         .map_or_else(|err| err as moto_rt::ErrorCode, |_| 0)
 }
 

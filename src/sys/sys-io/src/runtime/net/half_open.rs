@@ -92,6 +92,13 @@ impl<T> HalfOpenBudget<T> {
             .push_back((listener_id, replenish));
     }
 
+    /// Withdraw obsolete replenishments without changing active handshake counts.
+    pub(super) fn discard_deferred(&self, mut discard: impl FnMut(&T) -> bool) {
+        self.deferred
+            .borrow_mut()
+            .retain(|(_, value)| !discard(value));
+    }
+
     /// Give back one slot, and return a replenishment to resume if the cap was
     /// holding one back. The caller resumes it, so no borrow of this struct is
     /// live while a parked task is woken.
@@ -147,6 +154,10 @@ pub(crate) mod self_test {
         (
             "net::half_open::resumes_deferred_in_fifo_order",
             resumes_deferred_in_fifo_order,
+        ),
+        (
+            "net::half_open::withdraws_only_selected_replenishments",
+            withdraws_only_selected_replenishments,
         ),
         (
             "net::half_open::caps_each_listener_separately",
@@ -245,6 +256,21 @@ pub(crate) mod self_test {
         // ...without spending another listener's, well short of the global cap.
         st_assert!(budget.admit(2));
         st_assert!(budget.admit(2));
+        Ok(())
+    }
+
+    fn withdraws_only_selected_replenishments() -> Result<(), String> {
+        let budget = budget();
+        let _ = admit_globally(&budget, GLOBAL);
+        budget.defer(0, 10);
+        budget.defer(0, 11);
+        budget.defer(0, 12);
+        budget.discard_deferred(|value| *value == 11);
+        st_assert_eq!(budget.global.get(), GLOBAL);
+        st_assert_eq!(budget.deferred_len(), 2);
+        st_assert_eq!(budget.release(0), Some(10));
+        st_assert_eq!(budget.release(0), Some(12));
+        st_assert_eq!(budget.release(0), None);
         Ok(())
     }
 

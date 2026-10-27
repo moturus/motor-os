@@ -44,6 +44,7 @@ fn run() -> Result<(), String> {
     let mut memory_notices = 0;
     let mut observer = |event| {
         if let Event::Notice(text) = event {
+            fixture.observe_notice(&text)?;
             let proposed = format!(
                 "hook {}: Proposed workspace memory entry:\nThe fixture uses a compile-time assertion.",
                 fixture.hook
@@ -51,8 +52,6 @@ fn run() -> Result<(), String> {
             let declined = format!("hook {}: Memory change declined.", fixture.hook);
             if text == proposed || text == declined {
                 memory_notices += 1;
-            } else {
-                return Err(format!("unexpected workflow notice: {text}"));
             }
         }
         Ok(())
@@ -120,12 +119,12 @@ fn run() -> Result<(), String> {
     let mut notices = 0;
     let mut reminder_observer = |event| {
         if let Event::Notice(text) = event {
+            fixture.observe_notice(&text)?;
             if text
-                != "before_stop: The workspace changed and no current passing check exists. Run the declared check before finishing; checks provide development evidence, not task acceptance."
+                == "before_stop: The workspace changed and no current passing check exists. Run the declared check before finishing; checks provide development evidence, not task acceptance."
             {
-                return Err(format!("unexpected workflow notice: {text}"));
+                notices += 1;
             }
-            notices += 1;
         }
         Ok(())
     };
@@ -175,6 +174,7 @@ fn run() -> Result<(), String> {
     let mut remembered = Vec::new();
     runtime.hook_command("remember", "Run the fixture check offline.", &mut |event| {
         if let Event::Notice(text) = event {
+            fixture.observe_notice(&text)?;
             remembered.push(text);
         }
         Ok(())

@@ -120,22 +120,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-fs"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytemuck",
- "camino",
- "fittings",
- "log",
- "lru",
- "moto-async",
- "moto-rt",
- "moto-tooling",
- "tokio",
-]
-
-[[package]]
 name = "async-trait"
 version = "0.1.88"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -511,10 +495,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
-name = "fittings"
-version = "0.1.0"
-
-[[package]]
 name = "foldhash"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -589,12 +569,11 @@ dependencies = [
 name = "imager"
 version = "0.1.0"
 dependencies = [
- "async-fs",
  "async-trait",
  "camino",
  "env_logger",
- "fittings",
  "mbrman",
+ "moto-sdk",
  "motor-fs",
  "serde",
  "serde_yaml",
@@ -712,58 +691,43 @@ dependencies = [
 ]
 
 [[package]]
-name = "moto-async"
-version = "0.1.0"
-dependencies = [
- "crossbeam",
- "log",
- "moto-mpmc",
- "moto-rt",
- "moto-sys",
-]
-
-[[package]]
-name = "moto-mpmc"
-version = "0.1.0"
-dependencies = [
- "crossbeam-utils",
- "moto-rt",
- "moto-sys",
-]
-
-[[package]]
 name = "moto-rt"
-version = "0.17.8"
+version = "0.17.9"
+
+[[package]]
+name = "moto-sdk"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytemuck",
+ "camino",
+ "crossbeam",
+ "crossbeam-utils",
+ "log",
+ "lru",
+ "moto-rt",
+ "moto-sys",
+ "tokio",
+]
 
 [[package]]
 name = "moto-sys"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "moto-rt",
-]
-
-[[package]]
-name = "moto-tooling"
-version = "0.1.0"
-dependencies = [
- "fittings",
- "moto-sys",
 ]
 
 [[package]]
 name = "motor-fs"
 version = "0.1.0"
 dependencies = [
- "async-fs",
  "async-trait",
  "bytemuck",
  "crc",
- "fittings",
  "log",
  "micromap",
- "moto-async",
  "moto-rt",
- "moto-tooling",
+ "moto-sdk",
  "tokio",
 ]
 

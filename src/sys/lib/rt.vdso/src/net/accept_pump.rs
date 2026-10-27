@@ -19,8 +19,8 @@ use core::future::Future;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use core::task::Poll;
 use core::time::Duration;
-use moto_io::net::tcp::TcpListener;
 use moto_rt::mutex::Mutex;
+use moto_sdk::io::net::tcp::TcpListener;
 
 const RESERVATION_RETRY_START_MS: u64 = 10;
 const RESERVATION_RETRY_MAX_MS: u64 = 1000;
@@ -28,7 +28,7 @@ const RESERVATION_RETRY_MAX_MS: u64 = 1000;
 /// The pump's cross-thread wakeup: an epoch counter and a single parked
 /// waker. Raisers run on the channel runtime thread (completion dispatch)
 /// and on caller threads (the accept shims), so unlike
-/// `moto_async::LocalNotify` this must be `Sync`; it carries no permit
+/// `moto_sdk::async_runtime::LocalNotify` this must be `Sync`; it carries no permit
 /// because the pump re-reads its level after every wake.
 struct PumpSignal {
     epoch: AtomicU64,
@@ -187,7 +187,10 @@ impl AcceptPump {
                         let delay = Duration::from_millis(reservation_retry_ms);
                         reservation_retry_ms =
                             (reservation_retry_ms * 10).min(RESERVATION_RETRY_MAX_MS);
-                        let _ = self.signal.race(seen, moto_async::sleep(delay)).await;
+                        let _ = self
+                            .signal
+                            .race(seen, moto_sdk::async_runtime::sleep(delay))
+                            .await;
                         continue;
                     }
                 }

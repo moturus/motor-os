@@ -3,8 +3,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 use moto_dns::{AddressFamily, ClientError, Status};
-use moto_sys_io::api_net;
-use moto_sys_io::icmp::IcmpEchoClient;
+use moto_sdk::sys_io::api_net;
+use moto_sdk::sys_io::icmp::IcmpEchoClient;
 
 const DEFAULT_COUNT: u16 = 4;
 const DEFAULT_DATA_LEN: u16 = 56;

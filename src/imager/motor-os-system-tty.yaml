@@ -25,6 +25,7 @@ directories:
 static_dirs:
   - "img_files/motor-os-base"
   - "img_files/test-system-tty"
+ca_bundle: "/etc/ssl/certs/ca-certificates.crt"
 filesystem: "motor-fs"
 img_name: "motor-os-system-tty.img"
 image_format: "raw"

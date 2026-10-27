@@ -9,10 +9,8 @@ edition = "2024"
 test-support = []
 
 [dependencies]
-async-fs     = { path = "../async-fs"     }
-moto-async   = { path = "../moto-async"   }
 moto-rt      = { path = "../moto-rt"      }
-moto-tooling = { path = "../moto-tooling" }
+moto-sdk     = { path = "../moto-sdk"     }
 moto-sys     = { path = "../moto-sys"     }
 
 async-trait = "0.1.88"

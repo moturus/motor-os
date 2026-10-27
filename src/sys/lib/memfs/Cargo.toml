@@ -1,0 +1,12 @@
+[package]
+name = "memfs"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+async-trait = "0.1.88"
+moto-sdk = { path = "../moto-sdk" }
+
+[target.'cfg(target_os = "motor")'.dependencies]
+moto-sys = { path = "../moto-sys" }

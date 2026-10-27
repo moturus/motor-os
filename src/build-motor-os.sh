@@ -1,159 +1,116 @@
 #!/usr/bin/env bash
 #
-# build-motor-os.sh — build the complete Motor OS release environment and the
-# base, standard, development, and wasm VM images.
+# build-motor-os.sh — build the external sources and the base, standard,
+# development, and wasm VM images with the Motor toolchain that
+# rust-toolchain.toml names.
 #
-# This is the single entry point for the exact toolchain pipeline: it provisions
-# the host, resolves the declared Rust/LLVM source tuple, builds and validates a
-# key-qualified host toolchain, then assembles the matching native development
-# toolchain and images.
+# The toolchain is built separately (github.com/moturus/motor-os-toolchain)
+# and comes as two archives named by its version, x86_64-unknown-motor-<Rust
+# version>:
+#   motor-toolchain-<version>-x86_64-linux.tar.zst, the Linux-host toolchain,
+#     installed by the install.sh inside it, which links it into rustup;
+#   $MOTORH/motor-toolchain-<version>.tar.zst, the native toolchain, whose
+#     image overlays this script unpacks.
 #
-# Run it from a Motor OS checkout; sibling Rust, LLVM, mlibc, ripgrep, sed,
-# sysroot, and Lua sources/builds live under $MOTORH (the checkout's parent by
-# default).
-#
-# Generated image inputs are staged beneath a key-qualified assembly directory.
-#
-# The tracked img_files directories remain source-only. The standard imager
-# consumes the libc and rg roots; the development imager additionally consumes
-# the LLVM, rustc, Helix, Lua, sed, and rust-analyzer/rust-src roots.
-#
-# On-image layout (see docs/libc.md): C/C++ headers + libraries
-# live under /devtools/llvm, the clang driver config under /devtools/llvm/cfg,
-# mlibc's config files under /system/cfg/libc, and the Rust toolchain at
-# /devtools/rust — not the classic /usr and /etc.
-#
-# Re-running validates and reuses only complete outputs with the same exact key.
+# Everything else stays in the checkout. The external sources (ripgrep,
+# Helix, uutils sed, Lua, tar and zstd, Javy with Wasmi, and Wasmtime) are
+# fetched into external-sources/. The assembly, build/assembly/, holds what
+# the images take from outside the tree: the overlays of the native toolchain,
+# of the external sources, and of the dependencies of the staged library
+# sources, plus the external sources' build trees.
 
 set -euo pipefail
 
 log()  { printf '\033[1;34m[build-motor-os]\033[0m %s\n' "$*"; }
-skip() { printf '\033[1;32m[build-motor-os]\033[0m (skip) %s\n' "$*"; }
 warn() { printf '\033[1;33m[build-motor-os]\033[0m WARNING: %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[build-motor-os]\033[0m ERROR: %s\n' "$*" >&2; exit 1; }
 trap 'die "failed at line $LINENO"' ERR
 
 usage() {
 	cat << 'EOF'
-Usage: src/build-motor-os.sh [--source-mode managed]
+Usage: src/build-motor-os.sh
        src/build-motor-os.sh [--javy-only] [--wasmtime-only]
-       src/build-motor-os.sh --source-mode authoring \
-         --rust-source /absolute/path/to/rust --authoring-base FULL_COMMIT
+       src/build-motor-os.sh --sys-lib-deps-only
 
-Build the complete Motor OS release environment and all four images, including:
-  - the exact key-qualified Rust 1.99 Motor toolchain;
-  - Linux-host rust-analyzer and its matching proc-macro server;
-  - host cross LLVM/Clang and the mlibc/libc++ sysroot;
-  - native Motor OS LLVM/Clang, Lua, and rustc;
+Build the external sources and all four images with the Motor toolchain that
+rust-toolchain.toml names, which must be installed in rustup, and whose
+native archive must be $MOTORH/motor-toolchain-<version>.tar.zst:
   - ripgrep as /system/bin/rg;
+  - tar and zstd in /system/bin;
   - Helix as /devtools/helix/hx in the development image;
   - uutils sed as /devtools/bin/sed in the development image;
-  - native rust-analyzer and matching rust-src in the development image;
+  - Lua as /devtools/bin/lua in the development image;
   - Javy and Wasmi in the development and small wasm images;
   - runtime-only Wasmtime as /devtools/bin/wasmtime-rt in both of those images;
+  - the crates.io dependencies of the Motor OS library sources the development
+    image stages for native tests, as Lorry repository objects;
   - all standard and dev-image Motor OS binaries;
   - base, standard, dev, and wasm images under vm_images/release.
 
---javy-only and --wasmtime-only build the Javy/Wasmi and runtime-only Wasmtime
-add-ons with the selected installed assembly; they skip toolchain provisioning
-and image construction.
+--javy-only and --wasmtime-only build only Javy/Wasmi and the runtime-only
+Wasmtime; they skip host provisioning and image construction.
+--sys-lib-deps-only likewise fetches only the dependencies of the development
+image's library sources.
 
 Environment:
-  MOTORH  Development root for sibling checkouts and build trees.
-          Defaults to the parent of the Motor OS checkout.
+  MOTORH  The directory with the native toolchain archive. Defaults to the
+          parent of the Motor OS checkout.
   MOTOR_SKIP_HOST_NETWORK_SETUP=1
           Skip build-base.sh's privileged tap/NAT setup after independently
           verifying that host VM networking is already configured.
 
-Managed mode is the default. Authoring mode never fetches, switches, resets,
-stashes, cleans, or updates the supplied Rust and LLVM worktrees.
-
-The build is incremental and safe to rerun. It downloads managed sources and packages,
-uses sudo only at the start, for missing Ubuntu packages and host VM setup, and
-does not start the VM. A re-run discards an interrupted build and builds it again.
+Every run builds the external sources and the images again, incrementally
+through Cargo and make, so it is safe to rerun. After installing a different or
+rebuilt toolchain, run make clean first. The script fetches the external
+sources into external-sources/ and builds in build/ and vm_images/. It uses
+sudo only at the start, for missing Ubuntu packages and host VM setup, and
+starts a VM only to prepare the development image.
 EOF
 }
 
 parse_options() {
-	SOURCE_MODE=managed
 	JAVY_ONLY=false
 	WASMTIME_ONLY=false
-	RUST_SOURCE=
-	AUTHORING_BASE=
+	SYS_LIB_DEPS_ONLY=false
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
 			-h|--help) usage; return 2 ;;
 			--javy-only) JAVY_ONLY=true; shift ;;
 			--wasmtime-only) WASMTIME_ONLY=true; shift ;;
-			--source-mode) [ "$#" -ge 2 ] || die "--source-mode needs a value"; SOURCE_MODE="$2"; shift 2 ;;
-			--rust-source) [ "$#" -ge 2 ] || die "--rust-source needs a value"; RUST_SOURCE="$2"; shift 2 ;;
-			--authoring-base) [ "$#" -ge 2 ] || die "--authoring-base needs a value"; AUTHORING_BASE="$2"; shift 2 ;;
+			--sys-lib-deps-only) SYS_LIB_DEPS_ONLY=true; shift ;;
 			*) usage >&2; die "unknown argument: $1" ;;
 		esac
 	done
-	case "$SOURCE_MODE" in
-		managed)
-			[ -z "$RUST_SOURCE$AUTHORING_BASE" ] ||
-				die "managed mode does not accept authoring source options"
-			;;
-		authoring)
-			case "$RUST_SOURCE" in /*) ;; *) die "authoring --rust-source must be absolute" ;; esac
-			[[ "$AUTHORING_BASE" =~ ^[0-9a-f]{40}$ ]] ||
-				die "authoring --authoring-base must be a full lowercase commit"
-			;;
-		*) die "unsupported source mode: $SOURCE_MODE" ;;
-	esac
 }
 
-# --- paths (same scheme as docs/build-llvm.md and docs/build-rustc.md) -------
+# --- paths ------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 MOTOR="$(cd "$SCRIPT_DIR/.." && pwd)"
 [ -e "$MOTOR/.git" ] ||
 	die "run this script from its Motor OS checkout; .git is missing at $MOTOR"
-. "$SCRIPT_DIR/toolchain-versions.sh"
-. "$SCRIPT_DIR/toolchain-lib.sh"
-. "$SCRIPT_DIR/toolchain-sources.sh"
-. "$SCRIPT_DIR/toolchain-bootstrap.sh"
-. "$SCRIPT_DIR/toolchain-state.sh"
-. "$SCRIPT_DIR/toolchain-runtime.sh"
-. "$SCRIPT_DIR/toolchain-prefix.sh"
-. "$SCRIPT_DIR/toolchain-llvm.sh"
-. "$SCRIPT_DIR/toolchain-host.sh"
-. "$SCRIPT_DIR/toolchain-assembly.sh"
-. "$SCRIPT_DIR/toolchain-native.sh"
-. "$SCRIPT_DIR/toolchain-patched-crates.sh"
-. "$SCRIPT_DIR/toolchain-rust-analyzer.sh"
-. "$SCRIPT_DIR/patches/crates.sh"
-. "$SCRIPT_DIR/build-addon-sources.sh"
-. "$SCRIPT_DIR/build-javy.sh"
-. "$SCRIPT_DIR/build-wasmtime.sh"
-toolchain_validate_versions || die "invalid src/toolchain-versions.sh"
+. "$SCRIPT_DIR/build-scripts/external-sources.sh"
+. "$SCRIPT_DIR/build-scripts/build-javy.sh"
+. "$SCRIPT_DIR/build-scripts/build-wasmtime.sh"
 
 MOTORH="$(readlink -f "${MOTORH:-$MOTOR/..}")"
 export MOTORH
 export MOTOR_OS_DIR="$MOTOR"
+EXTERNAL_SOURCES="$MOTOR/external-sources"
 
-LLVM="$MOTORH/llvm-project"
-MLIBC="$MOTORH/mlibc"
-RUST="$MOTORH/rust"
-TOOLCHAIN_SRC_ROOT="$MOTORH/toolchain-src"
-RIPGREP="$MOTORH/ripgrep"
-HELIX="$MOTORH/helix"
-SED="$MOTORH/sed"
-B="$LLVM/build/bin"                 # the host cross toolchain, built in stage 1
-SYSROOT="$MOTORH/motor-sysroot"
-CROSS_FILE="$MOTORH/motor.cross-file"
+RIPGREP="$EXTERNAL_SOURCES/ripgrep"
+HELIX="$EXTERNAL_SOURCES/helix"
+SED="$EXTERNAL_SOURCES/sed"
+MOTOR_OS_TAR="$EXTERNAL_SOURCES/motor-os-tar"
 
-# Userspace add-ons. They are built with the finished toolchain and are no part
-# of its identity: Lua is a release, ripgrep, Helix, and sed follow a fork branch.
+# External sources. Lua is a release; ripgrep, Helix, sed, and motor-os-tar
+# follow a fork branch.
 LUA_VER=5.4.8
 RIPGREP_BRANCH=master
 HELIX_BRANCH=helix-motor-25.7.1_2026-08-31
 SED_BRANCH=main
-CLANG_MAJOR=""                      # detected after the host toolchain is built
+MOTOR_OS_TAR_BRANCH=master
 
-HOST=x86_64-unknown-linux-gnu
-# Guest WebAssembly test inputs of the wasm add-ons are built with this pinned
+# Guest WebAssembly test inputs of Javy and Wasmtime are built with this pinned
 # upstream Rust; the Motor toolchain itself carries no wasm32 targets.
 WASM_GUEST_TOOLCHAIN=1.99.0
 # The QuickJS C code of javy-smoke's test plugins needs wasi-sdk: the release
@@ -161,135 +118,42 @@ WASM_GUEST_TOOLCHAIN=1.99.0
 WASI_SDK_VERSION=24.0
 WASI_SDK_SHA=c6c38aab56e5de88adf6c1ebc9c3ae8da72f88ec2b656fb024eda8d4167a0bc5
 TARGET=x86_64-unknown-motor
-MAKE_LOG="$MOTORH/build-motor-os-make.log"
+# The Motor toolchain that rust-toolchain.toml names, and its native archive.
+TOOLCHAIN="$(sed -n 's/^channel = "\(.*\)"/\1/p' "$MOTOR/rust-toolchain.toml")"
+[[ "$TOOLCHAIN" =~ ^[A-Za-z0-9._-]+$ ]] ||
+	die "$MOTOR/rust-toolchain.toml does not name one toolchain as channel = \"...\""
+NATIVE_ARCHIVE="$MOTORH/motor-toolchain-$TOOLCHAIN.tar.zst"
 
-prepare_exact_sources() {
-	local source_mode="$1" rust_source="${2:-}" authoring_base="${3:-}"
-	MLIBC="$TOOLCHAIN_SRC_ROOT/mlibc"
-	toolchain_managed_checkout "$MOTOR_MLIBC_REPOSITORY" "$MOTOR_MLIBC_REF" \
-		"$MOTOR_MLIBC_REV" "$MLIBC" "$MOTORH/mlibc" || return
+ASSEMBLY_ROOT="$MOTOR/build/assembly"
+ASSEMBLY_IMAGE_ROOT="$ASSEMBLY_ROOT/images"
+ASSEMBLY_BUILD_ROOT="$ASSEMBLY_ROOT/build"
+RG_IMG="$ASSEMBLY_IMAGE_ROOT/rg"
+HELIX_IMG="$ASSEMBLY_IMAGE_ROOT/helix"
+LUA_IMG="$ASSEMBLY_IMAGE_ROOT/lua"
+SED_IMG="$ASSEMBLY_IMAGE_ROOT/sed"
+TAR_IMG="$ASSEMBLY_IMAGE_ROOT/tar"
+JAVY_IMG="$ASSEMBLY_IMAGE_ROOT/javy"
+WASMTIME_IMG="$ASSEMBLY_IMAGE_ROOT/wasmtime"
+JAVY_TESTS="$ASSEMBLY_ROOT/tests/javy"
+WASMTIME_TESTS="$ASSEMBLY_ROOT/tests/wasmtime"
+LUA_BUILD="$ASSEMBLY_BUILD_ROOT/lua-$LUA_VER"
+RIPGREP_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/ripgrep"
+HELIX_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/helix"
+SED_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/sed"
+TAR_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/motor-os-tar"
 
-	case "$source_mode" in
-		managed)
-			RUST="$TOOLCHAIN_SRC_ROOT/rust"
-			toolchain_managed_checkout "$MOTOR_RUST_REPOSITORY" "$MOTOR_RUST_REF" \
-				"$MOTOR_RUST_REV" "$RUST" "$MOTORH/rust" || return
-			toolchain_managed_submodule "$RUST" src/llvm-project \
-				"$MOTOR_LLVM_REPOSITORY" "$MOTOR_LLVM_REF" "$MOTOR_LLVM_REV" \
-				"$MOTORH/llvm-project" || return
-			toolchain_managed_submodule "$RUST" src/tools/cargo \
-				"$MOTOR_CARGO_REPOSITORY" "$MOTOR_CARGO_REV" "$MOTOR_CARGO_REV" || return
-			local backtrace_rev
-			backtrace_rev="$(toolchain_gitlink "$RUST" HEAD library/backtrace)" || return
-			toolchain_managed_submodule "$RUST" library/backtrace \
-				"$RUST_BACKTRACE_REPOSITORY" "$backtrace_rev" "$backtrace_rev" || return
-			local book_rev reference_rev rustc_perf_rev
-			book_rev="$(toolchain_gitlink "$RUST" HEAD src/doc/book)" || return
-			reference_rev="$(toolchain_gitlink "$RUST" HEAD src/doc/reference)" || return
-			toolchain_managed_submodule "$RUST" src/doc/book \
-				"$RUST_BOOK_REPOSITORY" "$book_rev" "$book_rev" || return
-			toolchain_managed_submodule "$RUST" src/doc/reference \
-				"$RUST_REFERENCE_REPOSITORY" "$reference_rev" "$reference_rev" || return
-			rustc_perf_rev="$(toolchain_gitlink "$RUST" HEAD src/tools/rustc-perf)" || return
-			toolchain_managed_submodule "$RUST" src/tools/rustc-perf \
-				"$RUSTC_PERF_REPOSITORY" "$rustc_perf_rev" "$rustc_perf_rev" || return
-			toolchain_verify_managed_rust "$RUST" || return
-			MOTOR_SOURCE_MODE=managed
-			SELECTED_UPSTREAM_RUST_REV="$UPSTREAM_RUST_REV"
-			SELECTED_RUST_VERSION="$UPSTREAM_RUST_VERSION"
-			SELECTED_STAGE0_REV="$UPSTREAM_STAGE0_REV"
-			SELECTED_RUST_LLVM_BASE_REV="$RUST_LLVM_BASE_REV"
-			SELECTED_MOTOR_CARGO_VERSION="$MOTOR_CARGO_VERSION"
-			SELECTED_MOTOR_CARGO_REV="$MOTOR_CARGO_REV"
-			SELECTED_RUSTUP_TOOLCHAIN_BASE="$MOTOR_RUSTUP_TOOLCHAIN_BASE"
-			SELECTED_TOOLCHAIN_DESCRIPTION="$MOTOR_TOOLCHAIN_ID"
-			EFFECTIVE_MOTOR_RUST_REV="$MOTOR_RUST_REV"
-			EFFECTIVE_MOTOR_LLVM_REV="$MOTOR_LLVM_REV"
-			MOTOR_RUST_TREE_STATE=clean
-			MOTOR_LLVM_TREE_STATE=clean
-			AUTHORING_SOURCE_DIGEST=none
-			MOTOR_ASSEMBLY_STATE=clean
-			;;
-		authoring)
-			[ -n "$rust_source" ] || die "authoring mode requires --rust-source"
-			[ -n "$authoring_base" ] || die "authoring mode requires --authoring-base"
-			RUST="$(readlink -f "$rust_source")"
-			toolchain_authoring_resolve "$RUST" "$authoring_base" || return
-			;;
-		*) die "unsupported source mode: $source_mode" ;;
-	esac
-	LLVM="$RUST/src/llvm-project"
-}
-
-activate_exact_assembly_paths() {
-	B="$STANDALONE_LLVM_BIN"
-	SYSROOT="$ASSEMBLY_SYSROOT"
-	CROSS_FILE="$ASSEMBLY_ROOT/motor.cross-file"
-	LLVM_IMG="$ASSEMBLY_IMAGE_ROOT/llvm"
-	RUSTC_IMG="$ASSEMBLY_IMAGE_ROOT/rustc"
-	RG_IMG="$ASSEMBLY_IMAGE_ROOT/rg"
-	HELIX_IMG="$ASSEMBLY_IMAGE_ROOT/helix"
-	LUA_IMG="$ASSEMBLY_IMAGE_ROOT/lua"
-	SED_IMG="$ASSEMBLY_IMAGE_ROOT/sed"
-	LIBC_IMG="$ASSEMBLY_IMAGE_ROOT/libc"
-	SHIM_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/moto-rt-cabi"
-	BUILTINS_BUILD="$ASSEMBLY_BUILD_ROOT/compiler-rt-builtins"
-	MLIBC_SOURCE="$ASSEMBLY_BUILD_ROOT/mlibc-source"
-	MLIBC_HEADERS_BUILD="$ASSEMBLY_BUILD_ROOT/mlibc-headers"
-	MLIBC_BUILD="$ASSEMBLY_BUILD_ROOT/mlibc"
-	CXX_BUILD="$ASSEMBLY_BUILD_ROOT/libcxx"
-	NATIVE_LLVM_BUILD="$ASSEMBLY_BUILD_ROOT/native-llvm"
-	LUA_BUILD="$ASSEMBLY_BUILD_ROOT/lua-$LUA_VER"
-	RIPGREP_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/ripgrep"
-	HELIX_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/helix"
-	SED_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/sed"
-	MOTOR_CARGO="$TOOLCHAIN_PREFIX/bin/cargo"
-	MOTOR_RUSTC="$TOOLCHAIN_PREFIX/bin/rustc"
-	MOTOR_RUSTDOC="$TOOLCHAIN_PREFIX/bin/rustdoc"
-	RUSTLIB_SRC="$TOOLCHAIN_PREFIX/lib/rustlib/$TARGET/lib"
-}
-
-run_motor_cargo() {
-	RUSTC="$MOTOR_RUSTC" RUSTDOC="$MOTOR_RUSTDOC" "$MOTOR_CARGO" "$@"
-}
-
-configure_exact_cross_driver() {
-	cat > "$B/x86_64-unknown-motor.cfg" <<'EOF'
--fuse-ld=lld
--static-pie
--nostdlib
--Wl,-e,motor_start
--Wl,--pack-dyn-relocs=none
--Wl,-z,noexecstack
-EOF
-	CLANG_MAJOR="$("$B/clang" --version |
-		sed -n 's/.*clang version \([0-9]\{1,\}\).*/\1/p' | head -1)"
-	[ -n "$CLANG_MAJOR" ] || die "could not determine clang major version"
-}
-
-# On-image directory prefixes (mirrored inside the cross sysroot). Keep these in
-# sync with clang/lib/Driver/ToolChains/Motor.cpp and mlibc's MLIBC_SYSCONFDIR.
-TOOLS="devtools/llvm"              # headers + libraries
-CFG_LLVM="devtools/llvm/cfg"       # clang <triple>.cfg
-CFG_LIBC="system/cfg/libc"         # mlibc config files (resolv.conf, ...)
-
-# ============================================================================
-# LLVM stage: the Motor OS native LLVM/Clang toolchain, the C/C++ sysroot
-# (mlibc + libc++ stack), and Lua, staged into the assembly image root.
-# See docs/build-llvm.md for the prose walkthrough behind each numbered stage.
-# ============================================================================
-
-# --- add-on source checkout: follow one branch of a fork ----------------------
-update_addon_source() {
-	local name="$1" checkout="$2" url="$3" branch="$4" head remote
+# --- external source checkout: one branch of a fork, at its head or a revision
+update_external_source() {
+	local name="$1" checkout="$2" url="$3" branch="$4" revision="${5:-}" head remote
 	if [ ! -e "$checkout" ]; then
 		log "cloning $name ($branch)"
 		git clone --branch "$branch" --single-branch "$url" "$checkout"
-		return
+		[ -n "$revision" ] || return 0
 	fi
-	git -C "$checkout" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
+	# It sits inside the Motor OS checkout, so it needs a .git of its own.
+	[ -e "$checkout/.git" ] && git -C "$checkout" rev-parse --is-inside-work-tree >/dev/null 2>&1 ||
 		die "$checkout exists but is not a Git checkout"
-	[ "$(git -C "$checkout" branch --show-current)" = "$branch" ] ||
+	[ -n "$revision" ] || [ "$(git -C "$checkout" branch --show-current)" = "$branch" ] ||
 		die "$name checkout must be on branch $branch: $checkout"
 	[ -z "$(git -C "$checkout" status --porcelain)" ] ||
 		die "$name checkout is dirty — preserve its changes and re-run: $checkout"
@@ -297,551 +161,116 @@ update_addon_source() {
 	git -C "$checkout" fetch "$url" "$branch"
 	head="$(git -C "$checkout" rev-parse HEAD)"
 	remote="$(git -C "$checkout" rev-parse FETCH_HEAD)"
-	[ "$head" != "$remote" ] || return 0
-	git -C "$checkout" merge-base --is-ancestor "$head" "$remote" ||
-		die "$name checkout has local or diverged commits — update it manually: $checkout"
-	log "updating $name ($branch)"
-	git -C "$checkout" merge --ff-only "$remote"
-}
-
-# --- stage 2: the C-ABI shim (libmoto_rt_cabi.a) ----------------------------
-build_shim() {
-	log "stage 2: building the moto-rt-cabi shim"
-	local rustlibs=("$RUSTLIB_SRC"/*.rlib) symbol
-	for symbol in motor_start memcpy memmove memset memcmp; do
-		if "$B/llvm-nm" --defined-only "${rustlibs[@]}" 2>/dev/null |
-				awk -v symbol="$symbol" '$2 ~ /^[Tt]$/ && $3 == symbol { found = 1 } END { exit !found }'; then
-			die "Motor target libraries define strong $symbol; mixed Rust+C links are unsafe"
+	if [ -z "$revision" ]; then
+		[ "$head" != "$remote" ] || return 0
+		git -C "$checkout" merge-base --is-ancestor "$head" "$remote" ||
+			die "$name checkout has local or diverged commits — update it manually: $checkout"
+		log "updating $name ($branch)"
+		git -C "$checkout" merge --ff-only "$remote"
+		return
+	fi
+	[ "$head" != "$revision" ] || return 0
+	# The declared revision may be ahead of the branch, or on another branch.
+	git -C "$checkout" cat-file -e "$revision^{commit}" 2>/dev/null ||
+		git -C "$checkout" fetch "$url" "$revision" ||
+		die "$name revision $revision is not in $url"
+	# Commits that are on no branch of the fork are local work: never leave
+	# them. Pin them (MOTOR_<NAME>_REV) or check out the declared revision.
+	local pushed=false tip
+	git -C "$checkout" fetch "$url" $(git ls-remote --heads "$url" | cut -f2)
+	for tip in $(cut -f1 "$(git -C "$checkout" rev-parse --absolute-git-dir)/FETCH_HEAD"); do
+		if git -C "$checkout" merge-base --is-ancestor "$head" "$tip"; then
+			pushed=true
+			break
 		fi
 	done
-	mkdir -p "$SYSROOT/$TOOLS/lib" "$SYSROOT/$TOOLS/include"
-	( cd "$MOTOR/src/sys/lib/moto-rt-cabi" \
-		&& CARGO_TARGET_DIR="$SHIM_TARGET_DIR" \
-		run_motor_cargo build --target x86_64-unknown-motor --release \
-			-Zbuild-std=core,alloc )
-	cp "$SHIM_TARGET_DIR/x86_64-unknown-motor/release/libmoto_rt_cabi.a" \
-		"$SYSROOT/$TOOLS/lib/"
-	if "$B/llvm-nm" "$SYSROOT/$TOOLS/lib/libmoto_rt_cabi.a" 2>/dev/null |
-			awk '$NF == "rust_eh_personality" ||
-				$NF == "DW.ref.rust_eh_personality" ||
-				$NF ~ /^_Unwind_/ || $NF ~ /^__unw_/ { found = 1 }
-				END { exit !found }'; then
-		die "moto-rt-cabi contains unwind runtime references"
+	[ "$pushed" = true ] ||
+		die "$name checkout has commits that are not in $url — pin HEAD or check out $revision: $checkout"
+	if [ "$(git -C "$checkout" branch --show-current)" = "$branch" ] &&
+		git -C "$checkout" merge-base --is-ancestor "$head" "$revision"; then
+		log "updating $name ($branch) to $revision"
+		git -C "$checkout" merge --ff-only "$revision"
+		return
 	fi
-	for symbol in motor_start memcpy memmove memset memcmp; do
-		if "$B/llvm-nm" --defined-only \
-				"$SYSROOT/$TOOLS/lib/libmoto_rt_cabi.a" 2>/dev/null |
-				awk -v symbol="$symbol" '$2 ~ /^[Tt]$/ && $3 == symbol { found = 1 } END { exit !found }'; then
-			die "moto-rt-cabi defines strong $symbol; mixed Rust+C links are unsafe"
-		fi
-	done
-	cp "$MOTOR/src/sys/lib/moto-rt-cabi/moto_rt.h" "$SYSROOT/$TOOLS/include/"
+	log "checking out $name at $revision (git checkout $branch resumes work on the branch)"
+	git -C "$checkout" checkout --detach "$revision"
 }
 
-# --- stage 3: compiler-rt builtins (emutls excluded) ------------------------
-build_builtins() {
-	log "stage 3: building compiler-rt builtins"
-	# -ffreestanding: the builtins are freestanding, and it keeps clang's
-	# resource limits.h/stdint.h from #include_next-ing into the host's glibc
-	# headers. The Motor ToolChain adds <sysroot>/devtools/llvm/include, which
-	# is empty under the cross sysroot at this stage (mlibc's headers do not
-	# exist yet). (The old host cfg used to supply -ffreestanding here.)
-	#
-	# CMAKE_DISABLE_FIND_PACKAGE_LLVM=ON: the standalone builtins build calls a
-	# non-REQUIRED find_package(LLVM) (compiler-rt/.../CompilerRTUtils.cmake,
-	# load_llvm_config). With no hint it searches system paths and, on a host
-	# that has a distro LLVM -dev package installed (e.g. /usr/lib/llvm-21),
-	# loads that package's LLVMExports.cmake — which declares the libLLVM/LTO/
-	# Remarks dylibs as `SHARED IMPORTED`. Under CMAKE_SYSTEM_NAME=Generic the
-	# platform has no dynamic linking, and newer CMake makes an imported SHARED
-	# target a hard error ("... target platform does not support dynamic
-	# linking"), aborting the configure. The builtins don't need LLVM at all:
-	# disabling the lookup forces compiler-rt's built-in mock-config fallback,
-	# which is the same path taken on a host with no system LLVM. (Pointing at
-	# the freshly built build tree would not help — its exports carry the same
-	# SHARED-imported LTO/Remarks targets.)
-	cmake -S "$LLVM/compiler-rt/lib/builtins" -B "$BUILTINS_BUILD" -G Ninja \
-		-DCMAKE_BUILD_TYPE=Release \
-		-DCMAKE_SYSTEM_NAME=Generic \
-		-DCMAKE_SYSTEM_PROCESSOR=x86_64 \
-		-DCMAKE_C_FLAGS="-ffreestanding" \
-		-DCMAKE_C_COMPILER="$B/clang" \
-		-DCMAKE_C_COMPILER_TARGET=x86_64-unknown-motor \
-		-DCMAKE_ASM_COMPILER="$B/clang" \
-		-DCMAKE_ASM_COMPILER_TARGET=x86_64-unknown-motor \
-		-DCMAKE_AR="$B/llvm-ar" -DCMAKE_RANLIB="$B/llvm-ranlib" -DCMAKE_NM="$B/llvm-nm" \
-		-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
-		-DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
-		-DCOMPILER_RT_BAREMETAL_BUILD=ON \
-		-DCMAKE_DISABLE_FIND_PACKAGE_LLVM=ON
-	ninja -C "$BUILTINS_BUILD"
-
-	local builtins
-	builtins="$(find "$BUILTINS_BUILD" -name 'libclang_rt.builtins*.a' | head -1)"
-	[ -n "$builtins" ] || die "builtins archive not produced"
-
-	# emutls.c must not be present (the shim owns emulated TLS).
-	if "$B/llvm-ar" t "$builtins" | grep -q emutls; then
-		"$B/llvm-ar" d "$builtins" emutls.c.o
-	fi
-	if "$B/llvm-nm" "$builtins" 2>/dev/null | grep -q __emutls; then
-		warn "__emutls_* still present in builtins — expected it excluded"
-	fi
-
-	# Stage a copy in the sysroot and one at the per-target resource-dir path
-	# where both mlibc's build and the clang driver look for it.
-	cp "$builtins" "$SYSROOT/$TOOLS/lib/libclang_rt.builtins-x86_64.a"
-	local rd="$STANDALONE_LLVM_BUILD/lib/clang/$CLANG_MAJOR/lib/x86_64-unknown-motor"
-	mkdir -p "$rd"
-	cp "$builtins" "$rd/libclang_rt.builtins.a"
-}
-
-# --- stage 4: mlibc ---------------------------------------------------------
-build_mlibc() {
-	log "stage 4: building mlibc"
-	[ ! -e "$MLIBC_SOURCE" ] ||
-		die "mlibc assembly source snapshot already exists: $MLIBC_SOURCE"
-	mkdir -p "$MLIBC_SOURCE"
-	git -C "$MLIBC" archive "$MOTOR_MLIBC_REV" | tar -x -C "$MLIBC_SOURCE"
-	# Meson cross file with this machine's absolute paths (kept out of the repos).
-	# MLIBC_SYSCONFDIR repoints mlibc's runtime config lookups (resolv.conf,
-	# hosts, passwd, ...) from /etc to /system/cfg/libc.
-	cat > "$CROSS_FILE" << EOF
-[binaries]
-c = ['$B/clang', '--target=x86_64-unknown-motor']
-cpp = ['$B/clang++', '--target=x86_64-unknown-motor']
-ar = '$B/llvm-ar'
-strip = '$B/llvm-strip'
-
-[host_machine]
-system = 'motor'
-cpu_family = 'x86_64'
-cpu = 'x86_64'
-endian = 'little'
-
-[built-in options]
-c_args = ['-I$SYSROOT/$TOOLS/include', '-D_GNU_SOURCE', '-DMLIBC_SYSCONFDIR="/$CFG_LIBC"']
-cpp_args = ['-I$SYSROOT/$TOOLS/include', '-D_GNU_SOURCE', '-DMLIBC_SYSCONFDIR="/$CFG_LIBC"']
-
-[properties]
-needs_exe_wrapper = true
-EOF
-	local cross_hash
-	cross_hash="$(sha256sum "$CROSS_FILE" | cut -d ' ' -f 1)"
-
-	( cd "$MLIBC_SOURCE"
-		setup_mlibc_build() {
-			local build_dir="$1"
-			shift
-			local stamp="$build_dir/.motor-cross-file.sha256"
-			local setup_mode=()
-			if [ -f "$build_dir/build.ninja" ]; then
-				if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$cross_hash" ]; then
-					setup_mode=(--reconfigure)
-				else
-					die "keyed mlibc build has a mismatched cross-file stamp: $build_dir"
-				fi
-			fi
-			meson setup "${setup_mode[@]}" --cross-file "$CROSS_FILE" \
-				--prefix="/$TOOLS" "$@" "$build_dir"
-			printf '%s\n' "$cross_hash" > "$stamp"
-		}
-
-		# Headers first (validates ABI/meson wiring quickly).
-		setup_mlibc_build "$MLIBC_HEADERS_BUILD" -Dheaders_only=true
-		DESTDIR="$SYSROOT" ninja -C "$MLIBC_HEADERS_BUILD" install
-
-		# The real static build: libc.a, crt1.o, headers, companion stubs.
-		# -Ddebug=false: mlibc's meson.build pins buildtype=debugoptimized
-		# (-O2 -g); the flag keeps -O2 and drops only -g. Without it libc.a is
-		# 18 MB (59% DWARF) and every mlibc-linked binary carries ~6.6 MB of
-		# debug info (see docs/libc_start_redesign.md). .text is byte-identical.
-		setup_mlibc_build "$MLIBC_BUILD" -Ddefault_library=static \
-			-Dbuild_tests=false -Ddebug=false
-		ninja -C "$MLIBC_BUILD"
-		DESTDIR="$SYSROOT" ninja -C "$MLIBC_BUILD" install )
-
-	ls "$SYSROOT/$TOOLS/lib/libc.a" "$SYSROOT/$TOOLS/lib/crt1.o" >/dev/null
-}
-
-# --- stage 5: the C++ runtime stack (with exceptions) -----------------------
-build_cxx_runtimes() {
-	log "stage 5: building libunwind + libc++abi + libc++ (exceptions on)"
-	cmake -G Ninja -S "$LLVM/runtimes" -B "$CXX_BUILD" \
-		-DCMAKE_BUILD_TYPE=Release \
-		-DCMAKE_C_COMPILER="$B/clang" -DCMAKE_CXX_COMPILER="$B/clang++" \
-		-DCMAKE_C_COMPILER_TARGET=x86_64-unknown-motor \
-		-DCMAKE_CXX_COMPILER_TARGET=x86_64-unknown-motor \
-		-DCMAKE_SYSTEM_NAME=Generic \
-		-DCMAKE_SYSROOT="$SYSROOT" \
-		-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
-		-DCMAKE_C_FLAGS="-isystem $SYSROOT/$TOOLS/include -D_GNU_SOURCE -D_DEFAULT_SOURCE -D_LIBUNWIND_USE_DLADDR=0" \
-		-DCMAKE_CXX_FLAGS="-isystem $SYSROOT/$TOOLS/include -D_GNU_SOURCE -D_DEFAULT_SOURCE -D_LIBUNWIND_USE_DLADDR=0" \
-		-DCMAKE_INSTALL_PREFIX="/$TOOLS" \
-		-DLLVM_ENABLE_RUNTIMES="libunwind;libcxxabi;libcxx" \
-		-DLLVM_USE_LINKER=lld \
-		-DLIBUNWIND_ENABLE_SHARED=OFF -DLIBUNWIND_ENABLE_STATIC=ON \
-		-DLIBUNWIND_ENABLE_THREADS=ON \
-		-DLIBUNWIND_USE_COMPILER_RT=ON \
-		-DLIBUNWIND_INCLUDE_TESTS=OFF \
-		-DLIBUNWIND_HAS_PTHREAD_LIB=OFF -DLIBUNWIND_HAS_DL_LIB=OFF \
-		-DLIBCXXABI_ENABLE_SHARED=OFF -DLIBCXXABI_ENABLE_STATIC=ON \
-		-DLIBCXXABI_ENABLE_EXCEPTIONS=ON \
-		-DLIBCXXABI_ENABLE_THREADS=ON \
-		-DLIBCXXABI_USE_COMPILER_RT=ON \
-		-DLIBCXXABI_USE_LLVM_UNWINDER=ON \
-		-DLIBCXXABI_HAS_CXA_THREAD_ATEXIT_IMPL=OFF \
-		-DLIBCXXABI_ENABLE_ASSERTIONS=OFF \
-		-DLIBCXXABI_HAS_PTHREAD_LIB=OFF \
-		-DLIBCXX_ENABLE_SHARED=OFF -DLIBCXX_ENABLE_STATIC=ON \
-		-DLIBCXX_ENABLE_EXCEPTIONS=ON -DLIBCXX_ENABLE_RTTI=ON \
-		-DLIBCXX_ENABLE_THREADS=ON -DLIBCXX_HAS_PTHREAD_API=ON \
-		-DLIBCXX_ENABLE_MONOTONIC_CLOCK=ON \
-		-DLIBCXX_ENABLE_RANDOM_DEVICE=ON \
-		-DLIBCXX_ENABLE_WIDE_CHARACTERS=ON \
-		-DLIBCXX_ENABLE_LOCALIZATION=ON \
-		-DLIBCXX_ENABLE_FILESYSTEM=ON \
-		-DLIBCXX_CXX_ABI=libcxxabi \
-		-DLIBCXX_USE_COMPILER_RT=ON \
-		-DLIBCXX_HAS_PTHREAD_LIB=OFF -DLIBCXX_HAS_RT_LIB=OFF \
-		-DLIBCXX_HAS_ATOMIC_LIB=OFF \
-		-DLIBCXX_INCLUDE_BENCHMARKS=OFF -DLIBCXX_INCLUDE_TESTS=OFF
-	ninja -C "$CXX_BUILD" unwind cxxabi cxx
-	DESTDIR="$SYSROOT" ninja -C "$CXX_BUILD" \
-		install-unwind install-cxxabi install-cxx
-
-	ls "$SYSROOT/$TOOLS/lib/libc++.a" "$SYSROOT/$TOOLS/lib/libc++abi.a" \
-		"$SYSROOT/$TOOLS/lib/libunwind.a" >/dev/null
-}
-
-# --- stage 6: the native LLVM toolchain (the on-image `llvm`) ----------------
-build_native_llvm() {
-	log "stage 6: building the native (on-image) LLVM toolchain"
-	# The STANDARD_LIBRARIES mirror the Motor ToolChain's link group (shim first
-	# so its __cxa_thread_atexit wins; -lunwind for the EH runtime). Both the C
-	# and C++ groups carry -lc++abi: mlibc is implemented in C++, so even a C link
-	# pulls `operator delete`/`new` from libc.a members (this matches the Motor
-	# ToolChain's ConstructJob, which adds -lc++abi unconditionally). The
-	# assembly key selects a fresh build directory whenever these inputs change,
-	# so cached try-compile results cannot cross configurations.
-	cmake -S "$LLVM/llvm" -B "$NATIVE_LLVM_BUILD" -G Ninja \
-		-DCMAKE_BUILD_TYPE=Release \
-		-DCMAKE_SYSTEM_NAME=Linux \
-		-DCMAKE_SYSROOT="$SYSROOT" \
-		-DCMAKE_C_COMPILER="$B/clang" \
-		-DCMAKE_CXX_COMPILER="$B/clang++" \
-		-DCMAKE_C_COMPILER_TARGET=x86_64-unknown-motor \
-		-DCMAKE_CXX_COMPILER_TARGET=x86_64-unknown-motor \
-		-DCMAKE_C_FLAGS="-isystem $SYSROOT/$TOOLS/include -D_GNU_SOURCE -D_DEFAULT_SOURCE" \
-		-DCMAKE_CXX_FLAGS="-nostdinc++ -isystem $SYSROOT/$TOOLS/include/c++/v1 -isystem $SYSROOT/$TOOLS/include -D_GNU_SOURCE -D_DEFAULT_SOURCE" \
-		-DCMAKE_C_STANDARD_LIBRARIES="$SYSROOT/$TOOLS/lib/crt1.o -Wl,--start-group -lmoto_rt_cabi -lc++abi -lunwind -lc -lclang_rt.builtins-x86_64 -Wl,--end-group" \
-		-DCMAKE_CXX_STANDARD_LIBRARIES="$SYSROOT/$TOOLS/lib/crt1.o -Wl,--start-group -lmoto_rt_cabi -lc++ -lc++abi -lunwind -lc -lclang_rt.builtins-x86_64 -Wl,--end-group" \
-		-DCMAKE_EXE_LINKER_FLAGS="-L$SYSROOT/$TOOLS/lib" \
-		-DCMAKE_TRY_COMPILE_PLATFORM_VARIABLES="CMAKE_C_STANDARD_LIBRARIES;CMAKE_CXX_STANDARD_LIBRARIES" \
-		-DLLVM_HOST_TRIPLE=x86_64-unknown-motor \
-		-DLLVM_DEFAULT_TARGET_TRIPLE=x86_64-unknown-motor \
-		-DLLVM_TARGETS_TO_BUILD=X86 \
-		-DLLVM_ENABLE_PROJECTS="clang;lld" \
-		-DLLVM_TOOL_LLVM_DRIVER_BUILD=ON \
-		-DLLVM_NATIVE_TOOL_DIR="$B" \
-		-DLLVM_ENABLE_THREADS=ON \
-		-DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_LIBXML2=OFF \
-		-DLLVM_ENABLE_LIBEDIT=OFF -DLLVM_ENABLE_PLUGINS=OFF \
-		-DLLVM_INCLUDE_TESTS=OFF -DLLVM_INCLUDE_EXAMPLES=OFF \
-		-DLLVM_INCLUDE_BENCHMARKS=OFF -DLLVM_INCLUDE_DOCS=OFF \
-		-DCLANG_ENABLE_STATIC_ANALYZER=OFF \
-		-DCLANG_DEFAULT_LINKER=lld -DCLANG_DEFAULT_RTLIB=compiler-rt \
-		-DCLANG_DEFAULT_CXX_STDLIB=libc++ \
-		-DDEFAULT_SYSROOT= \
-		-DCLANG_CONFIG_FILE_SYSTEM_DIR="/$CFG_LLVM"
-
-	ninja -C "$NATIVE_LLVM_BUILD" llvm-driver
-}
-
-# --- add-on: Lua, an end-to-end native C application -------------------------
+# --- external source: Lua, an end-to-end native C application ----------------
+# motor-clang compiles for the cross sysroot, and clang's Motor driver links
+# crt1.o and mlibc's link group, as the native cc does on Motor OS.
 build_lua() {
 	log "building Lua $LUA_VER and staging it as /devtools/bin/lua"
-	( cd "$MOTORH"
-		[ -f "lua-$LUA_VER.tar.gz" ] || curl -LO "https://www.lua.org/ftp/lua-$LUA_VER.tar.gz"
-		[ -d "lua-$LUA_VER" ] || tar xf "lua-$LUA_VER.tar.gz" )
+	mkdir -p "$EXTERNAL_SOURCES"
+	( cd "$EXTERNAL_SOURCES"
+		if [ ! -d "lua-$LUA_VER" ]; then
+			curl -LO "https://www.lua.org/ftp/lua-$LUA_VER.tar.gz"
+			tar xf "lua-$LUA_VER.tar.gz"
+			rm "lua-$LUA_VER.tar.gz"
+		fi )
 
-	( cd "$MOTORH/lua-$LUA_VER/src"
+	( cd "$EXTERNAL_SOURCES/lua-$LUA_VER/src"
 		mkdir -p "$LUA_BUILD"
-		local cflags="--target=x86_64-unknown-motor -O2 -isystem $SYSROOT/$TOOLS/include -DLUA_USE_POSIX"
-		local f object
+		local cc="$SYSROOT/bin/motor-clang" f
 		for f in ./*.c; do
 			case "$f" in ./lua.c|./luac.c) continue ;; esac
-			object="$LUA_BUILD/$(basename "${f%.c}").o"
-			# shellcheck disable=SC2086
-			"$B/clang" $cflags -c "$f" -o "$object"
+			"$cc" -O2 -DLUA_USE_POSIX -c "$f" -o "$LUA_BUILD/$(basename "${f%.c}").o"
 		done
-		"$B/llvm-ar" rcs "$LUA_BUILD/liblua.a" "$LUA_BUILD"/*.o
-		# mlibc is C++ internally (its stdio FILE machinery — cookie_file,
-		# memstream, fmemopen — has C++ destructors that call `operator delete`),
-		# so even this pure-C program pulls libc++abi/libunwind out of libc.a and
-		# must link them. Mirror the C link group the Motor ToolChain emits: the
-		# host cfg forces -nostdlib, suppressing that default group, so it is listed
-		# explicitly. --start-group resolves the libc <-> libc++abi <-> shim
-		# back-references regardless of order.
-		# shellcheck disable=SC2086
-		"$B/clang" $cflags lua.c "$LUA_BUILD/liblua.a" \
-			"$SYSROOT/$TOOLS/lib/crt1.o" \
-			-Wl,--start-group \
-			"$SYSROOT/$TOOLS/lib/libmoto_rt_cabi.a" \
-			"$SYSROOT/$TOOLS/lib/libc++abi.a" \
-			"$SYSROOT/$TOOLS/lib/libunwind.a" \
-			"$SYSROOT/$TOOLS/lib/libc.a" \
-			"$SYSROOT/$TOOLS/lib/libclang_rt.builtins-x86_64.a" \
-			-Wl,--end-group -o "$LUA_BUILD/lua" )
+		"$LLVM_TOOLS/llvm-ar" rcs "$LUA_BUILD/liblua.a" "$LUA_BUILD"/*.o
+		"$cc" -O2 -DLUA_USE_POSIX lua.c "$LUA_BUILD/liblua.a" -o "$LUA_BUILD/lua" )
 	mkdir -p "$LUA_IMG/devtools/bin"
-	"$B/llvm-strip" -o "$LUA_IMG/devtools/bin/lua" "$LUA_BUILD/lua"
+	"$LLVM_TOOLS/llvm-strip" -o "$LUA_IMG/devtools/bin/lua" "$LUA_BUILD/lua"
 }
 
-# --- stage 7: stage the C/C++ toolchain into the image ----------------------
-llvm_stage_image() {
-	log "stage 7: staging the toolchain and sysroot into the assembly image root"
-	local img="$LLVM_IMG"
-	[ ! -e "$ASSEMBLY_IMAGE_ROOT" ] ||
-		die "assembly image staging root already exists without validated reuse: $ASSEMBLY_IMAGE_ROOT"
-	mkdir -p "$img/devtools/bin" "$img/devtools/src/hello-world" \
-		"$img/$TOOLS/bin" "$img/$TOOLS/lib" \
-		"$img/$CFG_LLVM" "$LIBC_IMG/$CFG_LIBC"
-
-	# Headers: mlibc + libc++'s c++/v1 in the fresh keyed image root.
-	cp -a "$SYSROOT/$TOOLS/include" "$img/$TOOLS/include"
-
-	# Clang's own resource headers (intrinsics, stdarg.h, ...).
-	mkdir -p "$img/$TOOLS/lib/clang/$CLANG_MAJOR"
-	cp -a "$STANDALONE_LLVM_BUILD/lib/clang/$CLANG_MAJOR/include" \
-		"$img/$TOOLS/lib/clang/$CLANG_MAJOR/include"
-
-	# Libraries — strip debug info on the way in.
-	local a
-	for a in libc libc++ libc++abi libunwind libmoto_rt_cabi \
-	         libclang_rt.builtins-x86_64 \
-	         libdl libm libpthread librt libresolv libutil libssp libssp_nonshared; do
-		"$B/llvm-objcopy" --strip-debug "$SYSROOT/$TOOLS/lib/$a.a" "$img/$TOOLS/lib/$a.a"
-	done
-	cp "$SYSROOT/$TOOLS/lib/crt1.o" "$img/$TOOLS/lib/"
-
-	# The on-image LLVM multicall lives under /devtools/llvm/bin, mirroring the
-	# Rust toolchain at /devtools/rust/bin (build-rustc.md). Its clang config and
-	# resource dir are pinned by absolute path (the /devtools/llvm/cfg .cfg + the baked
-	# CLANG_CONFIG_FILE_SYSTEM_DIR), and its ld.lld self-dispatch uses the running
-	# exe's own path, so the binary works wherever it is placed.
-	"$B/llvm-strip" -o "$img/$TOOLS/bin/llvm" "$NATIVE_LLVM_BUILD/bin/llvm"
-
-	# /devtools/bin/cc — the C compiler / linker driver: a Rush script (not
-	# a compiled binary) over the llvm multicall's clang. rustc's default linker
-	# is the bare name `cc`, resolved through the dev image PATH, so a native
-	# `rustc hello.rs -o hello` links with no `-C linker=` flag — exactly as rustc
-	# uses /usr/bin/cc on Linux. A pure pass-through: the Motor clang ToolChain
-	# owns the whole link recipe (crt1.o + the mlibc/libc++ group, incl. libc++abi
-	# for C links) and gates it on -nostdlib/-nostartfiles/-nodefaultlibs, so a
-	# plain `cc hello.c` gets the full C runtime while rustc's pure-Rust links
-	# (which pass -nostartfiles -nodefaultlibs) get nothing forced on them — a
-	# pure-Rust hello is ~113 KB, not 8 MB (docs/libc_start_redesign.md). Rust
-	# programs that *want* mlibc opt back into the ToolChain recipe with
-	# `-C link-self-contained=no -C default-linker-libraries=yes` (build-rustc.md).
-	cat > "$img/devtools/bin/cc" << 'EOF'
-#!/system/bin/rush
-# cc — Motor OS's system C compiler / linker driver. See docs/build-llvm.md.
-# A pass-through: clang's Motor ToolChain owns the link recipe and honors
-# -nostartfiles/-nodefaultlibs (rustc's pure-Rust links stay mlibc-free).
-exec /devtools/llvm/bin/llvm clang "$@"
-EOF
-
-	# /devtools/bin/c++ — same, in C++ driver mode (adds -lc++ at link).
-	# rather than a `clang++` subcommand: the multicall dispatches on the first
-	# argument, and `clang++` is not a registered subcommand name.
-	cat > "$img/devtools/bin/c++" << 'EOF'
-#!/system/bin/rush
-# c++ — Motor OS's system C++ compiler / linker driver. See docs/build-llvm.md.
-exec /devtools/llvm/bin/llvm clang --driver-mode=g++ "$@"
-EOF
-	chmod +x "$img/devtools/bin/cc" "$img/devtools/bin/c++"
-
-	# The image driver config: only the resource dir needs pinning (the full
-	# link/include recipe lives in the Motor ToolChain now). Clang auto-loads it
-	# from /devtools/llvm/cfg (CLANG_CONFIG_FILE_SYSTEM_DIR, stage 6).
-	cat > "$img/$CFG_LLVM/x86_64-unknown-motor.cfg" << EOF
--resource-dir /$TOOLS/lib/clang/$CLANG_MAJOR
-EOF
-
-	# Ship libc's hosts and services databases. sys-io atomically generates
-	# resolv.conf from static per-device configuration or active DHCP leases.
-	cat > "$LIBC_IMG/$CFG_LIBC/services" << 'EOF'
-domain 53/tcp
-domain 53/udp
-EOF
-	cat > "$LIBC_IMG/$CFG_LIBC/hosts" << 'EOF'
-127.0.0.1 localhost
-::1 localhost
-127.0.0.53 motor-dns-test
-::1 motor-dns-test
-EOF
-	cat > "$LIBC_IMG/$CFG_LIBC/shells" << 'EOF'
-/system/bin/sh
-/system/bin/rush
-EOF
-
-	cat > "$img/devtools/src/hello-world/hello.c" << 'EOF'
-#include <stdio.h>
-
-int main(void) {
-	printf("Hello from Motor-native clang!\n");
-	return 0;
-}
-EOF
-	cat > "$img/devtools/src/hello-world/hello.cpp" << 'EOF'
-#include <iostream>
-#include <string>
-#include <vector>
-
-int main() {
-	std::vector<std::string> words{"Hello", "from", "Motor-native", "clang++!"};
-	std::string out;
-	for (const auto &w : words) {
-		if (!out.empty())
-			out += ' ';
-		out += w;
-	}
-	std::cout << out << std::endl;
-	return 0;
-}
-EOF
-}
-
-# cc — the C compiler / linker driver rustc uses on the image — is not built
-# here: it is a Rush script produced by the LLVM stage (it
-# belongs with the C toolchain: it fronts /devtools/llvm/bin/llvm and the
-# sysroot libs). rustc's default linker is the bare name `cc`, resolved on PATH
-# through the dev image PATH, so a native `rustc hello.rs -o hello` links with no
-# `-C linker=` flag, exactly as rustc uses /usr/bin/cc on Linux.
-
-# --- stage rustc + the Rust sysroot into the image ----------------------------
-rustc_stage_image() {
-	log "staging rustc and the Rust sysroot into the assembly image root"
-	[ ! -e "$RUSTC_IMG" ] ||
-		die "Rust image staging already exists without validated reuse: $RUSTC_IMG"
-	local rust_img="$RUSTC_IMG/devtools/rust"
-	mkdir -p "$RUSTC_IMG/devtools/bin" "$RUSTC_IMG/devtools/src/hello-world" "$rust_img/bin" \
-		"$rust_img/lib/rustlib/$TARGET"
-
-	# The compiler, stripped (~154 MB -> ~98 MB).
-	"$B/llvm-strip" -o "$rust_img/bin/rustc" "$RUSTC_MAIN"
-	toolchain_validate_native_elf "$rust_img/bin/rustc" "$B/llvm-readelf" "$RUSTC_MAIN" ||
-		die "staged rustc ELF validation failed"
-	cat > "$RUSTC_IMG/devtools/bin/rustc" << 'EOF'
-#!/system/bin/rush
-exec /devtools/rust/bin/rustc "$@"
-EOF
-	chmod +x "$RUSTC_IMG/devtools/bin/rustc"
-	"$B/llvm-strip" -o "$rust_img/bin/rustfmt" "$RUSTFMT_MAIN"
-	toolchain_validate_native_elf "$rust_img/bin/rustfmt" "$B/llvm-readelf" "$RUSTFMT_MAIN" ||
-		die "staged rustfmt ELF validation failed"
-	cat > "$RUSTC_IMG/devtools/bin/rustfmt" << 'EOF'
-#!/system/bin/rush
-exec /devtools/rust/bin/rustfmt "$@"
-EOF
-	chmod +x "$RUSTC_IMG/devtools/bin/rustfmt"
-	"$B/llvm-strip" -o "$rust_img/bin/clippy-driver" "$CLIPPY_DRIVER_MAIN"
-	toolchain_validate_native_clippy_driver "$rust_img/bin/clippy-driver" "$CLIPPY_DRIVER_MAIN" ||
-		die "staged clippy-driver validation failed"
-	cat > "$RUSTC_IMG/devtools/bin/clippy-driver" << 'EOF'
-#!/system/bin/rush
-exec /devtools/rust/bin/clippy-driver "$@"
-EOF
-	chmod +x "$RUSTC_IMG/devtools/bin/clippy-driver"
-	# A binary that still carries mlibc's operator-delete panic stub would
-	# abort at runtime; the stub guard must have taken effect.
-	if grep -aq 'operator delete called! delete expressions' "$rust_img/bin/rustc"; then
-		die "staged rustc contains mlibc's operator-delete stub — sysroot libc.a is stale (see docs/build-rustc.md pitfalls)"
-	fi
-
-	# The Rust sysroot. Copy the whole lib dir: the rlibs carry only metadata
-	# *stubs* (bootstrap uses -Zembed-metadata=no) — the .rmeta siblings and
-	# self-contained/ must come along or rustc fails with "only metadata stub
-	# found for rlib dependency `std`".
-	mkdir -p "$rust_img/lib/rustlib/$TARGET/lib"
-	cp -r "$RUSTLIB_SRC"/* "$rust_img/lib/rustlib/$TARGET/lib/"
-	[ -n "$(ls "$rust_img/lib/rustlib/$TARGET/lib"/*.rmeta 2>/dev/null)" ] || \
-		die "no .rmeta files staged — rustc on the image would reject every rlib"
-
-	# (`cc`, the linker driver rustc uses, is a Rush script staged by the
-	# LLVM stage — nothing to stage here.)
-
-	# A sample source exercising HashMap, sorting, and thread spawn/join.
-	cat > "$RUSTC_IMG/devtools/src/hello-world/hello.rs" << 'EOF'
-use std::collections::HashMap;
-
-fn main() {
-    let mut m = HashMap::new();
-    for (i, w) in "hello from rustc running natively on motor os".split(' ').enumerate() {
-        m.insert(w, i);
-    }
-    let mut kv: Vec<_> = m.into_iter().collect();
-    kv.sort_by_key(|&(_, i)| i);
-    let words: Vec<&str> = kv.into_iter().map(|(w, _)| w).collect();
-    println!("{}", words.join(" "));
-    let t = std::thread::spawn(|| (1..=10u64).product::<u64>());
-    println!("10! = {}", t.join().unwrap());
-}
-EOF
-
-}
-
-# --- add-on: ripgrep ------------------------------------------------------------
+# --- external source: ripgrep ---------------------------------------------------
 build_ripgrep() {
 	log "building ripgrep and staging it as /system/bin/rg"
 	( cd "$RIPGREP" && \
 		CARGO_TARGET_DIR="$RIPGREP_TARGET_DIR" \
-			run_motor_cargo build \
-				--target "$TARGET" --release --locked )
+			cargo build --target "$TARGET" --release --locked )
 
 	local binary="$RIPGREP_TARGET_DIR/$TARGET/release/rg"
 	[ -x "$binary" ] || die "ripgrep binary was not produced: $binary"
 	mkdir -p "$RG_IMG/system/bin"
-	"$B/llvm-strip" -o "$RG_IMG/system/bin/rg" "$binary"
+	"$LLVM_TOOLS/llvm-strip" -o "$RG_IMG/system/bin/rg" "$binary"
 	chmod 755 "$RG_IMG/system/bin/rg"
 }
 
-# --- add-on: sed (uutils) ------------------------------------------------------
+# --- external source: sed (uutils) ---------------------------------------------
 build_sed() {
 	log "building sed and staging it as /devtools/bin/sed"
 	# One codegen unit, as sed's Cargo.toml suggests: smaller, and no slower.
 	( cd "$SED" && \
 		CARGO_TARGET_DIR="$SED_TARGET_DIR" \
 		CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
-			run_motor_cargo build \
-				--target "$TARGET" --release --locked )
+			cargo build --target "$TARGET" --release --locked )
 
 	local binary="$SED_TARGET_DIR/$TARGET/release/sed"
 	[ -x "$binary" ] || die "sed binary was not produced: $binary"
 	mkdir -p "$SED_IMG/devtools/bin"
-	"$B/llvm-strip" -o "$SED_IMG/devtools/bin/sed" "$binary"
+	"$LLVM_TOOLS/llvm-strip" -o "$SED_IMG/devtools/bin/sed" "$binary"
 	chmod 755 "$SED_IMG/devtools/bin/sed"
 }
 
 validate_helix_elf() {
 	local binary="$1" stack
-	"$B/llvm-readelf" -h "$binary" | grep -Eq 'Type:.*DYN' ||
+	"$LLVM_TOOLS/llvm-readelf" -h "$binary" | grep -Eq 'Type:.*DYN' ||
 		die "Helix is not a static PIE (ELF DYN): $binary"
-	if "$B/llvm-readelf" -d "$binary" | grep -q '(NEEDED)'; then
+	if "$LLVM_TOOLS/llvm-readelf" -d "$binary" | grep -q '(NEEDED)'; then
 		die "Helix has a dynamic library dependency: $binary"
 	fi
-	if "$B/llvm-readelf" -l "$binary" | awk '$1 == "TLS" { found = 1 } END { exit !found }'; then
+	if "$LLVM_TOOLS/llvm-readelf" -l "$binary" | awk '$1 == "TLS" { found = 1 } END { exit !found }'; then
 		die "Helix has a loader-incompatible TLS segment: $binary"
 	fi
-	stack="$("$B/llvm-readelf" -l "$binary" | awk '$1 == "GNU_STACK" { print; found++ } END { if (found != 1) exit 1 }')" ||
+	stack="$("$LLVM_TOOLS/llvm-readelf" -l "$binary" | awk '$1 == "GNU_STACK" { print; found++ } END { if (found != 1) exit 1 }')" ||
 		die "Helix lacks one GNU_STACK program header: $binary"
 	case "$stack" in
 		*E*) die "Helix requests an executable stack: $binary" ;;
 	esac
-	"$B/llvm-readelf" --dyn-syms "$binary" |
+	"$LLVM_TOOLS/llvm-readelf" --dyn-syms "$binary" |
 		awk '$7 == "UND" && $1 != "0:" { bad = 1 } END { exit bad }' ||
 		die "Helix has unresolved dynamic symbols: $binary"
-	if "$B/llvm-nm" -u "$binary" 2>/dev/null |
+	if "$LLVM_TOOLS/llvm-nm" -u "$binary" 2>/dev/null |
 		grep -Eq '(^|[[:space:]])(dlopen|dlsym|tree_sitter_|__cxa_|_Z)'; then
 		die "Helix has an unresolved loader, grammar, or C++ runtime symbol: $binary"
 	fi
@@ -852,7 +281,7 @@ stage_helix() {
 	[ -x "$binary" ] || die "Helix binary was not produced: $binary"
 	validate_helix_elf "$binary"
 	mkdir -p "$HELIX_IMG/devtools/helix/runtime"
-	"$B/llvm-strip" -o "$HELIX_IMG/devtools/helix/hx" "$binary"
+	"$LLVM_TOOLS/llvm-strip" -o "$HELIX_IMG/devtools/helix/hx" "$binary"
 	chmod 755 "$HELIX_IMG/devtools/helix/hx"
 	validate_helix_elf "$HELIX_IMG/devtools/helix/hx"
 	for component in queries themes tutor; do
@@ -862,22 +291,15 @@ stage_helix() {
 	done
 }
 
-# --- add-ons -------------------------------------------------------------------
-# Add-ons link against this assembly's sysroot and are staged beside its
-# overlays, but are no part of its identity. Each records the source it was
-# built from and is rebuilt alone when that source changes.
-ensure_addon() {
-	local name="$1" source="$2" overlay="$3" executable="$4" build="$5"
-	local stamp="$ASSEMBLY_ROOT/ADDON-$name"
-	if [ -x "$overlay/$executable" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$source" ]; then
-		skip "$name $source"
-		return
-	fi
-	rm -f "$stamp"
+# --- external sources ------------------------------------------------------------
+# External sources link against the toolchain's sysroot and are staged in its
+# assembly. Every run builds each into an empty overlay; their Cargo target
+# directories keep that incremental.
+build_external_source() {
+	local name="$1" overlay="$2" executable="$3" build="$4"
 	rm -rf "$overlay"
 	"$build"
 	[ -x "$overlay/$executable" ] || die "$name was not staged: $overlay/$executable"
-	printf '%s\n' "$source" > "$stamp"
 }
 
 ensure_wasm_guest_toolchain() {
@@ -888,10 +310,11 @@ ensure_wasm_guest_toolchain() {
 
 ensure_wasi_sdk() {
 	local name="wasi-sdk-$WASI_SDK_VERSION-x86_64-linux"
-	WASI_SDK="$MOTORH/$name"
+	WASI_SDK="$EXTERNAL_SOURCES/$name"
 	[ ! -d "$WASI_SDK" ] || return 0
 	log "fetching wasi-sdk $WASI_SDK_VERSION for javy-smoke's test plugins"
-	local archive="$MOTORH/$name.tar.gz.part"
+	mkdir -p "$EXTERNAL_SOURCES"
+	local archive="$EXTERNAL_SOURCES/$name.tar.gz.part"
 	curl --fail --location -o "$archive" \
 		"https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION%.*}/$name.tar.gz"
 	printf '%s  %s\n' "$WASI_SDK_SHA" "$archive" | sha256sum -c -
@@ -902,40 +325,85 @@ ensure_wasi_sdk() {
 	mv "$WASI_SDK.part" "$WASI_SDK"
 }
 
-build_addons() {
-	configure_exact_cross_driver
-	ensure_addon lua "$LUA_VER" "$LUA_IMG" devtools/bin/lua build_lua
-	ensure_addon ripgrep "$(git -C "$RIPGREP" rev-parse HEAD)" \
-		"$RG_IMG" system/bin/rg build_ripgrep
-	ensure_addon helix "$(git -C "$HELIX" rev-parse HEAD)" \
-		"$HELIX_IMG" devtools/helix/hx build_helix
-	ensure_addon sed "$(git -C "$SED" rev-parse HEAD)" \
-		"$SED_IMG" devtools/bin/sed build_sed
+build_external_sources() {
+	build_external_source lua "$LUA_IMG" devtools/bin/lua build_lua
+	build_external_source ripgrep "$RG_IMG" system/bin/rg build_ripgrep
+	build_external_source helix "$HELIX_IMG" devtools/helix/hx build_helix
+	build_external_source sed "$SED_IMG" devtools/bin/sed build_sed
+	build_external_source tar "$TAR_IMG" system/bin/tar build_tar
 	ensure_wasm_guest_toolchain
 	ensure_wasi_sdk
-	build_javy_addon
-	build_wasmtime_addon
+	build_external_source javy "$JAVY_IMG" devtools/bin/javy build_javy
+	build_external_source wasmtime "$WASMTIME_IMG" devtools/bin/wasmtime-rt build_wasmtime
+	fetch_sys_lib_deps
+}
+
+# --- external source: tar and zstd ---------------------------------------------
+build_tar() {
+	log "building tar and zstd and staging them in /system/bin"
+	( cd "$MOTOR_OS_TAR" && \
+		CARGO_TARGET_DIR="$TAR_TARGET_DIR" \
+			cargo build --target "$TARGET" --release --locked )
+	local tool
+	mkdir -p "$TAR_IMG/system/bin"
+	for tool in tar zstd; do
+		"$LLVM_TOOLS/llvm-strip" -o "$TAR_IMG/system/bin/$tool" \
+			"$TAR_TARGET_DIR/$TARGET/release/$tool"
+		chmod 755 "$TAR_IMG/system/bin/$tool"
+	done
+}
+
+# --- dependencies of the staged Motor OS library sources ------------------------
+# The development image stages src/sys/lib crates for native tests, and
+# `make dev.img` admits and compiles them there offline
+# (src/build-scripts/prepare-dev-image.sh). Their crates.io dependencies
+# come from this overlay: objects of the image's
+# Interactive Lorry repository, fetched by a Lorry built for this host. Fetch
+# takes every package of the workspace's Cargo.lock, whatever features the
+# staged manifests select, so that lock alone decides the overlay; and
+# src/sys/Cargo.lock decides the lock.
+fetch_sys_lib_deps() {
+	local work="$ASSEMBLY_BUILD_ROOT/sys-lib-deps" overlay="$ASSEMBLY_IMAGE_ROOT/sys-lib-deps"
+	local repository="$overlay/devtools/lorry/user/vendor"
+	log "fetching the dependencies of the staged Motor OS library sources"
+	rm -rf "$work" "$overlay"
+	"$MOTOR/src/build-scripts/sys-lib-workspace.sh" "$work/workspace"
+	CARGO_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/host-lorry" \
+		cargo build --manifest-path "$MOTOR/src/bin/lorry/Cargo.toml" --release --locked
+	mkdir -p "$work/home/.config/lorry" "${repository%/*}"
+	cat > "$work/home/.config/lorry/lorry.toml" << EOF
+config-version = 1
+
+[repositories]
+user = "$repository"
+EOF
+	# A private HOME keeps the user's own Lorry configuration out.
+	( cd "$work/workspace" &&
+		RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
+		HOME="$work/home" "$ASSEMBLY_BUILD_ROOT/host-lorry/release/lorry" fetch --locked )
+	# The image ships its own repository header; only objects and index records
+	# belong to the overlay.
+	rm -rf "$repository/repository.toml" "$repository/.staging"
+	[ -n "$(find "$repository/objects" -type f)" ] ||
+		die "Lorry fetched no dependency objects into $repository"
 }
 
 build_helix() {
 	log "fetching, building, and staging Helix as /devtools/helix/hx"
 	(
 		cd "$HELIX"
-		RUSTC="$MOTOR_RUSTC" RUSTDOC="$MOTOR_RUSTDOC" \
-			"$MOTOR_CARGO" fetch --locked
+		cargo fetch --locked
 		env \
-			RUSTC="$MOTOR_RUSTC" \
-			RUSTDOC="$MOTOR_RUSTDOC" \
 			CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$SYSROOT/bin/motor-clang" \
 			CC_x86_64_unknown_motor="$SYSROOT/bin/motor-clang" \
 			CXX_x86_64_unknown_motor="$SYSROOT/bin/motor-clang++" \
 			CXXSTDLIB_x86_64_unknown_motor=c++ \
-			AR_x86_64_unknown_motor="$B/llvm-ar" \
+			AR_x86_64_unknown_motor="$LLVM_TOOLS/llvm-ar" \
 			ARFLAGS_x86_64_unknown_motor= \
 			CARGO_TARGET_DIR="$HELIX_TARGET_DIR" \
 			HELIX_DEFAULT_RUNTIME=/devtools/helix/runtime \
 			HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1 \
-			"$MOTOR_CARGO" build --target "$TARGET" --release --locked \
+			cargo build --target "$TARGET" --release --locked \
 				--offline -p helix-term --bin hx
 	)
 	stage_helix
@@ -944,16 +412,29 @@ build_helix() {
 # --- rebuild the OS and images ----------------------------------------------
 build_images() {
 	log "rebuilding Motor OS and all images (make images BUILD=release)"
-	# Keep make's output visible: when a component fails, the compiler diagnostic
-	# is the whole diagnosis, and the log alone is easy to overlook.
-	( cd "$MOTOR" && \
-		make images BUILD=release -j"$(nproc)" ) \
-		2>&1 | tee "$MAKE_LOG"
-	grep -q 'built the Motor OS base image' "$MAKE_LOG" &&
-		grep -q 'built the standard Motor OS image' "$MAKE_LOG" &&
-		grep -q 'built the Motor OS dev image' "$MAKE_LOG" &&
-		grep -q 'built the Motor OS wasm image' "$MAKE_LOG" ||
-		die "make finished without all four imagers running — see $MAKE_LOG"
+	( cd "$MOTOR" && make images BUILD=release -j"$(nproc)" )
+}
+
+# --- the native toolchain ------------------------------------------------------
+# Its overlays (llvm, rustc, rust-analyzer, libc) join those of the external
+# sources in the assembly, unpacked by motor-os-tar's tar built for Linux.
+# Every run unpacks them again, before the external sources are built, so a
+# replaced archive takes effect and a bad one fails early.
+unpack_native_toolchain() {
+	local top="motor-toolchain-$TOOLCHAIN" unpacked="$ASSEMBLY_BUILD_ROOT/native-toolchain"
+	local tar="$ASSEMBLY_BUILD_ROOT/motor-os-tar-linux/release/tar" overlay
+	log "unpacking the native toolchain from $NATIVE_ARCHIVE"
+	( cd "$MOTOR_OS_TAR" && \
+		CARGO_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/motor-os-tar-linux" \
+			cargo build --release --locked --bin tar )
+	rm -rf "$unpacked"
+	mkdir -p "$unpacked" "$ASSEMBLY_IMAGE_ROOT"
+	"$tar" -x -f "$NATIVE_ARCHIVE" -C "$unpacked"
+	for overlay in llvm rustc rust-analyzer libc; do
+		rm -rf "${ASSEMBLY_IMAGE_ROOT:?}/$overlay"
+		mv "$unpacked/$top/images/$overlay" "$ASSEMBLY_IMAGE_ROOT/$overlay"
+	done
+	rm -rf "$unpacked"
 }
 
 main() {
@@ -963,116 +444,80 @@ main() {
 		[ "$parse_status" -eq 2 ] && return 0
 		return "$parse_status"
 	}
-	if [ "$JAVY_ONLY" = true ] || [ "$WASMTIME_ONLY" = true ]; then
-		[ "$SOURCE_MODE" = managed ] ||
-			die "--javy-only and --wasmtime-only use the selected installed toolchain"
-		# Select once, as ordinary builds do, and pass that choice to every step.
-		if [ -z "${RUSTUP_TOOLCHAIN:-}" ]; then
-			RUSTUP_TOOLCHAIN="$(sed -n 's/^channel = "\(.*\)"/\1/p' "$MOTOR/rust-toolchain.toml")"
-			[ -n "$RUSTUP_TOOLCHAIN" ] || die "no Rust channel in $MOTOR/rust-toolchain.toml"
+	local complete=true caller_has_rustup=true
+	if [ "$JAVY_ONLY" = true ] || [ "$WASMTIME_ONLY" = true ] || [ "$SYS_LIB_DEPS_ONLY" = true ]; then
+		complete=false
+	else
+		log "complete Motor OS build starting"
+		log "Motor OS checkout: $MOTOR"
+
+		local test_ssh_key="$MOTOR/src/tests/test.key"
+		[ -f "$test_ssh_key" ] && [ ! -L "$test_ssh_key" ] ||
+			die "Motor test SSH key is absent or linked: $test_ssh_key"
+		chmod 400 "$test_ssh_key"
+		[ -f "$NATIVE_ARCHIVE" ] ||
+			die "the native toolchain archive is missing: $NATIVE_ARCHIVE (see docs/toolchain.md)"
+
+		log "provisioning host packages, rustup, and VM prerequisites"
+		local base="$SCRIPT_DIR/build-scripts/build-base.sh"
+		[ -x "$base" ] || die "required build stage is not executable: $base"
+		# The caller's shell keeps its PATH; note whether it can already see rustup.
+		command -v rustup >/dev/null 2>&1 || caller_has_rustup=false
+		MOTOR_BUILD_ORCHESTRATOR=1 "$base"
+		[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+		command -v rustup >/dev/null || die "rustup is unavailable after host provisioning"
+	fi
+	# Helix and Javy pin toolchains of their own; the exported name overrides them.
+	export RUSTUP_TOOLCHAIN="$TOOLCHAIN"
+	local toolchain_sysroot
+	toolchain_sysroot="$(rustc --print sysroot)"
+	SYSROOT="$toolchain_sysroot/lib/rustlib/$TARGET/sysroot"
+	LLVM_TOOLS="$toolchain_sysroot/lib/rustlib/x86_64-unknown-linux-gnu/bin"
+
+	if [ "$complete" = false ]; then
+		local wasm=false
+		if [ "$JAVY_ONLY" = true ] || [ "$WASMTIME_ONLY" = true ]; then
+			wasm=true
+			local selection=wasm
+			if [ "$WASMTIME_ONLY" = false ]; then selection=javy
+			elif [ "$JAVY_ONLY" = false ]; then selection=wasmtime; fi
+			select_external_sources "$selection"
+			prepare_external_sources
+			check_external_lockfiles ||
+				die "external source preflight failed; see $MOTOR/build/external-lockfiles.log"
 		fi
-		export RUSTUP_TOOLCHAIN
-		local selection=wasm
-		if [ "$WASMTIME_ONLY" = false ]; then selection=javy
-		elif [ "$JAVY_ONLY" = false ]; then selection=wasmtime; fi
-		select_addon_workspaces "$selection"
-		prepare_addon_sources
-		check_addon_lockfiles || die "add-on preflight failed; see $MOTOR/build/addon-lockfiles.log"
-		ASSEMBLY_IMAGE_ROOT="$("$MOTOR/src/resolve-toolchain-assembly.sh" --resolve)"
-		ASSEMBLY_ROOT="${ASSEMBLY_IMAGE_ROOT%/images}"
-		ASSEMBLY_BUILD_ROOT="$ASSEMBLY_ROOT/build"
-		ensure_wasm_guest_toolchain
+		[ "$wasm" = false ] || ensure_wasm_guest_toolchain
 		if [ "$JAVY_ONLY" = true ]; then
 			ensure_wasi_sdk
-			build_javy_addon
+			build_external_source javy "$JAVY_IMG" devtools/bin/javy build_javy
 		fi
-		[ "$WASMTIME_ONLY" = false ] || build_wasmtime_addon
+		[ "$WASMTIME_ONLY" = false ] ||
+			build_external_source wasmtime "$WASMTIME_IMG" devtools/bin/wasmtime-rt build_wasmtime
+		[ "$SYS_LIB_DEPS_ONLY" = false ] || fetch_sys_lib_deps
 		return
 	fi
-	log "complete Motor OS build starting"
-	log "Motor OS checkout: $MOTOR"
-	log "development root:  $MOTORH"
+	log "toolchain: $TOOLCHAIN"
+	select_external_sources all
+	prepare_external_sources
+	check_external_lockfiles ||
+		die "external source preflight failed; see $MOTOR/build/external-lockfiles.log"
+	unpack_native_toolchain
+	build_external_sources
 
-	local test_ssh_key="$MOTOR/src/tests/test.key"
-	[ -f "$test_ssh_key" ] && [ ! -L "$test_ssh_key" ] ||
-		die "Motor test SSH key is absent or linked: $test_ssh_key"
-	chmod 400 "$test_ssh_key"
-
-	log "provisioning host packages, rustup, and VM prerequisites"
-	local base="$SCRIPT_DIR/build-base.sh"
-	[ -x "$base" ] || die "required build stage is not executable: $base"
-	# The caller's shell keeps its PATH; note whether it can already see rustup.
-	local caller_has_rustup=true
-	command -v rustup >/dev/null 2>&1 || caller_has_rustup=false
-	MOTOR_BUILD_ORCHESTRATOR=1 "$base"
-	[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-	command -v rustup >/dev/null || die "rustup is unavailable after host provisioning"
-
-	log "resolving exact $SOURCE_MODE source tuple"
-	prepare_exact_sources "$SOURCE_MODE" "$RUST_SOURCE" "$AUTHORING_BASE"
-	log "declared Rust:  $MOTOR_RUST_REV"
-	log "effective Rust: $EFFECTIVE_MOTOR_RUST_REV ($MOTOR_RUST_TREE_STATE)"
-	log "declared LLVM:  $MOTOR_LLVM_REV"
-	log "effective LLVM: $EFFECTIVE_MOTOR_LLVM_REV ($MOTOR_LLVM_TREE_STATE)"
-	toolchain_build_selected_host "$RUST" "$AUTHORING_BASE" "$MOTORH/build/toolchain" \
-		"$(command -v rustup)" "${CARGO_HOME:-$HOME/.cargo}" \
-		"$MOTOR/src/sys/lib/moto-rt" "$TOOLCHAIN_SRC_ROOT/rust/build/cache"
-	log "host toolchain: $MOTOR_RUSTUP_TOOLCHAIN"
-	export RUSTUP_TOOLCHAIN="$MOTOR_RUSTUP_TOOLCHAIN"
-	select_addon_workspaces all
-	prepare_addon_sources
-	check_addon_lockfiles || die "add-on preflight failed; see $MOTOR/build/addon-lockfiles.log"
-	export PYTHONDONTWRITEBYTECODE=1
-	export PYTHONPYCACHEPREFIX="$TOOLCHAIN_STATE_ROOT/python-cache"
-
-	toolchain_fetch_rust_analyzer "$RUST" "$TOOLCHAIN_PREFIX"
-	toolchain_derive_assembly_identity "$MOTOR" "$MLIBC"
-	activate_exact_assembly_paths
-	toolchain_claim_assembly
-	if [ "$TOOLCHAIN_ASSEMBLY_REUSED" = false ]; then
-		log "building assembly $MOTOR_ASSEMBLY_KEY"
-		toolchain_generate_cross_wrappers "$SYSROOT" "$B"
-		configure_exact_cross_driver
-		build_shim
-		build_builtins
-		build_mlibc
-		build_cxx_runtimes
-		build_native_llvm
-		llvm_stage_image
-		toolchain_build_native_rustc "$RUST" "$AUTHORING_BASE" \
-			"$TOOLCHAIN_SRC_ROOT/rust/build/cache"
-		rustc_stage_image
-		if ! toolchain_build_native_rust_analyzer "$RUST" "${CARGO_HOME:-$HOME/.cargo}" "$AUTHORING_BASE"; then
-			toolchain_reject_assembly "native rust-analyzer build or validation failed"
-			return 1
-		fi
-		toolchain_complete_assembly
-	else
-		skip "validated assembly $MOTOR_ASSEMBLY_KEY"
-	fi
-	build_addons
-	# make must find exactly what was just produced.
-	[ "$("$MOTOR/src/resolve-toolchain-assembly.sh" --resolve)" = "$ASSEMBLY_IMAGE_ROOT" ] ||
-		die "ordinary builds would not select the produced assembly: $ASSEMBLY_ROOT"
-
-	# The tracked selector is deliberately added only by the separately gated
-	# cutover patch after a clean managed provision and the full core test gate.
-	if [ ! -f "$MOTOR/rust-toolchain.toml" ]; then
-		log "exact host and native artifacts are ready; root selector cutover remains gated"
-		return 0
-	fi
-	log "building Motor OS and all images with $MOTOR_RUSTUP_TOOLCHAIN"
+	log "building Motor OS and all images with $TOOLCHAIN"
 	build_images
 
 	local required_outputs=(
-		"$LLVM_IMG/devtools/llvm/bin/llvm"
-		"$RUSTC_IMG/devtools/rust/bin/rustc"
-		"$RUSTC_IMG/devtools/rust/bin/rustfmt"
-		"$RUSTC_IMG/devtools/rust/bin/clippy-driver"
+		"$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm"
+		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc"
+		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt"
+		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/clippy-driver"
+		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer"
 		"$RG_IMG/system/bin/rg"
+		"$TAR_IMG/system/bin/tar"
+		"$TAR_IMG/system/bin/zstd"
 		"$HELIX_IMG/devtools/helix/hx"
 		"$SED_IMG/devtools/bin/sed"
-		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer"
 		"$MOTOR/vm_images/release/motor-os.qcow2"
 		"$MOTOR/vm_images/release/motor-os-dev.qcow2"
 		"$MOTOR/vm_images/release/motor-os-wasm.qcow2"

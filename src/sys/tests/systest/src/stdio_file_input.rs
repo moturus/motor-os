@@ -481,10 +481,10 @@ fn lifetime_and_pipe_counter_tests() {
     std::fs::remove_file(&path).unwrap();
 
     let (reader_data, writer_data) =
-        moto_ipc::stdio_pipe::make_pair(moto_sys::SysHandle::SELF, moto_sys::SysHandle::SELF)
+        moto_sdk::ipc::stdio_pipe::make_pair(moto_sys::SysHandle::SELF, moto_sys::SysHandle::SELF)
             .unwrap();
-    let reader = unsafe { moto_ipc::stdio_pipe::StdioPipe::new_reader(reader_data) };
-    let writer = unsafe { moto_ipc::stdio_pipe::StdioPipe::new_writer(writer_data) };
+    let reader = unsafe { moto_sdk::ipc::stdio_pipe::StdioPipe::new_reader(reader_data) };
+    let writer = unsafe { moto_sdk::ipc::stdio_pipe::StdioPipe::new_writer(writer_data) };
     writer.close_writer().unwrap();
     let mut byte = [0_u8; 1];
     assert_eq!(reader.read(&mut byte).unwrap(), 0);
@@ -498,12 +498,12 @@ pub fn post_publish_error_progress_test() {
         moto_rt::process::STDIO_NULL,
     )
     .unwrap();
-    let (local, _remote) = moto_ipc::stdio_pipe::make_pair(
+    let (local, _remote) = moto_sdk::ipc::stdio_pipe::make_pair(
         moto_sys::SysHandle::SELF,
         moto_sys::SysHandle::from_u64(child.handle),
     )
     .unwrap();
-    let writer = unsafe { moto_ipc::stdio_pipe::StdioPipe::new_writer(local) };
+    let writer = unsafe { moto_sdk::ipc::stdio_pipe::StdioPipe::new_writer(local) };
     moto_rt::process::kill(child.handle).unwrap();
     assert_eq!(crate::wait_child(child.handle).unwrap(), -1);
 

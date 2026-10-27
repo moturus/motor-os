@@ -1,14 +1,15 @@
 //! Installed `wasmtime-rt` checks with the precompiled fixtures that the
-//! Wasmtime add-on builds from the runtime's own sources.
+//! Wasmtime build makes from the runtime's own sources.
 use std::fs;
+use std::time::{Duration, Instant};
 
-use wasm_smoke_suite::{Result, Suite};
+use wasm_smoke_suite::{Job, Result, Suite, process_active};
 
 mod filesystem;
 
 const RUNTIME: &str = "/devtools/bin/wasmtime-rt";
 /// Precompiled fixtures that test-wasm.sh uploads; they are not part of the images.
-const FIXTURES: &str = "/none/tmp/wasmtime-tests";
+const FIXTURES: &str = "/none/wasm-tests/wasmtime-tests";
 /// Upstream p2 socket programs carrying Motor's accepted socket semantics.
 const SOCKET_PROGRAMS: [&str; 13] = [
     "p2_tcp_bind",
@@ -80,6 +81,7 @@ pub fn run_suite(suite: &mut Suite) -> Result<()> {
     if !stderr.contains("interrupt") {
         return Err(format!("timeout: missing interrupt diagnostic: {stderr}").into());
     }
+    interruption(suite)?;
     for round in 0..8 {
         suite.command(
             &format!("repeat-{round}"),
@@ -135,33 +137,56 @@ pub fn run_suite(suite: &mut Suite) -> Result<()> {
         &invocation("0", "-W max-table-elements=40000", "limits-elements"),
         0,
     )?;
-    suite.refusal(
+    // Memories: no process-wide count or total, 4 GiB each.
+    suite.command(
         "memories-default",
         &invocation("0", "", "limits-memories"),
-        "reservation limits",
+        0,
     )?;
     suite.refusal(
-        "memories-fixed",
+        "memories-limited",
+        &invocation("0", "-W max-memories=4", "limits-memories"),
+        "memory count too high",
+    )?;
+    suite.command(
+        "memories-override",
         &invocation("0", "-W max-memories=5", "limits-memories"),
-        "reservation limits",
+        0,
     )?;
     suite.refusal(
         "memory-too-large",
         &invocation("0", "", "memory-too-large"),
         "exceeds",
     )?;
+    // Growing to 4 GiB touches no page, or the VM could not hold it.
     let (stdout, _) = suite.command(
         "memory-to-limit",
-        &(invocation("0", "--invoke grow", "memory-grow") + " 1535"),
+        &(invocation("0", "--invoke grow", "memory-grow") + " 65535"),
         0,
     )?;
     expect("memory-to-limit", stdout.trim(), "1")?;
     let (stdout, _) = suite.command(
-        "memory-beyond-limit",
-        &(invocation("0", "--invoke grow", "memory-grow") + " 1536"),
+        "memory-size-override",
+        &(invocation(
+            "0",
+            "-W max-memory-size=1048576 --invoke grow",
+            "memory-grow",
+        ) + " 16"),
         0,
     )?;
-    expect("memory-beyond-limit", stdout.trim(), "-1")?;
+    expect("memory-size-override", stdout.trim(), "-1")?;
+    let (stdout, _) = suite.command(
+        "memory64-to-limit",
+        &(invocation("0", "--invoke grow", "memory64-grow") + " 65535"),
+        0,
+    )?;
+    expect("memory64-to-limit", stdout.trim(), "1")?;
+    let (stdout, _) = suite.command(
+        "memory64-beyond-limit",
+        &(invocation("0", "--invoke grow", "memory64-grow") + " 65536"),
+        0,
+    )?;
+    expect("memory64-beyond-limit", stdout.trim(), "-1")?;
 
     // The mandatory TypeScript workload, compiled by Javy and precompiled.
     let (stdout, _) = suite.command("typescript", &invocation("0", "", "typescript"), 0)?;
@@ -186,6 +211,45 @@ pub fn run_suite(suite: &mut Suite) -> Result<()> {
 
     // WASI p2 filesystem and stdio.
     filesystem::run(suite)
+}
+
+/// Ctrl+C on the terminal ends a foreground `run` spinning in Pulley with
+/// status 130, and a runtime whose shell is killed ends once the shell is
+/// reaped.
+fn interruption(suite: &mut Suite) -> Result<()> {
+    let spin = invocation("0", "--invoke ready-loop", "lifecycle");
+    let mut job = suite.start("ctrl-c", &spin, true)?;
+    job.wait_stdout("out\n")?;
+    let runtime = runtime_pid(&job)?;
+    job.ctrl_c()?;
+    suite.wait(&mut job, 130)?;
+    // The shell is still held, so it has not killed its children: the
+    // runtime ended because Ctrl+C reached it rather than the shell.
+    if process_active(runtime)? {
+        return Err("ctrl-c: the runtime outlived its interrupted shell".into());
+    }
+
+    let mut job = suite.start("parent-exit", &spin, false)?;
+    job.wait_stdout("out\n")?;
+    let runtime = runtime_pid(&job)?;
+    job.kill()?;
+    suite.wait(&mut job, -1)?;
+    drop(job);
+    let reaped = Instant::now();
+    while process_active(runtime)? {
+        if reaped.elapsed() >= Duration::from_secs(10) {
+            return Err("parent-exit: the runtime outlived its reaped shell".into());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+fn runtime_pid(job: &Job) -> Result<u64> {
+    match job.children()?.as_slice() {
+        [(pid, name)] if name.contains("wasmtime-rt") => Ok(*pid),
+        other => Err(format!("expected one wasmtime-rt child, found {other:?}").into()),
+    }
 }
 
 pub fn run() -> Result<()> {

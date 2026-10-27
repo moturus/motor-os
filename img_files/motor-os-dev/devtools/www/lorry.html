@@ -634,7 +634,7 @@ an editor; building needs a review.</p>
   <li>Sources are the crates.io sparse index, the only supported registry, and Git over
   smart HTTP. Git is handled by an embedded client, never a <code>git</code> executable:
   anonymous HTTPS, shallow, with credentials, proxies, hooks, and filters disabled.</li>
-  <li>The configured curl (<code>/system/bin/curl</code> on Motor OS, Motor's own
+  <li>The configured curl (<code>/system/bin/curl</code> on Motor OS, Motor OS's own
   curl-compatible client) is run directly, never through a shell, restricted to HTTPS,
   without following redirects, and with proxy and credential settings stripped from the
   environment. A redirect is followed only for a site you have allowed in the redirect
@@ -645,7 +645,7 @@ an editor; building needs a review.</p>
   <li>The result is recorded in <code>.lorry/dependencies-v2.toml</code> with a checksum
   of the canonical review and one entry per reviewed host-and-target pair. A later
   build requires its own pair to be present and re-verifies every recorded pair, which
-  is why a Motor-capable rustc is needed even for a host-only build. An unchanged build
+  is why a Motor OS-capable rustc is needed even for a host-only build. An unchanged build
   reuses its finished result before this check. <code>lorry review</code> regenerates the
   canonical review offline so that it can be read, diffed, and checked into version
   control.</li>
@@ -703,7 +703,7 @@ thiserror, and others).</p>
   as its metadata is ready.</li>
   <li><strong>Procedural macros</strong> are compiled for the machine that runs the
   compiler. On Linux they load as ordinary dynamic libraries. Motor OS has no dynamic
-  loading, so on Motor a procedural macro is a static executable, and rustc talks to it
+  loading, so on Motor OS a procedural macro is a static executable, and rustc talks to it
   over the compiler's own proc-macro bridge protocol, carried in bounded, versioned frames
   on the child's stdin and stdout. This gives process separation, not a sandbox.</li>
   <li><strong>Build scripts</strong> of members and dependencies run on Linux in a
@@ -743,8 +743,11 @@ remaining differences from Cargo that may change.</p>
 <p>Lorry builds Motor OS programs on Motor OS. The developer-image test vendors and
 builds red, gears, and then Lorry itself natively in a VM, from the source snapshots
 under <code>/devtools/src</code>, and checks that the freshly linked build scripts carry
-the expected permissions. Lorry's own suite checks that Lorry built natively on Motor OS
-is byte-identical to Lorry cross-built on Linux. Replacing the repository's Cargo-driven
+the expected permissions. It also runs <code>lorry test</code> offline in
+<code>/devtools/src/motor-os/sys/lib</code>, where the image build has already admitted
+the Motor OS libraries staged there and compiled their dependencies. Lorry's own suite
+checks that Lorry built natively on Motor OS is byte-identical to Lorry cross-built on
+Linux. Replacing the repository's Cargo-driven
 build of every component with Lorry is not there yet. Lorry's
 <code>future-work.md</code> lists what remains: the kernel's custom target and its
 build-std needs, the imager's Linux-only dependencies, admission records for the other

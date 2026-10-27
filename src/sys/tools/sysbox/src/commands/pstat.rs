@@ -1,4 +1,4 @@
-use moto_stats::Collector;
+use moto_sdk::stats::Collector;
 
 fn print_usage_and_exit(exit_code: i32) -> ! {
     eprintln!("Report process stats (via the federated stats collector).");

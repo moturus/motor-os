@@ -10,7 +10,7 @@ use moto_dns::{
     LookupResult, Status, MAX_ADDRESSES, MAX_NAME_LEN, PROTOCOL_VERSION, RESPONSE_FLAG_TRUNCATED,
     SERVICE_URL,
 };
-use moto_ipc::sync::{ChannelSize, ClientConnection, LocalServer};
+use moto_sdk::ipc::sync::{ChannelSize, ClientConnection, LocalServer};
 use moto_sys::SysHandle;
 
 const WORKER_COUNT: usize = 4;
@@ -19,7 +19,7 @@ const LISTENERS_PER_WORKER: u64 = 2;
 
 fn initialize_logging() {
     for _ in 0..500 {
-        if moto_log::init("dns-resolver").is_ok() {
+        if moto_sdk::log::init("dns-resolver").is_ok() {
             log::set_max_level(log::LevelFilter::Info);
             return;
         }
@@ -29,7 +29,7 @@ fn initialize_logging() {
 }
 
 fn write_response(
-    conn: &mut moto_ipc::sync::LocalServerConnection,
+    conn: &mut moto_sdk::ipc::sync::LocalServerConnection,
     request_id: u64,
     header_result: moto_rt::ErrorCode,
     result: Option<bridge::Result>,

@@ -160,22 +160,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-fs"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytemuck",
- "camino",
- "fittings",
- "log",
- "lru",
- "moto-async",
- "moto-rt",
- "moto-tooling",
- "tokio",
-]
-
-[[package]]
 name = "async-trait"
 version = "0.1.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -799,10 +783,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
-name = "fittings"
-version = "0.1.0"
-
-[[package]]
 name = "flate2"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1254,99 +1234,36 @@ dependencies = [
 ]
 
 [[package]]
-name = "moto-async"
-version = "0.1.0"
-dependencies = [
- "crossbeam",
- "log",
- "moto-mpmc",
- "moto-rt",
- "moto-sys",
-]
-
-[[package]]
-name = "moto-io"
-version = "0.1.0"
-dependencies = [
- "async-fs",
- "async-trait",
- "crossbeam",
- "log",
- "moto-async",
- "moto-io-internal",
- "moto-ipc",
- "moto-mpmc",
- "moto-rt",
- "moto-sys",
- "moto-sys-io",
-]
-
-[[package]]
-name = "moto-io-internal"
-version = "0.1.0"
-dependencies = [
- "moto-ipc",
- "moto-rt",
- "moto-sys-io",
-]
-
-[[package]]
-name = "moto-ipc"
-version = "0.2.6"
-dependencies = [
- "log",
- "moto-async",
- "moto-rt",
- "moto-sys",
-]
-
-[[package]]
-name = "moto-log"
-version = "0.1.0"
-dependencies = [
- "log",
- "moto-ipc",
- "moto-rt",
- "moto-sys",
-]
-
-[[package]]
-name = "moto-mpmc"
-version = "0.1.0"
-dependencies = [
- "crossbeam-utils",
- "moto-rt",
- "moto-sys",
-]
-
-[[package]]
 name = "moto-rt"
-version = "0.17.8"
+version = "0.17.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d8ec4efe5d19efe27a3457f7fabf6a9a68f4ea51b8bc21f7ec494f27e74d1ec"
+
+[[package]]
+name = "moto-sdk"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ae39b1639527731b4f8cb7f762f68d959ab746791a4f88999d52abf08a3a996"
+dependencies = [
+ "async-trait",
+ "bytemuck",
+ "camino",
+ "crossbeam",
+ "crossbeam-utils",
+ "log",
+ "lru",
+ "moto-rt",
+ "moto-sys",
+ "tokio",
+]
 
 [[package]]
 name = "moto-sys"
-version = "0.3.1"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c345df997a770a2935df31acc3532aae239b26915800064b0d10d954956ce22b"
 dependencies = [
  "moto-rt",
-]
-
-[[package]]
-name = "moto-sys-io"
-version = "0.2.4"
-dependencies = [
- "async-fs",
- "log",
- "moto-ipc",
- "moto-rt",
- "moto-sys",
-]
-
-[[package]]
-name = "moto-tooling"
-version = "0.1.0"
-dependencies = [
- "fittings",
- "moto-sys",
 ]
 
 [[package]]
@@ -1896,12 +1813,7 @@ dependencies = [
  "hex",
  "libc",
  "log",
- "moto-async",
- "moto-io",
- "moto-log",
- "moto-rt",
- "moto-sys",
- "moto-tooling",
+ "moto-sdk",
  "rand",
  "russh",
  "russh-sftp",

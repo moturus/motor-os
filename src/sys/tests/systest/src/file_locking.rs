@@ -131,7 +131,7 @@ fn concurrent_duplicate_lock_test() {
 fn drop_locked_file_in_async_context_test() {
     let file = open();
     file.lock().unwrap();
-    moto_async::LocalRuntime::new().block_on(async move {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
         drop(file);
     });
 

@@ -82,7 +82,7 @@ fn pair() -> (
     )
 }
 
-async fn prime(signals: &[moto_async::SysHandleFuture]) {
+async fn prime(signals: &[moto_sdk::async_runtime::SysHandleFuture]) {
     std::future::poll_fn(|cx| {
         for signal in signals {
             assert_eq!(signal.do_poll(cx), Poll::Pending);
@@ -92,7 +92,10 @@ async fn prime(signals: &[moto_async::SysHandleFuture]) {
     .await;
 }
 
-async fn consume(signals: &[moto_async::SysHandleFuture], result: moto_rt::Result<()>) {
+async fn consume(
+    signals: &[moto_sdk::async_runtime::SysHandleFuture],
+    result: moto_rt::Result<()>,
+) {
     std::future::poll_fn(|cx| {
         for signal in signals {
             assert_eq!(signal.do_poll(cx), Poll::Ready(result));
@@ -105,12 +108,12 @@ async fn consume(signals: &[moto_async::SysHandleFuture], result: moto_rt::Resul
 pub(super) fn run() {
     let (wake, wait) = pair();
     let (other_wake, other_wait) = pair();
-    let (cold, batch, delayed) = moto_async::LocalRuntime::new().block_on(async {
+    let (cold, batch, delayed) = moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let mut signal = wait.syshandle().as_future();
         prime(std::slice::from_ref(&signal)).await;
         let measured = Measurement::start();
         SysCpu::wake(wake.syshandle()).unwrap();
-        moto_async::yield_to_io().await;
+        moto_sdk::async_runtime::yield_to_io().await;
         let cold = measured.finish().0;
         consume(std::slice::from_ref(&signal), Ok(())).await;
 
@@ -123,7 +126,7 @@ pub(super) fn run() {
         let measured = Measurement::start();
         SysCpu::wake(wake.syshandle()).unwrap();
         SysCpu::wake(other_wake.syshandle()).unwrap();
-        moto_async::yield_to_io().await;
+        moto_sdk::async_runtime::yield_to_io().await;
         let batch = measured.finish().0;
         consume(&signals, Ok(())).await;
         consume(std::slice::from_ref(&other), Ok(())).await;
@@ -136,12 +139,12 @@ pub(super) fn run() {
                 other.rearm();
                 prime(std::slice::from_ref(&other)).await;
             }
-            moto_async::yield_to_io().await;
+            moto_sdk::async_runtime::yield_to_io().await;
             let measured = Measurement::start();
             signal.rearm();
             prime(std::slice::from_ref(&signal)).await;
             SysCpu::wake(wake.syshandle()).unwrap();
-            moto_async::yield_to_io().await;
+            moto_sdk::async_runtime::yield_to_io().await;
             delayed += measured.finish().0;
             consume(std::slice::from_ref(&signal), Ok(())).await;
         }
@@ -159,12 +162,12 @@ pub(super) fn run() {
 
 fn bad_handles_and_cleanup() {
     let (peer, wait) = pair();
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let mut signal = wait.syshandle().as_future();
         let held = wait.syshandle().as_future();
         prime(std::slice::from_ref(&signal)).await;
         SysCpu::wake(peer.syshandle()).unwrap();
-        moto_async::yield_to_io().await;
+        moto_sdk::async_runtime::yield_to_io().await;
         consume(std::slice::from_ref(&signal), Ok(())).await;
         drop(peer);
 
@@ -172,7 +175,7 @@ fn bad_handles_and_cleanup() {
             let measured = Measurement::start();
             signal.rearm();
             prime(std::slice::from_ref(&signal)).await;
-            moto_async::yield_to_io().await;
+            moto_sdk::async_runtime::yield_to_io().await;
             assert_eq!(measured.finish().0, 0, "rearming a bad handle allocated");
             consume(
                 std::slice::from_ref(&signal),
@@ -186,7 +189,7 @@ fn bad_handles_and_cleanup() {
     });
 
     let (wake, wait) = pair();
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let mut anchor = wait.syshandle().as_future();
         // The anchor keeps the map entry and its queue allocation alive.
         // Each dropped sibling must release precisely its inner Rc object.
@@ -199,9 +202,9 @@ fn bad_handles_and_cleanup() {
             }
             let measured = Measurement::start();
             SysCpu::wake(wake.syshandle()).unwrap();
-            moto_async::yield_to_io().await;
+            moto_sdk::async_runtime::yield_to_io().await;
             drop(sibling);
-            moto_async::yield_to_io().await;
+            moto_sdk::async_runtime::yield_to_io().await;
             assert_eq!(
                 measured.finish(),
                 (0, 1),
@@ -219,7 +222,7 @@ fn registration_from_waker() {
 
     struct Register {
         handle: SysHandle,
-        signals: RefCell<Vec<moto_async::SysHandleFuture>>,
+        signals: RefCell<Vec<moto_sdk::async_runtime::SysHandleFuture>>,
     }
     impl LocalWake for Register {
         fn wake(self: Rc<Self>) {
@@ -230,7 +233,7 @@ fn registration_from_waker() {
     }
 
     let (wake, wait) = pair();
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let signal = wait.syshandle().as_future();
         let register = Rc::new(Register {
             handle: wait.syshandle(),
@@ -246,7 +249,7 @@ fn registration_from_waker() {
         })
         .await;
         SysCpu::wake(wake.syshandle()).unwrap();
-        moto_async::yield_to_io().await;
+        moto_sdk::async_runtime::yield_to_io().await;
 
         // Capacity reserved by a registration inside wake() must survive
         // completion delivery, and no runtime collection may stay borrowed.
@@ -255,7 +258,7 @@ fn registration_from_waker() {
         prime(&signals).await;
         let measured = Measurement::start();
         SysCpu::wake(wake.syshandle()).unwrap();
-        moto_async::yield_to_io().await;
+        moto_sdk::async_runtime::yield_to_io().await;
         assert_eq!(measured.finish().0, 0, "callback reservation was lost");
         consume(&signals, Ok(())).await;
         consume(std::slice::from_ref(&signal), Ok(())).await;

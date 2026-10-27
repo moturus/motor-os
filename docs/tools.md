@@ -145,9 +145,9 @@ The shell is somewhat barebones now (contributions are welcome!).
 - `/devtools/bin/mdbg print-stacks $PID`, where `$PID` can be deduced by running `ps`, will
   (attempt) to extract stack traces for all threads in the process; the stack traces
   are addresses, so `addr2line` will need to be used with the binary
-  (e.g. `$MOTORH/motor-os/build/obj/sys-io/x86_64-unknown-motor/debug/sys-io`);
+  (e.g. `$MOTORH/motor-os/build/obj/debug/sys-io/x86_64-unknown-motor/debug/sys-io`);
   - stack traces reaching into the VDSO object will be marked as so, and can be symbolized
-  using `addr2line` applied to `$MOTORH/motor-os/build/obj/vdso/x86_64-unknown-motor/debug/rt`.
+  using `addr2line` applied to `$MOTORH/motor-os/build/obj/debug/vdso/x86_64-unknown-motor/debug/rt`.
 
 ![ps -H](ps.png)
 

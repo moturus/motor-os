@@ -22,7 +22,7 @@ async fn main() {
             // .filter_level(log::LevelFilter::Debug)
             .init();
     } else {
-        moto_log::init("russhd").unwrap();
+        moto_sdk::log::init("russhd").unwrap();
         log::set_max_level(log::LevelFilter::Info);
     }
 
@@ -179,7 +179,10 @@ impl ConnectionHandler {
     async fn exec(&mut self, cmdline: &str) -> Result<(), russh::Error> {
         #[cfg(target_os = "motor")]
         if cmdline == "shutdown" {
-            if moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_SHUTDOWN == 0 {
+            if moto_sdk::sys::ProcessStaticPage::get().capabilities
+                & moto_sdk::sys::caps::CAP_SHUTDOWN
+                == 0
+            {
                 log::info!("`shutdown`: no CAP_SHUTDOWN.");
                 return Err(russh::Error::RequestDenied);
             }
@@ -200,13 +203,13 @@ impl ConnectionHandler {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
                 // The kernel stops at once, so persist what sys-io still holds.
-                if let Err(err) = moto_async::LocalRuntime::new()
-                    .block_on(async { moto_io::fs::FsClient::connect()?.flush().await })
+                if let Err(err) = moto_sdk::async_runtime::LocalRuntime::new()
+                    .block_on(async { moto_sdk::io::fs::FsClient::connect()?.flush().await })
                 {
                     log::error!("shutdown: filesystem flush failed: {err:?}");
                 }
 
-                if moto_sys::SysCpu::kill(moto_sys::SysHandle::KERNEL).is_err() {
+                if moto_sdk::sys::SysCpu::kill(moto_sdk::sys::SysHandle::KERNEL).is_err() {
                     log::error!("shutdown failed");
                 } else {
                     unreachable!()

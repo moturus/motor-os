@@ -1,8 +1,8 @@
 # Native virtio-vsock API
 
-Motor OS exposes virtio-vsock streams through `moto_io::net::vsock`. This is
-a native Rust API. It does not provide libc, Rust `std::net`, mio, or Tokio
-vsock sockets.
+Motor OS exposes virtio-vsock streams through `moto_sdk::io::net::vsock`.
+This is a native Rust API. It does not provide libc, Rust `std::net`, mio, or
+Tokio vsock sockets.
 
 The process must have both `CAP_VSOCK` (bit 7) and `CAP_NET` (bit 8), granted
 by an authorized parent. Even a System parent must own each capability to
@@ -14,24 +14,25 @@ injection.
 
 ## Driver lifetime and a listener
 
-`moto_io::net::connect()` returns a `NetClient` and its `NetDriver`. The
-driver must be continuously polled on a `moto_async::LocalRuntime` while any
-operation or socket on that channel is live. Run only one network driver on a
-given local runtime. This example gives the listener and accepted stream
+`moto_sdk::io::net::connect()` returns a `NetClient` and its `NetDriver`.
+The driver must be continuously polled on a
+`moto_sdk::async_runtime::LocalRuntime` while any operation or socket on that
+channel is live. Run only one network driver on a given local runtime. This example gives the listener and accepted stream
 different channels and drives each on its own thread/runtime:
 
 ```rust
-use moto_io::net::vsock::VsockListener;
-use moto_io::net::{NetDriver, connect};
+use moto_sdk::async_runtime::LocalRuntime;
+use moto_sdk::io::net::vsock::VsockListener;
+use moto_sdk::io::net::{NetDriver, connect};
 
 fn drive(driver: NetDriver) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        moto_async::LocalRuntime::new().block_on(driver.run());
+        LocalRuntime::new().block_on(driver.run());
     })
 }
 
 fn main() {
-    moto_async::LocalRuntime::new().block_on(async {
+    LocalRuntime::new().block_on(async {
         let (listener_client, listener_driver) = connect().await.unwrap();
         let listener_thread = drive(listener_driver);
         let listener = VsockListener::bind_reserved(
@@ -201,8 +202,8 @@ for normal cleanup. The limit bounds server work, not client-side rollback.
 | [virtio-async/virtio_vsock.rs](../src/sys/lib/virtio-async/src/virtio_vsock.rs) | Device initialization, bounded DMA pools, ordered packet/event reception, and TX submission. |
 | [sys-io/runtime/vsock/](../src/sys/sys-io/src/runtime/vsock/) | `Connection` owns protocol phase, RX storage/credit, and shutdown flags; helpers manage buffers, tuple admission, and listener backlog. |
 | [sys-io/runtime/net/vsock.rs](../src/sys/sys-io/src/runtime/net/vsock.rs) | Protocol pumps, native IPC, client ownership, pending accepts/shutdowns, and cleanup. |
-| [moto-sys-io/api_vsock.rs](../src/sys/lib/moto-sys-io/src/api_vsock.rs) | Native control-message layouts and checked codecs. |
-| [moto-io/net/vsock.rs](../src/sys/lib/moto-io/src/net/vsock.rs) | Native streams/listeners, application waits, and client IPC resources within moto-io's `no_std` boundary. |
+| [moto-sdk/sys_io/api_vsock.rs](../src/sys/lib/moto-sdk/src/sys_io/api_vsock.rs) | Native control-message layouts and checked codecs. |
+| [moto-sdk/io/net/vsock.rs](../src/sys/lib/moto-sdk/src/io/net/vsock.rs) | Native streams/listeners, application waits, and client IPC resources within the SDK's `no_std` boundary. |
 
 Vsock reuses the NET endpoint, channel budget, socket IDs, reservations,
 shared pages, and cancellation. Its protocol is independent of Ethernet, IP,

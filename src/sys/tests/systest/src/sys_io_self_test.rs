@@ -7,7 +7,7 @@
 
 #[cfg(debug_assertions)]
 pub fn run_all_tests() {
-    let mut service = moto_sys_io::stats::IoStatsService::connect().unwrap();
+    let mut service = moto_sdk::sys_io::stats::IoStatsService::connect().unwrap();
     let outcome = service.run_self_tests().unwrap();
 
     assert_eq!(

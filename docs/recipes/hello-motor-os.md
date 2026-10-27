@@ -2,7 +2,7 @@
 
 In this example, we will compile and run the final project
 ([a multithreaded web server](https://doc.rust-lang.org/book/ch20-00-final-project-a-web-server.html))
-from [Rust Book](https://doc.rust-lang.org/book/title-page.html) inside a Motor VM, with minor changes.
+from [Rust Book](https://doc.rust-lang.org/book/title-page.html) inside a Motor OS VM, with minor changes.
 
 First, make sure that you can [build and run Motor OS](https://github.com/moturus/motor-os/blob/main/docs/build.md).
 
@@ -241,7 +241,7 @@ ssh -p 2222 -o IdentitiesOnly=yes -i "$SSH_KEY" \
   motor@192.168.4.2 /system/bin/chmod 755 /user/tmp/hello/hello
 ```
 
-Start the server through SSH or from a Motor shell:
+Start the server through SSH or from a Motor OS shell:
 
 ```sh
 ssh -p 2222 -o IdentitiesOnly=yes -i "$SSH_KEY" \

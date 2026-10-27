@@ -10,9 +10,9 @@ pub(super) mod self_test;
 mod vdso;
 
 use super::FsRuntime;
-use async_fs::{AccessPermissions, EntryId, EntryKind, FileSystem, Role};
+use moto_sdk::async_fs::{AccessPermissions, EntryId, EntryKind, FileSystem, Role};
+use moto_sdk::sys_io::api_fs;
 use moto_sys::{SysHandle, SysMem, SysObj, syscalls::RaiiHandle};
-use moto_sys_io::api_fs;
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::io::{ErrorKind, Result};
@@ -24,7 +24,7 @@ fn native(code: moto_rt::ErrorCode) -> std::io::Error {
 }
 
 /// A zeroed buffer, or an error instead of aborting sys-io.
-fn try_zeroed(len: usize) -> Result<Vec<u8>> {
+pub(super) fn try_zeroed(len: usize) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(len)
@@ -106,18 +106,18 @@ impl Drop for ConstructionLock {
 
 /// Reads exactly `dst.len()` bytes at `offset`, block by block.
 async fn read_exact_at(
-    runtime: &FsRuntime,
     role: Role,
-    entry: EntryId,
+    entry: &super::mounts::Resolved,
     mut offset: u64,
     mut dst: &mut [u8],
 ) -> Result<()> {
-    let block = async_fs::BLOCK_SIZE as u64;
-    let fs = runtime.fs.read().await;
+    let block = moto_sdk::async_fs::BLOCK_SIZE as u64;
+    let fs = entry.read().await?;
     while !dst.is_empty() {
+        entry.healthy()?;
         let in_block = ((block - offset % block) as usize).min(dst.len());
         let (head, tail) = dst.split_at_mut(in_block);
-        let read = fs.read(role, entry, offset, head).await?;
+        let read = fs.read(role, entry.local, offset, head).await?;
         if read != in_block {
             return Err(ErrorKind::UnexpectedEof.into());
         }
@@ -137,22 +137,23 @@ async fn read_range(
     dst: &mut [u8],
 ) -> Result<()> {
     const BATCH: usize = 64 * 4096;
-    let block = async_fs::BLOCK_SIZE as u64;
+    let block = moto_sdk::async_fs::BLOCK_SIZE as u64;
+    let entry = runtime.resolve(entry)?;
     let mut done = 0;
     while done < dst.len() {
         let len = (dst.len() - done).min(BATCH);
         let first_key = (offset + done as u64) / block;
         let last_key = (offset + (done + len) as u64 - 1) / block;
-        runtime
-            .fs
-            .read()
-            .await
-            .prefetch(entry, first_key, last_key - first_key + 1)
-            .await;
+        if entry.kind == api_fs::MountKind::MotorFs {
+            entry
+                .read()
+                .await?
+                .prefetch(entry.local, first_key, last_key - first_key + 1)
+                .await;
+        }
         read_exact_at(
-            runtime,
             role,
-            entry,
+            &entry,
             offset + done as u64,
             &mut dst[done..done + len],
         )
@@ -372,7 +373,8 @@ async fn scan_relocations(
 
 /// The file's size, once the requester's role is allowed to run it.
 async fn executable_size(runtime: &FsRuntime, role: Role, entry: EntryId) -> Result<u64> {
-    let metadata = runtime.fs.read().await.metadata(role, entry).await?;
+    let entry = runtime.resolve(entry)?;
+    let metadata = entry.read().await?.metadata(role, entry.local).await?;
     if metadata.kind() != EntryKind::File {
         return Err(ErrorKind::InvalidInput.into());
     }
@@ -565,12 +567,13 @@ async fn load_image(
 }
 
 pub(super) async fn on_cmd_spawn(
-    msg: moto_ipc::io_channel::Msg,
-    sender: &moto_ipc::io_channel::Sender,
+    msg: moto_sdk::ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
 ) -> Result<()> {
-    let req = api_fs::spawn_msg_decode(msg, sender).map_err(crate::util::map_native_error)?;
+    let mut req = api_fs::spawn_msg_decode(msg, sender).map_err(crate::util::map_native_error)?;
+    req.entry_id = runtime.decode(req.entry_id)?.id;
     let stats = &runtime.spawn_stats;
     stats.requests.set(stats.requests.get() + 1);
     let started = moto_rt::time::Instant::now();

@@ -381,7 +381,7 @@ the RPCs; nothing else blocks on strobe.
 - **Disk-space rule.** Whenever strobe creates a log file -- at connection start
   and at rotation -- it first reads the filesystem's available bytes the way
   `df` does: sys-io's `fs.available_bytes` metric through
-  `moto_stats::Collector` (`src/sys/strobe/src/io_thread.rs:32-70`). If fewer
+  `moto_sdk::stats::Collector` (`src/sys/strobe/src/io_thread.rs:32-70`). If fewer
   than 50 MiB are available, strobe deletes `.prev` files in
   `/system/logs`, oldest first by the `modified` time `FsClient::metadata`
   reports, until 50 MiB are available or none remain. A live `.log` is never
@@ -477,8 +477,8 @@ successful-write diagnostics on that path originally fed back into the next
   (`src/sys/lib/motor-fs/src/txn_log.rs:251`);
 - a write that no flush follows commits on the timeout path, which records
   `committing batch {txn_id} on timeout` (`txn_log.rs:189`);
-- async-fs records `BD: flushed.` after a successful block-device flush
-  (`src/sys/lib/async-fs/src/block_cache.rs:554`).
+- moto-sdk's `async_fs` records `BD: flushed.` after a successful
+  block-device flush (`src/sys/lib/moto-sdk/src/async_fs/block_cache.rs:539`).
 
 Left alone, every flush of `kernel.log` produces a debug line, which becomes
 the content of the next flush: the file never stops growing. All three lines

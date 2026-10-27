@@ -125,6 +125,7 @@ if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   # timeout moves the suite into a background process group; a terminal
   # operation can then stop timeout and the entire suite with SIGTTIN/SIGTTOU.
   # Keeping timeout's separate group preserves its whole-process-tree timeout.
+  echo "full-test: starting $BUILD tests ($VMM)"
   testing_started="$SECONDS"
   set -m
   timeout "${TIMEOUT}s" "$0" "${ORIGINAL_ARGS[@]}" < /dev/null
@@ -160,31 +161,9 @@ test_vm_configure_ssh
 # Host-only regression for upgrading an existing IPv4-only moto-tap after the
 # IPv6 test network was introduced.
 "$WD/test-build-base-networking.sh"
-"$WD/test-build-addons.sh"
+"$WD/test-external-sources.sh"
+"$WD/test-sys-lib-workspace.sh"
 "$WD/test-full-test-size.sh"
-"$WD/test-toolchain-assembly.sh"
-"$WD/test-toolchain-assembly-resolution.sh"
-"$WD/test-toolchain-authoring-sources.sh"
-"$WD/test-toolchain-bootstrap.sh"
-"$WD/test-toolchain-cutover.sh"
-"$WD/test-toolchain-cxx-sysroot.sh"
-"$WD/test-toolchain-entry-point.sh"
-"$WD/test-toolchain-host.sh"
-"$WD/test-toolchain-keyed-paths.sh"
-"$WD/test-toolchain-llvm.sh"
-"$WD/test-toolchain-managed-sources.sh"
-"$WD/test-toolchain-native.sh"
-"$WD/test-toolchain-native-rust-analyzer.sh"
-"$WD/test-toolchain-patched-crates.sh"
-"$WD/test-toolchain-prefix.sh"
-"$WD/test-toolchain-runtime.sh"
-"$WD/test-toolchain-rust-analyzer.sh"
-"$WD/test-toolchain-rust-analyzer-fetch.sh"
-"$WD/test-toolchain-rust-analyzer-identity.sh"
-"$WD/test-toolchain-state.sh"
-"$WD/test-toolchain-submodules.sh"
-"$WD/test-toolchain-tree-digest.sh"
-"$WD/test-toolchain-versions.sh"
 "$WD/test-vm-console-filter.sh"
 "$WD/test-vm-image-format.sh"
 "$WD/test-vm-vsock-backend.sh"
@@ -192,6 +171,7 @@ test_vm_configure_ssh
 "$WD/test-rust-analyzer-size-contract.sh"
 "$WD/test-rustfmt-size-contract.sh"
 "$WD/test-make-driver.sh"
+bash "$WD/test-net-contract.sh"
 python3 "$WD/test-helix-lsp-ready.py"
 if [ "$BUILD" = "release" ]; then
   bash "$WD/test-rmux-copy-status.sh" --self-test --release
@@ -199,13 +179,10 @@ else
   bash "$WD/test-rmux-copy-status.sh" --self-test
 fi
 if [ "$BUILD" = "release" ]; then
-  "$WD/test-rust-analyzer-sources.sh" --release
   "$WD/test-rust-analyzer.sh" --release
 else
-  "$WD/test-rust-analyzer-sources.sh"
   "$WD/test-rust-analyzer.sh"
 fi
-"$WD/test-rustfmt-sources.sh"
 # Keep a local runtime version bump from breaking only the dev-image suite.
 python3 "$WD/test-dev-path-locks.py"
 
@@ -232,13 +209,13 @@ echo "full-test: runner=$TEST_VM_RUNNER profile=$TEST_VM_PROFILE target=$IMG_TAR
 # Build the image under test before running the tests.
 if [ "$BUILD" = "release" ]; then
   bash "$WD/test-moto-ipc-sync.sh" --release
-  make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" systest sysbox-tests mio-test tokio-tests \
+  make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" systest sysbox-tests mio-test tokio-tests wg-self-test \
     crossterm-smoke BUILD=release -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test --release)
   bash "$WD/test-kloader-image.sh" --release
 else
   bash "$WD/test-moto-ipc-sync.sh"
-  make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" systest sysbox-tests mio-test tokio-tests \
+  make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" systest sysbox-tests mio-test tokio-tests wg-self-test \
     crossterm-smoke -j"$(nproc)"
   (cd "$ROOT_DIR/src/imager" && cargo test)
   bash "$WD/test-kloader-image.sh"
@@ -276,13 +253,15 @@ fi
 # rush's are here because its line editor is testable only over a terminal, and
 # a pty is the one this host has -- including a resize, which on a pty is a
 # `SIGWINCH` and on a Motor console is the answer to an `ESC[6n`.
-for crate in red rmux rush russhd; do
+for crate in red rmux rush russhd wg; do
   profile_args=()
   if [ "$BUILD" = "release" ]; then
     profile_args+=(--release)
   fi
   (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet "${profile_args[@]}")
 done
+# Independent upstream WireGuard peer and its localhost transport tests.
+(cd "$ROOT_DIR/src/tests/wg-peer" && cargo test --quiet --locked "${profile_args[@]}")
 # The crossterm revision Rush ships: its own tests, and Rush's pty tests over
 # the Unix event source the pass above does not use.
 bash "$WD/test-crossterm-host.sh" "${profile_args[@]}"
@@ -304,29 +283,17 @@ else
   cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/moto-sys/Cargo.toml"
 fi
 
-# Exercise fallible queue and local-runtime construction.
+# The SDK's portable modules, host-tested with and without std; the rest of
+# the SDK is Motor-only and tested natively by full-test-dev.sh.
 if [ "$BUILD" = "release" ]; then
-  cargo test --quiet --release --locked --offline --manifest-path "$ROOT_DIR/src/sys/lib/moto-mpmc/Cargo.toml" --test fallible
-  cargo test --quiet --release --locked --offline --manifest-path "$ROOT_DIR/src/sys/lib/moto-async/Cargo.toml" --features host-construction-test --test fallible
+  cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/lib/moto-sdk/Cargo.toml"
+  cargo test --quiet --release --no-default-features --manifest-path "$ROOT_DIR/src/sys/lib/moto-sdk/Cargo.toml"
 else
-  cargo test --quiet --locked --offline --manifest-path "$ROOT_DIR/src/sys/lib/moto-mpmc/Cargo.toml" --test fallible
-  cargo test --quiet --locked --offline --manifest-path "$ROOT_DIR/src/sys/lib/moto-async/Cargo.toml" --features host-construction-test --test fallible
+  cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/moto-sdk/Cargo.toml"
+  cargo test --quiet --no-default-features --manifest-path "$ROOT_DIR/src/sys/lib/moto-sdk/Cargo.toml"
 fi
-
-# rt.vdso's stdio pipe ring, host-tested; moto-async needs its host feature to
-# build off Motor OS.
-if [ "$BUILD" = "release" ]; then
-  cargo test --quiet --release --locked --offline --manifest-path "$ROOT_DIR/src/sys/lib/moto-ipc/Cargo.toml" --features stdio-pipe,moto-async/host-construction-test
-else
-  cargo test --quiet --locked --offline --manifest-path "$ROOT_DIR/src/sys/lib/moto-ipc/Cargo.toml" --features stdio-pipe,moto-async/host-construction-test
-fi
-
-# Platform wire helpers are no_std in the image and unit-tested on the host.
-if [ "$BUILD" = "release" ]; then
-  cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/lib/moto-tooling/Cargo.toml"
-else
-  cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/moto-tooling/Cargo.toml"
-fi
+# The SDK as crates.io would ship it, built against registry dependencies.
+bash "$WD/test-sdk-package.sh" "${profile_args[@]}"
 
 # The allocator crate (kernel heap and runtime) is host-tested. Release
 # covers the full stress and concurrency step counts.
@@ -349,6 +316,13 @@ else
     --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \
     --no-default-features --features "$NETSTACK_FEATURES"
 fi
+
+# SLAAC is optional in sys-io; exercise its route merging alongside the
+# interface tests without changing the production feature set above.
+cargo test --locked --offline "${profile_args[@]}" \
+  --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \
+  --no-default-features --features "$NETSTACK_FEATURES,proto-ipv6-slaac" \
+  --lib iface::
 
 # The test-only image changes only sys-init.cfg, through a later static overlay,
 # and proves the opt-in System serial session without changing standard-image
@@ -391,6 +365,13 @@ else
   (cd "$ROOT_DIR/src/sys/lib/motor-fs" && cargo test --quiet --features image-admin)
 fi
 
+# memfs shares these runtime-free tests with its native Lorry test harness.
+if [ "$BUILD" = "release" ]; then
+  cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/Cargo.toml" -p memfs
+else
+  cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/Cargo.toml" -p memfs
+fi
+
 . "$WD/test-roots.sh"
 RMUX_TMPDIR="$TEST_TMP/full-test-rmux"
 
@@ -403,6 +384,7 @@ vm_rmux() {
 }
 
 . "$WD/test-udp-fragmentation.sh"
+. "$WD/test-wireguard.sh"
 . "$WD/test-ssh-client-host.sh"
 . "$WD/test-rush-script-caps.sh"
 
@@ -605,6 +587,13 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
   vm_ssh "[ ! -e /devtools ]" ||
     fail "standard image unexpectedly packages /devtools"
 fi
+# Before uploading any test binaries, the RAM mount is empty and hides the
+# sentinel shipped on disk. Listing also exercises mounted-root metadata/name.
+out="$(vm_ssh_stdout "/system/bin/ls /none/tmp")" ||
+  fail "cannot list fresh /none/tmp"
+[ -z "$out" ] || fail "fresh memfs is not empty: $out"
+vm_ssh "[ ! -e /none/tmp/.shadowed-by-memfs ]" ||
+  fail "memfs exposes its shadowed disk contents"
 # An earlier run's leftover test directories would fail the mkdirs below.
 remove_test_roots vm_ssh
 {
@@ -612,6 +601,7 @@ remove_test_roots vm_ssh
   if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
     printf '%s\n' \
       "put $ROOT_DIR/build/bin/$BUILD/systest $TEST_BIN/systest" \
+      "put $ROOT_DIR/build/bin/$BUILD/wg-self-test $TEST_BIN/wg-self-test" \
       "put $ROOT_DIR/build/bin/$BUILD/mio-test $TEST_BIN/mio-test" \
       "put $ROOT_DIR/build/bin/$BUILD/tokio-tests $TEST_BIN/tokio-tests" \
       "put $ROOT_DIR/build/bin/$BUILD/crossterm-smoke $TEST_BIN/crossterm-smoke" \
@@ -722,16 +712,10 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
     fail "Interactive session could not edit $editable_script in place"
   vm_ssh "/system/bin/rush -c 'cat $saved_script >$editable_script'" ||
     fail "could not restore $editable_script after its write probe"
-  if vm_ssh /system/bin/mv "$editable_script" "$editable_script.renamed"; then
-    fail "mv returned success after a denied installed-script rename"
-  fi
-  vm_ssh "[ -e $editable_script ] && [ ! -e $editable_script.renamed ]" ||
-    fail "Interactive session renamed $editable_script"
-  if vm_ssh /system/bin/rm "$editable_script"; then
-    fail "rm returned success after a denied installed-script deletion"
-  fi
-  vm_ssh "[ -e $editable_script ]" ||
-    fail "Interactive session deleted $editable_script"
+  # Interactive owns /devtools, where a user installs a toolchain.
+  vm_ssh "/system/bin/mv $editable_script $editable_script.renamed &&
+    /system/bin/mv $editable_script.renamed $editable_script" ||
+    fail "Interactive session could not rename $editable_script"
   vm_ssh /system/bin/rm "$saved_script"
   check_bin_permissions /devtools/bin mutable
 fi
@@ -767,6 +751,10 @@ vm_ssh /system/bin/ping -c 1 127.0.0.1
 vm_ssh /system/bin/ping -c 1 localhost
 
 test_udp_fragmentation
+test_wireguard
+for address in 192.168.4.2 2001:db8::2; do
+  vm_ssh "$TEST_BIN/wg-self-test $address"
+done
 test_ssh_client_host
 
 echo "-- Strobe I/O regressions --"
@@ -824,6 +812,27 @@ set +o pipefail
 systest_output="$(cat "$SYSTEST_LOG")"
 [ "${systest_output##*$'\n'}" = "systest: ALL PASS" ] ||
   fail "systest did not finish with 'systest: ALL PASS'"
+
+# A full eight-phase batch with the smallest CPU budget exercises the sizing
+# hint and all futex checks without adding a minute-long soak to this suite.
+out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP $TEST_BIN/systest --host-cpus=1 futex-stress 1")" ||
+  fail "CPU-sized futex stress failed: $out"
+printf '%s\n' "$out"
+case "$out" in
+  *"1 available CPUs"*"futex-stress: PASS"*) ;;
+  *) fail "CPU-sized futex stress did not pass: $out" ;;
+esac
+# The hint changes the efficiency precondition, retaining every exchange.
+vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/systest --host-cpus=1 test-active-channel-polls"
+for host_cpus in 0 invalid; do
+  if out="$(vm_ssh_stdout "$TEST_BIN/systest --host-cpus=$host_cpus futex-stress 1" 2>&1)"; then
+    fail "systest accepted --host-cpus=$host_cpus: $out"
+  fi
+  case "$out" in
+    *"--host-cpus requires a positive CPU count"*) ;;
+    *) fail "systest did not reject --host-cpus=$host_cpus: $out" ;;
+  esac
+done
 
 # The SSH login shell consumes russhd's one-time capability environment.
 # Explicitly pass CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED | CAP_INTERACTIVE |
@@ -944,16 +953,12 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   out="$(vm_ssh_stdout "/system/bin/rush -c '[ -d $sed_dir ] || mkdir $sed_dir; cd $sed_dir; printf \"alpha\nbeta\n\" | /devtools/bin/sed -n s/beta/BETA/p; echo RC=\$?; printf \"one\ntwo\n\" > f; chmod rwxrw---- f; /devtools/bin/sed -i s/one/ONE/ f; /devtools/bin/sed -i.bak -e s/two/TWO/ f; cat f f.bak; ls -l f'")"
   [ "$out" = $'BETA\nRC=0\nONE\nTWO\nONE\ntwo\n-rwxrw---- 8 f' ] ||
     fail "sed pipeline or in-place edit: '$out'"
-  # A writable script in a directory where no file can be created: the edit
-  # is staged in memory, and the script keeps its permissions and contents.
-  www=/devtools/bin/www
-  www_before="$(vm_ssh_stdout "/system/bin/rush -c 'cat $www'")"
-  out="$(vm_ssh_stdout "/system/bin/rush -c '/devtools/bin/sed -i 1s/^/#sed-probe/ $www; /devtools/bin/sed -n 1p $www; /devtools/bin/sed -i 1s/^#sed-probe// $www; ls -l $www'")"
-  [ "$(printf '%s\n' "$out" | head -1)" = "#sed-probe$(printf '%s\n' "$www_before" | head -1)" ] &&
-    [ "$(printf '%s\n' "$out" | sed -n 2p | awk '{ print $1 }')" = "-rwxrwxr-x" ] ||
-    fail "sed did not edit $www in place: '$out'"
-  [ "$(vm_ssh_stdout "/system/bin/rush -c 'cat $www'")" = "$www_before" ] ||
-    fail "sed did not restore $www"
+  # A writable file in a directory where no file can be created: the edit is
+  # staged in memory, and the file keeps its permissions.
+  locked="$sed_dir/locked"
+  out="$(vm_ssh_stdout "/system/bin/rush -c 'mkdir $locked; printf \"one\ntwo\n\" > $locked/f; chmod rwxrw---- $locked/f; chmod rwxr-xr-x $locked; /devtools/bin/sed -i s/one/ONE/ $locked/f; cat $locked/f; ls -l $locked/f; chmod rwxrwxr-x $locked; rm -r $locked'")"
+  [ "$out" = "ONE"$'\n'"two"$'\n'"-rwxrw---- 8 $locked/f" ] ||
+    fail "sed did not edit a file in a read-only directory in place: '$out'"
   echo "sed PASS"
 fi
 
@@ -1143,7 +1148,7 @@ out="$(vm_ssh "TMPDIR='$RMUX_ESCAPES' /user/bin/rmux ls")"
 vm_ssh "TMPDIR='$RMUX_DELIMITERS' /user/bin/rmux kill-session -t delimiters"
 vm_ssh "TMPDIR='$RMUX_ESCAPES' /user/bin/rmux kill-session -t escapes"
 
-# rmux's client and server meet over moto-ipc, and a server serves only
+# rmux's client and server meet over moto_sdk::ipc, and a server serves only
 # clients that hold every capability it holds (src/bin/rmux/details.md §4.2.1).
 # rmux-probe is a hand-written client that can name any server, so these
 # checks do not rely on rmux's own client choosing the right one.

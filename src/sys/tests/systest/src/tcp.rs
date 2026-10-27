@@ -7,7 +7,7 @@ use std::sync::{Arc, atomic::*};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use moto_io::net::tcp::{
+use moto_sdk::io::net::tcp::{
     Shutdown as NativeShutdown, TcpListener as NativeTcpListener, TcpStream as NativeTcpStream,
 };
 
@@ -28,36 +28,52 @@ fn completed_backlog_cap() -> usize {
 }
 
 pub(crate) fn read_sys_io_metric(name: &str) -> u64 {
-    let provider = moto_stats::Collector::provider_by_name("sys-io")
-        .expect("sys-io stats provider is not registered");
-    let metric = moto_stats::Collector::describe(&provider)
-        .unwrap()
-        .into_iter()
-        .find(|metric| metric.name == name)
-        .unwrap_or_else(|| panic!("sys-io metric {name:?} is not described"));
-    // read() polls sys-io's net runtime for a live snapshot; under load that
-    // round-trip can come back empty and surface as NotFound for a metric that
-    // always exists (same race as fs.rs::read_sys_io_fs_metrics). Opening the
-    // stats connection can also exhaust its listener pool: formerly NotFound,
-    // now NotReady. Keep both within the existing snapshot deadline.
+    read_sys_io_metric_opt(name)
+        .unwrap_or_else(|| panic!("sys-io metric {name:?} is not described"))
+}
+
+/// Reads a system-wide sys-io metric by name; `None` if sys-io does not
+/// describe it.
+pub(crate) fn read_sys_io_metric_opt(name: &str) -> Option<u64> {
+    // Discovery is best effort and can omit live providers under contention.
+    // Registry discovery itself is covered by stats::test_stats_provider.
+    let provider = moto_sdk::stats::ProviderInfo {
+        id: moto_sys::stats::PID_SYS_IO,
+        name: "sys-io".into(),
+        url: "sys-io-stats".into(),
+    };
+    // Both describe() and read() open a connection to sys-io's stats server,
+    // which fails with NotReady while other clients hold its small listener
+    // pool. read() also polls sys-io's net runtime for a live snapshot; under
+    // load that round-trip can come back empty and surface as NotFound for a
+    // metric that always exists (same race as fs.rs::read_sys_io_fs_metrics).
+    // Keep both within one snapshot deadline.
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let busy = |err: moto_rt::ErrorCode| {
+        assert!(
+            matches!(err, moto_rt::E_NOT_FOUND | moto_rt::E_NOT_READY)
+                && std::time::Instant::now() < deadline,
+            "read sys-io metric {name:?}: {err}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let metric = loop {
+        match moto_sdk::stats::Collector::describe(&provider) {
+            Ok(metrics) => break metrics.into_iter().find(|metric| metric.name == name)?,
+            Err(err) => busy(err),
+        }
+    };
     loop {
-        match moto_stats::Collector::read(&provider, metric.id, moto_stats::SCOPE_GLOBAL) {
-            Ok(value) => return value,
-            Err(err) => {
-                assert!(
-                    matches!(err, moto_rt::E_NOT_FOUND | moto_rt::E_NOT_READY)
-                        && std::time::Instant::now() < deadline,
-                    "read sys-io metric {name:?}: {err}"
-                );
-                std::thread::sleep(Duration::from_millis(50));
-            }
+        match moto_sdk::stats::Collector::read(&provider, metric.id, moto_sdk::stats::SCOPE_GLOBAL)
+        {
+            Ok(value) => return Some(value),
+            Err(err) => busy(err),
         }
     }
 }
 
-fn read_tcp_socket_stats() -> Vec<moto_sys_io::stats::TcpSocketStatsV1> {
-    let mut service = moto_sys_io::stats::IoStatsService::connect().unwrap();
+fn read_tcp_socket_stats() -> Vec<moto_sdk::sys_io::stats::TcpSocketStatsV1> {
+    let mut service = moto_sdk::sys_io::stats::IoStatsService::connect().unwrap();
     let mut result = Vec::new();
     let mut start_id = 0;
     loop {
@@ -66,7 +82,7 @@ fn read_tcp_socket_stats() -> Vec<moto_sys_io::stats::TcpSocketStatsV1> {
             return result;
         };
         let next_id = last.id + 1;
-        let done = page.len() < moto_sys_io::stats::MAX_TCP_SOCKET_STATS;
+        let done = page.len() < moto_sdk::sys_io::stats::MAX_TCP_SOCKET_STATS;
         result.extend_from_slice(page);
         if done {
             return result;
@@ -91,8 +107,8 @@ pub(crate) fn wait_for_sys_io_metric(name: &str, predicate: impl Fn(u64) -> bool
 }
 
 pub(crate) fn recv_raw_net_response(
-    connection: &moto_ipc::io_channel::ClientConnection,
-) -> moto_ipc::io_channel::Msg {
+    connection: &moto_sdk::ipc::io_channel::ClientConnection,
+) -> moto_sdk::ipc::io_channel::Msg {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
         match connection.recv() {
@@ -117,8 +133,8 @@ pub(crate) fn recv_raw_net_response(
 /// until the peer answers it, and only then is it dropped. Testing for the
 /// socket's *disappearance* instead would be testing that the close was a
 /// reset, which it is only for SO_LINGER(0).
-fn is_closing(state: moto_sys_io::stats::TcpProtocolState) -> bool {
-    use moto_sys_io::stats::TcpProtocolState;
+fn is_closing(state: moto_sdk::sys_io::stats::TcpProtocolState) -> bool {
+    use moto_sdk::sys_io::stats::TcpProtocolState;
 
     match state {
         TcpProtocolState::FinWait1
@@ -136,7 +152,7 @@ fn is_closing(state: moto_sys_io::stats::TcpProtocolState) -> bool {
 }
 
 fn wait_for_tcp_pair(listener_addr: SocketAddr, client_addr: SocketAddr) {
-    use moto_sys_io::stats::TcpProtocolState;
+    use moto_sdk::sys_io::stats::TcpProtocolState;
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
@@ -170,8 +186,8 @@ fn wait_for_tcp_pair(listener_addr: SocketAddr, client_addr: SocketAddr) {
 fn wait_for_tcp_socket_state(
     local_addr: SocketAddr,
     remote_addr: Option<SocketAddr>,
-    tcp_state: moto_sys_io::api_net::TcpState,
-    protocol_state: moto_sys_io::stats::TcpProtocolState,
+    tcp_state: moto_sdk::sys_io::api_net::TcpState,
+    protocol_state: moto_sdk::sys_io::stats::TcpProtocolState,
 ) {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
@@ -228,7 +244,7 @@ fn test_cancelled_native_connect_closes_socket() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let listener_addr = listener.local_addr().unwrap();
 
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = crate::net_harness::host_channel().await;
         // Releasing a client's last reservation shuts the channel down; the
         // keeper holds it open across the reserve/drop cycles below (the
@@ -313,7 +329,7 @@ fn test_cancelled_native_io_waiters_are_removed() {
         }
     });
 
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = crate::net_harness::host_channel().await;
         let stream = NativeTcpStream::connect_reserved(
             client.try_reserve().unwrap(),
@@ -436,7 +452,7 @@ fn test_parked_native_writer_reports_close_error() {
             }
         });
 
-        moto_async::LocalRuntime::new().block_on(async {
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
             let (client, driver_task) = crate::net_harness::host_channel().await;
             let stream = NativeTcpStream::connect_reserved(
                 client.try_reserve().unwrap(),
@@ -458,12 +474,12 @@ fn test_parked_native_writer_reports_close_error() {
                 assert!(matches!(write.as_mut().poll(&mut context), Poll::Pending));
                 assert_eq!(stream.tx_waiter_count(), 1);
 
-                let mut state_change = moto_ipc::io_channel::Msg::new();
+                let mut state_change = moto_sdk::ipc::io_channel::Msg::new();
                 state_change.command =
-                    moto_sys_io::api_net::NetCmd::EvtTcpStreamStateChanged as u16;
+                    moto_sdk::sys_io::api_net::NetCmd::EvtTcpStreamStateChanged as u16;
                 state_change.handle = stream.handle();
                 state_change.payload.args_32_mut()[0] =
-                    moto_sys_io::api_net::TcpState::Closed as u32;
+                    moto_sdk::sys_io::api_net::TcpState::Closed as u32;
                 state_change.payload.args_32_mut()[1] = cause;
                 stream.process_incoming_msg(state_change);
 
@@ -500,7 +516,7 @@ fn test_parked_native_writer_reports_close_error() {
     }
 
     check(
-        moto_sys_io::api_net::TCP_STATE_CHANGE_CAUSE_RESET,
+        moto_sdk::sys_io::api_net::TCP_STATE_CHANGE_CAUSE_RESET,
         moto_rt::E_CONNECTION_RESET,
     );
     check(0, moto_rt::E_NOT_CONNECTED);
@@ -523,7 +539,7 @@ fn test_cancelled_native_rpc_response_is_tolerated() {
     });
 
     let (net_client, driver_thread) = crate::net_harness::host_channel_on_thread();
-    let stream = moto_async::LocalRuntime::new()
+    let stream = moto_sdk::async_runtime::LocalRuntime::new()
         .block_on(NativeTcpStream::connect_reserved(
             net_client.try_reserve().unwrap(),
             &listener_addr,
@@ -533,14 +549,14 @@ fn test_cancelled_native_rpc_response_is_tolerated() {
         ))
         .unwrap();
 
-    moto_io::net::channel::arm_rpc_response_cancel_test();
+    moto_sdk::io::net::channel::arm_rpc_response_cancel_test();
     let mut future = Box::pin(stream.nodelay_async());
     let waker = futures::task::noop_waker();
     let mut cx = Context::from_waker(&waker);
     assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while !moto_io::net::channel::rpc_response_cancel_test_is_held() {
+    while !moto_sdk::io::net::channel::rpc_response_cancel_test_is_held() {
         assert!(
             std::time::Instant::now() < deadline,
             "channel runtime did not hold the RPC response"
@@ -548,9 +564,9 @@ fn test_cancelled_native_rpc_response_is_tolerated() {
         std::thread::yield_now();
     }
     drop(future);
-    moto_io::net::channel::release_rpc_response_cancel_test();
+    moto_sdk::io::net::channel::release_rpc_response_cancel_test();
 
-    while !moto_io::net::channel::rpc_response_cancel_test_is_done() {
+    while !moto_sdk::io::net::channel::rpc_response_cancel_test_is_done() {
         assert!(
             std::time::Instant::now() < deadline,
             "channel runtime did not finish the cancelled RPC response"
@@ -558,7 +574,7 @@ fn test_cancelled_native_rpc_response_is_tolerated() {
         std::thread::yield_now();
     }
 
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         stream.set_nodelay_async(true).await.unwrap();
         assert!(stream.nodelay_async().await.unwrap());
         stream.set_nodelay_async(false).await.unwrap();
@@ -585,11 +601,11 @@ fn test_cancelled_native_rpc_response_is_tolerated() {
     });
     assert!(stream.has_rx_bytes());
 
-    moto_io::net::channel::arm_rpc_response_cancel_test();
+    moto_sdk::io::net::channel::arm_rpc_response_cancel_test();
     let mut future = Box::pin(stream.shutdown_async(NativeShutdown::Read));
     assert!(matches!(future.as_mut().poll(&mut cx), Poll::Pending));
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while !moto_io::net::channel::rpc_response_cancel_test_is_held() {
+    while !moto_sdk::io::net::channel::rpc_response_cancel_test_is_held() {
         assert!(
             std::time::Instant::now() < deadline,
             "channel runtime did not hold the shutdown response"
@@ -600,8 +616,8 @@ fn test_cancelled_native_rpc_response_is_tolerated() {
     let mut empty = [0_u8; 1];
     assert_eq!(stream.try_read(&mut [&mut empty], false), Ok(0));
     drop(future);
-    moto_io::net::channel::release_rpc_response_cancel_test();
-    while !moto_io::net::channel::rpc_response_cancel_test_is_done() {
+    moto_sdk::io::net::channel::release_rpc_response_cancel_test();
+    while !moto_sdk::io::net::channel::rpc_response_cancel_test_is_done() {
         assert!(
             std::time::Instant::now() < deadline,
             "channel runtime did not finish the cancelled shutdown response"
@@ -631,7 +647,7 @@ fn test_native_async_shutdown() {
         received
     });
 
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = crate::net_harness::host_channel().await;
         let stream = NativeTcpStream::connect_reserved(
             client.try_reserve().unwrap(),
@@ -683,7 +699,7 @@ fn test_native_stream_drop_under_backpressure() {
     });
 
     let (net_client, driver_thread) = crate::net_harness::host_channel_on_thread();
-    let stream = moto_async::LocalRuntime::new()
+    let stream = moto_sdk::async_runtime::LocalRuntime::new()
         .block_on(NativeTcpStream::connect_reserved(
             net_client.try_reserve().unwrap(),
             &listener_addr,
@@ -692,11 +708,11 @@ fn test_native_stream_drop_under_backpressure() {
             None,
         ))
         .unwrap();
-    moto_io::net::channel::arm_stream_drop_backpressure_test(stream.handle());
+    moto_sdk::io::net::channel::arm_stream_drop_backpressure_test(stream.handle());
     release_trigger.store(true, Ordering::Release);
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while !moto_io::net::channel::stream_drop_backpressure_test_is_held() {
+    while !moto_sdk::io::net::channel::stream_drop_backpressure_test_is_held() {
         assert!(
             std::time::Instant::now() < deadline,
             "channel runtime did not reach the stream-drop backpressure hook"
@@ -725,7 +741,7 @@ fn test_native_stream_drop_under_backpressure() {
 
     // Always release the runtime before asserting so a regression reports
     // cleanly instead of stranding the test process.
-    moto_io::net::channel::release_stream_drop_backpressure_test();
+    moto_sdk::io::net::channel::release_stream_drop_backpressure_test();
     drop_thread.join().unwrap();
     assert!(
         drop_was_nonblocking,
@@ -733,7 +749,7 @@ fn test_native_stream_drop_under_backpressure() {
     );
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while !moto_io::net::channel::stream_drop_backpressure_test_is_done() {
+    while !moto_sdk::io::net::channel::stream_drop_backpressure_test_is_done() {
         assert!(
             std::time::Instant::now() < deadline,
             "TcpStream::drop blocked its channel runtime on a full send queue"
@@ -749,7 +765,7 @@ fn test_native_stream_drop_under_backpressure() {
 /// Prove a redelivered connection is live end to end: the std client pings,
 /// the native stream echoes, the client reads the echo back.
 fn exchange_bytes_with_client(
-    runtime: &mut moto_async::LocalRuntime,
+    runtime: &mut moto_sdk::async_runtime::LocalRuntime,
     stream: &NativeTcpStream,
     client: &mut std::net::TcpStream,
 ) {
@@ -788,7 +804,7 @@ fn test_native_listener_drop_under_backpressure() {
     }
 
     let (net_client, driver_thread) = crate::net_harness::host_channel_on_thread();
-    let listener = moto_async::LocalRuntime::new()
+    let listener = moto_sdk::async_runtime::LocalRuntime::new()
         .block_on(NativeTcpListener::bind_reserved(
             net_client.try_reserve().unwrap(),
             &"127.0.0.1:0".parse().unwrap(),
@@ -796,7 +812,7 @@ fn test_native_listener_drop_under_backpressure() {
             None,
         ))
         .unwrap();
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         listener.set_ttl_async(41).await.unwrap();
         assert_eq!(listener.ttl_async().await.unwrap(), 41);
         assert_eq!(
@@ -804,7 +820,7 @@ fn test_native_listener_drop_under_backpressure() {
             Err(moto_rt::E_INVALID_ARGUMENT)
         );
     });
-    moto_io::net::channel::arm_listener_drop_backpressure_test(listener.handle());
+    moto_sdk::io::net::channel::arm_listener_drop_backpressure_test(listener.handle());
 
     // Post an accept (the donation is the outstanding request) and park and
     // cancel a caller. The donation's eventual response then arrives with no
@@ -819,7 +835,7 @@ fn test_native_listener_drop_under_backpressure() {
 
     let client = std::net::TcpStream::connect(*listener.socket_addr()).unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while !moto_io::net::channel::listener_drop_backpressure_test_is_held() {
+    while !moto_sdk::io::net::channel::listener_drop_backpressure_test_is_held() {
         assert!(
             std::time::Instant::now() < deadline,
             "channel runtime did not reach the listener-drop backpressure hook"
@@ -857,7 +873,7 @@ fn test_native_listener_drop_under_backpressure() {
         std::thread::yield_now();
     }
     let drop_was_nonblocking = drop_done.load(Ordering::Acquire);
-    moto_io::net::channel::release_listener_drop_backpressure_test();
+    moto_sdk::io::net::channel::release_listener_drop_backpressure_test();
     drop_thread.join().unwrap();
     assert!(
         drop_was_nonblocking,
@@ -865,7 +881,7 @@ fn test_native_listener_drop_under_backpressure() {
     );
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while !moto_io::net::channel::listener_drop_backpressure_test_is_done() {
+    while !moto_sdk::io::net::channel::listener_drop_backpressure_test_is_done() {
         assert!(
             std::time::Instant::now() < deadline,
             "TcpListener::drop blocked its channel runtime on a full send queue"
@@ -883,7 +899,7 @@ fn test_native_listener_drop_under_backpressure() {
 /// so this converges only if the rollback really closed the handle. Sleeping
 /// async keeps the caller's channel driver running between attempts.
 async fn wait_for_bind_to_succeed(
-    client: &moto_io::net::NetClient,
+    client: &moto_sdk::io::net::NetClient,
     addr: SocketAddr,
 ) -> Arc<NativeTcpListener> {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -898,7 +914,7 @@ async fn wait_for_bind_to_succeed(
                 "cancelled bind never released {addr}: {err}"
             ),
         }
-        moto_async::sleep(Duration::from_millis(10)).await;
+        moto_sdk::async_runtime::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -911,7 +927,7 @@ fn test_cancelled_native_bind_releases_addr() {
     let addr: SocketAddr = "127.0.0.1:3342".parse().unwrap();
     let total_before = read_sys_io_metric("net.total_tcp_sockets");
 
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = crate::net_harness::host_channel().await;
         // Releasing a client's last reservation shuts the channel down; hold
         // it open across the cancel/rebind cycle.
@@ -969,7 +985,7 @@ fn test_delivered_then_cancelled_native_bind_releases_addr() {
 
     let addr: SocketAddr = "127.0.0.1:3343".parse().unwrap();
 
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = crate::net_harness::host_channel().await;
         // Releasing a client's last reservation shuts the channel down; hold
         // it open across the cancel/rebind cycle.
@@ -1013,12 +1029,12 @@ fn test_delivered_then_cancelled_native_bind_releases_addr() {
 fn test_disconnect_discards_queued_control() {
     let clients_before = read_sys_io_metric("net.active_clients");
     let sockets_before = read_sys_io_metric("net.udp_sockets");
-    let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    let connection = moto_sdk::ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
     wait_for_sys_io_metric("net.active_clients", |value| value > clients_before);
     let addr = "127.0.0.1:0".parse().unwrap();
 
     connection
-        .send(moto_sys_io::api_net::bind_udp_socket_request(&addr, 0))
+        .send(moto_sdk::sys_io::api_net::bind_udp_socket_request(&addr, 0))
         .unwrap();
     drop(connection);
 
@@ -1030,11 +1046,12 @@ fn test_disconnect_discards_queued_control() {
 // Run after stats are ready, before other networking tests: their closing
 // sockets can retain channels whose release changes this global baseline.
 pub fn test_disconnect_before_rx_ready_releases_channels() {
-    use moto_sys_io::api_net;
+    use moto_sdk::sys_io::api_net;
 
     let clients_before = read_sys_io_metric("net.active_clients");
     let channels_before = read_sys_io_metric("net.channels");
-    let listener_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    let listener_connection =
+        moto_sdk::ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
 
     let bind_addr = "127.0.0.1:0".parse().unwrap();
@@ -1046,7 +1063,7 @@ pub fn test_disconnect_before_rx_ready_releases_channels() {
     let listener_id = bind_resp.handle;
     let listener_addr = api_net::get_socket_addr(&bind_resp.payload);
 
-    let client_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    let client_connection = moto_sdk::ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 2);
     client_connection
         .send(api_net::tcp_stream_connect_request(&listener_addr, 0))
@@ -1065,19 +1082,20 @@ pub fn test_disconnect_before_rx_ready_releases_channels() {
     drop(client_connection);
     drop(listener_connection);
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before);
-    // A departed client's sockets keep its channel slot while they sit in
-    // TIME_WAIT, so slots left by earlier tests can expire during this wait:
-    // the count may end below the baseline, never above it.
+    // A departed client's lingering sockets keep its channel slot until
+    // they reach TIME_WAIT, so slots left by earlier tests can be released
+    // during this wait: the count may end below the baseline, never above it.
     wait_for_sys_io_metric("net.channels", |value| value <= channels_before);
 
     println!("test_disconnect_before_rx_ready_releases_channels() PASS");
 }
 
 fn test_stale_cross_connection_accept_is_requeued() {
-    use moto_sys_io::api_net;
+    use moto_sdk::sys_io::api_net;
 
     let clients_before = read_sys_io_metric("net.active_clients");
-    let listener_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    let listener_connection =
+        moto_sdk::ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
 
     let bind_addr = "127.0.0.1:0".parse().unwrap();
@@ -1089,7 +1107,7 @@ fn test_stale_cross_connection_accept_is_requeued() {
     let listener_id = bind_resp.handle;
     let listener_addr = api_net::get_socket_addr(&bind_resp.payload);
 
-    let stale_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    let stale_connection = moto_sdk::ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 2);
     stale_connection
         .send(api_net::accept_tcp_listener_request(listener_id, 0))
@@ -1108,7 +1126,7 @@ fn test_stale_cross_connection_accept_is_requeued() {
     drop(stale_connection);
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
 
-    let client_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    let client_connection = moto_sdk::ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 2);
     client_connection
         .send(api_net::tcp_stream_connect_request(&listener_addr, 0))
@@ -1139,14 +1157,15 @@ fn test_stale_cross_connection_accept_is_requeued() {
 }
 
 fn test_pending_accept_queue_is_bounded_and_canceled() {
-    use moto_sys_io::api_net;
+    use moto_sdk::sys_io::api_net;
 
     const CAP: usize = 1024;
     const BATCH: usize = 32;
 
     let clients_before = read_sys_io_metric("net.active_clients");
-    let listener_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
-    let accept_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    let listener_connection =
+        moto_sdk::ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    let accept_connection = moto_sdk::ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 2);
 
     let bind_addr = "127.0.0.1:0".parse().unwrap();
@@ -1185,7 +1204,7 @@ fn test_pending_accept_queue_is_bounded_and_canceled() {
         Err(moto_rt::Error::OutOfMemory)
     );
 
-    let mut drop_req = moto_ipc::io_channel::Msg::new();
+    let mut drop_req = moto_sdk::ipc::io_channel::Msg::new();
     drop_req.command = api_net::NetCmd::TcpListenerDrop as u16;
     drop_req.handle = listener_id;
     listener_connection.send(drop_req).unwrap();
@@ -1208,11 +1227,11 @@ fn test_pending_accept_queue_is_bounded_and_canceled() {
 /// until the FIN arrives to prove sys-io retains and eventually answers the
 /// explicit request instead of dropping it when the linger task is spawned.
 fn test_positive_linger_close_rpc_completes() {
-    use moto_sys_io::api_net;
+    use moto_sdk::sys_io::api_net;
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let listener_addr = listener.local_addr().unwrap();
-    let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    let connection = moto_sdk::ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
 
     connection
         .send(api_net::tcp_stream_connect_request(&listener_addr, 0))
@@ -1235,7 +1254,7 @@ fn test_positive_linger_close_rpc_completes() {
     peer.read_exact(&mut byte).unwrap();
     assert_eq!(&byte, b"x");
 
-    let mut set_linger = moto_ipc::io_channel::Msg::new();
+    let mut set_linger = moto_sdk::ipc::io_channel::Msg::new();
     set_linger.command = api_net::NetCmd::TcpStreamSetOption as u16;
     set_linger.handle = handle;
     set_linger.payload.args_64_mut()[0] = api_net::TCP_OPTION_LINGER;
@@ -1245,7 +1264,7 @@ fn test_positive_linger_close_rpc_completes() {
     recv_raw_net_response(&connection).status().unwrap();
 
     const CLOSE_ID: u64 = 0x4c49_4e47_4552;
-    let mut close = moto_ipc::io_channel::Msg::new();
+    let mut close = moto_sdk::ipc::io_channel::Msg::new();
     close.id = CLOSE_ID;
     close.command = api_net::NetCmd::TcpStreamClose as u16;
     close.handle = handle;
@@ -1291,14 +1310,14 @@ fn test_positive_linger_close_rpc_completes() {
 /// protocol state, but it must advance to FIN-WAIT-2 rather than retaining an
 /// active socket or resetting a completed stream.
 fn test_client_death_reclaims_tcp_sockets() {
-    use moto_sys_io::api_net;
-    use moto_sys_io::stats::TcpProtocolState;
+    use moto_sdk::sys_io::api_net;
+    use moto_sdk::sys_io::stats::TcpProtocolState;
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let listener_addr = listener.local_addr().unwrap();
     let clients_before = read_sys_io_metric("net.active_clients");
 
-    let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    let connection = moto_sdk::ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
     connection
         .send(api_net::tcp_stream_connect_request(&listener_addr, 0))
@@ -1318,7 +1337,7 @@ fn test_client_death_reclaims_tcp_sockets() {
     let mut byte = [0_u8; 1];
     peer.read_exact(&mut byte).unwrap();
 
-    let mut set_linger = moto_ipc::io_channel::Msg::new();
+    let mut set_linger = moto_sdk::ipc::io_channel::Msg::new();
     set_linger.command = api_net::NetCmd::TcpStreamSetOption as u16;
     set_linger.handle = handle;
     set_linger.payload.args_64_mut()[0] = api_net::TCP_OPTION_LINGER;
@@ -1327,7 +1346,7 @@ fn test_client_death_reclaims_tcp_sockets() {
     connection.send(set_linger).unwrap();
     recv_raw_net_response(&connection).status().unwrap();
 
-    let mut close = moto_ipc::io_channel::Msg::new();
+    let mut close = moto_sdk::ipc::io_channel::Msg::new();
     close.id = 1;
     close.command = api_net::NetCmd::TcpStreamClose as u16;
     close.handle = handle;
@@ -1350,7 +1369,7 @@ fn test_client_death_reclaims_tcp_sockets() {
 
     // A channel that dies before issuing close must not turn its active
     // socket into a default 60-second orphan either.
-    let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    let connection = moto_sdk::ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
     connection
         .send(api_net::tcp_stream_connect_request(&listener_addr, 0))
@@ -1439,15 +1458,15 @@ fn test_positive_linger_timeout_discards_stalled_tx() {
 /// not handed all their pages to the netstack yet. Fill the path while the
 /// peer does not read, then allow reads only after sys-io has reclaimed EOF.
 pub fn test_channel_teardown_drains_staged_tcp() {
-    use moto_ipc::io_channel::{CHANNEL_PAGE_COUNT, PAGE_SIZE};
-    use moto_sys_io::api_net;
+    use moto_sdk::ipc::io_channel::{CHANNEL_PAGE_COUNT, PAGE_SIZE};
+    use moto_sdk::sys_io::api_net;
     use std::os::fd::AsRawFd;
 
     const SEND_RING: u64 = 32 * 1024;
     for (explicit_close, timeout) in [(false, false), (true, false), (false, true)] {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let listener_addr = listener.local_addr().unwrap();
-        let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+        let connection = moto_sdk::ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
         let mut connect = api_net::tcp_stream_connect_request(&listener_addr, 0);
         connect.payload.args_8_mut()[api_net::TCP_BUF_SIZE_POS_TX] =
             api_net::tcp_buf_size_to_code(SEND_RING);
@@ -1461,7 +1480,7 @@ pub fn test_channel_teardown_drains_staged_tcp() {
         let clients_with_writer = read_sys_io_metric("net.active_clients");
 
         if timeout {
-            let mut linger = moto_ipc::io_channel::Msg::new();
+            let mut linger = moto_sdk::ipc::io_channel::Msg::new();
             linger.command = api_net::NetCmd::TcpStreamSetOption as u16;
             linger.handle = handle;
             linger.payload.args_64_mut()[0] = api_net::TCP_OPTION_LINGER;
@@ -1492,7 +1511,7 @@ pub fn test_channel_teardown_drains_staged_tcp() {
 
         // TX dispatch is inline. This response proves every write reached
         // sys-io and checks the send-ring bound used above, without draining it.
-        let mut barrier = moto_ipc::io_channel::Msg::new();
+        let mut barrier = moto_sdk::ipc::io_channel::Msg::new();
         barrier.id = 1;
         barrier.command = api_net::NetCmd::TcpStreamGetOption as u16;
         barrier.handle = handle;
@@ -1504,7 +1523,7 @@ pub fn test_channel_teardown_drains_staged_tcp() {
         assert_eq!(response.payload.args_64()[1], SEND_RING);
 
         if explicit_close {
-            let mut close = moto_ipc::io_channel::Msg::new();
+            let mut close = moto_sdk::ipc::io_channel::Msg::new();
             close.command = api_net::NetCmd::TcpStreamClose as u16;
             close.handle = handle;
             connection.send(close).unwrap();
@@ -1541,12 +1560,12 @@ pub fn test_channel_teardown_drains_staged_tcp() {
 }
 
 fn test_failed_tcp_setup_rolls_back_socket() {
-    use moto_sys_io::api_net;
+    use moto_sdk::sys_io::api_net;
 
     let clients_before = read_sys_io_metric("net.active_clients");
     let sockets_before = read_tcp_socket_stats();
     let total_before = read_sys_io_metric("net.total_tcp_sockets");
-    let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    let connection = moto_sdk::ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
 
     let invalid_remote = "127.0.0.1:0".parse().unwrap();
@@ -1582,14 +1601,14 @@ fn test_failed_tcp_setup_rolls_back_socket() {
 }
 
 fn test_invalid_socket_subchannels_are_rejected() {
-    use moto_sys_io::api_net;
+    use moto_sdk::sys_io::api_net;
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let listener_addr = listener.local_addr().unwrap();
     let bind_addr = "127.0.0.1:0".parse().unwrap();
     let remote_addr = "127.0.0.1:9".parse().unwrap();
     let clients_before = read_sys_io_metric("net.active_clients");
-    let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    let connection = moto_sdk::ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
 
     // Not the live TCP count: it also counts earlier tests' sockets that are
@@ -1600,7 +1619,7 @@ fn test_invalid_socket_subchannels_are_rejected() {
     let udp_before = read_sys_io_metric("net.udp_sockets");
     let total_udp_before = read_sys_io_metric("net.total_udp_sockets");
     let total_clients = read_sys_io_metric("net.total_clients");
-    let reject = |mut request: moto_ipc::io_channel::Msg, subchannel_idx| {
+    let reject = |mut request: moto_sdk::ipc::io_channel::Msg, subchannel_idx| {
         request.payload.args_8_mut()[23] = subchannel_idx;
         let command = request.command;
         connection.send(request).unwrap();
@@ -1669,7 +1688,7 @@ fn test_total_clients_is_monotonic() {
     let mut expected_total = read_sys_io_metric("net.total_clients");
 
     for _ in 0..2 {
-        let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+        let connection = moto_sdk::ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
         wait_for_sys_io_metric("net.active_clients", |value| value > clients_before);
         expected_total += 1;
         assert_eq!(read_sys_io_metric("net.total_clients"), expected_total);
@@ -1683,7 +1702,7 @@ fn test_total_clients_is_monotonic() {
 }
 
 fn test_inline_tcp_data_flood_yields_to_other_clients() {
-    use moto_sys_io::api_net;
+    use moto_sdk::sys_io::api_net;
 
     const MIN_MESSAGES: u64 = 4_096;
     const MIN_FULL_OBSERVATIONS: u64 = 128;
@@ -1699,7 +1718,7 @@ fn test_inline_tcp_data_flood_yields_to_other_clients() {
     let clients_before = read_sys_io_metric("net.active_clients");
 
     let flood_connection =
-        Arc::new(moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap());
+        Arc::new(moto_sdk::ipc::io_channel::ClientConnection::connect("sys-io").unwrap());
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
     flood_connection
         .send(api_net::tcp_stream_connect_request(&flood_addr, 0))
@@ -1709,12 +1728,13 @@ fn test_inline_tcp_data_flood_yields_to_other_clients() {
     let flood_handle = response.handle;
     let (flood_peer, _) = flood_listener.accept().unwrap();
 
-    let probe_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    let probe_connection = moto_sdk::ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 2);
 
     let stop = Arc::new(AtomicBool::new(false));
     let messages = Arc::new(AtomicU64::new(0));
     let full_observations = Arc::new(AtomicU64::new(0));
+    let active_producers = Arc::new(AtomicU64::new(0));
     let start = Arc::new(std::sync::Barrier::new(3));
     let mut producers = Vec::new();
     for _ in 0..2 {
@@ -1722,9 +1742,10 @@ fn test_inline_tcp_data_flood_yields_to_other_clients() {
         let stop = stop.clone();
         let messages = messages.clone();
         let full_observations = full_observations.clone();
+        let active_producers = active_producers.clone();
         let start = start.clone();
         producers.push(std::thread::spawn(move || {
-            let mut ack = moto_ipc::io_channel::Msg::new();
+            let mut ack = moto_sdk::ipc::io_channel::Msg::new();
             ack.command = api_net::NetCmd::TcpStreamRxAck as u16;
             ack.handle = flood_handle;
             start.wait();
@@ -1734,6 +1755,9 @@ fn test_inline_tcp_data_flood_yields_to_other_clients() {
                     Ok(()) => {
                         sent += 1;
                         messages.fetch_add(1, Ordering::Relaxed);
+                        if sent == 1 {
+                            active_producers.fetch_add(1, Ordering::Release);
+                        }
                     }
                     Err(moto_rt::Error::NotReady) => {
                         full_observations.fetch_add(1, Ordering::Relaxed);
@@ -1748,15 +1772,18 @@ fn test_inline_tcp_data_flood_yields_to_other_clients() {
     start.wait();
 
     // More than one ring's worth of successful sends proves sys-io is
-    // continuously draining this channel; full observations prove both
-    // producers are keeping pressure on it when the probe starts.
+    // continuously draining this channel; full observations prove ring
+    // pressure. Require each producer to send before the probe starts:
+    // the shared counters alone can be met by one.
     let load_deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while messages.load(Ordering::Relaxed) < MIN_MESSAGES
+    while active_producers.load(Ordering::Acquire) < 2
+        || messages.load(Ordering::Relaxed) < MIN_MESSAGES
         || full_observations.load(Ordering::Relaxed) < MIN_FULL_OBSERVATIONS
     {
         assert!(
             std::time::Instant::now() < load_deadline,
-            "inline-data producers did not saturate the ring: {} messages, {} full observations",
+            "inline-data producers did not saturate the ring: {} active producers, {} messages, {} full observations",
+            active_producers.load(Ordering::Acquire),
             messages.load(Ordering::Relaxed),
             full_observations.load(Ordering::Relaxed)
         );
@@ -1819,10 +1846,10 @@ fn test_inline_tcp_data_flood_yields_to_other_clients() {
 }
 
 fn test_resolved_listener_bind_conflicts() {
-    use moto_sys_io::api_net;
+    use moto_sdk::sys_io::api_net;
 
     let clients_before = read_sys_io_metric("net.active_clients");
-    let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    let connection = moto_sdk::ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
 
     // A port held by a listener must be skipped by ephemeral allocation.
@@ -1866,8 +1893,9 @@ fn test_resolved_listener_bind_conflicts() {
 }
 
 pub fn test_native_net_cancellation() {
-    // Run this first, while test_channel_teardown's assert-empty guarantee
-    // still provides stable baselines for the global sys-io gauges.
+    // Run this first: it waits for exact client-count baselines, which the
+    // std-socket tests below disturb with vdso pool channels shutting down
+    // asynchronously.
     test_total_clients_is_monotonic();
     test_inline_tcp_data_flood_yields_to_other_clients();
     test_resolved_listener_bind_conflicts();
@@ -1914,7 +1942,7 @@ pub fn test_tx_error_with_queued_rx() {
         }
     });
 
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = crate::net_harness::host_channel().await;
         let stream = NativeTcpStream::connect_reserved(
             client.try_reserve().unwrap(),
@@ -1935,8 +1963,8 @@ pub fn test_tx_error_with_queued_rx() {
         // asynchronous write (for example, because the peer has closed).
         // Inject that protocol result after real RX data to deterministically
         // exercise the same ordering seen under HTTP production traffic.
-        let mut tx_error = moto_ipc::io_channel::Msg::new();
-        tx_error.command = moto_sys_io::api_net::NetCmd::TcpStreamTx as u16;
+        let mut tx_error = moto_sdk::ipc::io_channel::Msg::new();
+        tx_error.command = moto_sdk::sys_io::api_net::NetCmd::TcpStreamTx as u16;
         tx_error.handle = stream.handle();
         tx_error.status = moto_rt::E_NOT_CONNECTED;
         stream.process_incoming_msg(tx_error);
@@ -1947,6 +1975,87 @@ pub fn test_tx_error_with_queued_rx() {
     });
     peer.join().unwrap();
     println!("test_tx_error_with_queued_rx() PASS");
+}
+
+pub fn test_outgoing_ports_exclude_listeners() {
+    use std::net::{IpAddr, TcpListener};
+
+    for (ip, wildcard) in [("127.0.0.1", "0.0.0.0"), ("::1", "::")] {
+        let ip: IpAddr = ip.parse().unwrap();
+        for bind_ip in [ip, wildcard.parse().unwrap()] {
+            // Find the current bottom of the free range, then bind that port
+            // explicitly so the listener owns no ephemeral-port reservation.
+            let probe = TcpListener::bind(SocketAddr::new(ip, 0)).unwrap();
+            let destination = probe.local_addr().unwrap();
+            drop(probe);
+            wait_for_sockets_released(destination);
+            let listener = TcpListener::bind(SocketAddr::new(bind_ip, destination.port())).unwrap();
+            exchange_avoiding_listener_port(&listener, destination, destination.port());
+
+            // Also exclude the listening port when connecting elsewhere: the
+            // fix must check listener occupancy, not just unequal endpoints.
+            let other = TcpListener::bind(SocketAddr::new(ip, 0)).unwrap();
+            let other_addr = other.local_addr().unwrap();
+            exchange_avoiding_listener_port(&other, other_addr, destination.port());
+            drop((other, listener));
+            wait_for_sockets_released(other_addr);
+            wait_for_sockets_released(destination);
+        }
+    }
+    println!("test_outgoing_ports_exclude_listeners() PASS");
+}
+
+fn exchange_avoiding_listener_port(
+    listener: &std::net::TcpListener,
+    destination: SocketAddr,
+    forbidden_port: u16,
+) {
+    use std::os::fd::AsRawFd;
+
+    let mut client =
+        std::net::TcpStream::connect_timeout(&destination, Duration::from_secs(2)).unwrap();
+    let local = client.local_addr().unwrap();
+    assert_ne!(
+        local.port(),
+        forbidden_port,
+        "outgoing socket reused a listening port"
+    );
+    assert_ne!(local, destination, "outgoing socket connected to itself");
+    listener.set_nonblocking(true).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let (mut accepted, peer) = loop {
+        match listener.accept() {
+            Ok(accepted) => break accepted,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "listener did not accept the connection"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => panic!("accept failed: {error:?}"),
+        }
+    };
+    assert_eq!(peer, local);
+    accepted.set_nonblocking(false).unwrap();
+    for stream in [&client, &accepted] {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        moto_rt::net::set_linger(stream.as_raw_fd(), Some(Duration::ZERO)).unwrap();
+    }
+    let mut buffer = [0; 8];
+    client.write_all(b"listener").unwrap();
+    accepted.read_exact(&mut buffer).unwrap();
+    assert_eq!(&buffer, b"listener");
+    accepted.write_all(b"accepted").unwrap();
+    client.read_exact(&mut buffer).unwrap();
+    assert_eq!(&buffer, b"accepted");
+    drop((client, accepted));
+    wait_for_connection_released(local, destination);
 }
 
 fn test_connect_reset_is_not_a_timeout() {
@@ -2060,8 +2169,8 @@ fn test_simultaneous_open() {
 }
 
 pub fn test_loopback_peer_time_wait() {
-    use moto_sys_io::api_net::TcpState;
-    use moto_sys_io::stats::TcpProtocolState;
+    use moto_sdk::sys_io::api_net::TcpState;
+    use moto_sdk::sys_io::stats::TcpProtocolState;
     use std::net::{Shutdown, TcpListener, TcpStream};
     use std::os::fd::AsRawFd;
 
@@ -2111,9 +2220,197 @@ pub fn test_loopback_peer_time_wait() {
     println!("test_loopback_peer_time_wait() PASS");
 }
 
+/// The child half of `test_time_wait_releases_client_channel`: one loopback
+/// connection whose server end closes the way an HTTP/1.1 server does
+/// (respond, shut down writing, read the peer's EOF, drop), so that end is in
+/// TIME-WAIT when this process exits. Prints the server's address.
+pub fn time_wait_child() {
+    use std::net::{Shutdown, TcpListener, TcpStream};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mut client = TcpStream::connect(addr).unwrap();
+    let (mut server, _) = listener.accept().unwrap();
+    // Each end sends a byte: a close that never sent one is a reset.
+    client.write_all(b"x").unwrap();
+    let mut byte = [0_u8];
+    server.read_exact(&mut byte).unwrap();
+    server.write_all(b"y").unwrap();
+    server.shutdown(Shutdown::Write).unwrap();
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).unwrap();
+    assert_eq!(response, b"y");
+    drop(client);
+    assert_eq!(server.read(&mut byte).unwrap(), 0);
+    drop(server);
+    println!("{addr}");
+}
+
+/// Waits until `addr`, a socket retired to TIME-WAIT, is gone, so that it
+/// cannot move later gauge checks.
+fn wait_for_time_wait_end(addr: SocketAddr) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !sockets_on_addr_released(addr) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "TIME-WAIT on {addr} did not end"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn in_time_wait(addr: SocketAddr) -> bool {
+    read_tcp_socket_stats().iter().any(|socket| {
+        socket.local_addr() == Some(addr)
+            && socket.protocol_state == moto_sdk::sys_io::stats::TcpProtocolState::TimeWait
+    })
+}
+
+/// A client's socket in TIME-WAIT must not keep its channel: the channel maps
+/// 512 KiB of pages shared with the client, and a server's closed connections
+/// held them for ten seconds after the server was gone.
+pub fn test_time_wait_releases_client_channel() {
+    use moto_sdk::sys_io::stats::TcpProtocolState;
+
+    // An isolated baseline: a departed client's closing socket keeps its
+    // channel until TIME-WAIT, so let any that earlier tests left get there.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while read_tcp_socket_stats().iter().any(|socket| {
+        matches!(
+            socket.protocol_state,
+            TcpProtocolState::FinWait1
+                | TcpProtocolState::FinWait2
+                | TcpProtocolState::Closing
+                | TcpProtocolState::LastAck
+        )
+    }) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "sockets still closing"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let channels_before = read_sys_io_metric("net.channels");
+
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("tcp-time-wait-child")
+        .output()
+        .unwrap();
+    assert!(child.status.success());
+    let addr: SocketAddr = String::from_utf8(child.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    wait_for_sys_io_metric("net.channels", |value| value == channels_before);
+    // Checked after the channel went: TIME-WAIT ending would release it too.
+    assert!(in_time_wait(addr), "{addr} left TIME-WAIT");
+    wait_for_time_wait_end(addr);
+    println!("test_time_wait_releases_client_channel() PASS");
+}
+
+fn recv_raw_net_response_to(
+    connection: &moto_sdk::ipc::io_channel::ClientConnection,
+    command: moto_sdk::sys_io::api_net::NetCmd,
+) -> moto_sdk::ipc::io_channel::Msg {
+    use moto_sdk::sys_io::api_net::NetCmd;
+
+    loop {
+        let msg = recv_raw_net_response(connection);
+        if msg.command != NetCmd::EvtTcpStreamStateChanged as u16 {
+            assert_eq!(msg.command, command as u16);
+            return msg;
+        }
+    }
+}
+
+/// Requests naming a TCP socket retired to TIME-WAIT, which has let go of its
+/// client's channel, fail instead of reaching for that channel: the owner's
+/// second close, and UDP requests on the TCP socket from any client.
+pub fn test_requests_to_retired_tcp_socket() {
+    use moto_sdk::ipc::io_channel::{ClientConnection, Msg};
+    use moto_sdk::sys_io::api_net::{self, NetCmd};
+
+    let close = |handle| {
+        let mut msg = Msg::new();
+        msg.command = NetCmd::TcpStreamClose as u16;
+        msg.handle = handle;
+        msg
+    };
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener_addr = listener.local_addr().unwrap();
+    let owner = ClientConnection::connect("sys-io").unwrap();
+    owner
+        .send(api_net::tcp_stream_connect_request(&listener_addr, 0))
+        .unwrap();
+    let connect_resp = recv_raw_net_response_to(&owner, NetCmd::TcpStreamConnect);
+    connect_resp.status().unwrap();
+    let handle = connect_resp.handle;
+    let addr = api_net::get_socket_addr(&connect_resp.payload);
+    let (mut peer, _) = listener.accept().unwrap();
+
+    // A byte out, or the close would be a reset.
+    let page = owner.alloc_page(api_net::io_subchannel_mask(0)).unwrap();
+    page.bytes_mut()[0] = b'x';
+    owner
+        .send(api_net::tcp_stream_tx_msg(handle, page, 1, 0))
+        .unwrap();
+    let mut byte = [0_u8];
+    peer.read_exact(&mut byte).unwrap();
+
+    // With a positive linger, the close is answered once its handshake is done.
+    let mut linger = Msg::new();
+    linger.command = NetCmd::TcpStreamSetOption as u16;
+    linger.handle = handle;
+    linger.payload.args_64_mut()[0] = api_net::TCP_OPTION_LINGER;
+    linger.payload.args_32_mut()[2] = 1;
+    linger.payload.args_32_mut()[3] = 5;
+    owner.send(linger).unwrap();
+    recv_raw_net_response_to(&owner, NetCmd::TcpStreamSetOption)
+        .status()
+        .unwrap();
+    owner.send(close(handle)).unwrap();
+    assert_eq!(peer.read(&mut byte).unwrap(), 0);
+    // Not a close: one that never sent a byte would reset the connection.
+    peer.shutdown(std::net::Shutdown::Write).unwrap();
+    recv_raw_net_response_to(&owner, NetCmd::TcpStreamClose)
+        .status()
+        .unwrap();
+    assert!(in_time_wait(addr), "{addr} is not in TIME-WAIT");
+
+    owner.send(close(handle)).unwrap();
+    assert_eq!(
+        recv_raw_net_response_to(&owner, NetCmd::TcpStreamClose).status,
+        moto_rt::E_NOT_FOUND
+    );
+
+    let other = ClientConnection::connect("sys-io").unwrap();
+    for (connection, expected) in [
+        (&owner, moto_rt::E_INVALID_DATA),
+        (&other, moto_rt::E_NOT_FOUND),
+    ] {
+        let mut msg = Msg::new();
+        msg.command = NetCmd::UdpSocketGetOption as u16;
+        msg.handle = handle;
+        msg.payload.args_64_mut()[0] = api_net::UDP_OPTION_TTL;
+        connection.send(msg).unwrap();
+        assert_eq!(
+            recv_raw_net_response_to(connection, NetCmd::UdpSocketGetOption).status,
+            expected
+        );
+    }
+
+    drop((owner, other, peer, listener));
+    wait_for_sockets_released(listener_addr);
+    wait_for_time_wait_end(addr);
+    println!("test_requests_to_retired_tcp_socket() PASS");
+}
+
 fn test_tcp_socket_state_transitions() {
-    use moto_sys_io::api_net::TcpState;
-    use moto_sys_io::stats::TcpProtocolState;
+    use moto_sdk::sys_io::api_net::TcpState;
+    use moto_sdk::sys_io::stats::TcpProtocolState;
     use std::os::fd::AsRawFd;
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2173,63 +2470,6 @@ fn test_tcp_socket_state_transitions() {
     wait_for_sockets_released(client_addr);
     wait_for_sockets_released(listener_addr);
     println!("test_tcp_socket_state_transitions() PASS");
-}
-
-// Stage-E channel teardown (design 5.5): churn more concurrent connections
-// than one channel holds (api_net::IO_SUBCHANNELS == 4) across several rounds,
-// close everything, then assert the net runtime tore every channel down.
-// Before stage E, NetChannel::drop was a todo!() and channels were pooled
-// forever, so this leak check could never pass.
-fn test_channel_teardown() {
-    use std::os::fd::AsRawFd;
-
-    const N: usize = 12;
-    const ROUNDS: usize = 3;
-    let addr = "127.0.0.1:3340";
-    let listener = Arc::new(std::net::TcpListener::bind(addr).unwrap());
-
-    for _round in 0..ROUNDS {
-        let acceptor_listener = listener.clone();
-        let acceptor = std::thread::spawn(move || {
-            let mut servers = Vec::with_capacity(N);
-            for _ in 0..N {
-                let (mut server, _) = acceptor_listener.accept().unwrap();
-                let mut byte = [0_u8; 1];
-                server.read_exact(&mut byte).unwrap();
-                server.write_all(&byte).unwrap();
-                // This test exercises channel reclamation, not graceful TCP
-                // retention. Abort its finished streams so their control
-                // blocks cannot consume later tests' orphan budget.
-                moto_rt::net::set_linger(server.as_raw_fd(), Some(Duration::ZERO)).unwrap();
-                servers.push(server);
-            }
-            // Every accepted stream drops here, on this (non-runtime) thread.
-        });
-
-        let mut clients = Vec::with_capacity(N);
-        for i in 0..N {
-            let mut client = std::net::TcpStream::connect(addr).unwrap();
-            client.write_all(&[i as u8]).unwrap();
-            let mut byte = [0_u8; 1];
-            client.read_exact(&mut byte).unwrap();
-            assert_eq!(byte[0], i as u8);
-            moto_rt::net::set_linger(client.as_raw_fd(), Some(Duration::ZERO)).unwrap();
-            clients.push(client);
-        }
-        acceptor.join().unwrap();
-        drop(clients); // Close every client socket.
-    }
-
-    drop(listener); // Close the listener and release its pending accepts.
-
-    // internal_helper(0, 0, ..) routes to NET.assert_empty(), which sleeps
-    // briefly and then panics on any surviving channel, listener or socket --
-    // so a clean return proves teardown completed.
-    moto_rt::internal_helper(0, 0, 0, 0, 0, 0);
-
-    std::thread::sleep(Duration::from_millis(10));
-    println!("test_channel_teardown() PASS");
-    std::thread::sleep(Duration::from_millis(10));
 }
 
 fn handle_client(mut stream: std::net::TcpStream, stop: Arc<AtomicBool>) {
@@ -2426,8 +2666,8 @@ fn test_tcp_loopback() {
         wait_for_tcp_socket_state(
             client_addr,
             Some("127.0.0.1:3333".parse().unwrap()),
-            moto_sys_io::api_net::TcpState::Closed,
-            moto_sys_io::stats::TcpProtocolState::TimeWait,
+            moto_sdk::sys_io::api_net::TcpState::Closed,
+            moto_sdk::sys_io::stats::TcpProtocolState::TimeWait,
         );
     }
     std::thread::sleep(Duration::from_millis(100));
@@ -2542,16 +2782,16 @@ fn test_unsupported_tcp_options_return_errors() {
 /// connect and bind requests themselves (payload bytes 18/19) and read
 /// back effective -- rounded up to the wire's power-of-two granularity.
 fn test_native_buffer_options() {
-    use moto_io::net::tcp::TcpSocketOptions;
+    use moto_sdk::io::net::tcp::TcpSocketOptions;
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let accept_thread = std::thread::spawn(move || listener.accept().unwrap().0);
 
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = crate::net_harness::host_channel().await;
 
-        let stream = moto_io::net::tcp::TcpStream::connect_reserved(
+        let stream = moto_sdk::io::net::tcp::TcpStream::connect_reserved(
             client.try_reserve().unwrap(),
             &addr,
             None,
@@ -2569,7 +2809,7 @@ fn test_native_buffer_options() {
         assert_eq!(stream.buffer_size_async(false).await.unwrap(), 128 * 1024);
         drop(stream);
 
-        let native_listener = moto_io::net::tcp::TcpListener::bind_reserved(
+        let native_listener = moto_sdk::io::net::tcp::TcpListener::bind_reserved(
             client.try_reserve().unwrap(),
             &"127.0.0.1:0".parse().unwrap(),
             None,
@@ -2618,7 +2858,7 @@ async fn assert_remote_options_not_connected(stream: &NativeTcpStream) {
 fn test_unconnected_native_options_return_errors() {
     let closed_addr = "127.0.0.1:1".parse().unwrap();
 
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = crate::net_harness::host_channel().await;
         let stream = NativeTcpStream::connect_nonblocking_reserved(
             client.try_reserve().unwrap(),
@@ -2632,12 +2872,12 @@ fn test_unconnected_native_options_return_errors() {
         // queued its request, so this is deterministically pre-response.
         assert_eq!(
             stream.tcp_state(),
-            moto_sys_io::api_net::TcpState::Connecting
+            moto_sdk::sys_io::api_net::TcpState::Connecting
         );
         assert_remote_options_not_connected(&stream).await;
 
         crate::net_harness::wait_until("refused native connect", || {
-            stream.tcp_state() == moto_sys_io::api_net::TcpState::Closed
+            stream.tcp_state() == moto_sdk::sys_io::api_net::TcpState::Closed
         })
         .await;
         assert_remote_options_not_connected(&stream).await;
@@ -4068,21 +4308,22 @@ fn test_backlog_saturation_liveness() {
 /// Established sockets waiting for accept are independently bounded even
 /// when the listener is driven through sys-io directly, with no vDSO backlog.
 fn test_completed_accept_backlog_is_bounded() {
-    use moto_sys_io::api_net;
+    use moto_sdk::sys_io::api_net;
 
     let per_listener_cap = completed_backlog_cap();
 
     let backlog_before = read_sys_io_metric("net.tcp.accept_backlog");
     let overflow_before = read_sys_io_metric("net.tcp.accept_overflow");
     let clients_before = read_sys_io_metric("net.active_clients");
-    let listener_connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+    let listener_connection =
+        moto_sdk::ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
     wait_for_sys_io_metric("net.active_clients", |value| value == clients_before + 1);
 
     // The bound counts sockets, not bytes: the smallest encodable rings on
     // both ends keep the connections within a small guest's memory. A std
     // stream would take the default rings, so the held clients are raw.
     const RING_CODE: u8 = api_net::tcp_buf_size_to_code(32 * 1024);
-    let small_rings = |msg: &mut moto_ipc::io_channel::Msg| {
+    let small_rings = |msg: &mut moto_sdk::ipc::io_channel::Msg| {
         msg.payload.args_8_mut()[api_net::TCP_BUF_SIZE_POS_RX] = RING_CODE;
         msg.payload.args_8_mut()[api_net::TCP_BUF_SIZE_POS_TX] = RING_CODE;
     };
@@ -4326,14 +4567,17 @@ pub fn run_all_tests() {
     test_device_rx_validation();
     test_neighbor_admission();
     test_unresolved_neighbor_fails_connect();
-    test_channel_teardown();
     test_completed_accept_backlog_is_bounded();
     test_backlog_saturation_liveness();
-    // Runs while teardown leaves the ephemeral port space quiet.
+    // Needs a quiet ephemeral port space: its self-connect relies on being
+    // handed the port it just freed.
     test_simultaneous_open();
+    test_outgoing_ports_exclude_listeners();
     test_native_net_cancellation();
     test_connect_reset_is_not_a_timeout();
     test_loopback_peer_time_wait();
+    test_time_wait_releases_client_channel();
+    test_requests_to_retired_tcp_socket();
     test_tcp_socket_state_transitions();
     test_half_open_accounting();
     test_backlog_growth_and_shrink();

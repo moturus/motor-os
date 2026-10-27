@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Motor FS, the journaling filesystem of Motor OS; the image layout; and per-role permissions.">
+<meta name="description" content="Motor OS filesystem, the journaling filesystem of Motor OS; the image layout; and per-role permissions.">
 <meta name="theme-color" content="#0a0a0a">
 <title>Filesystem | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
@@ -446,11 +446,11 @@ a.card h3 { color: var(--accent); }
 <article class="content">
 <div class="eyebrow">System</div>
 <h1>Filesystem</h1>
-<p class="lead">Motor FS is the default filesystem since June 2026. It is a journaling
+<p class="lead">The Motor OS filesystem is the default filesystem since June 2026. It is a journaling
 filesystem served by sys-io, with three-role permissions on every entry, advisory locks,
 and no notion of users, links, or numeric Unix modes.</p>
 
-<h2>Motor FS</h2>
+<h2>Motor OS filesystem</h2>
 <ul>
   <li><strong>Journaling.</strong> Writes are batched into transactions, committed to an
   on-disk redo log, and then checkpointed into the main block area. The design assumes
@@ -472,7 +472,7 @@ and no notion of users, links, or numeric Unix modes.</p>
   ACLs, sticky directories, numeric modes, and recursive chmod.</li>
 </ul>
 <p>The implementation is <code>src/sys/lib/motor-fs</code> (about 10,000 lines) on top
-of <code>async-fs</code>, an abstraction that also runs on a Linux host so that images
+of moto-sdk's <code>async_fs</code>, an abstraction that also runs on a Linux host so that images
 can be built and tested there. Rust's <code>std::fs</code> works as expected on top of it,
 with the permission model below showing through <code>Permissions</code>.</p>
 
@@ -494,7 +494,7 @@ with the permission model below showing through <code>Permissions</code>.</p>
 </div>
 
 <h2>Permissions</h2>
-<p>A Motor FS mode is three permission triplets in <strong>System, Interactive, None</strong>
+<p>A Motor OS filesystem mode is three permission triplets in <strong>System, Interactive, None</strong>
 order; <code>rw-r-----</code> gives System read and write, Interactive read, and None
 nothing. Each triplet is one of <code>rwx</code>, <code>rw-</code>, <code>r-x</code>,
 <code>r--</code>, or <code>---</code>, and permissions are monotonic across roles:</p>
@@ -534,17 +534,15 @@ for two secrets. Smaller images omit trees; they never relax a mode. The main ru
   <tr><td><code>/user/tmp</code></td><td><code>rwxrwx---</code></td><td><code>rw-rw----</code></td><td><code>rwxrwx---</code></td><td><code>r-xr-x---</code></td></tr>
   <tr><td><code>/none/cfg</code>, <code>/none/tmp</code>, <code>/devtools/lorry/none</code></td><td><code>rwxrwxrwx</code></td><td><code>rw-rw-rw-</code></td><td><code>rwxrwxrwx</code></td><td><code>r-xr-xr-x</code></td></tr>
   <tr><td><code>/none</code></td><td><code>rwxrwxr-x</code></td><td><code>rw-rw-r--</code></td><td><code>rwxrwxr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
-  <tr><td><code>/user</code>, <code>/user/bin</code>, <code>/devtools/src</code></td><td><code>rwxrwxr-x</code></td><td><code>rw-rw-r--</code></td><td><code>rwxrwxr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
+  <tr><td><code>/user</code>, <code>/user/bin</code>, <code>/devtools</code></td><td><code>rwxrwxr-x</code></td><td><code>rw-rw-r--</code></td><td><code>rwxrwxr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
   <tr><td><code>/user/cfg</code>, <code>/devtools/lorry/user</code></td><td><code>rwxrwx---</code></td><td><code>rw-rw----</code></td><td><code>rwxrwx---</code></td><td><code>r-xr-x---</code></td></tr>
-  <tr><td><code>/devtools/bin</code></td><td><code>rwxr-xr-x</code></td><td><code>rw-r--r--</code></td><td><code>rwxrwxr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
 </table>
 </div>
 <p><code>/system/cfg/sshd.toml</code> and <code>/system/cfg/ssl/ssl-key.pem</code> are
 <code>rw-r-----</code>: readable by the Interactive services that need them, invisible to
 None. With the initial modes, Interactive cannot create a new top-level directory or
-replace <code>/system</code>; it can edit a launcher script in <code>/devtools/bin</code>
-in place but not add or remove entries there; only System can create or rotate files in
-<code>/system/logs</code>.</p>
+replace <code>/system</code>; it owns <code>/devtools</code>, so a user can install a newer
+toolchain there; only System can create or rotate files in <code>/system/logs</code>.</p>
 <p>The <a href="imager.html">imager</a> classifies each source file by its host execute bit (a host-executable file
 must be a <code>#!</code> script or an ELF executable, anything else is rejected), resolves
 every mode before it creates the image, and creates non-writable files through a
@@ -570,8 +568,8 @@ not parse.</p>
   <code>CAP_FS_WRITE</code>. Only System may change <code>/</code>. Entry-ID changes
   need parent <code>w</code> but not <code>x</code>; pathname lookup still needs
   <code>x</code>. A file's own <code>w</code> still permits editing its contents
-  under a protected parent. Interactive can write to <code>/devtools/bin/www</code>
-  in place but cannot chmod it.</li>
+  under a protected parent: a file Interactive may write, in a directory whose
+  <code>w</code> it has dropped, can be edited but not chmodded.</li>
   <li>An SFTP upload onto an existing file replaces its contents in place and keeps
   its installed mode: OPEN's mode is a creation hint. An upload whose mode excludes
   a lower role that can currently read the file first takes that role's access

@@ -1,6 +1,6 @@
 # Helix on Motor OS
 
-The developer image includes the Motor port of Helix 25.07.1, native
+The developer image includes the Motor OS port of Helix 25.07.1, native
 rust-analyzer, and native rustfmt. Helix runs on the console, over SSH, and
 inside an rmux pane. The base and standard images do not include it.
 
@@ -33,7 +33,7 @@ finish before the project and standard-library sources have loaded.
 
 Changing the example's `answer` binding from `u32` to `bool` and saving
 produces a compiler diagnostic; restoring `u32` and saving clears it.
-Navigation on `rt_version` opens the installed Motor standard library.
+Navigation on `rt_version` opens the installed Motor OS standard library.
 
 Same-crate definitions and module navigation also work in a fresh checkout
 with explicit workspace members, including `src/sys/tools/sysbox` in Motor
@@ -65,13 +65,13 @@ needs the native settings copied into its own `helix/languages.toml`.
 Helix starts `/devtools/rust/bin/rust-analyzer` directly over stdio. Its
 environment selects `/devtools/bin/lorry` through `CARGO` and
 `/devtools/rust/bin/rustfmt` through `RUSTFMT`, and includes `/devtools/bin`
-in `PATH`. Motor gives it the role's `TMPDIR`. These belong in the server's
+in `PATH`. Motor OS gives it the role's `TMPDIR`. These belong in the server's
 own environment: `cargo.extraEnv` only affects its children and cannot select
 the metadata/check executable.
 
 `MOTURUS_STDIO_NO_TERMINAL=true` in the server's launch environment is
 required to keep its terminal-input relay from taking Helix's keyboard
-stream. Motor consumes this instruction before the server starts; see
+stream. Motor OS consumes this instruction before the server starts; see
 [foreground forwarding](tui.md#foreground-forwarding).
 
 The server targets `x86_64-unknown-motor`, uses the installed sysroot at
@@ -80,10 +80,10 @@ uses Lorry's Cargo-compatible metadata and check commands.
 Build scripts are enabled without a rustc wrapper; procedural-macro
 expansion in the analyzer is disabled. The client reports file changes.
 Lorry's compiler-side procedural-macro support is separate. General server
-configuration is documented in [build-rustc.md](build-rustc.md#native-motor-rust-analyzer).
+configuration is documented in [build-rustc.md](build-rustc.md#native-motor-os-rust-analyzer).
 
 The build-script pass uses a complete `check --workspace --all-targets
---keep-going --compile-time-deps` override for Motor, writing beneath
+--keep-going --compile-time-deps` override for Motor OS, writing beneath
 `target/rust-analyzer/lorry`. It runs member scripts and builds executable
 procedural macros and their dependencies while skipping ordinary application
 compilation. Ordinary projects keep workspace-wide checks on save.
@@ -112,12 +112,12 @@ The normal metadata and save-check commands use the configured settings.
 The Motor OS checkout's `.helix/languages.toml` sets `check.workspace = false`
 because `src/sys` has member-specific compiler requirements. This exception
 belongs to that checkout. Saving a file outside its members, including files
-under `src/third_party`, starts no member check. The editable `moto-io`
-member has a build script. Without Cargo's cache, Lorry runs it only with a
-rule in your own configuration, under the checkout's `src/sys` workspace
-table, for example
-`[workspaces."/home/me/motor-os/src/sys".policy.rules.moto-io]` with
-`action = "allow"`, `source = "path"`, `name = "moto-io"`, and
+under `src/third_party`, starts no member check. The editable member
+`moto-netstack` has a build script. Without Cargo's cache,
+Lorry runs it only with a rule in your own configuration, under the
+checkout's `src/sys` workspace table, for example
+`[workspaces."/home/me/motor-os/src/sys".policy.rules.moto-netstack]` with
+`action = "allow"`, `source = "path"`, `name = "moto-netstack"`, and
 `allow-build-script = true`. Commands started at `src/sys` do not read member-local Cargo configuration;
 the `tokio_unstable` settings in `motor-fs` and `tokio-tests` therefore do not
 apply to those root-started editor checks. Run their real builds from their
@@ -140,7 +140,7 @@ unformatted source. Repair the source and format or save again.
 
 rustfmt searches the source directory and its ancestors for `rustfmt.toml`
 or `.rustfmt.toml`, then `/user`, then `/user/cfg/rustfmt`. It ignores
-`HOME` and `XDG_CONFIG_HOME` on Motor. This formatter lookup is separate
+`HOME` and `XDG_CONFIG_HOME` on Motor OS. This formatter lookup is separate
 from Helix's own configuration lookup above.
 
 ## Port behavior
@@ -159,12 +159,12 @@ resolves parsers through tree-house's static `LanguageFn` constructor.
 Unknown grammars report a missing parser. Adding or updating a grammar
 requires a fork update and rebuild; builds and tests never download grammars.
 
-Motor uses keyboard input and true color without Unix terminfo or signal
+Motor OS uses keyboard input and true color without Unix terminfo or signal
 hooks. Ctrl+C reaches the editor as an input event. Normal exit and startup
 failure restore terminal modes and the alternate screen. Mouse input is
 disabled by default. Suspend/job control, external URL launching, system
 clipboard access, OSC 52, and dynamic grammar loading are unavailable;
-ordinary internal registers work. Motor builds exclude Helix's Git backend
+ordinary internal registers work. Motor OS builds exclude Helix's Git backend
 and its dependencies even when the default `git` feature is enabled.
 
 Local-file URI conversion is centralized in the fork's
@@ -185,26 +185,24 @@ and hardlinks.
 
 ## Build and regression coverage
 
-Helix is a userspace add-on, not a part of the toolchain.
+Helix is an external source, not a part of the toolchain.
 [`src/build-motor-os.sh`](../src/build-motor-os.sh) declares the Helix fork
 and the branch to follow; no commit is declared. Dependency patches and
-grammar revisions live in that fork. After the toolchain and its assembly are
-complete, the [producer](build-motor-os.md) updates the checkout in
-`$MOTORH/helix`, explicitly fetches locked Cargo dependencies, then builds
-with the Motor compiler using `--locked` and `--offline`. The built commit
-is recorded in the assembly's `ADDON-helix` file, and Helix is rebuilt alone
-when the branch head differs; it is no part of the assembly's key, manifest,
-or validation. The image contains only the binary, queries, themes, and
+grammar revisions live in that fork. The [build](build-motor-os.md) updates
+the checkout in `external-sources/helix`, explicitly fetches locked Cargo
+dependencies, then builds with the Motor OS compiler using `--locked` and
+`--offline`. Every run of the build builds it again; Cargo rebuilds only what
+changed. The image contains only the binary, queries, themes, and
 tutor; raw and stripped binaries undergo ELF checks.
 
-The Motor `parking_lot` fork parks idle Tokio workers with `moto_rt::Futex`.
+The Motor OS `parking_lot` fork parks idle Tokio workers with `moto_rt::Futex`.
 Its generic fallback used to spin, causing editor and file-picker latency.
 [`rt_idle.rs`](../src/sys/tests/tokio-tests/src/rt_idle.rs) guards idle CPU
 consumption. The framed child-pipe regression in
 [`process.rs`](../src/sys/tests/tokio-tests/src/process.rs) guards writable
 readiness after partial writes, which previously stalled LSP initialization.
 
-Salsa cancellation uses `resume_unwind`. The standard Motor sysroot supplies
+Salsa cancellation uses `resume_unwind`. The standard Motor OS sysroot supplies
 real unwinding; an abort-only analyzer exits on ordinary cancellation.
 The former private analyzer library has been retired. The
 [toolchain runtime contract](toolchain.md#rust-runtime-and-native-formatting)
@@ -215,7 +213,7 @@ editing, saves, terminal restoration, resize, rmux, native semantic requests,
 formatting, and clean server shutdown. The LSP cases include empty editor
 startup, opening a file afterward, an unprepared virtual workspace with
 same-file and module definitions, edits during loading, paths with spaces,
-Motor std navigation, and formatter-error recovery. The readiness helper's
+Motor OS std navigation, and formatter-error recovery. The readiness helper's
 host tests guard waiting for source scans and indexing before semantic
 assertions. These tests run through `src/tests/full-test.sh`; developer
 coverage is reached with `src/tests/full-test-dev.sh --release`.

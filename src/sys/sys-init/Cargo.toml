@@ -11,8 +11,8 @@ path = "src/main.rs"
 test = false
 
 [target.'cfg(target_os = "motor")'.dependencies]
+moto-sdk     = { path = "../lib/moto-sdk"    }
 moto-sys     = { path = "../lib/moto-sys"    }
-moto-log     = { path = "../lib/moto-log"    }
 
 log = "=0.4.28"
 shell-words = "1.1"

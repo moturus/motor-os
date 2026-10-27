@@ -1,7 +1,7 @@
 //! One submitter owns every filesystem request on a block device's queue.
 use super::stats;
 use futures::{StreamExt, stream::FuturesUnordered};
-use moto_async::{channel, oneshot};
+use moto_sdk::async_runtime::{channel, oneshot};
 use std::cell::RefCell;
 use std::future::poll_fn;
 use std::io::{Error, ErrorKind, Result};

@@ -26,12 +26,19 @@ mod fsbench;
 mod futex_stress;
 mod icmp;
 mod io_channel;
+mod ip_device;
+mod ip_device_admission;
+mod ip_device_live;
+mod ip_device_plain;
+mod ip_device_queues;
+mod ip_device_udp;
 mod ipc_service;
 mod kernel_log;
 mod logging;
 mod mem_blocks;
 mod mmio;
 mod moto_async;
+mod mounts;
 mod mpmc;
 mod net_caps;
 mod net_driver;
@@ -40,6 +47,7 @@ mod poll;
 mod pressure;
 mod process_permissions;
 mod rush_caps;
+mod sparse;
 mod spawn_wait_kill;
 mod stats;
 mod stdio;
@@ -75,6 +83,9 @@ mod vsock;
 mod vsock_outgoing;
 mod wait_set;
 mod wakebench;
+mod wireguard;
+mod wireguard_bench;
+mod wireguard_load;
 mod xor_server;
 
 use std::{
@@ -97,11 +108,12 @@ pub(crate) fn none_temp_path(name: &str) -> std::path::PathBuf {
 
 pub(crate) fn set_directory_access(
     path: &std::path::Path,
-    access: moto_io::fs::AccessPermissions,
+    access: moto_sdk::io::fs::AccessPermissions,
 ) -> moto_rt::Result<()> {
-    ::moto_async::LocalRuntime::new().block_on(async {
-        let client = moto_io::fs::FsClient::connect()?;
-        let (id, moto_io::fs::EntryKind::Directory) = client.stat(path.to_str().unwrap()).await?
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+        let client = moto_sdk::io::fs::FsClient::connect()?;
+        let (id, moto_sdk::io::fs::EntryKind::Directory) =
+            client.stat(path.to_str().unwrap()).await?
         else {
             return Err(moto_rt::Error::NotADirectory);
         };
@@ -110,15 +122,15 @@ pub(crate) fn set_directory_access(
 }
 
 /// A kernel metric by its `stats get 1` name, for one scope: a pid, or
-/// `moto_stats::provider::KERNEL` for the kernel's own counters.
+/// `moto_sdk::stats::provider::KERNEL` for the kernel's own counters.
 pub(crate) fn kernel_metric(name: &str, scope: u64) -> u64 {
-    let kernel = moto_stats::Collector::kernel();
-    let metric = moto_stats::Collector::describe(&kernel)
+    let kernel = moto_sdk::stats::Collector::kernel();
+    let metric = moto_sdk::stats::Collector::describe(&kernel)
         .unwrap()
         .into_iter()
         .find(|m| m.name == name)
         .unwrap_or_else(|| panic!("no kernel metric {name}"));
-    moto_stats::Collector::read(&kernel, metric.id, scope).unwrap()
+    moto_sdk::stats::Collector::read(&kernel, metric.id, scope).unwrap()
 }
 
 pub(crate) fn ensure_temp_dir() {
@@ -265,7 +277,7 @@ fn test_halt_poll_metrics() {
         return;
     }
     const ITERS: u32 = 2000;
-    let scope = moto_stats::provider::KERNEL;
+    let scope = moto_sdk::stats::provider::KERNEL;
     let hits_0 = kernel_metric("sched.poll_hit", scope);
     let elided_0 = kernel_metric("sched.ipi_elided", scope);
 
@@ -502,7 +514,7 @@ fn test_random_bytes() {
 }
 
 fn test_ipc() {
-    use moto_ipc::sync::*;
+    use moto_sdk::ipc::sync::*;
 
     let mut xor_service = subcommand::spawn();
     xor_service.start_xor_service();
@@ -808,6 +820,34 @@ fn test_invalid_memory_map_options() {
         ),
         Err(moto_rt::E_NOT_ALLOWED)
     );
+
+    // Zero pages are refused at the entry, before any path can build an
+    // empty segment, which was a kernel panic. The wrapper asserts a
+    // non-zero count, so these go through the raw syscall.
+    for flags in [
+        0,
+        SysMem::F_READABLE | SysMem::F_WRITABLE,
+        SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_LAZY,
+        SysMem::F_SHARE_SELF | SysMem::F_READABLE | SysMem::F_WRITABLE,
+    ] {
+        let nr = (u64::from(syscalls::SYS_MEM) << 56)
+            | (u64::from(SysMem::OP_MAP) << 48)
+            | (u64::from(flags) << 16);
+        assert_eq!(
+            syscalls::do_syscall(
+                nr,
+                SysHandle::SELF.as_u64(),
+                u64::MAX,
+                u64::MAX,
+                sys_mem::PAGE_SIZE_SMALL,
+                0,
+                0
+            )
+            .error_code(),
+            moto_rt::E_INVALID_ARGUMENT,
+            "flags 0x{flags:x}"
+        );
+    }
 
     println!("test_invalid_memory_map_options PASS");
 }
@@ -1290,8 +1330,36 @@ pub(crate) fn wait_child(handle: u64) -> moto_rt::Result<i32> {
     status
 }
 
+// Global sizing hint; remove it before dispatching positional subcommands.
+fn take_host_cpus(args: &mut Vec<String>) -> Result<Option<usize>, &'static str> {
+    let mut host_cpus = None;
+    let mut index = 1;
+    while index < args.len() {
+        let Some(value) = args[index].strip_prefix("--host-cpus=") else {
+            index += 1;
+            continue;
+        };
+        if host_cpus.is_some() {
+            return Err("duplicate --host-cpus");
+        }
+        let count = value
+            .parse::<usize>()
+            .ok()
+            .filter(|count| *count != 0)
+            .ok_or("--host-cpus requires a positive CPU count");
+        host_cpus = Some(count?);
+        args.remove(index);
+    }
+    Ok(host_cpus)
+}
+
 fn main() {
     let mut args: Vec<String> = std::env::args().collect();
+    let host_cpus = take_host_cpus(&mut args).unwrap_or_else(|error| {
+        eprintln!("systest: {error}");
+        std::process::exit(2);
+    });
+    let available_cpus = (moto_sys::num_cpus() as usize).min(host_cpus.unwrap_or(usize::MAX));
     if environment::run_command(&args) {
         return;
     }
@@ -1307,6 +1375,26 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "cold-spawn" {
         cold_spawn::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "mounts" {
+        mounts::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "mounts-none" {
+        mounts::none_role();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-memfs-pressure" {
+        pressure::test_memfs_reclamation();
+        return;
+    }
+    if args.len() == 2 && args[1] == "paging-soak" {
+        cold_spawn::run_soak_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "sparse-soak" {
+        sparse::run_soak_tests();
         return;
     }
     #[cfg(debug_assertions)]
@@ -1403,6 +1491,10 @@ fn main() {
         io_channel::test_listener_cleanup();
         return;
     }
+    if args.len() == 2 && args[1] == "ipc-canceled-page-send" {
+        io_channel::test_canceled_page_send();
+        return;
+    }
     if args.len() == 2 && args[1] == "wait-set-tests" {
         wait_set::run_all_tests();
         return;
@@ -1412,6 +1504,10 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "admission-class-tests" {
         admission::test_process_classes();
+        return;
+    }
+    if args.len() == 2 && args[1] == "sparse-tests" {
+        sparse::run_all_tests();
         return;
     }
     if args.len() == 2 && args[1] == "system-caps-tests" {
@@ -1446,7 +1542,7 @@ fn main() {
         return;
     }
     if args.len() >= 2 && args[1] == "futex-stress" {
-        futex_stress::run(&args);
+        futex_stress::run(&args, available_cpus);
         return;
     }
     if args.len() >= 2 && args[1] == "fs-bench" {
@@ -1467,17 +1563,11 @@ fn main() {
         }
         args.remove(1);
     }
-    if args.len() == 2 && args[1] == "pool-cold-start-child" {
-        net_driver::pool_cold_start_child();
-    }
     if net_caps::is_denied_child(&args) {
         net_caps::run_denied_child(&args);
     }
     if net_caps::is_without_vsock_child(&args) {
         net_caps::run_without_vsock_child(&args);
-    }
-    if args.len() == 2 && args[1] == "pool-channel-churn-child" {
-        net_driver::pool_channel_churn_child();
     }
     if net_driver::is_vsock_discovery_denied_child(&args) {
         net_driver::run_vsock_discovery_denied_child(args.len() == 3);
@@ -1517,6 +1607,54 @@ fn main() {
         tcp::test_native_net_cancellation();
         return;
     }
+    if ip_device_admission::run_child(&args) {
+        return;
+    }
+
+    if args.len() == 4 && args[1] == "wireguard-client" {
+        wireguard::exchange(&args[2], &args[3]);
+        return;
+    }
+    if args.len() == 4 && args[1] == "wireguard-permissions" {
+        wireguard::permissions(&args[2..]);
+        return;
+    }
+    if args.len() == 2 && args[1] == "wireguard-cleanup" {
+        wireguard::cleanup();
+        return;
+    }
+    if args.len() == 4 && args[1] == "wireguard-readable-secrets" {
+        wireguard::reject_readable_secrets(&args[2..]);
+        return;
+    }
+    if args.len() == 3 && args[1] == "wireguard-rejections" {
+        wireguard::rejection_counters(&args[2]);
+        return;
+    }
+    if args.len() == 2 && args[1] == "wireguard-fragmented-reply" {
+        wireguard::fragmented_reply();
+        return;
+    }
+    if args.len() == 2 && args[1] == "wireguard-stale-sockets" {
+        wireguard::stale_sockets();
+        return;
+    }
+    if args.len() == 3 && args[1] == "wireguard-load" {
+        wireguard_load::run(&args[2]);
+        return;
+    }
+    if args.len() == 4 && args[1] == "ip-device-plain" {
+        ip_device_plain::run(&args[2], &args[3]);
+        return;
+    }
+    if args.len() == 4 && args[1] == "wireguard-measure" {
+        wireguard_bench::run(&args[2], &args[3]);
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-ip-device" {
+        ip_device::run_all_tests();
+        return;
+    }
     if args.len() == 2 && args[1] == "test-native-net" {
         tcp::test_disconnect_before_rx_ready_releases_channels();
         net_driver::run_all_tests();
@@ -1535,6 +1673,26 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "test-loopback-peer-time-wait" {
         tcp::test_loopback_peer_time_wait();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-outgoing-listener-ports" {
+        tcp::test_outgoing_ports_exclude_listeners();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-udp-local-delivery" {
+        udp::test_udp_local_delivery();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-time-wait-releases-client-channel" {
+        tcp::test_time_wait_releases_client_channel();
+        return;
+    }
+    if args.len() == 2 && args[1] == "tcp-time-wait-child" {
+        tcp::time_wait_child();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-requests-to-retired-tcp-socket" {
+        tcp::test_requests_to_retired_tcp_socket();
         return;
     }
     if args.len() == 2 && args[1] == "test-native-listener-drop-backpressure" {
@@ -1586,8 +1744,8 @@ fn main() {
         poll::run_all_tests();
         return;
     }
-    if args.len() == 2 && args[1] == "mio-accept-pump-repro" {
-        poll::reproduce_mio_accept_pump_stall();
+    if args.len() == 2 && args[1] == "test-active-channel-polls" {
+        io_channel::test_active_channel_polls(available_cpus);
         return;
     }
     if (args.len() == 3 || args.len() == 4) && args[1] == "mio-ping-pong-peer" {
@@ -1816,6 +1974,7 @@ fn main() {
     bench_page_faults();
     test_fp_env_across_blocking_syscall();
     fs::run_tests();
+    mounts::run_all_tests();
     virtio::run_tests();
     virtio_task_tests::run_tests();
     fs_permissions::run_all_tests();
@@ -1850,7 +2009,7 @@ fn main() {
     threads::run_all_tests();
     moto_async::run_all_tests();
     poll::run_all_tests();
-    io_channel::run_all_tests();
+    io_channel::run_all_tests(available_cpus);
     test_thread_names();
     test_halt_poll_metrics();
     test_cpus();
@@ -1895,6 +2054,7 @@ fn main() {
     test_oom();
     diagnostics::test_vdso_panic_at_floor();
     admission::run_all_tests();
+    sparse::run_all_tests();
     test_nx();
     test_writable_executable_elf_rejected();
     test_oversized_elf_segment_reports_oom();
@@ -1910,6 +2070,7 @@ fn main() {
     tcp::run_all_tests();
     udp::run_all_tests();
     icmp::run_all_tests();
+    ip_device::run_all_tests();
     pressure::run_all_tests();
 
     mpmc::test_mpmc();

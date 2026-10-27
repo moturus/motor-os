@@ -1,4 +1,5 @@
 use moto_sys::{SysCpu, SysHandle, stats::ProcessInfoV1};
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -9,16 +10,20 @@ pub fn run_command(args: &[String]) -> bool {
     match args.get(1).map(String::as_str) {
         Some("swap-cancel-owner") => {
             let status = Command::new(std::env::current_exe().unwrap())
-                .args(["swap-cancel-worker", &args[2], &args[3]])
+                .args(["swap-cancel-worker", &args[2]])
                 .status()
                 .unwrap();
             assert!(status.success());
             true
         }
-        Some("swap-cancel-worker") => run_worker(Path::new(&args[2]), args[3] == "swap"),
+        Some("swap-cancel-worker") => run_worker(args[2] == "swap"),
         Some("wait-spill-worker") => run_spill_worker(Path::new(&args[2])),
         Some("test-swap-cancel") => {
             run_tests();
+            true
+        }
+        Some("swap-cancel-soak") => {
+            run_soak_tests();
             true
         }
         _ => false,
@@ -44,13 +49,13 @@ fn move_to_cpu(cpu: Option<u32>) {
     }
 }
 
-fn run_worker(root: &Path, swap: bool) -> ! {
+fn run_worker(swap: bool) -> ! {
     let cpu = (moto_sys::num_cpus() > 1).then_some(1);
     move_to_cpu(cpu);
     let token = Arc::new(AtomicU64::new(0));
     let peer_handle = Arc::new(AtomicU64::new(0));
     let main_handle = moto_sys::current_thread();
-    let before = crate::kernel_metric("direct_switch", moto_stats::provider::KERNEL);
+    let before = crate::kernel_metric("direct_switch", moto_sdk::stats::provider::KERNEL);
     let peer_token = token.clone();
     let published_handle = peer_handle.clone();
     std::thread::spawn(move || {
@@ -67,51 +72,74 @@ fn run_worker(root: &Path, swap: bool) -> ! {
         core::hint::spin_loop();
     }
     let peer = peer_handle.load(Ordering::Acquire).into();
+    // One round trip establishes the wake control; extra warmup only adds
+    // scheduler latency to the parent's readiness deadline.
+    let ready_index = if swap { 100 } else { 0 };
     for index in 0..u64::MAX / 2 {
         token.store(index * 2 + 1, Ordering::Release);
         while token.load(Ordering::Acquire) != index * 2 + 2 {
             handoff(peer, swap);
         }
-        if index == 100 {
+        if index == ready_index {
             if swap {
                 assert!(
-                    crate::kernel_metric("direct_switch", moto_stats::provider::KERNEL) > before,
+                    crate::kernel_metric("direct_switch", moto_sdk::stats::provider::KERNEL)
+                        > before,
                     "worker never entered the direct-switch path"
                 );
             }
-            std::fs::write(root.join("ready"), std::process::id().to_string()).unwrap();
+            std::io::stdout().write_all(b"ready\n").unwrap();
         }
     }
     unreachable!()
 }
 
 pub fn run_tests() {
+    test_swap_cancel_releases_children();
+    test_killed_waiters_release_handle_lists();
+}
+
+/// Kills during direct CPU handoffs beside unrelated workloads. The
+/// handle-list check samples the kernel heap, which only the gate can do.
+pub fn run_soak_tests() {
+    test_swap_cancel_releases_children();
+    println!("swap-cancel-soak PASS");
+}
+
+fn test_swap_cancel_releases_children() {
     // Each episode must clear its child record; these are distinct kills, not
     // retries. Ordinary wakes provide a control for the swap-target path.
     for episode in 0..4 {
         for mode in ["wake", "swap"] {
-            let root = crate::temp_path(&format!(
-                "swap-cancel-{}-{episode}-{mode}",
-                std::process::id()
-            ));
-            std::fs::create_dir_all(&root).unwrap();
             let mut owner = Command::new(std::env::current_exe().unwrap())
-                .args(["swap-cancel-owner", root.to_str().unwrap(), mode])
+                .args(["swap-cancel-owner", mode])
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
+                .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .spawn()
                 .unwrap();
             let pid = u64::from(owner.id());
             let deadline = Instant::now() + Duration::from_secs(5);
-            while !root.join("ready").is_file() {
+            // Read the signal without filesystem polling, keeping the same
+            // startup bound even if the pipe never becomes readable.
+            let mut stdout = owner.stdout.take().unwrap();
+            let ready = std::thread::spawn(move || {
+                let mut marker = [0; 6];
+                stdout.read_exact(&mut marker).unwrap();
+                assert_eq!(&marker, b"ready\n");
+            });
+            while !ready.is_finished() {
                 assert!(
                     owner.try_wait().unwrap().is_none(),
                     "worker exited before readiness"
                 );
-                assert!(Instant::now() < deadline, "worker did not become ready");
+                assert!(
+                    Instant::now() < deadline,
+                    "episode {episode} {mode}: worker did not become ready"
+                );
                 std::thread::sleep(Duration::from_millis(1));
             }
+            ready.join().unwrap();
             owner.kill().unwrap();
             assert_eq!(owner.wait().unwrap().code(), Some(-1));
             // The last process handle must close before checking retained stats.
@@ -131,11 +159,9 @@ pub fn run_tests() {
                 );
                 std::thread::sleep(Duration::from_millis(1));
             }
-            std::fs::remove_dir_all(root).unwrap();
         }
     }
     println!("test_swap_cancel_releases_children PASS");
-    test_killed_waiters_release_handle_lists();
 }
 
 /// The kernel's wait-handle limit. A list this long does not fit the kernel's

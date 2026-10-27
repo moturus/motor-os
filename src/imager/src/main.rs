@@ -33,6 +33,8 @@ const SECTOR_SIZE: u32 = 512;
 
 const SOURCE_TREE_EXCLUDED_DIRS: [&str; 4] = [".git", ".lorry", "__pycache__", "target"];
 
+const CA_BUNDLE_DESTINATION: &str = "/system/cfg/ssl/ca-certificates.crt";
+
 #[derive(Debug, Deserialize)]
 struct SourceDirectory {
     source: String,
@@ -53,6 +55,8 @@ struct Config {
     assembly_required_executables: Vec<String>,
     #[serde(default)]
     source_dirs: Vec<SourceDirectory>,
+    #[serde(default)]
+    ca_bundle: Option<String>,
     filesystem: String,
     data_partition_size_mb: u64,
     img_name: String,
@@ -71,7 +75,7 @@ struct ImageFile {
     source: PathBuf,
     destination: PathBuf,
     class: permissions::FileClass,
-    permissions: async_fs::RolePermissions,
+    permissions: moto_sdk::async_fs::RolePermissions,
 }
 
 async fn create_motorfs_partition_async(
@@ -81,11 +85,11 @@ async fn create_motorfs_partition_async(
     policy: &permissions::PermissionPolicy,
     data_partition_size_mb: u64,
 ) -> io::Result<()> {
-    use async_fs::FileSystem;
+    use moto_sdk::async_fs::FileSystem;
 
     let data_partition_size = data_partition_size_mb * 1024 * 1024;
 
-    let bd = async_fs::file_block_device::AsyncFileBlockDevice::create(
+    let bd = moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice::create(
         result_path.to_str().unwrap().into(),
         data_partition_size / 4096,
     )
@@ -94,7 +98,7 @@ async fn create_motorfs_partition_async(
     println!("creating Motor FS in {:?}", result_path);
 
     fs.set_all_permissions_image_admin(
-        async_fs::Role::System,
+        moto_sdk::async_fs::Role::System,
         motor_fs::ROOT_DIR_ID,
         policy.directory_permissions(Path::new("/")),
     )
@@ -112,19 +116,19 @@ async fn create_motorfs_partition_async(
         let initial_permissions = if final_permissions.system.can_write() {
             final_permissions
         } else {
-            async_fs::RolePermissions::new(
-                async_fs::AccessPermissions::Rw,
-                async_fs::AccessPermissions::None,
-                async_fs::AccessPermissions::None,
+            moto_sdk::async_fs::RolePermissions::new(
+                moto_sdk::async_fs::AccessPermissions::Rw,
+                moto_sdk::async_fs::AccessPermissions::None,
+                moto_sdk::async_fs::AccessPermissions::None,
             )
         };
 
         let parent_id = util::motor_fs_create_dir_all(&mut fs, parent, policy).await?;
         let new_file_id = fs
             .create_entry(
-                async_fs::Role::System,
+                moto_sdk::async_fs::Role::System,
                 parent_id,
-                async_fs::EntryKind::File,
+                moto_sdk::async_fs::EntryKind::File,
                 filename,
                 initial_permissions,
             )
@@ -149,15 +153,20 @@ async fn create_motorfs_partition_async(
 
             assert_eq!(
                 sz,
-                fs.write(async_fs::Role::System, new_file_id, offset, &buf[..sz])
-                    .await?
+                fs.write(
+                    moto_sdk::async_fs::Role::System,
+                    new_file_id,
+                    offset,
+                    &buf[..sz]
+                )
+                .await?
             );
             offset += sz as u64;
         }
 
         if initial_permissions != final_permissions {
             fs.set_all_permissions_image_admin(
-                async_fs::Role::System,
+                moto_sdk::async_fs::Role::System,
                 new_file_id,
                 final_permissions,
             )
@@ -449,6 +458,54 @@ fn add_source_dir(files: &mut BTreeMap<String, PathBuf>, dir_to_add: PathBuf, de
     add_dir(files, dir_to_add, dest_path, &SOURCE_TREE_EXCLUDED_DIRS);
 }
 
+// The host bundle becomes the guest trust store, replacing any static file there.
+fn add_ca_bundle(files: &mut BTreeMap<String, PathBuf>, bundle: &Path) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+
+    let error = |reason: String| format!("CA bundle '{}': {reason}", bundle.display());
+    let source = fs::canonicalize(bundle).map_err(|e| error(e.to_string()))?;
+    let pem = fs::read_to_string(&source).map_err(|e| error(e.to_string()))?;
+    let certificates = count_pem_certificates(&pem).map_err(error)?;
+    println!(
+        "CA bundle {} has {certificates} certificates and SHA-256 {:x}.",
+        bundle.display(),
+        Sha256::digest(pem.as_bytes())
+    );
+
+    files.insert(CA_BUNDLE_DESTINATION.to_owned(), source);
+    Ok(())
+}
+
+// Text outside PEM blocks is allowed, as in p11-kit bundles; non-certificate blocks are not.
+fn count_pem_certificates(pem: &str) -> Result<usize, String> {
+    let mut certificates = 0;
+    // Inside a certificate: whether it has data yet.
+    let mut open: Option<bool> = None;
+    for (index, line) in pem.lines().map(str::trim_end).enumerate() {
+        let invalid = |what: &str| Err(format!("line {}: {what}", index + 1));
+        let base64 = !line.is_empty()
+            && line
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='));
+        match (open, line) {
+            (None, "-----BEGIN CERTIFICATE-----") => open = Some(false),
+            (None, _) if line.starts_with("-----") => return invalid("not a certificate block"),
+            (None, _) => {}
+            (Some(true), "-----END CERTIFICATE-----") => {
+                certificates += 1;
+                open = None;
+            }
+            (Some(_), _) if base64 => open = Some(true),
+            (Some(_), _) => return invalid("malformed certificate"),
+        }
+    }
+    match (open, certificates) {
+        (Some(_), _) => Err("unterminated certificate".to_owned()),
+        (None, 0) => Err("no certificates".to_owned()),
+        (None, count) => Ok(count),
+    }
+}
+
 fn resolve_image_files(
     files: &BTreeMap<String, PathBuf>,
     directories: &[String],
@@ -567,8 +624,7 @@ fn use_assembly_image_root(config: &mut Config, root: Option<&Path>) -> Result<(
         return Ok(());
     }
     let root = root.ok_or_else(|| {
-        "image configuration requires an assembly; run src/resolve-toolchain-assembly.sh --resolve"
-            .to_owned()
+        "image configuration requires an assembly; set it to build/assembly/images".to_owned()
     })?;
     let mut components = root.components();
     if components.next() != Some(Component::RootDir)
@@ -795,6 +851,9 @@ fn main() {
             .unwrap_or_else(|error| panic!("source image destination: {error}"));
         add_source_dir(&mut files, path, destination);
     }
+    if let Some(bundle) = &config.ca_bundle {
+        add_ca_bundle(&mut files, &motorh.join(bundle)).unwrap_or_else(|error| panic!("{error}"));
+    }
 
     let files = resolve_image_files(&files, &config.directories, &policy).unwrap_or_else(|error| {
         panic!(
@@ -876,7 +935,7 @@ fn set_raw_output(config: &mut Config, output: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_fs::FileSystem;
+    use moto_sdk::async_fs::FileSystem;
 
     #[test]
     fn production_image_requires_ripgrep() {
@@ -890,8 +949,15 @@ mod tests {
             config.static_dirs,
             ["img_files/motor-os-base", "img_files/motor-os"]
         );
-        assert_eq!(config.assembly_dirs, ["libc", "rg"]);
-        assert_eq!(config.assembly_required_executables, ["rg/system/bin/rg"]);
+        assert_eq!(config.assembly_dirs, ["libc", "rg", "tar"]);
+        assert_eq!(
+            config.assembly_required_executables,
+            [
+                "rg/system/bin/rg",
+                "tar/system/bin/tar",
+                "tar/system/bin/zstd"
+            ]
+        );
         assert!(!config.assembly_dirs.iter().any(|path| path == "helix"));
         assert!(!config
             .assembly_required_executables
@@ -963,16 +1029,6 @@ mod tests {
         assert!(config
             .input_files
             .iter()
-            .any(|path| path == "/devtools/bin/gears"));
-        for path in [
-            "/devtools/bin/gears-batteries",
-            "/devtools/tests/gears/gears-batteries-smoke",
-        ] {
-            assert!(config.input_files.iter().any(|candidate| candidate == path));
-        }
-        assert!(config
-            .input_files
-            .iter()
             .any(|path| path == "/system/bin/curl"));
         assert!(config
             .input_files
@@ -995,6 +1051,7 @@ mod tests {
             [
                 "libc",
                 "rg",
+                "tar",
                 "llvm",
                 "rustc",
                 "helix",
@@ -1002,10 +1059,11 @@ mod tests {
                 "sed",
                 "rust-analyzer",
                 "javy",
-                "wasmtime"
+                "wasmtime",
+                "sys-lib-deps"
             ]
         );
-        assert_eq!(config.assembly_required_executables.len(), 16);
+        assert_eq!(config.assembly_required_executables.len(), 18);
         assert!(config
             .assembly_required_executables
             .iter()
@@ -1069,27 +1127,33 @@ mod tests {
             .directories
             .iter()
             .any(|path| path == "/user/cfg/lorry" || path.starts_with("/user/cfg/lorry/")));
-        assert!(config
-            .directories
-            .iter()
-            .any(|path| path == "/devtools/tests/gears"));
-        assert_eq!(config.source_dirs.len(), 5);
+        assert_eq!(config.source_dirs.len(), 8);
         for (source, destination) in [
             ("src/bin/red", "/devtools/src/motor-os/bin/red"),
             ("src/bin/lorry", "/devtools/src/motor-os/bin/lorry"),
-            ("src/bin/gears", "/devtools/src/motor-os/bin/gears"),
-            ("src/bin/gears/tools", "/user/cfg/gears/tools"),
-            ("src/bin/gears/config", "/user/cfg/gears"),
         ] {
             assert!(config
                 .source_dirs
                 .iter()
                 .any(|dir| dir.source == source && dir.destination == destination));
         }
-        assert!(config
+        // Library sources for native tests mirror the tree below sys/lib, so
+        // their `../moto-rt` path dependencies resolve on the image.
+        let mut library_sources: Vec<_> = config
             .source_dirs
             .iter()
-            .all(|dir| !dir.destination.starts_with("/devtools/src/motor-os/sys")));
+            .filter(|dir| dir.destination.starts_with("/devtools/src/motor-os/sys/"))
+            .map(|dir| {
+                let name = dir.source.strip_prefix("src/sys/lib/").unwrap();
+                assert_eq!(
+                    dir.destination,
+                    format!("/devtools/src/motor-os/sys/lib/{name}")
+                );
+                name
+            })
+            .collect();
+        library_sources.sort_unstable();
+        assert_eq!(library_sources, ["moto-rt", "moto-sdk", "moto-sys"]);
     }
 
     #[test]
@@ -1164,18 +1228,93 @@ mod tests {
             .any(|path| path == "/user/cfg/ssh"));
     }
 
+    const IMAGE_CONFIGS: [&str; 6] = [
+        include_str!("../motor-os-base.yaml"),
+        include_str!("../motor-os.yaml"),
+        include_str!("../motor-os-dev.yaml"),
+        include_str!("../motor-os-wasm.yaml"),
+        include_str!("../motor-os-system-tty.yaml"),
+        include_str!("../motor-os-vsock-test.yaml"),
+    ];
+
+    const TEST_CERTIFICATE: &str =
+        include_str!("../../../img_files/motor-os-base/system/cfg/ssl/ssl-cert.pem");
+
     #[test]
     fn every_image_config_requires_the_shared_policy() {
-        for yaml in [
-            include_str!("../motor-os-base.yaml"),
-            include_str!("../motor-os.yaml"),
-            include_str!("../motor-os-dev.yaml"),
-            include_str!("../motor-os-wasm.yaml"),
-            include_str!("../motor-os-system-tty.yaml"),
-            include_str!("../motor-os-vsock-test.yaml"),
-        ] {
+        for yaml in IMAGE_CONFIGS {
             let config: Config = serde_yaml::from_str(yaml).unwrap();
             assert_eq!(config.permission_policy, "motor-os-permissions.yaml");
+        }
+    }
+
+    #[test]
+    fn every_image_takes_the_host_ca_bundle() {
+        for yaml in IMAGE_CONFIGS {
+            let config: Config = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(
+                config.ca_bundle.as_deref(),
+                Some("/etc/ssl/certs/ca-certificates.crt")
+            );
+        }
+    }
+
+    #[test]
+    fn host_ca_bundle_replaces_a_static_trust_store() {
+        let root =
+            std::env::temp_dir().join(format!("motor-imager-ca-test-{}", std::process::id()));
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        fs::create_dir_all(root.join("static/system/cfg/ssl")).unwrap();
+        fs::write(
+            root.join("static/system/cfg/ssl/ca-certificates.crt"),
+            "stale\n",
+        )
+        .unwrap();
+        fs::write(root.join("host.pem"), TEST_CERTIFICATE).unwrap();
+
+        let mut files = BTreeMap::new();
+        add_static_dir(&mut files, root.join("static"), Path::new("/"));
+        add_ca_bundle(&mut files, &root.join("host.pem")).unwrap();
+        assert_eq!(
+            files.into_iter().collect::<Vec<_>>(),
+            [(
+                CA_BUNDLE_DESTINATION.to_owned(),
+                root.join("host.pem").canonicalize().unwrap()
+            )]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn host_ca_bundle_is_required() {
+        let missing = std::env::temp_dir().join(format!(
+            "motor-imager-missing-ca-test-{}",
+            std::process::id()
+        ));
+        let mut files = BTreeMap::new();
+        assert!(add_ca_bundle(&mut files, &missing).is_err());
+        assert!(add_ca_bundle(&mut files, &std::env::temp_dir()).is_err());
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn ca_bundles_hold_only_certificates() {
+        assert_eq!(count_pem_certificates(TEST_CERTIFICATE), Ok(1));
+        let labeled = format!("# First\n{TEST_CERTIFICATE}\n# Second\r\n{TEST_CERTIFICATE}");
+        assert_eq!(count_pem_certificates(&labeled), Ok(2));
+
+        let key = "-----BEGIN PRIVATE KEY-----\nMC4CAQAw\n-----END PRIVATE KEY-----\n";
+        for invalid in [
+            String::new(),
+            "# no certificates\n".to_owned(),
+            format!("{TEST_CERTIFICATE}{key}"),
+            TEST_CERTIFICATE.replace("-----END CERTIFICATE-----", ""),
+            "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n".to_owned(),
+            "-----BEGIN CERTIFICATE-----\nMII!\n-----END CERTIFICATE-----\n".to_owned(),
+        ] {
+            assert!(count_pem_certificates(&invalid).is_err(), "{invalid}");
         }
     }
 
@@ -1376,23 +1515,25 @@ entries: []
         tokio::runtime::LocalRuntime::new()
             .unwrap()
             .block_on(async {
-                let device = async_fs::file_block_device::AsyncFileBlockDevice::open(
+                let device = moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice::open(
                     camino::Utf8Path::from_path(&partition).unwrap(),
                 )
                 .await?;
                 let fs = motor_fs::MotorFs::open(Box::new(device)).await?;
 
                 async fn entry(
-                    fs: &motor_fs::MotorFs<async_fs::file_block_device::AsyncFileBlockDevice>,
+                    fs: &motor_fs::MotorFs<
+                        moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice,
+                    >,
                     path: &Path,
-                ) -> io::Result<async_fs::EntryId> {
+                ) -> io::Result<moto_sdk::async_fs::EntryId> {
                     let mut id = motor_fs::ROOT_DIR_ID;
                     for component in path.components() {
                         let Component::Normal(name) = component else {
                             continue;
                         };
                         id = fs
-                            .stat(async_fs::Role::System, id, name.to_str().unwrap())
+                            .stat(moto_sdk::async_fs::Role::System, id, name.to_str().unwrap())
                             .await?
                             .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?
                             .0;
@@ -1408,7 +1549,7 @@ entries: []
                 ] {
                     let id = entry(&fs, Path::new(path)).await?;
                     let mode = fs
-                        .metadata(async_fs::Role::System, id)
+                        .metadata(moto_sdk::async_fs::Role::System, id)
                         .await?
                         .permissions()?;
                     assert_eq!(permissions::mode_string(mode), expected, "{path}");

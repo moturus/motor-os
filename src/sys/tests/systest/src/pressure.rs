@@ -25,26 +25,6 @@ use moto_sys::SysMem;
 use moto_sys::stats::AdmissionStats;
 use moto_sys::sys_mem::PAGE_SIZE_SMALL;
 
-/// Reads a system-wide sys-io metric by name; the sys-io analogue of
-/// `admission::kernel_metric`. `None` if the metric does not exist or is not
-/// reported.
-fn sys_io_metric_opt(name: &str) -> Option<u64> {
-    use moto_stats::Collector;
-
-    let provider = Collector::provider_by_name("sys-io").expect("no sys-io stats provider");
-    let descs = Collector::describe(&provider).unwrap();
-    let desc = descs.iter().find(|d| d.name == name)?;
-    Collector::query(&provider)
-        .unwrap()
-        .iter()
-        .find(|e| e.metric == desc.id && e.scope == moto_stats::SCOPE_GLOBAL)
-        .map(|e| e.value)
-}
-
-fn sys_io_metric(name: &str) -> u64 {
-    sys_io_metric_opt(name).unwrap_or_else(|| panic!("no sys-io metric '{name}'"))
-}
-
 /// Refusals travel as E_OUT_OF_MEMORY; accept whichever representation the
 /// std port surfaces.
 fn is_refused(err: &std::io::Error) -> bool {
@@ -254,7 +234,7 @@ fn probe_fresh_client(service: &str, dips: &mut usize) -> Result<Hand, moto_rt::
         if !flag_up() {
             return Ok(Hand::Neither);
         }
-        let conn = moto_ipc::io_channel::ClientConnection::connect(service)?;
+        let conn = moto_sdk::ipc::io_channel::ClientConnection::connect(service)?;
         let mut dropped = false;
         let mut dipped = false;
         for _ in 0..500 {
@@ -288,8 +268,14 @@ fn test_pressure_mode() {
     assert!(!moto_sys::memory_pressure(), "pressure before the squeeze");
 
     // sys-io's gauges mirror the kernel policy.
-    assert_eq!(low, sys_io_metric("net.pressure_low_pages"));
-    assert_eq!(high, sys_io_metric("net.pressure_high_pages"));
+    assert_eq!(
+        low,
+        crate::tcp::read_sys_io_metric("net.pressure_low_pages")
+    );
+    assert_eq!(
+        high,
+        crate::tcp::read_sys_io_metric("net.pressure_high_pages")
+    );
 
     // An established connection from before the squeeze, to show service
     // continuing under pressure.
@@ -298,9 +284,9 @@ fn test_pressure_mode() {
     let mut client = TcpStream::connect(addr).unwrap();
     let (mut serve, _) = listener.accept().unwrap();
 
-    let entries_before = sys_io_metric("net.pressure_entries");
-    let refused_before = sys_io_metric("net.pressure_refused");
-    let clients_refused_before = sys_io_metric("net.pressure_refused_clients");
+    let entries_before = crate::tcp::read_sys_io_metric("net.pressure_entries");
+    let refused_before = crate::tcp::read_sys_io_metric("net.pressure_refused");
+    let clients_refused_before = crate::tcp::read_sys_io_metric("net.pressure_refused_clients");
 
     let child = squeeze_to_pressure();
 
@@ -387,10 +373,12 @@ fn test_pressure_mode() {
     );
     refusals.assert_all_refused(4, "sockets and spawn");
     assert_ne!(client_hand, Hand::Neither, "fresh sys-io client kept");
-    assert!(sys_io_metric("net.pressure_entries") > entries_before);
-    assert!(sys_io_metric("net.pressure_refused") >= refused_before + 3);
+    assert!(crate::tcp::read_sys_io_metric("net.pressure_entries") > entries_before);
+    assert!(crate::tcp::read_sys_io_metric("net.pressure_refused") >= refused_before + 3);
     if client_hand == Hand::Service {
-        assert!(sys_io_metric("net.pressure_refused_clients") > clients_refused_before);
+        assert!(
+            crate::tcp::read_sys_io_metric("net.pressure_refused_clients") > clients_refused_before
+        );
     }
 
     // With the flag down, everything works again at once.
@@ -402,7 +390,7 @@ fn test_pressure_mode() {
     let mut buf = [0u8; 2];
     serve.read_exact(&mut buf).unwrap();
     assert_eq!(&buf, b"ok");
-    assert_eq!(0, sys_io_metric("net.pressure_active"));
+    assert_eq!(0, crate::tcp::read_sys_io_metric("net.pressure_active"));
 
     println!("test_pressure_mode PASS");
 }
@@ -483,8 +471,9 @@ pub fn test_fs_under_pressure(lock_spam: usize) {
     // Lenient reads: these counters exist only once the refusal set is
     // built, and the pre-refusal demonstrator must reach the hammer rather
     // than die on a missing metric name.
-    let refused_before = sys_io_metric_opt("fs.pressure_refused").unwrap_or(0);
-    let clients_refused_before = sys_io_metric_opt("fs.pressure_refused_clients").unwrap_or(0);
+    let refused_before = crate::tcp::read_sys_io_metric_opt("fs.pressure_refused").unwrap_or(0);
+    let clients_refused_before =
+        crate::tcp::read_sys_io_metric_opt("fs.pressure_refused_clients").unwrap_or(0);
 
     let child = squeeze_to_pressure();
     let mut dips = 0;
@@ -619,9 +608,11 @@ pub fn test_fs_under_pressure(lock_spam: usize) {
     // Counters: the three hammers plus the refused acquire probe, and the
     // client counter only if sys-io was the refusing hand.
     let hammered = (HAMMER_WRITES + HAMMER_STATS + lock_spam + 1) as u64;
-    assert!(sys_io_metric("fs.pressure_refused") >= refused_before + hammered);
+    assert!(crate::tcp::read_sys_io_metric("fs.pressure_refused") >= refused_before + hammered);
     if client_hand == Hand::Service {
-        assert!(sys_io_metric("fs.pressure_refused_clients") > clients_refused_before);
+        assert!(
+            crate::tcp::read_sys_io_metric("fs.pressure_refused_clients") > clients_refused_before
+        );
     }
 
     println!("test_fs_under_pressure PASS");
@@ -750,7 +741,21 @@ fn test_frame_churn() {
     println!("test_frame_churn PASS");
 }
 
+fn logging_services() -> [u64; 2] {
+    use moto_sys::stats::ProcessInfoV1;
+    let mut processes = [ProcessInfoV1::default(); 32];
+    let count = ProcessInfoV1::list(0, &mut processes).unwrap();
+    ["/system/services/sys-tty", "/system/services/strobe"].map(|name| {
+        processes[..count]
+            .iter()
+            .find(|process| process.active != 0 && process.debug_name() == name)
+            .unwrap_or_else(|| panic!("logging service {name} is not alive"))
+            .pid
+    })
+}
+
 pub fn run_all_tests() {
+    let services = logging_services();
     test_large_allocs();
     test_frame_churn();
     test_pressure_mode();
@@ -758,4 +763,97 @@ pub fn run_all_tests() {
     // and the standalone knob (`systest test-fs-pressure [n]`) keeps the
     // large-n form for driving a build without the refusal set into OOM.
     test_fs_under_pressure(128);
+    test_memfs_reclamation();
+    assert_eq!(
+        logging_services(),
+        services,
+        "logging services exited under pressure"
+    );
+}
+
+/// Both service gates must reclaim already-free memfs pages before refusing.
+/// Held memfs IDs still permit freeing while the squeeze keeps the flag up.
+pub fn test_memfs_reclamation() {
+    use moto_sdk::io::fs::{EntryKind, FsClient};
+    let mut runtime = moto_sdk::async_runtime::LocalRuntime::new();
+    let client = FsClient::connect().unwrap();
+    let (root, _) = runtime.block_on(client.stat("/none/tmp")).unwrap();
+    // Warm the net channel before the squeeze, so this probes sys-io's gate.
+    drop(UdpSocket::bind("127.0.0.1:0").unwrap());
+    for network in [false, true] {
+        let dir = runtime
+            .block_on(client.create_entry(root, EntryKind::Directory, "systest-reclaim"))
+            .unwrap();
+        let cached = runtime
+            .block_on(client.create_entry(dir, EntryKind::File, "cache"))
+            .unwrap();
+        let shrink = runtime
+            .block_on(client.create_entry(dir, EntryKind::File, "shrink"))
+            .unwrap();
+        let delete = runtime
+            .block_on(client.create_entry(dir, EntryKind::File, "delete"))
+            .unwrap();
+        let data = [17; 32768];
+        for offset in (0..4 << 20).step_by(data.len()) {
+            assert_eq!(
+                runtime
+                    .block_on(client.write(cached, offset as u64, &data))
+                    .unwrap(),
+                data.len()
+            );
+        }
+        for file in [shrink, delete] {
+            runtime
+                .block_on(client.write(file, 0, &data[..4096]))
+                .unwrap();
+        }
+        runtime.block_on(client.delete_entry(cached)).unwrap();
+        assert!(crate::tcp::read_sys_io_metric("fs.memfs.cached_free_bytes") >= 2 << 20);
+        let child = squeeze_to_pressure();
+        let mut dips = 0;
+        let verdict = if network {
+            until_refused(|| UdpSocket::bind("127.0.0.1:0").map(drop), &mut dips)
+        } else {
+            until_refused(
+                || {
+                    runtime
+                        .block_on(client.metadata(shrink))
+                        .map(|_| ())
+                        .map_err(|err| std::io::Error::from_raw_os_error(err as u16 as i32))
+                },
+                &mut dips,
+            )
+        };
+        let pressure_before_shrink = flag_up();
+        let resized = runtime.block_on(client.resize(shrink, 0));
+        let pressure_before_delete = flag_up();
+        // The stale first ID must not prevent cleanup of the next held ID.
+        let deleted = runtime.block_on(crate::mounts::delete_held_entries(
+            &client,
+            [cached, delete],
+        ));
+        release_squeeze(child);
+
+        // Queries and assertions allocate, so judge only after releasing the
+        // squeeze. Dips from the documented hysteresis are counted above.
+        assert_eq!(verdict, Verdict::Refused);
+        assert!(pressure_before_shrink && pressure_before_delete);
+        resized.expect("held-ID shrink refused under pressure");
+        assert_eq!(deleted, Err(moto_rt::Error::InvalidArgument));
+        assert_eq!(
+            runtime.block_on(client.metadata(delete)).err(),
+            Some(moto_rt::Error::InvalidArgument)
+        );
+        assert_eq!(
+            crate::tcp::read_sys_io_metric("fs.memfs.cached_free_bytes"),
+            0
+        );
+        assert_eq!(runtime.block_on(client.metadata(shrink)).unwrap().size, 0);
+        runtime.block_on(client.delete_entry(shrink)).unwrap();
+        runtime.block_on(client.delete_entry(dir)).unwrap();
+        println!(
+            "memfs reclamation: {} gate, {dips} flag dips PASS",
+            if network { "network" } else { "filesystem" }
+        );
+    }
 }

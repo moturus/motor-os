@@ -2,22 +2,36 @@
 
 use super::{FsRuntime, Mapping, PAGE, PageBuf, elf, serve};
 use crate::self_test::{st_assert, st_assert_eq};
-use async_fs::{AccessPermissions, EntryKind, FileSystem, Role, RolePermissions};
+use moto_sdk::async_fs::{AccessPermissions, EntryKind, FileSystem, Role, RolePermissions};
 use moto_sys::{SysHandle, SysMem, SysObj, syscalls::RaiiHandle};
 use std::task::Poll;
 
 pub(in crate::runtime::fs) async fn coalesced_windows(runtime: &FsRuntime) -> Result<(), String> {
+    for path in ["/", "/none/tmp"] {
+        let (id, _) = crate::runtime::fs::mounts::stat_path(&runtime.mounts, Role::System, path)
+            .await
+            .map_err(|err| err.to_string())?;
+        check_mount(runtime, id).await?;
+    }
+    Ok(())
+}
+
+async fn check_mount(
+    runtime: &FsRuntime,
+    parent: moto_sdk::async_fs::EntryId,
+) -> Result<(), String> {
     let name = format!(
         ".pager-window-test-{}",
         moto_rt::time::Instant::now().as_u64()
     );
-    let entry = runtime
-        .fs
+    let parent = runtime.resolve(parent).map_err(|err| err.to_string())?;
+    let local = parent
         .write()
         .await
+        .map_err(|err| err.to_string())?
         .create_entry(
             Role::System,
-            async_fs::ROOT_ID,
+            parent.local,
             EntryKind::File,
             &name,
             RolePermissions::new(
@@ -28,14 +42,15 @@ pub(in crate::runtime::fs) async fn coalesced_windows(runtime: &FsRuntime) -> Re
         )
         .await
         .map_err(|err| err.to_string())?;
+    let entry = parent.export(local).map_err(|err| err.to_string())?;
 
     let result = async {
-        let bytes = vec![b'x'; async_fs::BLOCK_SIZE];
+        let bytes = vec![b'x'; moto_sdk::async_fs::BLOCK_SIZE];
         {
-            let mut fs = runtime.fs.write().await;
+            let mut fs = parent.write().await.map_err(|err| err.to_string())?;
             for offset in (0..8 * PAGE).step_by(bytes.len()) {
                 let written = fs
-                    .write(Role::System, entry, offset, &bytes)
+                    .write(Role::System, local, offset, &bytes)
                     .await
                     .map_err(|err| err.to_string())?;
                 st_assert_eq!(written, bytes.len());
@@ -68,7 +83,7 @@ pub(in crate::runtime::fs) async fn coalesced_windows(runtime: &FsRuntime) -> Re
                 None,
             ),
         );
-        let result = check_windows(runtime, id).await;
+        let result = check_windows(runtime, id, entry).await;
         drop(space);
         runtime.pager.drain();
         st_assert!(!runtime.pager.is_live(id));
@@ -76,24 +91,29 @@ pub(in crate::runtime::fs) async fn coalesced_windows(runtime: &FsRuntime) -> Re
     }
     .await;
 
-    let cleanup = runtime
-        .fs
+    let cleanup = parent
         .write()
         .await
-        .delete_entry(Role::System, entry)
+        .map_err(|err| err.to_string())?
+        .delete_entry(Role::System, local)
         .await
         .map_err(|err| err.to_string());
     result.and(cleanup)
 }
 
-async fn check_windows(runtime: &FsRuntime, id: u64) -> Result<(), String> {
+async fn check_windows(
+    runtime: &FsRuntime,
+    id: u64,
+    entry: moto_sdk::async_fs::EntryId,
+) -> Result<(), String> {
     serve(runtime.clone(), id, PAGE).await;
     serve(runtime.clone(), id, 2 * PAGE).await;
-    check_skips(runtime, id, &[2 * PAGE, 3 * PAGE]).await?;
+    check_skips(runtime, id, entry, &[2 * PAGE, 3 * PAGE]).await?;
 
     // Both reads start before either can fill. The wider request covers the
     // other; finishing the latter must not replace that window with a smaller one.
-    let writer = runtime.fs.write().await;
+    let resolved = runtime.resolve(entry).map_err(|err| err.to_string())?;
+    let writer = resolved.write().await.map_err(|err| err.to_string())?;
     let mut wide = core::pin::pin!(serve(runtime.clone(), id, 4 * PAGE));
     let mut overlap = core::pin::pin!(serve(runtime.clone(), id, 5 * PAGE));
     let waiting = core::future::poll_fn(|cx| {
@@ -105,7 +125,7 @@ async fn check_windows(runtime: &FsRuntime, id: u64) -> Result<(), String> {
     st_assert!(waiting);
     drop(writer);
     futures::join!(wide, overlap);
-    check_skips(runtime, id, &[4 * PAGE, 7 * PAGE]).await?;
+    check_skips(runtime, id, entry, &[4 * PAGE, 7 * PAGE]).await?;
 
     // The end is exclusive. Fill the remaining page, then ask the kernel to
     // confirm that all eight pages are already installed.
@@ -115,8 +135,14 @@ async fn check_windows(runtime: &FsRuntime, id: u64) -> Result<(), String> {
     Ok(())
 }
 
-async fn check_skips(runtime: &FsRuntime, id: u64, pages: &[u64]) -> Result<(), String> {
-    let _writer = runtime.fs.write().await;
+async fn check_skips(
+    runtime: &FsRuntime,
+    id: u64,
+    entry: moto_sdk::async_fs::EntryId,
+    pages: &[u64],
+) -> Result<(), String> {
+    let resolved = runtime.resolve(entry).map_err(|err| err.to_string())?;
+    let _writer = resolved.write().await.map_err(|err| err.to_string())?;
     for &page in pages {
         let faults = runtime.pager.faults.get();
         let mut request = core::pin::pin!(serve(runtime.clone(), id, page));

@@ -83,7 +83,7 @@ const RECLAIM_SLACK_BYTES: usize = 1 << 20;
 pub(crate) async fn reclaim_resident() {
     const TICK: core::time::Duration = core::time::Duration::from_secs(5);
     loop {
-        moto_async::sleep(TICK).await;
+        moto_sdk::async_runtime::sleep(TICK).await;
 
         let stats = FRUSA.stats();
         // Metadata is never reclaimed; counting its slack would make every

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use moto_tooling::mode2048;
+use moto_sdk::tooling::mode2048;
 
 pub const SSH_RECEIVE_WINDOW: u32 = 2 * 1024 * 1024;
 
@@ -174,14 +174,14 @@ fn configure_terminal(cmd: &mut tokio::process::Command, pty: Option<PtyGeometry
     cmd.env_remove("COLUMNS");
     cmd.env_remove("LINES");
     #[cfg(target_os = "motor")]
-    cmd.env_remove(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY);
+    cmd.env_remove(moto_sdk::rt::process::STDIO_IS_TERMINAL_ENV_KEY);
 
     let Some(geometry) = pty else {
         return false;
     };
 
     #[cfg(target_os = "motor")]
-    cmd.env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true");
+    cmd.env(moto_sdk::rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true");
     if let Some(cols) = geometry.cols {
         cmd.env("COLUMNS", cols.to_string());
     }
@@ -226,15 +226,15 @@ pub async fn spawn(
     // only the intersection with its own capabilities.
     #[cfg(target_os = "motor")]
     cmd.env(
-        moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
+        moto_sdk::sys::caps::MOTOR_OS_CAPS_ENV_KEY,
         format!(
             "0x{:x}",
-            moto_sys::ProcessStaticPage::get().capabilities
-                & (moto_sys::caps::CAP_SPAWN
-                    | moto_sys::caps::CAP_LOG
-                    | moto_sys::caps::CAP_SPAWN_DETACHED
-                    | moto_sys::caps::PARENT_OWNED_CAPS
-                    | moto_sys::caps::CAP_INTERACTIVE)
+            moto_sdk::sys::ProcessStaticPage::get().capabilities
+                & (moto_sdk::sys::caps::CAP_SPAWN
+                    | moto_sdk::sys::caps::CAP_LOG
+                    | moto_sdk::sys::caps::CAP_SPAWN_DETACHED
+                    | moto_sdk::sys::caps::PARENT_OWNED_CAPS
+                    | moto_sdk::sys::caps::CAP_INTERACTIVE)
         ),
     );
 

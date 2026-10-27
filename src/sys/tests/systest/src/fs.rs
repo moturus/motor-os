@@ -13,10 +13,10 @@ const FS_METRICS: std::ops::Range<u32> = 1002..1014;
 /// request's failure mode is an empty or short metric set returned as success,
 /// so an individual read can report NotFound for a metric that always exists.
 /// Retry until a complete snapshot arrives; only a persistent absence fails.
-pub(crate) fn read_sys_io_fs_metrics(provider: &moto_stats::ProviderInfo) -> [u64; 12] {
+pub(crate) fn read_sys_io_fs_metrics(provider: &moto_sdk::stats::ProviderInfo) -> [u64; 12] {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
-        let snapshot = moto_stats::Collector::query(provider).unwrap_or_default();
+        let snapshot = moto_sdk::stats::Collector::query(provider).unwrap_or_default();
         let mut vals = [0_u64; 12];
         let missing = FS_METRICS.clone().position(|metric| {
             match snapshot.iter().find(|e| e.metric == metric) {
@@ -46,6 +46,11 @@ fn temp_dir() -> PathBuf {
     path
 }
 
+// Storage/cache regressions must reach Motor FS even when TMPDIR is memfs.
+fn disk_temp_path(name: &str) -> PathBuf {
+    std::path::Path::new("/user/tmp").join(name)
+}
+
 /// A busy filesystem connection must not prevent kernel wakes from admitting
 /// another connection or delivering that client's intermittent requests.
 pub fn concurrent_client_progress_test() {
@@ -64,8 +69,8 @@ pub fn concurrent_client_progress_test() {
     let busy_stop = stop.clone();
     let busy_count = busy_requests.clone();
     let busy = std::thread::spawn(move || {
-        moto_async::LocalRuntime::new().block_on(async {
-            let client = moto_io::fs::FsClient::connect().unwrap();
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+            let client = moto_sdk::io::fs::FsClient::connect().unwrap();
             client.stat("/user").await.unwrap();
             ready_tx.send(()).unwrap();
             while !busy_stop.load(Ordering::Relaxed) {
@@ -80,8 +85,8 @@ pub fn concurrent_client_progress_test() {
     let intermittent_count = completed.clone();
     let started = std::time::Instant::now();
     let intermittent = std::thread::spawn(move || {
-        moto_async::LocalRuntime::new().block_on(async {
-            let client = moto_io::fs::FsClient::connect().unwrap();
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+            let client = moto_sdk::io::fs::FsClient::connect().unwrap();
             for _ in 0..REQUESTS {
                 // Let this receiver's shared-memory spin window expire, so
                 // the server must poll kernel I/O to see its next request.
@@ -356,7 +361,7 @@ pub fn move_noreplace_child(args: &[String]) {
 }
 
 fn copy_test() {
-    use moto_io::fs::{AccessPermissions, EntryKind, FsClient, Role, RolePermissions};
+    use moto_sdk::io::fs::{AccessPermissions, EntryKind, FsClient, Role, RolePermissions};
 
     // A panic aborts systest without cleanup. Keep this fixture outside the
     // shared test directory, where a sealed leftover would break other
@@ -405,7 +410,7 @@ fn copy_test() {
     let small = b"small contents";
     std::fs::write(&dst, small).unwrap();
     assert_eq!(std::fs::metadata(&dst).unwrap().len(), small.len() as u64);
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().unwrap();
         let (destination, EntryKind::File) = client.stat(dst.to_str().unwrap()).await.unwrap()
         else {
@@ -431,7 +436,7 @@ fn copy_test() {
     );
     // Under a writable parent the destination takes the source's mode: the
     // executable became a plain `Rw` file like `src`.
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().unwrap();
         let (destination, _) = client.stat(dst.to_str().unwrap()).await.unwrap();
         let permissions = client
@@ -487,7 +492,7 @@ fn copy_test() {
     );
     let private = root.join("private");
     std::fs::write(&private, b"private contents").unwrap();
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().unwrap();
         let (id, _) = client.stat(private.to_str().unwrap()).await.unwrap();
         client
@@ -518,7 +523,7 @@ fn copy_test() {
     // Under a writable parent the copy installs the source's private mode.
     crate::set_directory_access(&protected, AccessPermissions::Rwx).unwrap();
     assert_eq!(16, std::fs::copy(&private, &protected_dst).unwrap());
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().unwrap();
         let (id, _) = client.stat(protected_dst.to_str().unwrap()).await.unwrap();
         assert_eq!(
@@ -571,7 +576,7 @@ fn copy_test() {
     {
         let source = root.join(format!("mode-source-{index}"));
         let destination = root.join(format!("mode-destination-{index}"));
-        moto_async::LocalRuntime::new().block_on(async {
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
             let client = FsClient::connect().unwrap();
             let (parent, EntryKind::Directory) = client.stat(root.to_str().unwrap()).await.unwrap()
             else {
@@ -616,7 +621,7 @@ fn copy_test() {
                 .unwrap()
                 .perm
         );
-        moto_async::LocalRuntime::new().block_on(async {
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
             let client = FsClient::connect().unwrap();
             let (destination_id, EntryKind::File) =
                 client.stat(destination.to_str().unwrap()).await.unwrap()
@@ -645,7 +650,7 @@ fn copy_test() {
 /// A copy whose finished mode a higher role's byte cannot hold is refused
 /// before the destination changes, not after its contents were replaced.
 fn copy_ceiling_test() {
-    use moto_io::fs::{AccessPermissions, EntryKind, FsClient, RolePermissions};
+    use moto_sdk::io::fs::{AccessPermissions, EntryKind, FsClient, RolePermissions};
 
     let root = crate::temp_path("systest-copy-ceiling");
     let _ = std::fs::remove_dir_all(&root);
@@ -655,7 +660,7 @@ fn copy_ceiling_test() {
     let script = b"#!/system/bin/rush\nexit 0\n";
     std::fs::write(&source, script).unwrap();
     std::fs::write(&destination, b"before copy").unwrap();
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().unwrap();
         let (source_id, EntryKind::File) = client.stat(source.to_str().unwrap()).await.unwrap()
         else {
@@ -729,11 +734,11 @@ fn copy_ceiling_test() {
 }
 
 fn directory_data_requests_test() {
-    use moto_io::fs::{EntryKind, FsClient};
+    use moto_sdk::io::fs::{EntryKind, FsClient};
 
     let root = temp_dir();
     std::fs::create_dir_all(&root).unwrap();
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().unwrap();
         let (directory, EntryKind::Directory) = client.stat(root.to_str().unwrap()).await.unwrap()
         else {
@@ -791,7 +796,7 @@ pub fn smoke_test() {
     }
 
     // add stats
-    let sys_io_provider = moto_stats::Collector::providers()
+    let sys_io_provider = moto_sdk::stats::Collector::providers()
         .into_iter()
         .find(|p| p.id == 2)
         .unwrap();
@@ -900,7 +905,7 @@ pub fn hot_cache_read_test() {
     for byte in &mut bytes {
         *byte = std::random::random(..);
     }
-    let path = crate::temp_path("systest-fs-hot");
+    let path = disk_temp_path("systest-fs-hot");
     std::fs::write(&path, bytes.as_slice()).unwrap();
 
     // Warm the cache; also verifies the content.
@@ -910,7 +915,7 @@ pub fn hot_cache_read_test() {
         moto_rt::fnv1a_hash_64(bytes_back.as_slice())
     );
 
-    let sys_io_provider = moto_stats::Collector::providers()
+    let sys_io_provider = moto_sdk::stats::Collector::providers()
         .into_iter()
         .find(|p| p.id == 2)
         .unwrap();
@@ -966,10 +971,10 @@ pub fn hot_cache_read_test() {
 fn run_pstat(timing: &str) {
     let this_pid = moto_sys::current_pid();
 
-    let kernel = moto_stats::Collector::kernel();
-    let kernel_cpu = moto_stats::Collector::read(&kernel, 1, 1).unwrap();
-    let sys_io_cpu = moto_stats::Collector::read(&kernel, 1, 2).unwrap();
-    let systest_cpu = moto_stats::Collector::read(&kernel, 1, this_pid).unwrap();
+    let kernel = moto_sdk::stats::Collector::kernel();
+    let kernel_cpu = moto_sdk::stats::Collector::read(&kernel, 1, 1).unwrap();
+    let sys_io_cpu = moto_sdk::stats::Collector::read(&kernel, 1, 2).unwrap();
+    let systest_cpu = moto_sdk::stats::Collector::read(&kernel, 1, this_pid).unwrap();
 
     println!(
         "CPU usage {timing}:\n    kernel: {kernel_cpu} sys-io: {sys_io_cpu} systest: {systest_cpu}"
@@ -977,10 +982,10 @@ fn run_pstat(timing: &str) {
 
     // SysCpuWaits = metric 8, SysCpuWakes = metric 9: how often each side
     // blocks/wakes the other (per-response wake/sleep thrash shows up here).
-    let sys_io_waits = moto_stats::Collector::read(&kernel, 8, 2).unwrap();
-    let sys_io_wakes = moto_stats::Collector::read(&kernel, 9, 2).unwrap();
-    let systest_waits = moto_stats::Collector::read(&kernel, 8, this_pid).unwrap();
-    let systest_wakes = moto_stats::Collector::read(&kernel, 9, this_pid).unwrap();
+    let sys_io_waits = moto_sdk::stats::Collector::read(&kernel, 8, 2).unwrap();
+    let sys_io_wakes = moto_sdk::stats::Collector::read(&kernel, 9, 2).unwrap();
+    let systest_waits = moto_sdk::stats::Collector::read(&kernel, 8, this_pid).unwrap();
+    let systest_wakes = moto_sdk::stats::Collector::read(&kernel, 9, this_pid).unwrap();
     println!(
         "waits/wakes {timing}:\n    sys-io: {sys_io_waits}/{sys_io_wakes} systest: {systest_waits}/{systest_wakes}"
     );
@@ -990,12 +995,12 @@ fn run_pstat(timing: &str) {
     // (kernel tlb.rs::invalidate: IPI all CPUs + spin for acks) charged to
     // the caller. SysMem* = metrics 4/5/6 (systest scope); shootdown/wakeup
     // IPIs = metrics 19/18 (kernel scope, remote CPUs only); IrqPfFired = 20.
-    let mem_calls = moto_stats::Collector::read(&kernel, 4, this_pid).unwrap();
-    let mem_maps = moto_stats::Collector::read(&kernel, 5, this_pid).unwrap();
-    let mem_unmaps = moto_stats::Collector::read(&kernel, 6, this_pid).unwrap();
-    let tlb_shootdowns = moto_stats::Collector::read(&kernel, 19, 1).unwrap();
-    let wakeup_irqs = moto_stats::Collector::read(&kernel, 18, 1).unwrap();
-    let pf_irqs = moto_stats::Collector::read(&kernel, 20, 1).unwrap();
+    let mem_calls = moto_sdk::stats::Collector::read(&kernel, 4, this_pid).unwrap();
+    let mem_maps = moto_sdk::stats::Collector::read(&kernel, 5, this_pid).unwrap();
+    let mem_unmaps = moto_sdk::stats::Collector::read(&kernel, 6, this_pid).unwrap();
+    let tlb_shootdowns = moto_sdk::stats::Collector::read(&kernel, 19, 1).unwrap();
+    let wakeup_irqs = moto_sdk::stats::Collector::read(&kernel, 18, 1).unwrap();
+    let pf_irqs = moto_sdk::stats::Collector::read(&kernel, 20, 1).unwrap();
     println!(
         "systest mem calls/maps/unmaps {timing}: {mem_calls}/{mem_maps}/{mem_unmaps}\n\
          kernel irqs tlb_shootdown/wakeup/pf {timing}: {tlb_shootdowns}/{wakeup_irqs}/{pf_irqs}"
@@ -1031,13 +1036,12 @@ fn resize_test() {
 /// Retained write completions used to exhaust CHV's 128-entry block queue
 /// before the worker could reach Commit and release their descriptors.
 pub fn scattered_writes_test() {
-    use std::io::Write;
     use std::os::fd::AsRawFd;
 
     const FILES: usize = 248;
     const STRIDE: usize = 4;
     const LEN: usize = 1024; // Inline data: each file occupies one entry block.
-    let root = crate::temp_path("systest-fs-scattered-writes");
+    let root = disk_temp_path("systest-fs-scattered-writes");
     std::fs::create_dir(&root).unwrap();
     let paths: Vec<_> = (0..FILES).map(|i| root.join(format!("{i:03}"))).collect();
     for (i, path) in paths.iter().enumerate() {
@@ -1048,7 +1052,7 @@ pub fn scattered_writes_test() {
     // wait for it as read_sys_io_fs_metrics waits for its metrics.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let sys_io_provider = loop {
-        if let Some(provider) = moto_stats::Collector::providers()
+        if let Some(provider) = moto_sdk::stats::Collector::providers()
             .into_iter()
             .find(|p| p.id == 2)
         {
@@ -1061,7 +1065,7 @@ pub fn scattered_writes_test() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
     // Open during setup: debug logging from open must not split the write batch.
-    let mut files: Vec<_> = paths
+    let files: Vec<_> = paths
         .iter()
         .enumerate()
         .step_by(STRIDE)
@@ -1073,13 +1077,41 @@ pub fn scattered_writes_test() {
         })
         .collect();
     let flush_file = std::fs::File::open(&paths[0]).unwrap();
+    let overwrites: Vec<_> = files
+        .iter()
+        .map(|(i, file)| {
+            (
+                moto_rt::fs::get_file_attr(file.as_raw_fd())
+                    .unwrap()
+                    .entry_id,
+                !(*i as u8),
+            )
+        })
+        .collect();
+    let mut runtime = moto_sdk::async_runtime::LocalRuntime::new();
+    let client = moto_sdk::io::fs::FsClient::connect().unwrap();
     // Empty the creation batch before measuring the 62 one-block overwrites.
     moto_rt::fs::flush(flush_file.as_raw_fd()).unwrap();
     let before = read_sys_io_fs_metrics(&sys_io_provider);
     let started = std::time::Instant::now();
-    for (i, file) in &mut files {
-        file.write_all(&[!(*i as u8); LEN]).unwrap();
-    }
+    // Submit the whole batch before waiting for completions. Blocking round
+    // trips can outlast the automatic flush interval on oversubscribed CPUs.
+    runtime.block_on(async {
+        client.enable_response_pump();
+        moto_sdk::async_runtime::LocalRuntime::spawn(client.clone().run_response_pump());
+        let writes: Vec<_> = overwrites
+            .into_iter()
+            .map(|(entry_id, byte)| {
+                let client = client.clone();
+                moto_sdk::async_runtime::LocalRuntime::spawn(async move {
+                    assert_eq!(client.write(entry_id, 0, &[byte; LEN]).await.unwrap(), LEN);
+                })
+            })
+            .collect();
+        for write in writes {
+            write.await;
+        }
+    });
     let overwrite_elapsed = started.elapsed();
     moto_rt::fs::flush(flush_file.as_raw_fd()).unwrap();
     let after = read_sys_io_fs_metrics(&sys_io_provider);
@@ -1185,7 +1217,7 @@ pub fn concurrent_flush_stress_test() {
     for t in 0..THREADS {
         let progress = progress.clone();
         handles.push(std::thread::spawn(move || {
-            let path = crate::temp_path(&format!("systest-flush-stress-{t}"));
+            let path = disk_temp_path(&format!("systest-flush-stress-{t}"));
             let _ = std::fs::remove_file(&path);
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
@@ -1366,7 +1398,7 @@ pub fn verify_pattern_file(path: &str, len: u64, label: &str) {
 /// Several processes and threads stream the same large file at once and
 /// verify its contents.
 fn concurrent_large_file_read_test() {
-    let path = crate::temp_path("systest-concurrent-read");
+    let path = disk_temp_path("systest-concurrent-read");
     let path_str = path.to_str().unwrap();
     if std::fs::metadata(&path).is_ok() {
         std::fs::remove_file(&path).unwrap();
@@ -1558,8 +1590,8 @@ pub fn service_progress_test() {
     let newcomer = std::thread::spawn(move || {
         // Exercise fresh listeners repeatedly while the original client stays hot.
         for _ in 0..ROUNDS {
-            let client = moto_io::fs::FsClient::connect().unwrap();
-            moto_async::LocalRuntime::new().block_on(async {
+            let client = moto_sdk::io::fs::FsClient::connect().unwrap();
+            moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
                 client.stat("/system/bin").await.unwrap();
             });
             newcomer_rounds.fetch_add(1, Ordering::Relaxed);
@@ -1582,14 +1614,14 @@ pub fn service_progress_test() {
 
 /// A client withholding response pages must not hold up another client's writer.
 pub fn metadata_page_pressure_test() {
-    use moto_ipc::io_channel::{self, CHANNEL_PAGE_COUNT};
-    use moto_sys_io::api_fs;
+    use moto_sdk::ipc::io_channel::{self, CHANNEL_PAGE_COUNT};
+    use moto_sdk::sys_io::api_fs;
     use std::time::Duration;
 
     crate::ensure_temp_dir();
     let root = std::env::temp_dir();
     let name = format!("systest-metadata-page-pressure-{}", std::process::id());
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (sender, mut receiver) = io_channel::connect(api_fs::FS_URL).unwrap();
         let (writer, mut writer_receiver) = io_channel::connect(api_fs::FS_URL).unwrap();
         let mut stat = api_fs::stat_path_msg_encode(
@@ -1640,7 +1672,7 @@ pub fn metadata_page_pressure_test() {
         writer.send(create).await.unwrap();
         let result = {
             let response = std::pin::pin!(writer_receiver.recv());
-            let deadline = std::pin::pin!(moto_async::sleep(Duration::from_secs(2)));
+            let deadline = std::pin::pin!(moto_sdk::async_runtime::sleep(Duration::from_secs(2)));
             match futures::future::select(response, deadline).await {
                 futures::future::Either::Left((response, _)) => Some(response.unwrap()),
                 futures::future::Either::Right(_) => None,

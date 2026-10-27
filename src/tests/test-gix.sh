@@ -447,9 +447,8 @@ PY
 
 # The Motor OS executables that the guest mode copies to the VM.
 build_native() {
-  local assembly_images linker
-  assembly_images="$("$ROOT_DIR/src/resolve-toolchain-assembly.sh" --resolve)"
-  linker="${assembly_images%/images}/sysroot/bin/motor-clang"
+  local linker
+  linker="$(cd "$ROOT_DIR" && rustc --print sysroot)/lib/rustlib/x86_64-unknown-motor/sysroot/bin/motor-clang"
   env "CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER=$linker" \
     "CARGO_TARGET_X86_64_UNKNOWN_MOTOR_RUSTFLAGS=-C link-self-contained=no -C default-linker-libraries=yes" \
     "$cargo" build "${common[@]}" --features native-test-support \

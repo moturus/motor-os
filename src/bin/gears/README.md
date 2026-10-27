@@ -286,25 +286,35 @@ context settings to the server's context capacity.
 
 Automated tests never use an Internet provider:
 
-    bash src/tests/test-gears-http.sh
-    bash src/tests/test-gears-http.sh --release
+    src/bin/gears/tests/full-test.sh
+    src/bin/gears/tests/full-test.sh --release
     cargo fmt --manifest-path src/bin/gears/Cargo.toml -- --check
     cargo test --manifest-path src/bin/gears/Cargo.toml
     cargo clippy --manifest-path src/bin/gears/Cargo.toml --all-targets
     cargo test --manifest-path src/bin/gears/Cargo.toml --example mock-provider
 
-The component gate runs the package's tests and the mock provider's tests,
-and selects the host build of Motor curl through `MOTOR_CURL_TEST_PROGRAM` for
-the provider regression; plain `cargo test` uses upstream curl there. The
-developer-image gate also runs guest curl and Gears against the host mock's
-HTTP endpoint on the TAP address:
+Run the build preparation in [docs/build.md](../../../docs/build.md) first:
 
-    src/tests/full-test-dev.sh --release
+    src/build-motor-os.sh
 
-Build the development-image binaries and test programs, including the
-`gears-mock-provider` TLS backend (the `mock-provider` example), with:
+The standalone gate accepts `--release` and can be invoked from any working
+directory. It runs host unit/integration tests, the mock provider's tests, and
+the batteries workflow. It selects the host build of Motor curl through
+`MOTOR_CURL_TEST_PROGRAM`; plain `cargo test` uses upstream curl there.
 
-    make gears
+It then builds the developer image and test examples, boots a disposable QEMU
+overlay, and uploads the fixtures. Guest checks cover HTTP, shipped tools,
+first-run setup, and batteries in both profiles. Native Gears source builds,
+tests, and launch checks using Lorry run only with `--release`.
+Provider traffic stays local; build preparation and native dependency vendoring
+need network access. VM networking and KVM must be available, with no other VM
+using the test TAP address. VM logs are retained under `build/gears-vm-*`.
+
+Gears tests are independent of `src/tests/full-test.sh` and `full-test-dev.sh`.
+`make gears` builds only the application binaries. For just the host checks:
+
+    src/bin/gears/tests/test-gears-http.sh
+    src/bin/gears/tests/test-gears-batteries.sh
 
 For a manual Linux smoke test, start that backend with
 src/bin/curl/tests/server-cert.pem and server-key.pem:
@@ -316,9 +326,10 @@ src/bin/curl/tests/server-cert.pem and server-key.pem:
 
 Point a temporary config at https://127.0.0.1:9443/v1, set provider.ca_cert to
 src/bin/curl/tests/test-ca.pem, allowlist 127.0.0.1, and run Gears with any
-non-empty test key. It is installed as gears-mock-provider in the
-Motor OS development image under /devtools/tests/gears/; copy the three test
-certificate files into the VM and repeat with /devtools/bin/gears.
+non-empty test key. To repeat on Motor OS, cross-build the `mock-provider`
+example and copy it and the certificates into the VM. Test-only TLS fixtures
+also live in `tests/tls`; the standalone gate uploads them under
+`/user/tmp/gears-tests` in its disposable VM.
 
 Use the streamed-text, sh-round, hook-round, compaction, interrupt-stream,
 usage, malformed-response, and error scenarios as appropriate. `--plain`

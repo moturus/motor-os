@@ -19,22 +19,14 @@ test = false
 
 # internal dependencies
 frusa            = { path = "../frusa"            }
-moto-async       = { path = "../moto-async"       }
 futures          = { version = "0.3", default-features = false, features = ["alloc"] }
 moto-dns         = { path = "../moto-dns"         }
-moto-io          = { path = "../moto-io"          }
-moto-io-internal = { path = "../moto-io-internal" }
-moto-ipc         = { path = "../moto-ipc"         , features = ["stdio-pipe"] }
 moto-rt          = { path = "../moto-rt"          , features = ["libc"]       }
+moto-sdk         = { path = "../moto-sdk"         , default-features = false  }
 moto-sys         = { path = "../moto-sys"         }
-moto-sys-io      = { path = "../moto-sys-io"      }
 
 # external dependencies
 log = "0.4.28"
-
-[features]
-# If enabled, extra runtime checks/assertions are performed.
-netdev = ["moto-io/netdev"]
 
 [lints.rust]
 unexpected_cfgs = { level = 'allow', check-cfg = [ 'cfg(test)'] }

@@ -3,9 +3,9 @@
 The developer image (`make dev.img BUILD=release`, producing
 `motor-os-dev.qcow2`) includes Javy 9.1.0, Wasmi 1.1.0 and a runtime-only
 Wasmtime 48.0.1. Javy compiles JavaScript into a WebAssembly module containing
-the QuickJS runtime. Wasmi interprets that module using the Motor port's WASI
+the QuickJS runtime. Wasmi interprets that module using the Motor OS port's WASI
 Preview 1 support. The runtime-only Wasmtime executes precompiled Pulley
-artifacts; it contains no compiler, and on-Motor compilation is not installed
+artifacts; it contains no compiler, and compilation on Motor OS is not installed
 yet.
 
 ## Installed files
@@ -25,15 +25,36 @@ The smaller `wasm.img` also includes the three tools and their data
 directories. The test inputs (the TypeScript workload, the Linux identity
 digests, two custom Javy plugins and the precompiled Wasmtime fixtures) are
 not installed;
-`src/tests/test-wasm.sh` uploads them to `/none/tmp` on every VM boot during tests.
+`src/tests/test-wasm.sh` uploads them to `/none/wasm-tests` on every VM boot
+during tests. The low-RAM qualification keeps these fixtures and retained
+outputs on disk; the tools' None-role `TMPDIR` still uses memfs at `/none/tmp`.
 
 `wasmtime-rt` runs as role None (`MOTOR_OS_CAPS=0`, `0x100`, `0x200` or
-`0x300`) and needs `--allow-precompiled`. Each linear memory is limited to
-96 MiB, and a process to four memories reserving 128 MiB in total; `-W
-max-memory-size` and `-W max-memories` can only lower these. A store defaults
+`0x300`) and needs `--allow-precompiled`.
+
+Wasmtime and Wasmi reserve each linear memory's declared maximum, or 4 GiB
+without one, as a sparse lazy mapping: only the pages a guest touches use RAM,
+and, as on Linux, there is no limit on the total or the number of memories in a
+process. A 64-bit memory cannot grow past 4 GiB; `memory.grow` returns -1, as
+upstream Wasmtime does with `-O memory-may-move=n`. When RAM runs out, Motor OS
+kills whichever process has a page fault refused (there is no OOM killer, see
+[OOM handling](oom-handling.md)): the guest's runtime or another process. `-W
+max-memory-size` and `-W max-memories` bound a `wasmtime-rt` guest as upstream.
+A store defaults
 to 64 instances, 16 tables and 32,768 table elements, which `-W max-instances`,
 `-W max-tables` and `-W max-table-elements` override. `-W timeout=DURATION`
 interrupts a guest compiled with epoch interruption. The example and HTML documentation are part of `dev.img`.
+
+`wasmtime-rt` runs asynchronous calls, such as each `serve` request, on fiber
+stacks that are lazy guarded mappings: a stack uses RAM only for the pages it
+touches, and, as on Linux, their number is not limited. `serve` behaves as
+upstream: up to 1,000 concurrent requests and connections by default
+(`--max-concurrent-requests`, `--max-concurrent-connections`), no default
+request deadline, no header-read or idle timeout, and exit on any accept
+error. A request deadline needs `-W timeout` and an artifact compiled with
+epoch interruption: a server with a timeout refuses artifacts compiled
+without epochs, and a server without one refuses artifacts compiled with
+them.
 
 ## Run the example
 

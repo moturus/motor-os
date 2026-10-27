@@ -79,9 +79,9 @@ dependencies = [
 
 [[package]]
 name = "moto-rt"
-version = "0.17.8"
+version = "0.17.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a77aa5e9703e09b6fef00cd465edff63b4ab502177e10aecbbd93b3cef217d6"
+checksum = "4d8ec4efe5d19efe27a3457f7fabf6a9a68f4ea51b8bc21f7ec494f27e74d1ec"
 
 [[package]]
 name = "parking_lot"

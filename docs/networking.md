@@ -54,6 +54,16 @@ and already-progressing TCP connections are not aborted solely because a lease
 was lost. Applications must still handle the ordinary I/O failure that follows
 when the old address is no longer usable.
 
+## WireGuard
+
+See [WireGuard usage and design](wireguard.md) for key generation, a complete
+configuration example, file permissions, starting and stopping tunnels,
+routing behavior and diagnostics. Each `wg` process registers one IP device
+with sys-io; applications use the normal TCP, UDP and ICMP APIs.
+
+[Initial measurements](wireguard-measurements.md) cover physical, unencrypted
+packet-device and WireGuard paths, including the limits on small VMs.
+
 ## Admission and response limits
 
 `max_half_open_global` and `max_half_open_per_listener` bound sockets in

@@ -3,9 +3,6 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-for helper in versions lib native llvm; do
-  . "$ROOT_DIR/src/toolchain-$helper.sh"
-done
 manifest="$ROOT_DIR/src/tests/unwind/Cargo.toml"
 temporary="$(mktemp -d)"
 trap 'rm -rf "$temporary"' EXIT
@@ -13,22 +10,17 @@ cargo="$(rustup which cargo)"
 common=(--locked --offline --target x86_64-unknown-motor
   --manifest-path "$manifest")
 
-development_root="$(readlink -f "${MOTORH:-$ROOT_DIR/..}")"
-EFFECTIVE_MOTOR_LLVM_REV="$MOTOR_LLVM_REV"
-MOTOR_LLVM_TREE_STATE=clean
-standalone_key="$(toolchain_standalone_llvm_key)"
-elf_tools="$development_root/build/toolchain/standalone-llvm/$standalone_key/bin"
-assembly_images="$("$ROOT_DIR/src/resolve-toolchain-assembly.sh" --resolve)"
-assembly_root="${assembly_images%/images}"
-assembly_sysroot="$assembly_root/sysroot"
+toolchain_sysroot="$(cd "$ROOT_DIR" && rustc --print sysroot)"
+motor_sysroot="$toolchain_sysroot/lib/rustlib/x86_64-unknown-motor/sysroot"
+llvm_tools="$toolchain_sysroot/lib/rustlib/x86_64-unknown-linux-gnu/bin"
 
 pure_target="$temporary/pure"
 c_target="$temporary/c-runtime"
 c_environment=(
-  "MOTOR_TEST_CXX=$assembly_sysroot/bin/motor-clang++"
-  "MOTOR_TEST_AR=$elf_tools/llvm-ar"
-  "MOTOR_TEST_CXX_LIB=$assembly_sysroot/devtools/llvm/lib"
-  "CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER=$assembly_sysroot/bin/motor-clang"
+  "MOTOR_TEST_CXX=$motor_sysroot/bin/motor-clang++"
+  "MOTOR_TEST_AR=$llvm_tools/llvm-ar"
+  "MOTOR_TEST_CXX_LIB=$motor_sysroot/devtools/llvm/lib"
+  "CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER=$motor_sysroot/bin/motor-clang"
   "CARGO_TARGET_X86_64_UNKNOWN_MOTOR_RUSTFLAGS=-C link-self-contained=no -C default-linker-libraries=yes"
 )
 
@@ -62,11 +54,11 @@ for mode_target in "pure:$pure_target" "c-runtime:$c_target"; do
   target="${mode_target#*:}"
   for profile in release release-lto release-abort; do
     binary="$target/x86_64-unknown-motor/$profile/motor-unwind-test"
-    unstripped="$binary"
+    unstripped=("$binary")
     if [ "$mode:$profile" = pure:release-abort ]; then
-      unstripped=
+      unstripped=()
     fi
-    toolchain_validate_native_elf "$binary" "$elf_tools/llvm-readelf" "$unstripped" || {
+    "$ROOT_DIR/src/build-scripts/validate-native-elf.sh" "$binary" ${unstripped[@]+"${unstripped[@]}"} || {
       echo "test-unwind: $mode $profile ELF validation failed" >&2
       exit 1
     }
@@ -118,7 +110,7 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = 1 ]; then
     /devtools/bin/rustc --edition=2024 -O "$guest_source" -o "$guest_binary"
   printf 'get "%s" "%s"\n' "$guest_binary" "$downloaded" |
     sftp "${ssh_options[@]}" -P 2222 -b - motor@192.168.4.2
-  toolchain_validate_native_elf "$downloaded" "$elf_tools/llvm-readelf" "$downloaded"
+  "$ROOT_DIR/src/build-scripts/validate-native-elf.sh" "$downloaded" "$downloaded"
   ssh "${ssh_options[@]}" -p 2222 motor@192.168.4.2 "$guest_binary" suite
   ssh "${ssh_options[@]}" -p 2222 motor@192.168.4.2 /system/bin/rm "$guest_source"
   ssh "${ssh_options[@]}" -p 2222 motor@192.168.4.2 /system/bin/rm "$guest_binary"

@@ -455,9 +455,9 @@ started with <code>run-dev.sh</code> (8 vCPUs, 8 GiB).</p>
 <div class="table-wrap">
 <table>
   <tr><th>Path</th><th>Contents</th></tr>
-  <tr><td><code>/devtools/bin</code></td><td><code>cc</code>, <code>c++</code>, <code>rustc</code> (launcher scripts), <code>gix</code>, <code>lorry</code>, <code>gears</code>, <code>mdbg</code>, <code>lua</code>, <code>sed</code>, <a href="wasm.html"><code>javy</code> and <code>wasmi</code></a>, and <code>www</code>, the script that serves this website. On <code>PATH</code>.</td></tr>
+  <tr><td><code>/devtools/bin</code></td><td><code>cc</code>, <code>c++</code>, <code>rustc</code>, <code>rustfmt</code>, <code>clippy-driver</code> (launcher scripts), <code>gix</code>, <code>lorry</code>, <code>gears</code>, <code>mdbg</code>, <code>lua</code>, <code>sed</code>, <a href="wasm.html"><code>javy</code> and <code>wasmi</code></a>, and <code>www</code>, the script that serves this website. On <code>PATH</code>.</td></tr>
   <tr><td><code>/devtools/llvm</code></td><td>The LLVM multicall binary (clang, lld, and the tools), headers, and static libraries: mlibc, libc++, libc++abi, libunwind, compiler-rt, and the C ABI shim over the runtime.</td></tr>
-  <tr><td><code>/devtools/rust</code></td><td>Native rustc with a full <code>x86_64-unknown-motor</code> sysroot. There is no cargo on the image; Lorry is the build driver.</td></tr>
+  <tr><td><code>/devtools/rust</code></td><td>Native rustc, rustfmt, clippy-driver, and rust-analyzer with a full <code>x86_64-unknown-motor</code> sysroot and matching <code>rust-src</code>. There is no Cargo on the image; Lorry is the build driver.</td></tr>
   <tr><td><code>/devtools/src</code></td><td>Writable workspace with sample sources under <code>hello-world/</code> and <a href="wasm.html"><code>wasm/</code></a>, and snapshots of red, lorry, gears, moto-rt, and moto-sys under <code>motor-os/</code>, so that those can be rebuilt natively.</td></tr>
   <tr><td><code>/devtools/tests</code></td><td><code>systest</code>, <code>mio-test</code>, <code>tokio-tests</code>, <code>crossterm-smoke</code>, <code>crossbench</code>, <code>rnetbench</code>, and <code>gears/gears-mock-provider</code>.</td></tr>
   <tr><td><code>/devtools/lorry</code></td><td>Lorry's dependency repository and compiled-unit cache: <code>user/</code> for Interactive, <code>none/</code> for None.</td></tr>
@@ -466,9 +466,11 @@ started with <code>run-dev.sh</code> (8 vCPUs, 8 GiB).</p>
   <tr><td><code>/system/bin/curl</code></td><td>A curl-compatible HTTPS client, the network tool Lorry uses to fetch crates.</td></tr>
 </table>
 </div>
-<p><code>/devtools</code> itself is System-owned; Interactive sessions write under
-<code>/devtools/src</code> and <code>/devtools/lorry/user</code>, and may edit the launcher
-scripts in <code>/devtools/bin</code> in place but not add or remove entries there.</p>
+<p><code>/devtools</code> belongs to Interactive sessions: they build under
+<code>/devtools/src</code>, keep Lorry's state in <code>/devtools/lorry/user</code>, and can
+install a newer toolchain with the <code>install.sh</code> of its native archive, which
+replaces <code>/devtools/llvm</code> and <code>/devtools/rust</code>; see
+<a href="toolchain.html">Toolchains</a>.</p>
 
 <h2>Compiling natively</h2>
 <pre><code>cd /devtools/src/hello-world
@@ -532,9 +534,9 @@ calls use hook policy and honor saved denials. The
 as Gears. Sessions are append-only JSONL trees under <code>/user/cfg/gears/sessions/</code>,
 with <code>--continue</code>, <code>--resume</code>, <code>--fork</code>, and in-session
 <code>/new</code>, <code>/resume</code>, <code>/fork</code>, <code>/tree</code>, and
-<code>/compact</code>. <code>gears-mock-provider</code>, installed under
-<code>/devtools/tests/gears/</code>, is a deterministic local TLS provider so that Gears can
-be tested without an Internet provider.</p>
+<code>/compact</code>. Gears has a deterministic local mock provider so it can be
+tested without an Internet provider. Run <code>src/bin/gears/tests/full-test.sh</code>
+on the host for its standalone test suite; add <code>--release</code> for release builds.</p>
 
 <h2>mdbg</h2>
 <p><code>mdbg print-stacks PID</code> pauses a process through the kernel's debug interface

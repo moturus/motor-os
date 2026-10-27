@@ -48,7 +48,7 @@ pub fn run(binary: &Path, compiler: &str) -> Result<(), String> {
     let mut approvals = Approvals::default();
     let mut observer = |event| {
         if let Event::Notice(text) = event {
-            return Err(format!("unexpected skill workflow notice: {text}"));
+            fixture.observe_notice(&text)?;
         }
         Ok(())
     };

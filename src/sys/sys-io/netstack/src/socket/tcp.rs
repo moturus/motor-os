@@ -1497,10 +1497,13 @@ impl<'a> Socket<'a> {
     /// New data arriving after our FIN is then answered with an RST rather
     /// than absorbed (Linux RCV_SHUTDOWN semantics), and the rings shrink
     /// to a floor once the close handshake reaches FIN-WAIT-2 or
-    /// TIME-WAIT. Cleared by a reset. This is a local marker; it does not
-    /// itself change the connection state.
+    /// TIME-WAIT, or at once if it already has: a server that shuts down
+    /// writing and then reads the peer's FIN closes in TIME-WAIT. Cleared
+    /// by a reset. This is a local marker; it does not itself change the
+    /// connection state.
     pub fn set_rx_shutdown(&mut self) {
         self.rx_shutdown = true;
+        self.release_orphan_rings();
     }
 
     /// Aborts the connection, if any.
@@ -2093,12 +2096,25 @@ impl<'a> Socket<'a> {
             self.apply_pending_tx_growth();
         }
 
-        // An orphaned socket's rings are dead once our FIN is acked: no reader
-        // ever again, and everything sent is acknowledged. A small window is
-        // needed through FIN-WAIT-2 so the peer's FIN remains acceptable. Once
-        // that FIN is consumed, TIME-WAIT only acknowledges duplicates. The
-        // assembler check matters: out-of-order octets live in the ring past
-        // the readable region, invisible to `is_empty`.
+        self.release_orphan_rings();
+
+        #[cfg(feature = "async")]
+        {
+            // Wake all tasks waiting. Even if we haven't received/sent data, this
+            // is needed because return values of functions may change depending on the state.
+            // For example, a pending read has to fail with an error if the socket is closed.
+            self.rx_waker.wake();
+            self.tx_waker.wake();
+        }
+    }
+
+    /// An orphaned socket's rings are dead once our FIN is acked: no reader
+    /// ever again, and everything sent is acknowledged. A small window is
+    /// needed through FIN-WAIT-2 so the peer's FIN remains acceptable. Once
+    /// that FIN is consumed, TIME-WAIT only acknowledges duplicates. The
+    /// assembler check matters: out-of-order octets live in the ring past
+    /// the readable region, invisible to `is_empty`.
+    fn release_orphan_rings(&mut self) {
         if self.rx_shutdown
             && matches!(self.state, State::FinWait2 | State::TimeWait)
             && self.rx_buffer.is_empty()
@@ -2116,15 +2132,6 @@ impl<'a> Socket<'a> {
             if self.tx_buffer.capacity() > floor {
                 self.tx_buffer.release_to(floor);
             }
-        }
-
-        #[cfg(feature = "async")]
-        {
-            // Wake all tasks waiting. Even if we haven't received/sent data, this
-            // is needed because return values of functions may change depending on the state.
-            // For example, a pending read has to fail with an error if the socket is closed.
-            self.rx_waker.wake();
-            self.tx_waker.wake();
         }
     }
 
@@ -2741,6 +2748,19 @@ impl<'a> Socket<'a> {
             return Some(reply);
         }
 
+        // Text past the peer's FIN is invalid, and RFC 9293 ignores it. An
+        // orphan must not take it: the ACK below may release the rings it was
+        // admitted to.
+        let payload = if self.rx_shutdown
+            && matches!(
+                self.state,
+                State::CloseWait | State::Closing | State::LastAck | State::TimeWait
+            ) {
+            &[][..]
+        } else {
+            payload
+        };
+
         // Compute the amount of acknowledged octets, removing the SYN and FIN bits
         // from the sequence space.
         let mut ack_len = 0;
@@ -2992,6 +3012,9 @@ impl<'a> Socket<'a> {
             self.tx_buffer.dequeue_allocated(ack_len);
 
             self.apply_pending_tx_growth();
+            // The ACK of our FIN usually acknowledges the last data too, and
+            // the state change above ran before that data left the ring.
+            self.release_orphan_rings();
 
             // There's new room available in tx_buffer, wake the waiting task if any.
             #[cfg(feature = "async")]
@@ -8231,6 +8254,187 @@ mod test {
             (3, ())
         })
         .unwrap();
+
+        // Giving up reading once the data is drained releases the rings to
+        // the floor, and the peer's FIN then releases them to TIME-WAIT's.
+        s.set_rx_shutdown();
+        assert_eq!(s.rx_buffer.capacity(), 16384);
+        assert_eq!(s.tx_buffer.capacity(), 16384);
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Fin,
+                seq_number: REMOTE_SEQ + 1 + 3,
+                ack_number: Some(LOCAL_SEQ + 1 + 1),
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::TimeWait);
+        assert_eq!(s.rx_buffer.capacity(), 1);
+        assert_eq!(s.tx_buffer.capacity(), 1);
+    }
+
+    // A server that shuts down writing, reads the peer's FIN and only then
+    // closes reaches TIME-WAIT before the owner gives up reading.
+    #[test]
+    fn test_rx_shutdown_in_time_wait_releases_rings() {
+        let mut s = socket_established_with_buffer_sizes(32768, 32768);
+        s.close();
+        recv!(
+            s,
+            [TcpRepr {
+                control: TcpControl::Fin,
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                window_len: 32768,
+                ..RECV_TEMPL
+            }]
+        );
+        send!(
+            s,
+            TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + 1),
+                ..SEND_TEMPL
+            }
+        );
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Fin,
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + 1),
+                ..SEND_TEMPL
+            }
+        );
+        assert_eq!(s.state, State::TimeWait);
+        assert_eq!(s.rx_buffer.capacity(), 32768);
+        assert_eq!(s.tx_buffer.capacity(), 32768);
+        recv!(
+            s,
+            [TcpRepr {
+                seq_number: LOCAL_SEQ + 1 + 1,
+                ack_number: Some(REMOTE_SEQ + 1 + 1),
+                window_len: 32768,
+                ..RECV_TEMPL
+            }]
+        );
+
+        s.set_rx_shutdown();
+        assert_eq!(s.state, State::TimeWait);
+        assert_eq!(s.rx_buffer.capacity(), 1);
+        assert_eq!(s.tx_buffer.capacity(), 1);
+        // A retransmitted FIN is still acknowledged against the floor rings.
+        send!(
+            s,
+            TcpRepr {
+                control: TcpControl::Fin,
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1 + 1),
+                ..SEND_TEMPL
+            },
+            Some(TcpRepr {
+                seq_number: LOCAL_SEQ + 1 + 1,
+                ack_number: Some(REMOTE_SEQ + 1 + 1),
+                window_len: 1,
+                ..RECV_TEMPL
+            })
+        );
+        assert_eq!(s.state, State::TimeWait);
+    }
+
+    // One segment acknowledges our last data and our FIN; the state changes
+    // before that data leaves the send ring. A server's close looks like
+    // this: response, FIN, then the peer's ACK of both, with or without
+    // its own FIN.
+    #[test]
+    fn test_rx_shutdown_rings_released_when_fin_ack_covers_data() {
+        for peer_fin in [false, true] {
+            let mut s = socket_established_with_buffer_sizes(32768, 32768);
+            s.send_slice(b"abcdef").unwrap();
+            s.set_rx_shutdown();
+            s.close();
+            recv!(
+                s,
+                [TcpRepr {
+                    control: TcpControl::Fin,
+                    seq_number: LOCAL_SEQ + 1,
+                    ack_number: Some(REMOTE_SEQ + 1),
+                    payload: &b"abcdef"[..],
+                    window_len: 32768,
+                    ..RECV_TEMPL
+                }]
+            );
+            send!(
+                s,
+                TcpRepr {
+                    control: if peer_fin {
+                        TcpControl::Fin
+                    } else {
+                        TcpControl::None
+                    },
+                    seq_number: REMOTE_SEQ + 1,
+                    ack_number: Some(LOCAL_SEQ + 1 + 6 + 1),
+                    ..SEND_TEMPL
+                }
+            );
+            let (state, floor) = if peer_fin {
+                (State::TimeWait, 1)
+            } else {
+                (State::FinWait2, 16384)
+            };
+            assert_eq!(s.state, state);
+            assert_eq!(s.rx_buffer.capacity(), floor);
+            assert_eq!(s.tx_buffer.capacity(), floor);
+        }
+    }
+
+    // The peer's FIN arrives before its ACK of ours (CLOSING), and the ACK
+    // that ends CLOSING carries text past that FIN. The text is ignored: the
+    // ACK releases the rings it would have been admitted to, whether it also
+    // acknowledges our data or that was acknowledged with the FIN.
+    #[test]
+    fn test_rx_shutdown_ignores_text_after_peer_fin() {
+        for data_acked_with_fin in [false, true] {
+            let mut s = socket_established_with_buffer_sizes(32768, 32768);
+            s.send_slice(b"abcdef").unwrap();
+            s.set_rx_shutdown();
+            s.close();
+            recv!(
+                s,
+                [TcpRepr {
+                    control: TcpControl::Fin,
+                    seq_number: LOCAL_SEQ + 1,
+                    ack_number: Some(REMOTE_SEQ + 1),
+                    payload: &b"abcdef"[..],
+                    window_len: 32768,
+                    ..RECV_TEMPL
+                }]
+            );
+            let acked = if data_acked_with_fin { 6 } else { 0 };
+            send!(
+                s,
+                TcpRepr {
+                    control: TcpControl::Fin,
+                    seq_number: REMOTE_SEQ + 1,
+                    ack_number: Some(LOCAL_SEQ + 1 + acked),
+                    ..SEND_TEMPL
+                }
+            );
+            assert_eq!(s.state, State::Closing);
+            send!(
+                s,
+                TcpRepr {
+                    seq_number: REMOTE_SEQ + 1 + 1,
+                    ack_number: Some(LOCAL_SEQ + 1 + 6 + 1),
+                    payload: &b"xyz"[..],
+                    ..SEND_TEMPL
+                }
+            );
+            assert_eq!(s.state, State::TimeWait);
+            assert_eq!(s.rx_buffer.capacity(), 1);
+            assert_eq!(s.tx_buffer.capacity(), 1);
+        }
     }
 
     #[test]

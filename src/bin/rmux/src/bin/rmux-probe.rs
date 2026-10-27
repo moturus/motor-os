@@ -38,10 +38,10 @@ mod motor {
     use std::io::Write;
     use std::time::Duration;
 
-    use moto_ipc::sync::ChannelSize;
-    use moto_ipc::sync::ClientConnection;
-    use moto_ipc::sync::RequestHeader;
-    use moto_ipc::sync::ResponseHeader;
+    use moto_sdk::ipc::sync::ChannelSize;
+    use moto_sdk::ipc::sync::ClientConnection;
+    use moto_sdk::ipc::sync::RequestHeader;
+    use moto_sdk::ipc::sync::ResponseHeader;
     use rmux::proto;
     use rmux::proto::Frames;
     use rmux::proto::ToClient;
@@ -66,7 +66,7 @@ mod motor {
                 0
             }
             ["whoami"] => {
-                let caps = moto_sys::ProcessStaticPage::get().capabilities;
+                let caps = moto_sdk::sys::ProcessStaticPage::get().capabilities;
                 println!("caps={caps:#x} profile={:#x}", ipc::profile());
                 0
             }
@@ -104,11 +104,11 @@ mod motor {
     }
 
     fn errors() -> i32 {
-        use moto_ipc::sync::LocalServer;
-        use moto_sys::SysHandle;
+        use moto_sdk::ipc::sync::LocalServer;
+        use moto_sdk::sys::SysHandle;
         use std::sync::mpsc::channel;
 
-        let caps = moto_sys::ProcessStaticPage::get().capabilities;
+        let caps = moto_sdk::sys::ProcessStaticPage::get().capabilities;
         let name = format!("rmux-probe-errors/{}", std::process::id());
         for (stop_on, close) in [
             (ipc::CMD_OPEN_OUTPUT, false),
@@ -136,9 +136,9 @@ mod motor {
                             return; // Drop both endpoints without a response.
                         }
                         conn.resp::<ResponseHeader>().result = if cmd == stop_on {
-                            moto_rt::E_NOT_ALLOWED
+                            moto_sdk::rt::E_NOT_ALLOWED
                         } else {
-                            moto_rt::E_OK
+                            moto_sdk::rt::E_OK
                         };
                         let page = conn.data_mut();
                         page[ipc::TOKEN_AT..ipc::TOKEN_AT + 8]
@@ -159,7 +159,10 @@ mod motor {
                 let error = ipc::connect(&name, caps)
                     .err()
                     .expect("opening refusal was lost");
-                assert_eq!(error.raw_os_error(), Some(moto_rt::E_NOT_ALLOWED as i32));
+                assert_eq!(
+                    error.raw_os_error(),
+                    Some(moto_sdk::rt::E_NOT_ALLOWED as i32)
+                );
             } else {
                 let (_writer, mut reader) = ipc::connect(&name, caps).unwrap().unwrap();
                 reader
@@ -171,7 +174,10 @@ mod motor {
                     assert_eq!(reader.read(&mut buf).unwrap(), 0);
                 } else {
                     let error = reader.read(&mut buf).unwrap_err();
-                    assert_eq!(error.raw_os_error(), Some(moto_rt::E_NOT_ALLOWED as i32));
+                    assert_eq!(
+                        error.raw_os_error(),
+                        Some(moto_sdk::rt::E_NOT_ALLOWED as i32)
+                    );
                 }
             }
             if !close {
@@ -189,7 +195,7 @@ mod motor {
         // Own both application ends, but use the real IPC thread and forwarder.
         let (events, queue) = std::sync::mpsc::channel();
         ipc::listen(events).unwrap();
-        let caps = moto_sys::ProcessStaticPage::get().capabilities;
+        let caps = moto_sdk::sys::ProcessStaticPage::get().capabilities;
         let (mut writer, mut reader) = ipc::connect(&ipc::service_name(caps), caps)
             .unwrap()
             .unwrap();
@@ -256,7 +262,7 @@ mod motor {
             .map(|_| ipc::connect(name, parse_mask(profile)).unwrap().unwrap())
             .collect();
         let mut extra = ClientConnection::new(ChannelSize::Small).unwrap();
-        assert_eq!(extra.connect(name), Err(moto_rt::E_NOT_READY));
+        assert_eq!(extra.connect(name), Err(moto_sdk::rt::E_NOT_READY));
         assert_eq!(ipc::service_name(ipc::profile()), name);
         let error = ipc::connect_or_start(
             || panic!("a busy server must not invoke the spawn callback"),
@@ -275,12 +281,12 @@ mod motor {
     }
 
     fn silent(name: &str) -> i32 {
-        use moto_sys::{SysCpu, SysHandle, SysObj};
+        use moto_sdk::sys::{SysCpu, SysHandle, SysObj};
 
         let mut conn = ClientConnection::new(ChannelSize::Small).unwrap();
         conn.connect(name).unwrap();
         let mut handles = [conn.handle()];
-        let deadline = moto_rt::time::Instant::now() + Duration::from_secs(5);
+        let deadline = moto_sdk::rt::time::Instant::now() + Duration::from_secs(5);
         // Closing during wait is a wake; closing before wait is a bad handle.
         let result = SysCpu::wait(
             &mut handles,
@@ -288,10 +294,10 @@ mod motor {
             SysHandle::NONE,
             Some(deadline),
         );
-        assert!(result.is_ok() || result == Err(moto_rt::E_BAD_HANDLE));
+        assert!(result.is_ok() || result == Err(moto_sdk::rt::E_BAD_HANDLE));
         assert_eq!(
             SysObj::handle_status(conn.handle()),
-            Err(moto_rt::E_BAD_HANDLE),
+            Err(moto_sdk::rt::E_BAD_HANDLE),
             "silent unauthorized connection was not rejected"
         );
         println!("silent rejected");
@@ -359,11 +365,11 @@ mod motor {
         page[ipc::TOKEN_AT..ipc::TOKEN_AT + 8].copy_from_slice(&token.to_ne_bytes());
         page[ipc::LEN_AT..ipc::LEN_AT + 4].copy_from_slice(&(data.len() as u32).to_ne_bytes());
         page[ipc::DATA_AT..ipc::DATA_AT + data.len()].copy_from_slice(data);
-        let deadline = moto_rt::time::Instant::now() + Duration::from_secs(5);
+        let deadline = moto_sdk::rt::time::Instant::now() + Duration::from_secs(5);
         conn.do_rpc(Some(deadline))
             .map_err(|e| format!("rpc: {e}"))?;
         match conn.resp::<ResponseHeader>().result {
-            moto_rt::E_OK => Ok(conn),
+            moto_sdk::rt::E_OK => Ok(conn),
             err => Err(format!("result {err}")),
         }
     }

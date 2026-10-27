@@ -1,4 +1,4 @@
-use moto_io::fs::{AccessPermissions, EntryKind, FsClient, RolePermissions};
+use moto_sdk::io::fs::{AccessPermissions, EntryKind, FsClient, RolePermissions};
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -54,7 +54,7 @@ pub fn run_all_tests() {
     // Exercise the IPC operation directly, including trusted Interactive
     // authority and rollback when a higher role is changed.
     let ipc = write_file(&root, "ipc");
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().unwrap();
         let (entry_id, EntryKind::File) = client.stat(ipc.to_str().unwrap()).await.unwrap() else {
             panic!("IPC fixture is not a file")

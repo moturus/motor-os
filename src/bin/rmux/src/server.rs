@@ -1434,12 +1434,12 @@ pub(crate) const FAREWELL: Duration = Duration::from_secs(5);
 /// Loopback TCP, because the client and the server are unrelated processes and
 /// standard Rust has nothing else that works on both platforms (§4.2): Motor
 /// sets no target family, so Unix domain sockets do not exist there, and
-/// `moto-ipc` is not standard Rust. systest already proves loopback works here
-/// (`systest/src/tcp.rs:241-262` binds `127.0.0.1:0` and connects to the port
-/// it got), which is why this needed no spike.
+/// `moto_sdk::ipc` is not standard Rust. systest already proves loopback works
+/// here (`systest/src/tcp.rs:241-262` binds `127.0.0.1:0` and connects to the
+/// port it got), which is why this needed no spike.
 ///
-/// On Motor OS the transport is `moto-ipc` instead (`sys::ipc`), because an
-/// IPC connection tells the server what its client may do.
+/// On Motor OS the transport is `moto_sdk::ipc` instead (`sys::ipc`), because
+/// an IPC connection tells the server what its client may do.
 #[cfg(unix)]
 pub fn serve() -> std::io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0")?;

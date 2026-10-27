@@ -317,12 +317,37 @@ allocating virtual memory never allocates from the heap. `Page` and
 (128 bytes per data page) is asserted at compile time to cover `Page`,
 `Frame` and page-table growth.
 
+A map of zero pages is refused at the syscall entry with
+`E_INVALID_ARGUMENT`: every mapping path builds a segment, and an empty
+segment is a kernel assertion.
+
 A `Page`'s kind is derived from its `Frame`; a page without a frame is a
-small lazy or unmapped reservation. Lookup finds the greatest page start not
-above the queried address and checks its kind-sized extent. A segment's
-creation policy (`HUGE_ELIGIBLE`) is stored as an internal bit in its mapping
-options, never inferred from permissions or size, and stripped before any
-hardware PTE is written.
+small guard page or unmapped reservation. Lookup finds the greatest page
+start not above the queried address and checks its kind-sized extent. A
+segment's creation policy (`HUGE_ELIGIBLE`) is stored as an internal bit in
+its mapping options, never inferred from permissions or size, and stripped
+before any hardware PTE is written.
+
+Lazy and file-paged segments are sparse: they hold descriptors only for the
+pages that have received a frame, so an untouched lazy reservation costs one
+segment node whatever its size, and mapping it takes time independent of
+that size: a segment lookup and insertion, plus the search for a gap when
+the region's free space is fragmented. The
+fault path creates the descriptor on first touch, with the per-page options
+construction would have given it; readers treat a missing descriptor as an
+absent page with those options. Unmapped reservations stay dense, because
+they exist to receive shared frames: every share destination is dense, and
+sharing into a lazy segment is refused. A lazy segment can be a share source
+once every page of the shared range has been touched; a share is validated
+in full before the first destination page changes.
+
+Neither frame allocation nor page-table growth can fail: admission keeps the
+kernel away from an empty pool, and `phys::allocate_frame` and the
+page-table allocator panic if it is reached anyway. `PageTable::map_page`
+fails only for mapping options it does not accept; eager construction rolls
+a segment back at its boundary on that error, and a fault that meets it
+leaves its fresh descriptor frameless, which is a hole. Nothing in the
+mapping paths has an allocation failure branch.
 
 `VmemKind` distinguishes boot, MM slab, MMIO, heap, stack, static, user,
 user-stack and unmapped segments. `VaddrMapStatus` reports unallocated,
@@ -331,11 +356,15 @@ copy-out, pinning and sharing refuse MMIO and frame-less pages.
 
 `PageTable::map_page` zeroes the entire frame before publishing its PTE.
 Clearing a segment unmaps each page by its actual kind, flushes the whole
-segment before dropping frames, and subtracts the sum of page byte sizes,
-not the descriptor count times 4 KiB, from region and process statistics.
+segment before dropping frames, and subtracts the segment size, which is
+what was accounted when it was reserved, from region and process statistics.
 The region lock is held continuously from reservation through mapping or
-rollback for MMIO and contiguous allocation, so a concurrent unmap cannot
-remove or replace the reservation in between.
+rollback for MMIO and contiguous allocation, for a shared allocation (both
+regions, in one fixed order) and for a fixed-address fill from another
+process or from kernel-static memory, so a concurrent unmap cannot remove
+or replace the reservation in between, and a rollback never removes a
+segment another thread has since put at the same address. Any two region
+locks are taken in that one order, the higher region address first.
 
 ### User heaps and huge pages
 
@@ -373,11 +402,26 @@ Huge availability is best effort. After a pressure episode most blocks are
 split and pinned by other processes' pages, so huge requests fall back until
 those pages die.
 
+### Guarded heaps
+
+`F_GUARDED`, with `F_READABLE | F_WRITABLE` alone or with `F_LAZY`, puts a
+page that is never mapped at each end of a heap allocation: the segment is
+`num_pages + 2` small pages, never rounded and never huge; `map2` returns
+its start (the lower guard) and its full size, and `free` takes that start.
+A guard has no frame and refuses every fault, which kills the faulting
+thread as a stack guard does, and a guarded segment is refused at either
+end of a share. The guards count toward reserved but not resident memory; the eager
+kind is charged for its pages plus a descriptor per guard, the lazy kind
+per touched page.
+
 ### Sharing
 
 `share_range_with` validates both ranges before replacing any destination
 PTE or frame and returns `E_INVALID_ARGUMENT` if either endpoint belongs to
-a huge-eligible segment, whatever its actual backing, or contains MMIO. This
+a huge-eligible segment, whatever its actual backing, or contains MMIO, or
+if the destination is lazy or guarded: a guarded destination would get
+frames installed in its guards, and a guarded source is refused because a
+guard has no frame. This
 applies to `F_SHARE_SELF` and to IPC's `map_shared`, including same-space
 sharing. Supported shared buffers are fresh-frame `F_SHARE_SELF`, unmapped
 reservations at the receiving end, and populated lazy small-only
@@ -412,6 +456,23 @@ that touch the allocator directly:
   delayed publisher cannot restore an older observation over newer completed
   updates; it does not make the two counters an instantaneous snapshot.
 
+## Process memory statistics
+
+`memory_usage` reports reserved virtual bytes; `pages_user` and `pages_kernel`
+report the corresponding counts in 4 KiB pages. `memory_resident` reports RAM
+backing those tracked mappings. Untouched lazy pages, unbacked reservations,
+guards and MMIO do not contribute to resident memory. Huge pages contribute
+their full size. Cached kernel stacks remain counted until actually freed.
+
+Shared RAM counts once per mapping, including aliases. Kernel stacks are
+also attributed to their process, so summing these counters is not unique
+physical-memory usage; use system `mem.used` for that. The existing accounting
+coverage is unchanged: not all boot mappings are captured, fixed per-process
+static pages are excluded, and kernel bookkeeping is not charged to each
+process. Reservation and resident counters are sampled independently; a
+concurrent mapping change can make a snapshot temporarily inconsistent.
+Memory limits and admission retain their existing reservation-based policy.
+
 ## Validation
 
 Kernel self-tests run in debug boots on Motor OS through full-test.sh, on a
@@ -424,7 +485,11 @@ layouts, table rounding and span limits, and the publication order of each
 transition. A mapping self-test on the live pool, run on the BSP before the
 schedulers are published, holds every whole dual-purpose block to force
 fallback, releases one dirtied block to prove a huge leaf maps it zeroed,
-and checks that sharing is refused at either eligible endpoint.
+and checks that sharing is refused at either eligible endpoint. A
+guarded-heap self-test checks the exact shape of both kinds, including the
+one-page minimum and a size an ordinary heap would round, guard refusals,
+share refusal at either end with the refused destination intact, and
+teardown.
 
 Systest (`mem_blocks.rs`, reached by full-test.sh) covers placement of fresh
 1 MiB pieces within `10 + 2 * CPUs` blocks on the plain 1 GiB guest, mixed
@@ -435,7 +500,10 @@ the pressure episode, and process and region accounting. The MMIO suite runs
 from the System console fixture with `CAP_IO_MANAGER`: a mapping outside RAM
 is queried, freed and then faulted on; RAM, wrapped and unaligned ranges are
 refused with their rollback checked; an MMIO page is refused as syscall
-buffer.
+buffer. Systest's `sparse.rs` covers `F_GUARDED` through `map2`: shape and
+translations of both kinds, the accounting of an unstarted process,
+refused flag combinations, a child killed on touching either guard, and a
+guarded IPC listener buffer refused with its guards and bytes intact.
 
 Pool-squeezing cases run only in plain systest, never under load.
 Benchmarks are user-owned.

@@ -1,6 +1,6 @@
-//! Futex stress for stress-soak.sh, not part of the suite:
-//! `systest futex-stress [seconds] [phase]` runs rounds of the phases below
-//! (or of the one named) until the time is up. Each phase checks an exact
+//! Futex stress for stress-soak.sh, with a short pass in full-test.sh:
+//! `systest [--host-cpus=N] futex-stress [seconds] [phase]` runs rounds of the
+//! phases below (or of the one named) until the time is up. Each phase checks an exact
 //! result; a lost wakeup stalls it instead, and the watchdog then prints
 //! every raw-futex waiter and exits 3.
 use moto_rt::futex::{futex_wait, futex_wake, futex_wake_all};
@@ -82,17 +82,24 @@ fn reset_words() {
     }
 }
 
-fn mutex_phase(threads: usize) {
-    const ITERS: u64 = 200_000;
+// Keep batches short on small hosts so every phase runs within the soak's
+// command budget. Eight available CPUs use the original counts; smaller
+// batches repeat for the same duration, with unchanged contention and checks.
+fn iterations(full: u64, cpus: usize) -> u64 {
+    full * cpus.clamp(1, 8) as u64 / 8
+}
+
+fn mutex_phase(threads: usize, cpus: usize) {
+    let iters = iterations(200_000, cpus);
     let counter = Arc::new(Mutex::new(0_u64));
     let shared = counter.clone();
     spawn_all(threads, move |_| {
-        for _ in 0..ITERS {
+        for _ in 0..iters {
             *shared.lock().unwrap() += 1;
             progress();
         }
     });
-    assert_eq!(*counter.lock().unwrap(), threads as u64 * ITERS);
+    assert_eq!(*counter.lock().unwrap(), threads as u64 * iters);
 }
 
 struct Queue {
@@ -101,8 +108,8 @@ struct Queue {
     not_full: Condvar,
 }
 
-fn condvar_phase(threads: usize) {
-    const ITEMS: u64 = 200_000;
+fn condvar_phase(threads: usize, cpus: usize) {
+    let items = iterations(200_000, cpus);
     const CAPACITY: usize = 8;
     let producers = (threads / 2).max(1) as u64;
     let queue = Arc::new(Queue {
@@ -119,7 +126,7 @@ fn condvar_phase(threads: usize) {
             let producer_queue = &shared;
             let mut rng = Rng::new(idx);
             let mut value = idx as u64;
-            while value < ITEMS {
+            while value < items {
                 let mut items = producer_queue.items.lock().unwrap();
                 while items.0.len() == CAPACITY {
                     items = if rng.next(4) == 0 {
@@ -184,13 +191,13 @@ fn condvar_phase(threads: usize) {
     });
     producer.join().unwrap();
 
-    assert_eq!(consumed.0.load(Ordering::Relaxed), ITEMS);
-    assert_eq!(consumed.1.load(Ordering::Relaxed), ITEMS * (ITEMS - 1) / 2);
+    assert_eq!(consumed.0.load(Ordering::Relaxed), items);
+    assert_eq!(consumed.1.load(Ordering::Relaxed), items * (items - 1) / 2);
 }
 
 // Pairs hand a raw futex word back and forth: one lost wakeup deadlocks a pair.
-fn pingpong_phase(threads: usize) {
-    const ROUNDS: u32 = 50_000;
+fn pingpong_phase(threads: usize, cpus: usize) {
+    let rounds = iterations(50_000, cpus) as u32;
     reset_words();
     let pairs = (threads / 2).clamp(1, NUM_WORDS);
     spawn_all(pairs * 2, move |slot| {
@@ -198,7 +205,7 @@ fn pingpong_phase(threads: usize) {
         let mut rng = Rng::new(slot);
         loop {
             let value = WORDS[word].load(Ordering::Acquire);
-            if value >= 2 * ROUNDS {
+            if value >= 2 * rounds {
                 break;
             }
             if value % 2 == parity {
@@ -280,14 +287,14 @@ fn timeouts_phase(threads: usize) {
 }
 
 // Woken threads wait again at once while futex_wake_all may still be running.
-fn wake_all_phase(threads: usize) {
-    const ROUNDS: u32 = 10_000;
+fn wake_all_phase(threads: usize, cpus: usize) {
+    let rounds = iterations(10_000, cpus) as u32;
     reset_words();
     let arrived = Arc::new(AtomicU32::new(0));
     let waiter_arrived = arrived.clone();
     let waiters = std::thread::spawn(move || {
         spawn_all(threads, move |slot| {
-            for round in 0..ROUNDS {
+            for round in 0..rounds {
                 while WORDS[0].load(Ordering::Acquire) == round {
                     wait_word(slot, 0, round, None);
                 }
@@ -295,7 +302,7 @@ fn wake_all_phase(threads: usize) {
             }
         });
     });
-    for round in 0..ROUNDS {
+    for round in 0..rounds {
         WORDS[0].store(round + 1, Ordering::Release);
         futex_wake_all(&WORDS[0]);
         while arrived.load(Ordering::Acquire) < (round + 1) * threads as u32 {
@@ -306,15 +313,15 @@ fn wake_all_phase(threads: usize) {
     waiters.join().unwrap();
 }
 
-fn park_phase(threads: usize) {
-    const ROUNDS: u32 = 20_000;
+fn park_phase(threads: usize, cpus: usize) {
+    let rounds = iterations(20_000, cpus) as u32;
     let pairs = (threads / 2).max(1);
     let joins: Vec<_> = (0..pairs)
         .map(|_| {
             let turn = Arc::new(AtomicU32::new(0));
             let peer_turn = turn.clone();
             let peer = std::thread::spawn(move || {
-                for round in 0..ROUNDS {
+                for round in 0..rounds {
                     while peer_turn.load(Ordering::Acquire) != 2 * round + 1 {
                         std::thread::park();
                     }
@@ -324,7 +331,7 @@ fn park_phase(threads: usize) {
             });
             let peer_thread = peer.thread().clone();
             let main = std::thread::spawn(move || {
-                for round in 0..ROUNDS {
+                for round in 0..rounds {
                     turn.store(2 * round + 1, Ordering::Release);
                     peer_thread.unpark();
                     while turn.load(Ordering::Acquire) != 2 * round + 2 {
@@ -342,13 +349,13 @@ fn park_phase(threads: usize) {
     }
 }
 
-fn rwlock_phase(threads: usize) {
-    const ITERS: u64 = 100_000;
+fn rwlock_phase(threads: usize, cpus: usize) {
+    let iters = iterations(100_000, cpus);
     let lock = Arc::new(RwLock::new((0_u64, 0_u64)));
     let shared = lock.clone();
     let writers = 2;
     spawn_all(threads.max(writers + 1), move |idx| {
-        for _ in 0..ITERS {
+        for _ in 0..iters {
             if idx < writers {
                 let mut pair = shared.write().unwrap();
                 pair.0 += 1;
@@ -360,23 +367,23 @@ fn rwlock_phase(threads: usize) {
             progress();
         }
     });
-    assert_eq!(*lock.read().unwrap(), (2 * ITERS, 2 * ITERS));
+    assert_eq!(*lock.read().unwrap(), (2 * iters, 2 * iters));
 }
 
-fn barrier_phase(threads: usize) {
-    const ROUNDS: u64 = 20_000;
+fn barrier_phase(threads: usize, cpus: usize) {
+    let rounds = iterations(20_000, cpus);
     let barrier = Arc::new(Barrier::new(threads));
     let leaders = Arc::new(AtomicU64::new(0));
     let shared = (barrier.clone(), leaders.clone());
     spawn_all(threads, move |_| {
-        for _ in 0..ROUNDS {
+        for _ in 0..rounds {
             if shared.0.wait().is_leader() {
                 shared.1.fetch_add(1, Ordering::Relaxed);
             }
             progress();
         }
     });
-    assert_eq!(leaders.load(Ordering::Relaxed), ROUNDS);
+    assert_eq!(leaders.load(Ordering::Relaxed), rounds);
 }
 
 fn watchdog() {
@@ -416,7 +423,7 @@ fn watchdog() {
     }
 }
 
-pub fn run(args: &[String]) {
+pub fn run(args: &[String], available_cpus: usize) {
     let seconds: u64 = args.get(2).map_or(30, |arg| arg.parse().unwrap());
     // An optional phase name runs only that phase.
     let only = args.get(3).map(|name| {
@@ -426,6 +433,11 @@ pub fn run(args: &[String]) {
             .unwrap_or_else(|| panic!("unknown phase '{name}'"))
     });
     let threads = (2 * moto_sys::num_cpus() as usize).clamp(4, 32);
+    println!(
+        "futex-stress: {} guest CPUs, {available_cpus} available CPUs, {threads} threads, batch {}/8",
+        moto_sys::num_cpus(),
+        available_cpus.min(8)
+    );
     std::thread::spawn(watchdog);
 
     let started = Instant::now();
@@ -438,14 +450,14 @@ pub fn run(args: &[String]) {
             PHASE.store(idx, Ordering::Relaxed);
             let phase_started = Instant::now();
             match idx {
-                0 => mutex_phase(threads),
-                1 => condvar_phase(threads),
-                2 => pingpong_phase(threads),
+                0 => mutex_phase(threads, available_cpus),
+                1 => condvar_phase(threads, available_cpus),
+                2 => pingpong_phase(threads, available_cpus),
                 3 => timeouts_phase(threads),
-                4 => wake_all_phase(threads),
-                5 => park_phase(threads),
-                6 => rwlock_phase(threads),
-                _ => barrier_phase(threads),
+                4 => wake_all_phase(threads, available_cpus),
+                5 => park_phase(threads, available_cpus),
+                6 => rwlock_phase(threads, available_cpus),
+                _ => barrier_phase(threads, available_cpus),
             }
             println!(
                 "futex-stress: round {rounds} {name} {} ms",

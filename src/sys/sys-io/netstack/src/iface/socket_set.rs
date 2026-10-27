@@ -541,11 +541,42 @@ impl SocketSet<'_> {
     }
 }
 
-/// The identity-changing UDP operations, mediated by the set for the same
-/// reason as the TCP five above. UDP has only these two: nothing inside
-/// packet or timer handling ever changes a UDP socket's binding.
+/// UDP delivery and binding operations. Bind and close must go through the
+/// set to keep its demux index current.
 #[cfg(feature = "socket-udp")]
 impl SocketSet<'_> {
+    /// Deliver a locally originated datagram to an address owned by this set's
+    /// interface. The caller must validate address ownership and routing policy.
+    /// A missing receiver or full receive queue drops the datagram, as on ingress.
+    pub fn udp_deliver_local(
+        &mut self,
+        source: IpEndpoint,
+        destination: IpEndpoint,
+        payload: &[u8],
+    ) -> Result<(), crate::socket::udp::SendError> {
+        use crate::socket::udp::{SendError, Socket, UdpMetadata};
+
+        if source.port == 0
+            || destination.port == 0
+            || !source.addr.is_unicast()
+            || !destination.addr.is_unicast()
+            || source.addr.version() != destination.addr.version()
+        {
+            return Err(SendError::Unaddressable);
+        }
+        if let Some(handle) = self.udp_socket(destination, false) {
+            self.get_mut::<Socket>(handle).enqueue_rx(
+                UdpMetadata {
+                    endpoint: source,
+                    local_address: Some(destination.addr),
+                    meta: crate::phy::PacketMeta::default(),
+                },
+                payload,
+            );
+        }
+        Ok(())
+    }
+
     /// [`udp::Socket::bind`] through the set.
     ///
     /// # Panics
@@ -577,6 +608,80 @@ impl SocketSet<'_> {
             .meta
             .reset_egress();
         self.sync_demux(handle);
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "socket-udp",
+    feature = "proto-ipv4",
+    feature = "proto-ipv6"
+))]
+mod udp_local_tests {
+    use super::*;
+    use crate::socket::udp::{PacketBuffer, PacketMetadata, RecvError, SendError, Socket};
+
+    fn socket() -> Socket<'static> {
+        Socket::new(
+            PacketBuffer::new(vec![PacketMetadata::EMPTY; 1], vec![0; 8]),
+            PacketBuffer::new(vec![], vec![]),
+        )
+    }
+
+    #[test]
+    fn local_udp_preserves_demux_metadata_and_receive_limits() {
+        for ip in [
+            IpAddress::v4(192, 0, 2, 1),
+            IpAddress::v6(0xfd00, 0, 0, 0, 0, 0, 0, 1),
+        ] {
+            let mut set = SocketSet::new();
+            let source = IpEndpoint::new(ip, 1000);
+            let destination = IpEndpoint::new(ip, 2000);
+            let wildcard = set.add(1, socket());
+            let exact = set.add(2, socket());
+            set.udp_bind(wildcard, destination.port).unwrap();
+            set.udp_bind(exact, destination).unwrap();
+
+            set.udp_deliver_local(source, destination, b"first")
+                .unwrap();
+            set.udp_deliver_local(source, destination, b"full").unwrap();
+            assert!(!set.get::<Socket>(wildcard).can_recv());
+            let receiver = set.get_mut::<Socket>(exact);
+            let (payload, metadata) = receiver.recv().unwrap();
+            assert_eq!(payload, b"first");
+            assert_eq!(metadata.endpoint, source);
+            assert_eq!(metadata.local_address, Some(ip));
+            assert_eq!(receiver.recv(), Err(RecvError::Exhausted));
+
+            set.udp_deliver_local(source, destination, b"too large")
+                .unwrap();
+            assert!(!set.get::<Socket>(exact).can_recv());
+            set.udp_close(exact);
+            set.udp_deliver_local(source, destination, b"").unwrap();
+            assert_eq!(set.get_mut::<Socket>(wildcard).recv().unwrap().0, b"");
+            set.remove(wildcard);
+            set.udp_deliver_local(source, destination, b"no receiver")
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn local_udp_rejects_invalid_endpoints() {
+        let mut set = SocketSet::new();
+        let source = IpEndpoint::new(IpAddress::v4(192, 0, 2, 1), 1000);
+        let receiver = set.add(1, socket());
+        set.udp_bind(receiver, 2000).unwrap();
+        for destination in [
+            IpEndpoint::new(source.addr, 0),
+            IpEndpoint::new(IpAddress::v4(0, 0, 0, 0), 2000),
+            IpEndpoint::new(IpAddress::v6(0xfd00, 0, 0, 0, 0, 0, 0, 1), 2000),
+        ] {
+            assert_eq!(
+                set.udp_deliver_local(source, destination, b"invalid"),
+                Err(SendError::Unaddressable)
+            );
+        }
+        assert!(!set.get::<Socket>(receiver).can_recv());
     }
 }
 

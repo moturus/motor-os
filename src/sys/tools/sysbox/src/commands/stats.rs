@@ -1,4 +1,4 @@
-use moto_stats::{Collector, ProviderInfo, SCOPE_GLOBAL};
+use moto_sdk::stats::{Collector, ProviderInfo, SCOPE_GLOBAL};
 
 fn print_usage_and_exit(exit_code: i32) -> ! {
     eprintln!("Query Motor OS system statistics (federated across the kernel and");

@@ -620,7 +620,7 @@ role, not the mask, and are for observation, not authorization.</p>
 
 <h2 id="named-ipc-services">Named IPC services</h2>
 <p>A server registers a service name by creating a listener for it, usually through
-<code>moto_ipc::sync::LocalServer</code>. The kernel gives each name one owner process:</p>
+<code>moto_sdk::ipc::sync::LocalServer</code>. The kernel gives each name one owner process:</p>
 <ul>
   <li>The first process to register a name owns it; its later listeners share it.</li>
   <li>The owner keeps the name while it has any listening or connected endpoint for it,

@@ -1,77 +1,61 @@
-# LLVM, mlibc, and the Motor C/C++ toolchain
+# LLVM, mlibc, and the Motor OS C/C++ toolchain
 
-LLVM/Clang, mlibc, and the C++ runtime are built by the unified
-`src/build-motor-os.sh` workflow. This document describes that component and
-its outputs; it is not a separate branch-switching or cache-clearing recipe.
+LLVM/Clang, mlibc, and the C++ runtime are part of the Motor OS toolchain, which
+[motor-os-toolchain](https://github.com/moturus/motor-os-toolchain) builds
+and packages; its README describes the build. This document describes what
+the toolchain provides for C and C++ on Linux and on Motor OS.
 
-## Source identity
+## Sources
 
-The current beta tuple is declared in `src/toolchain-versions.sh`:
+The current toolchain, `x86_64-unknown-motor-1.99.1`, is Rust 1.99.1 on LLVM
+23.1.1:
 
-- upstream Rust LLVM base `21cf28432798952d942bacc6bcee3a328faa3638`;
-- Motor LLVM `7c2a7b21e3dc7be1f0c41d443bc420bcc774b1d4`;
-- Motor mlibc `39d67d64bce3adf5903cc27da50d3017d5d8ba87`.
+- Motor OS LLVM (branch `motor-os-1.99.1`), at the commit that the Motor OS Rust
+  branch's `src/llvm-project` gitlink names, so the host compilers and rustc's
+  LLVM come from the same commit;
+- Motor OS mlibc (branch `motor-os-rustc`), including its C-ABI shim and
+  lockfile.
 
-The Motor Rust revision's `src/llvm-project` gitlink must equal the declared
-Motor LLVM revision. The standalone host compiler and rustc's host/native LLVM
-builds therefore consume the same effective LLVM commit and source tree. A
-managed build rejects a mismatched gitlink, remote, revision, or dirty checkout.
+The toolchain repository's `versions.sh` names the Rust and mlibc branches,
+and the build takes their heads.
 
 Executable-permission support is a cross-repository compatibility boundary.
-This tuple combines the Motor OS fd wrapper descended from `fb4d6989`, mlibc
-with the permission support from `0cece7e5`, and LLVM `7c2a7b21e3dc`
-(the beta-line cherry-pick of `bc769e6e44a4`). Do not mix an older shim, libc,
-or linker binary into an assembly: a new output may remain writable or Cargo's
-copied build scripts may become non-executable.
+This toolchain combines the Motor OS fd wrapper descended from `fb4d6989`,
+mlibc with the permission support from `0cece7e5`, and LLVM `606d4754c103`
+(the 1.99.1-line rebase of `7c2a7b21e3dc`, a cherry-pick of `bc769e6e44a4`).
+Do not mix an older shim, libc, or linker binary into a toolchain: a new
+output may remain writable or Cargo's copied build scripts may become
+non-executable.
 
-mlibc `39d67d64` leaves main-executable relocation to Motor's loader, avoiding
+mlibc `39d67d64` leaves main-executable relocation to Motor OS's loader, avoiding
 redundant startup passes that would make lazily relocated pages resident.
-Rebuild the assembly and relink native tools when changing the mlibc revision.
+Commit `52bed56c` additionally maps Motor OS's `CrossesDevices` error to `EXDEV`.
+Commit `9abf5139` hosts the `moto-rt-cabi` shim crate and its lockfile.
 
-LLVM changes are tested through the Rust checkout that owns the submodule:
+## What the toolchain contains
 
-```sh
-src/build-motor-os.sh \
-  --source-mode authoring \
-  --rust-source /absolute/path/to/rust \
-  --authoring-base FULL_40_CHARACTER_BASE_COMMIT
-```
+The toolchain build produces, in dependency order:
 
-Authoring mode hashes the current Rust and LLVM commits plus modified and
-untracked content. It does not fetch, switch, reset, stash, clean, or update
-either worktree.
-
-## Build graph
-
-The unified workflow builds this closure in dependency order:
-
-1. Standalone Linux-host Clang, LLD, and LLVM utilities for the Motor target.
-2. `libmoto_rt_cabi.a`, the Rust C-ABI shim over Motor's RT.VDSO, including the
-   emulated-TLS runtime.
+1. Standalone Linux-host Clang, LLD, and LLVM utilities for the Motor OS target.
+2. `libmoto_rt_cabi.a`, the Rust C-ABI shim over Motor OS's RT.VDSO, including
+   the emulated-TLS runtime, from `sysdeps/motor/moto-rt-cabi` in mlibc.
 3. compiler-rt builtins, with the shim remaining the sole emulated-TLS owner.
 4. mlibc headers, `crt1.o`, `libc.a`, and companion libraries.
 5. libunwind, libc++abi, and libc++, with exceptions enabled.
-6. Native Motor LLVM/Clang/LLD as one multicall `llvm` executable.
+6. Native Motor OS LLVM/Clang/LLD as one multicall `llvm` executable.
 
-Lua is then built with the finished toolchain as an end-to-end native C
-application. It is an add-on, not a part of the assembly's identity.
-
-All reusable products live under the selected assembly key:
+On Linux, the host toolchain carries Clang, LLD, and the LLVM tools in
+`lib/rustlib/x86_64-unknown-linux-gnu/bin`, and the cross sysroot in
+`lib/rustlib/x86_64-unknown-motor/sysroot`:
 
 ```text
-$MOTORH/assemblies/<assembly-key>/
-  build/                 isolated component build trees
-  sysroot/devtools/llvm/ headers and libraries
-  sysroot/bin/           motor-clang, motor-clang++, motor-rust-cc
-  images/llvm/           native LLVM and development-image files
-  images/libc/           mlibc configuration for standard/dev images
+sysroot/bin/              motor-clang, motor-clang++, motor-rust-cc
+sysroot/devtools/llvm/    headers and libraries
 ```
 
-No component writes the old shared `$MOTORH/motor-sysroot`, sibling LLVM build
-directory, `src/sys/target`, or tracked `img_files` trees. A complete assembly
-is reused only after its manifest and required artifacts validate. A change to
-LLVM, mlibc, or native configuration selects a new key rather than deleting
-the old tree.
+`motor-clang` and `motor-clang++` compile and link C and C++ for Motor OS;
+the Motor OS build uses them for Lua, Helix's C++ grammars, gix, curl, and
+Lorry.
 
 ## Development-image layout
 
@@ -99,33 +83,10 @@ c++ /devtools/src/hello-world/hello.cpp -o /user/tmp/hello-cxx
 /devtools/llvm/bin/llvm clang --version
 ```
 
-Clang's Motor toolchain owns the C/C++ startup and runtime link recipe. Plain C
+Clang's Motor OS toolchain owns the C/C++ startup and runtime link recipe. Plain C
 and C++ programs receive `crt1.o`, mlibc, compiler-rt, and the appropriate C++
 libraries. `-nostdlib`, `-nostartfiles`, and `-nodefaultlibs` remain meaningful
 so rustc can produce a pure-Rust binary without pulling in mlibc.
 
-## Build and validation
-
-Build or validate the complete managed tuple:
-
-```sh
-src/build-motor-os.sh --source-mode managed
-```
-
-The workflow checks the standalone/native LLVM identities, required symbols,
-mlibc and C++ artifacts, linker wrappers, and the completed assembly manifest
-before it exposes generated image roots. The final development image and
-`$MOTORH/assemblies/<assembly-key>/MOTOR-ASSEMBLY-MANIFEST` record the exact
-LLVM, mlibc, runtime, and artifact identities.
-
-Run the repository integration gates after changes:
-
-```sh
-src/tests/full-test.sh
-src/tests/full-test.sh --release
-```
-
-Do not recreate the removed `dev-x86_64-unknown-motor` toolchain, manually
-switch sibling branches, or clear shared caches. Update a managed source only
-through a reviewed revision/ref change in `src/toolchain-versions.sh`; local
-Rust/LLVM work belongs in authoring mode.
+A newer native toolchain installs over the image's with the `install.sh` of
+its archive; see [toolchain.md](toolchain.md#5-installing-the-native-toolchain-on-motor-os).

@@ -10,8 +10,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use moto_ipc::sync::*;
-use moto_stats::{Collector, MetricDescWire, MetricEntry, PagedRequest, ProviderInfo};
+use moto_sdk::ipc::sync::*;
+use moto_sdk::stats::{Collector, MetricDescWire, MetricEntry, PagedRequest, ProviderInfo};
 use moto_sys::SysHandle;
 
 /// The provider's registry name and the URL it serves metrics on.
@@ -81,11 +81,11 @@ fn process(server: &mut LocalServer, waker: SysHandle) {
     };
 
     match cmd {
-        moto_stats::CMD_QUERY_METRICS => {
-            moto_stats::respond_pods(conn.data_mut(), &entries(), start_index);
+        moto_sdk::stats::CMD_QUERY_METRICS => {
+            moto_sdk::stats::respond_pods(conn.data_mut(), &entries(), start_index);
         }
-        moto_stats::CMD_DESCRIBE => {
-            moto_stats::respond_pods(conn.data_mut(), &descriptors(), start_index);
+        moto_sdk::stats::CMD_DESCRIBE => {
+            moto_sdk::stats::respond_pods(conn.data_mut(), &descriptors(), start_index);
         }
         _ => unsafe {
             conn.raw_channel().get_mut::<ResponseHeader>().result = moto_rt::E_INVALID_ARGUMENT;
@@ -144,11 +144,11 @@ pub fn test_stats_provider() {
         .expect("test.beta descriptor missing");
 
     assert_eq!(
-        Collector::read(&provider, alpha.id, moto_stats::SCOPE_GLOBAL).unwrap(),
+        Collector::read(&provider, alpha.id, moto_sdk::stats::SCOPE_GLOBAL).unwrap(),
         ALPHA_VALUE
     );
     assert_eq!(
-        Collector::read(&provider, beta.id, moto_stats::SCOPE_GLOBAL).unwrap(),
+        Collector::read(&provider, beta.id, moto_sdk::stats::SCOPE_GLOBAL).unwrap(),
         BETA_VALUE
     );
 

@@ -461,7 +461,7 @@ rt.vdso, implements the system interface that Rust's standard library calls.</p>
   +----------------------------+   +-----------+  +--------------+  +--------+
   | sys-io                     |   | sys-init  |  | dns-resolver |  | strobe |
   |  virtio-blk  virtio-net    |   | sys-tty   |  +--------------+  +--------+
-  |  Motor FS    moto-netstack |   +-----------+
+  |  motor-fs    moto-netstack |   +-----------+
   +----------------------------+
         | syscalls (4 of them)
         v
@@ -542,7 +542,7 @@ them: they use Rust's standard library, and the runtime below it makes the calls
 <h2>sys-io</h2>
 <p><code>sys-io</code> is the I/O manager. It is one process that owns every VirtIO
 device, provides the filesystem service, and provides the network service. All of its
-work runs as tasks on a single-threaded asynchronous runtime, <code>moto-async</code>, on
+work runs as tasks on a single-threaded asynchronous runtime, moto-sdk's <code>async_runtime</code>, on
 one thread pinned to CPU 0, where the device interrupts are routed; there are no locks in
 its hot paths. Two small helper threads answer synchronous statistics queries.</p>
 <ul>
@@ -551,7 +551,7 @@ its hot paths. Two small helper threads answer synchronous statistics queries.</
   virtio-net negotiates checksum offload and TSO on transmit and passes per-frame checksum
   verdicts up to the stack. Exactly one block device and any number of network devices
   are expected.</li>
-  <li><strong>Motor FS</strong>, the journaling filesystem, with a 16 MiB block cache,
+  <li><strong>Motor OS filesystem</strong>, the journaling filesystem, with a 16 MiB block cache,
   readahead, and a lock manager for advisory locks (see
   <a href="filesystem.html">Filesystem</a>).</li>
   <li><strong>moto-netstack</strong>, the networking stack, which grew out of smoltcp but
@@ -562,8 +562,8 @@ its hot paths. Two small helper threads answer synchronous statistics queries.</
 <p>Programs talk to sys-io over <code>io_channel</code>, a shared-memory channel inspired
 by io_uring: a submission ring and a completion ring of 64 entries each, with 64 pages of
 buffer space per direction split into four sub-channels, and kernel wait handles for
-cross-process wakeups. The wire definitions live in <code>moto-sys-io</code>; the native
-client library is <code>moto-io</code>, and rt.vdso uses them on behalf of std. Because
+cross-process wakeups. The wire definitions are moto-sdk's <code>sys_io</code> module; the
+native client library is its <code>io</code> module, and rt.vdso uses them on behalf of std. Because
 the kernel allows a process at most 1024 wait handles, sys-io serves at most 960
 channels, at most 896 per kind (filesystem or network); at four sub-channels per network
 channel that is roughly 3,500 concurrent sockets per machine.</p>
@@ -583,7 +583,7 @@ stop is preferred over a partial restart.</p>
   <tr><td><code>sys-tty</code></td><td>The serial console: a polled 16550 UART, driven as a byte pump.
     It starts the console shell (rush) with the environment from <code>/system/cfg/sys-tty.cfg</code>.</td></tr>
   <tr><td><code>strobe</code></td><td>Logging and the metrics registry. Services send log records
-    over IPC through <code>moto-log</code>; strobe writes <code>/system/logs/TAG.log</code> and rotates
+    over IPC through moto-sdk's <code>log</code> module; strobe writes <code>/system/logs/TAG.log</code> and rotates
     to <code>.prev</code>. Userspace metric providers register with it so that collectors such as
     <code>sysbox stats</code> can find them.</td></tr>
   <tr><td><code>dns-resolver</code></td><td>A bounded IPC service that resolves names over UDP with
@@ -619,7 +619,7 @@ matching moto-rt 0.17.x).</p>
 </ul>
 <p>Programs are statically linked x86-64 ELF executables with no interpreter and no ELF
 TLS segment; thread-local storage is provided by the runtime. Anything that needs a
-Motor-specific interface, for example a service that wants to know a peer's
+Motor OS-specific interface, for example a service that wants to know a peer's
 capabilities, uses <code>moto-sys</code> or <code>moto-rt</code> directly.</p>
 
 <h2>Where things are in the source tree</h2>
@@ -631,11 +631,10 @@ capabilities, uses <code>moto-sys</code> or <code>moto-rt</code> directly.</p>
   <tr><td><code>src/sys/sys-io</code></td><td>The I/O manager; <code>netstack/</code> is the networking stack.</td></tr>
   <tr><td><code>src/sys/sys-init</code>, <code>sys-tty</code>, <code>strobe</code>, <code>dns-resolver</code></td><td>The services.</td></tr>
   <tr><td><code>src/sys/lib</code></td><td>System libraries: <code>moto-sys</code> (syscalls), <code>moto-rt</code>
-    and <code>rt.vdso</code> (the runtime), <code>moto-ipc</code> (io_channel, pipes), <code>moto-io</code> and
-    <code>moto-sys-io</code> (sys-io clients and wire formats), <code>motor-fs</code> and <code>async-fs</code>,
-    <code>virtio-async</code>, <code>moto-async</code>, <code>moto-dns</code>, <code>moto-log</code>,
-    <code>moto-stats</code>, <code>moto-mpmc</code>, <code>frusa</code>, <code>moto-rt-cabi</code> (the C ABI
-    shim under the C library).</td></tr>
+    and <code>rt.vdso</code> (the runtime), <code>moto-sdk</code> (IPC, the async runtime,
+    sys-io clients and wire formats, filesystem traits, logging, metrics), <code>motor-fs</code>,
+    <code>memfs</code>, <code>virtio-async</code>, <code>timeq</code>, <code>moto-dns</code>,
+    <code>frusa</code>.</td></tr>
   <tr><td><code>src/sys/tools</code></td><td><code>sysbox</code> (the commands) and <code>mdbg</code>.</td></tr>
   <tr><td><code>src/sys/tests</code></td><td>The in-VM test suites.</td></tr>
   <tr><td><code>src/bin</code></td><td>User programs: rush, rmux, red, kibim, russhd, httpd, httpd-axum,
@@ -650,8 +649,8 @@ capabilities, uses <code>moto-sys</code> or <code>moto-rt</code> directly.</p>
 
 <h3>Size</h3>
 <p>Lines of Rust, including tests, as of August 2026: the kernel about 18,600; rt.vdso
-about 10,700; sys-io about 13,900 plus about 73,900 in the networking stack; Motor FS about
-10,300; the VirtIO drivers about 3,400; moto-async about 2,800.</p>
+about 10,700; sys-io about 13,900 plus about 73,900 in the networking stack; the Motor OS filesystem about
+10,300; the VirtIO drivers about 3,400; the async runtime about 2,800.</p>
 <nav class="pager">
 <a class="pager-prev" href="imager.html"><span>Previous</span>Imager: image tools</a>
 <a class="pager-next" href="processes.html"><span>Next</span>Processes and roles</a>

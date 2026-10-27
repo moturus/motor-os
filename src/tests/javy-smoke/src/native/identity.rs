@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use super::{JavyTools, PLUGIN, Result, Suite, TEST_INPUTS, fs};
 
 /// Each output must equal what Linux Javy 9.1.0 builds from the same inputs
-/// and flags; src/build-javy.sh records those digests.
+/// and flags; src/build-scripts/build-javy.sh records those digests.
 pub(super) fn run(suite: &mut Suite) -> Result<()> {
     let flags = format!("-C deterministic -C plugin={PLUGIN}");
     let mut outputs = Vec::new();

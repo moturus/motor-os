@@ -10,7 +10,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::time::Duration;
 
-use moto_ipc::sync::{ChannelSize, ClientConnection, RequestHeader, ResponseHeader};
+use moto_sdk::ipc::sync::{ChannelSize, ClientConnection, RequestHeader, ResponseHeader};
 
 pub const SERVICE_URL: &str = "moto-dns-resolver";
 pub const PROTOCOL_VERSION: u16 = 1;

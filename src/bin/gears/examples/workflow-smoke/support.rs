@@ -15,6 +15,22 @@ pub struct Fixture {
 }
 
 impl Fixture {
+    pub fn observe_notice(&self, text: &str) -> Result<(), String> {
+        eprintln!("workflow notice: {text}");
+        // Hook stderr is forwarded as `hook NAME: ...`, including debug logs.
+        // Runtime hook failures use these distinct prefixes instead.
+        for prefix in [
+            format!("hook {} ", self.hook),
+            format!("permission hook {} ", self.hook),
+            format!("before_stop hook {} ", self.hook),
+        ] {
+            if text.starts_with(&prefix) {
+                return Err(format!("workflow hook failure: {text}"));
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(binary: &Path, compiler: &str) -> Result<Self, String> {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

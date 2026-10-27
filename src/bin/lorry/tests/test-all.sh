@@ -16,7 +16,7 @@ usage: test-all.sh [--warm] [--keep] [--reuse-running-vm] [--full [--release]]
 Runs the complete Lorry product suite once. The default invocation is bounded
 to 30 minutes; exceeding the budget is a test failure. --warm only preserves
 the native fixture's host and guest target directories for local iteration.
---full then has the developer image's Lorry natively build red, rush, gears,
+--full then has the developer image's Lorry natively build red, rush,
 russhd and Helix (test-native-projects.sh, with its own budget): debug
 builds, or release builds with --release.
 EOF

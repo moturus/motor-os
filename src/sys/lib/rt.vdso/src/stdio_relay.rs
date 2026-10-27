@@ -12,8 +12,8 @@ use core::future::Future;
 use core::pin::Pin;
 use core::sync::atomic::Ordering;
 use core::sync::atomic::{AtomicBool, AtomicU32};
-use moto_async::SyncWaiter;
 use moto_rt::spinlock::SpinLock;
+use moto_sdk::async_runtime::SyncWaiter;
 use moto_sys::SysHandle;
 
 type LocalBoxFuture = Pin<Box<dyn Future<Output = ()> + 'static>>;
@@ -27,7 +27,7 @@ enum RelayMsg {
 }
 
 struct RelayState {
-    tasks_tx: Option<moto_async::channel::Sender<RelayMsg>>,
+    tasks_tx: Option<moto_sdk::async_runtime::channel::Sender<RelayMsg>>,
     // Relay tasks alive or queued. A queued Spawn is always counted
     // before it is sent, so live == 0 implies an empty queue: the
     // dispatcher may exit, and the next spawn() starts a new thread.
@@ -59,7 +59,7 @@ struct FileRelays {
     /// the same cross-thread wake into the relay runtime that `spawn()` uses.
     /// Firing before the relay parks is safe: the receiver resolves on its
     /// first poll, so the wakeup cannot be lost.
-    signals: SpinLock<Vec<(SysHandle, moto_async::oneshot::Sender<()>)>>,
+    signals: SpinLock<Vec<(SysHandle, moto_sdk::async_runtime::oneshot::Sender<()>)>>,
 }
 
 static FILE_RELAYS: FileRelays = FileRelays {
@@ -68,8 +68,10 @@ static FILE_RELAYS: FileRelays = FileRelays {
     signals: SpinLock::new(Vec::new()),
 };
 
-pub(crate) fn register_file_relay(handle: SysHandle) -> moto_async::oneshot::Receiver<()> {
-    let (tx, rx) = moto_async::oneshot();
+pub(crate) fn register_file_relay(
+    handle: SysHandle,
+) -> moto_sdk::async_runtime::oneshot::Receiver<()> {
+    let (tx, rx) = moto_sdk::async_runtime::oneshot();
     FILE_RELAYS.live.fetch_add(1, Ordering::Relaxed);
     FILE_RELAYS.signals.lock().push((handle, tx));
     rx
@@ -217,7 +219,7 @@ where
         match &state.tasks_tx {
             Some(tasks_tx) => tasks_tx.clone(),
             None => {
-                let (tasks_tx, tasks_rx) = moto_async::channel(8);
+                let (tasks_tx, tasks_rx) = moto_sdk::async_runtime::channel(8);
                 let thread_param = Box::into_raw(Box::new((tasks_rx, tasks_tx.clone())));
                 moto_sys::SysCpu::spawn(
                     SysHandle::SELF,
@@ -245,7 +247,7 @@ where
             fut.await
         })
     });
-    moto_async::block_on_sync(async move {
+    moto_sdk::async_runtime::block_on_sync(async move {
         let _ = tasks_tx.send(RelayMsg::Spawn(ctor)).await;
     });
     IDLE_WAKE.fetch_add(1, Ordering::Release);
@@ -317,8 +319,8 @@ fn linger() -> bool {
 }
 
 type Channel = (
-    moto_async::channel::Receiver<RelayMsg>,
-    moto_async::channel::Sender<RelayMsg>,
+    moto_sdk::async_runtime::channel::Receiver<RelayMsg>,
+    moto_sdk::async_runtime::channel::Sender<RelayMsg>,
 );
 
 extern "C" fn runtime_thread(param: u64) {
@@ -337,7 +339,7 @@ extern "C" fn runtime_thread(param: u64) {
 // Owns the runtime and the channel so they are freed when it returns:
 // SysObj::put(SELF) ends the thread without dropping its caller's locals.
 fn run_relays((mut tasks_rx, tasks_tx): Channel) {
-    let mut runtime = moto_async::LocalRuntime::new();
+    let mut runtime = moto_sdk::async_runtime::LocalRuntime::new();
     loop {
         // Run relays until none is live.
         runtime.block_on(async {
@@ -345,7 +347,7 @@ fn run_relays((mut tasks_rx, tasks_tx): Channel) {
                 match tasks_rx.recv().await.unwrap() {
                     RelayMsg::Spawn(ctor) => {
                         let tasks_tx = tasks_tx.clone();
-                        core::mem::drop(moto_async::LocalRuntime::spawn(async move {
+                        core::mem::drop(moto_sdk::async_runtime::LocalRuntime::spawn(async move {
                             ctor().await;
                             let last = {
                                 let mut state = STATE.lock();

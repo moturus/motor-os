@@ -63,6 +63,26 @@ impl Subcommand {
         self.stdin.flush().unwrap();
     }
 
+    pub fn sparse_fault_at_floor(&mut self) {
+        use std::io::Write;
+        self.stdin.write_all(b"sparse_fault_at_floor\n").unwrap();
+        self.stdin.flush().unwrap();
+    }
+
+    pub fn sparse_exit(&mut self) {
+        use std::io::Write;
+        self.stdin.write_all(b"sparse_exit\n").unwrap();
+        self.stdin.flush().unwrap();
+    }
+
+    pub fn guard_touch(&mut self, case: u64) {
+        use std::io::Write;
+        self.stdin
+            .write_all(format!("guard_touch {case}\n").as_bytes())
+            .unwrap();
+        self.stdin.flush().unwrap();
+    }
+
     pub fn bad_wait_array(&mut self, case: usize) {
         use std::io::{BufRead, BufReader, Write};
         self.stdin
@@ -187,6 +207,18 @@ fn do_command(cmd: String) {
         "lazy_fault_at_floor" => {
             assert_eq!(1, words.len());
             crate::admission::run_lazy_fault_at_floor_child()
+        }
+        "sparse_fault_at_floor" => {
+            assert_eq!(1, words.len());
+            crate::sparse::run_fault_at_floor_child()
+        }
+        "sparse_exit" => {
+            assert_eq!(1, words.len());
+            crate::sparse::run_exit_child()
+        }
+        "guard_touch" => {
+            assert_eq!(2, words.len());
+            crate::sparse::run_guard_touch_child(words[1].parse().unwrap())
         }
         "bad_wait_array" => {
             assert_eq!(2, words.len());

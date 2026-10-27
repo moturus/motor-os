@@ -14,10 +14,10 @@ use crate::posix::PosixKind;
 use crate::runtime::EventSourceManaged;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use moto_io::net::udp::UdpSocket;
 use moto_rt::poll::Interests;
 use moto_rt::poll::Token;
 use moto_rt::{ErrorCode, RtFd};
+use moto_sdk::io::net::udp::UdpSocket;
 
 /// A UDP descriptor: the native socket plus the POSIX state a native caller
 /// does not have. Because the wrapper is the shared `Arc<dyn PosixFile>`, a
@@ -101,7 +101,7 @@ impl RtUdpSocket {
             moto_rt::net::SO_TTL => {
                 assert_eq!(len, 4);
                 let ttl = unsafe { *(ptr as *const u32) };
-                match moto_async::block_on_sync(self.inner.set_ttl_async(ttl)) {
+                match moto_sdk::async_runtime::block_on_sync(self.inner.set_ttl_async(ttl)) {
                     Ok(()) => moto_rt::E_OK,
                     Err(err) => err,
                 }
@@ -128,7 +128,7 @@ impl RtUdpSocket {
             }
             moto_rt::net::SO_TTL => {
                 assert_eq!(len, 4);
-                match moto_async::block_on_sync(self.inner.ttl_async()) {
+                match moto_sdk::async_runtime::block_on_sync(self.inner.ttl_async()) {
                     Ok(ttl) => {
                         unsafe { *(ptr as *mut u32) = ttl };
                         moto_rt::E_OK

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use moto_io::net::ReserveError;
+use moto_sdk::io::net::ReserveError;
 
 use crate::net_harness::{bounded, bounded_output, host_channel};
 
@@ -28,7 +28,7 @@ struct VsockMeasurement {
 }
 
 struct VsockMetrics {
-    kernel: moto_stats::ProviderInfo,
+    kernel: moto_sdk::stats::ProviderInfo,
     memory: u32,
     cpu: u32,
     waits: u32,
@@ -37,8 +37,8 @@ struct VsockMetrics {
 
 impl VsockMetrics {
     fn new() -> Self {
-        let kernel = moto_stats::Collector::kernel();
-        let descriptions = moto_stats::Collector::describe(&kernel).unwrap();
+        let kernel = moto_sdk::stats::Collector::kernel();
+        let descriptions = moto_sdk::stats::Collector::describe(&kernel).unwrap();
         let metric = |name: &str| {
             descriptions
                 .iter()
@@ -57,7 +57,8 @@ impl VsockMetrics {
 
     fn snapshot(&self) -> VsockMeasurement {
         let read = |metric| {
-            moto_stats::Collector::read(&self.kernel, metric, moto_sys::stats::PID_SYS_IO).unwrap()
+            moto_sdk::stats::Collector::read(&self.kernel, metric, moto_sys::stats::PID_SYS_IO)
+                .unwrap()
         };
         VsockMeasurement {
             memory_bytes: read(self.memory),
@@ -70,7 +71,7 @@ impl VsockMetrics {
 
     async fn measure_idle(&self, topology: &str, state: &str) -> VsockMeasurement {
         let before = self.snapshot();
-        moto_async::sleep(VSOCK_IDLE_SAMPLE).await;
+        moto_sdk::async_runtime::sleep(VSOCK_IDLE_SAMPLE).await;
         let after = self.snapshot();
         // observed_tsc follows the CPU read in both snapshots, so this
         // denominator spans the same cumulative CPU samples. It includes the
@@ -116,9 +117,9 @@ fn report_vsock_memory(
 }
 
 async fn expect_raw_vsock_error(
-    sender: &moto_ipc::io_channel::Sender,
-    receiver: &mut moto_ipc::io_channel::Receiver,
-    request: moto_ipc::io_channel::Msg,
+    sender: &moto_sdk::ipc::io_channel::Sender,
+    receiver: &mut moto_sdk::ipc::io_channel::Receiver,
+    request: moto_sdk::ipc::io_channel::Msg,
     expected: moto_rt::Error,
 ) {
     sender.send(request).await.unwrap();
@@ -135,31 +136,31 @@ async fn expect_raw_vsock_error(
     assert_eq!(response.status(), Err(expected));
 }
 
-fn raw_vsock_controls(first_id: u64) -> [moto_ipc::io_channel::Msg; 3] {
-    let mut shutdown = moto_sys_io::api_vsock::shutdown_request(
+fn raw_vsock_controls(first_id: u64) -> [moto_sdk::ipc::io_channel::Msg; 3] {
+    let mut shutdown = moto_sdk::sys_io::api_vsock::shutdown_request(
         0xfeed_cafe,
-        moto_sys_io::api_vsock::SHUTDOWN_SEND,
+        moto_sdk::sys_io::api_vsock::SHUTDOWN_SEND,
     )
     .unwrap();
     shutdown.id = first_id;
-    let mut close = moto_sys_io::api_vsock::close_request(0xfeed_cafe);
+    let mut close = moto_sdk::sys_io::api_vsock::close_request(0xfeed_cafe);
     close.id = first_id + 1;
-    let mut drop = moto_sys_io::api_vsock::listener_drop_request(0xfeed_cafe);
+    let mut drop = moto_sdk::sys_io::api_vsock::listener_drop_request(0xfeed_cafe);
     drop.id = first_id + 2;
     [shutdown, close, drop]
 }
 
-fn raw_vsock_bind(id: u64) -> moto_ipc::io_channel::Msg {
-    let mut bind = moto_sys_io::api_vsock::listener_bind_request(70_000).unwrap();
+fn raw_vsock_bind(id: u64) -> moto_sdk::ipc::io_channel::Msg {
+    let mut bind = moto_sdk::sys_io::api_vsock::listener_bind_request(70_000).unwrap();
     bind.id = id;
     bind
 }
 
 async fn raw_vsock_response(
-    sender: &moto_ipc::io_channel::Sender,
-    receiver: &mut moto_ipc::io_channel::Receiver,
-    request: moto_ipc::io_channel::Msg,
-) -> moto_ipc::io_channel::Msg {
+    sender: &moto_sdk::ipc::io_channel::Sender,
+    receiver: &mut moto_sdk::ipc::io_channel::Receiver,
+    request: moto_sdk::ipc::io_channel::Msg,
+) -> moto_sdk::ipc::io_channel::Msg {
     sender.send(request).await.unwrap();
     let response = bounded_output(receiver.recv(), 2)
         .await
@@ -172,12 +173,12 @@ async fn raw_vsock_response(
 }
 
 async fn raw_vsock_listener_drop(
-    sender: &moto_ipc::io_channel::Sender,
-    receiver: &mut moto_ipc::io_channel::Receiver,
+    sender: &moto_sdk::ipc::io_channel::Sender,
+    receiver: &mut moto_sdk::ipc::io_channel::Receiver,
     handle: u64,
     id: u64,
 ) {
-    let mut request = moto_sys_io::api_vsock::listener_drop_request(handle);
+    let mut request = moto_sdk::sys_io::api_vsock::listener_drop_request(handle);
     request.id = id;
     let response = raw_vsock_response(sender, receiver, request).await;
     assert_eq!(response.handle, handle);
@@ -187,19 +188,19 @@ async fn raw_vsock_listener_drop(
 }
 
 pub struct RawVsockListener {
-    owner: moto_ipc::io_channel::Sender,
-    owner_rx: moto_ipc::io_channel::Receiver,
+    owner: moto_sdk::ipc::io_channel::Sender,
+    owner_rx: moto_sdk::ipc::io_channel::Receiver,
     handle: u64,
     next_id: u64,
 }
 
 impl RawVsockListener {
     pub async fn bind(port: u32) -> Self {
-        let (owner, mut owner_rx) = moto_ipc::io_channel::connect("sys-io").unwrap();
-        let mut request = moto_sys_io::api_vsock::listener_bind_request(port).unwrap();
+        let (owner, mut owner_rx) = moto_sdk::ipc::io_channel::connect("sys-io").unwrap();
+        let mut request = moto_sdk::sys_io::api_vsock::listener_bind_request(port).unwrap();
         request.id = 0x564f_7000;
         let response = raw_vsock_response(&owner, &mut owner_rx, request).await;
-        let listener = moto_sys_io::api_vsock::decode_listener_bind_response(&response)
+        let listener = moto_sdk::sys_io::api_vsock::decode_listener_bind_response(&response)
             .unwrap_or_else(|error| panic!("binding vsock port {port}: {error:?}"));
         assert_eq!(listener.local.port, port);
         Self {
@@ -215,8 +216,9 @@ impl RawVsockListener {
     }
 
     pub async fn accept_early(&self, local_port: u32) {
-        let (accept_tx, mut accept_rx) = moto_ipc::io_channel::connect("sys-io").unwrap();
-        let mut request = moto_sys_io::api_vsock::listener_accept_request(self.handle, 0).unwrap();
+        let (accept_tx, mut accept_rx) = moto_sdk::ipc::io_channel::connect("sys-io").unwrap();
+        let mut request =
+            moto_sdk::sys_io::api_vsock::listener_accept_request(self.handle, 0).unwrap();
         request.id = 0x564f_7800;
         accept_tx.send(request).await.unwrap();
 
@@ -226,7 +228,8 @@ impl RawVsockListener {
             .expect("timed out waiting for raw vsock accept response")
             .unwrap();
         assert_eq!(response.id, request.id);
-        let accepted = moto_sys_io::api_vsock::decode_listener_accept_response(&response).unwrap();
+        let accepted =
+            moto_sdk::sys_io::api_vsock::decode_listener_accept_response(&response).unwrap();
         assert_eq!(accepted.local.cid, 3);
         assert_eq!(accepted.local.port, local_port);
         assert_eq!(accepted.peer.cid, 2);
@@ -242,7 +245,7 @@ impl RawVsockListener {
             .unwrap();
         assert_eq!(
             rx.command,
-            moto_sys_io::api_net::NetCmd::VsockStreamRx as u16
+            moto_sdk::sys_io::api_net::NetCmd::VsockStreamRx as u16
         );
         assert_eq!(rx.handle, accepted.handle);
         assert_eq!(rx.payload.args_64()[1], 5);
@@ -251,7 +254,7 @@ impl RawVsockListener {
         drop(page);
 
         let mut wrong_kind =
-            moto_sys_io::api_vsock::listener_accept_request(accepted.handle, 0).unwrap();
+            moto_sdk::sys_io::api_vsock::listener_accept_request(accepted.handle, 0).unwrap();
         wrong_kind.id = request.id + 1;
         expect_raw_vsock_error(
             &accept_tx,
@@ -262,18 +265,18 @@ impl RawVsockListener {
         .await;
 
         accept_tx
-            .send(moto_sys_io::api_vsock::close_request(accepted.handle))
+            .send(moto_sdk::sys_io::api_vsock::close_request(accepted.handle))
             .await
             .unwrap();
     }
 
-    pub async fn accept_with_full_reply_ring(&self) -> moto_ipc::io_channel::ClientConnection {
-        use moto_sys_io::api_net::{self, NetCmd};
+    pub async fn accept_with_full_reply_ring(&self) -> moto_sdk::ipc::io_channel::ClientConnection {
+        use moto_sdk::sys_io::api_net::{self, NetCmd};
 
         let total_udp = crate::tcp::read_sys_io_metric("net.total_udp_sockets");
-        let connection = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
-        for id in 1..=moto_ipc::io_channel::QUEUE_SIZE {
-            let mut request = moto_ipc::io_channel::Msg::new();
+        let connection = moto_sdk::ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+        for id in 1..=moto_sdk::ipc::io_channel::QUEUE_SIZE {
+            let mut request = moto_sdk::ipc::io_channel::Msg::new();
             request.command = NetCmd::VsockAvailability as u16;
             request.id = id;
             connection.send(request).unwrap();
@@ -283,8 +286,9 @@ impl RawVsockListener {
         })
         .await;
 
-        let mut accept = moto_sys_io::api_vsock::listener_accept_request(self.handle, 0).unwrap();
-        accept.id = moto_ipc::io_channel::QUEUE_SIZE + 1;
+        let mut accept =
+            moto_sdk::sys_io::api_vsock::listener_accept_request(self.handle, 0).unwrap();
+        accept.id = moto_sdk::ipc::io_channel::QUEUE_SIZE + 1;
         connection.send(accept).unwrap();
         let mut barrier = api_net::bind_udp_socket_request(&"127.0.0.1:0".parse().unwrap(), 0);
         barrier.id = accept.id + 1;
@@ -300,21 +304,21 @@ impl RawVsockListener {
     pub async fn accept_with_blocked_tcp_teardown(
         mut self,
     ) -> (
-        moto_ipc::io_channel::ClientConnection,
-        moto_ipc::io_channel::ClientConnection,
+        moto_sdk::ipc::io_channel::ClientConnection,
+        moto_sdk::ipc::io_channel::ClientConnection,
     ) {
-        use moto_sys_io::api_net::{self, NetCmd};
+        use moto_sdk::sys_io::api_net::{self, NetCmd};
 
         let mut bind = api_net::bind_tcp_listener_request(&"127.0.0.1:0".parse().unwrap(), Some(1));
         bind.id = self.next_id;
         let response = raw_vsock_response(&self.owner, &mut self.owner_rx, bind).await;
         response.status().unwrap();
-        let tcp = moto_ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
+        let tcp = moto_sdk::ipc::io_channel::ClientConnection::connect("sys-io").unwrap();
         let mut accept =
             api_net::accept_tcp_listener_request(response.handle, api_net::io_subchannel_mask(0));
         accept.id = 0x564f_d000;
         tcp.send(accept).unwrap();
-        let mut query = moto_ipc::io_channel::Msg::new();
+        let mut query = moto_sdk::ipc::io_channel::Msg::new();
         query.command = NetCmd::VsockAvailability as u16;
         query.id = accept.id + 1;
         tcp.send(query).unwrap();
@@ -323,7 +327,7 @@ impl RawVsockListener {
         response.status().unwrap();
         // The FIFO query proves TCP accept is queued. Keep its cancellation
         // reply blocked until after the vsock peer has observed listener loss.
-        for id in 1..=moto_ipc::io_channel::QUEUE_SIZE {
+        for id in 1..=moto_sdk::ipc::io_channel::QUEUE_SIZE {
             query.id = id;
             tcp.send(query).unwrap();
         }
@@ -336,16 +340,16 @@ impl RawVsockListener {
 }
 
 pub fn finish_blocked_owner_accepts(
-    tcp: moto_ipc::io_channel::ClientConnection,
-    vsock: moto_ipc::io_channel::ClientConnection,
+    tcp: moto_sdk::ipc::io_channel::ClientConnection,
+    vsock: moto_sdk::ipc::io_channel::ClientConnection,
 ) {
-    use moto_sys_io::api_net::NetCmd;
+    use moto_sdk::sys_io::api_net::NetCmd;
 
     for (connection, command, count) in [
         (vsock, NetCmd::VsockListenerAccept as u16, 2),
         (tcp, NetCmd::TcpListenerAccept as u16, 1),
     ] {
-        for id in 1..=moto_ipc::io_channel::QUEUE_SIZE {
+        for id in 1..=moto_sdk::ipc::io_channel::QUEUE_SIZE {
             let response = crate::tcp::recv_raw_net_response(&connection);
             assert_eq!(response.id, id);
             response.status().unwrap();
@@ -366,14 +370,14 @@ pub fn finish_blocked_owner_accepts(
 }
 
 pub async fn test_raw_vsock_pending_accepts() {
-    use moto_sys_io::{api_net, api_vsock};
+    use moto_sdk::sys_io::{api_net, api_vsock};
 
     const PORT: u32 = 80_004;
     const ACCEPT_LIMIT: usize = 8;
     const LISTENERS: usize = 8;
     const FIRST_ID: u64 = 0x564f_8000;
 
-    let (accept_tx, mut accept_rx) = moto_ipc::io_channel::connect("sys-io").unwrap();
+    let (accept_tx, mut accept_rx) = moto_sdk::ipc::io_channel::connect("sys-io").unwrap();
     let mut handles = [0; LISTENERS];
     for (index, handle) in handles.iter_mut().enumerate() {
         let mut bind = api_vsock::listener_bind_request(PORT + index as u32).unwrap();
@@ -391,7 +395,7 @@ pub async fn test_raw_vsock_pending_accepts() {
         }
     }
     // All 64 dispatch tickets used to remain held by these unmatched accepts.
-    let mut query = moto_ipc::io_channel::Msg::new();
+    let mut query = moto_sdk::ipc::io_channel::Msg::new();
     query.command = api_net::NetCmd::VsockAvailability as u16;
     query.id = FIRST_ID + 64;
     raw_vsock_response(&accept_tx, &mut accept_rx, query)
@@ -402,7 +406,7 @@ pub async fn test_raw_vsock_pending_accepts() {
     udp.id = query.id + 1;
     let response = raw_vsock_response(&accept_tx, &mut accept_rx, udp).await;
     response.status().unwrap();
-    let mut drop_udp = moto_ipc::io_channel::Msg::new();
+    let mut drop_udp = moto_sdk::ipc::io_channel::Msg::new();
     drop_udp.command = api_net::NetCmd::UdpSocketDrop as u16;
     drop_udp.handle = response.handle;
     drop_udp.id = udp.id + 1;
@@ -466,12 +470,12 @@ pub async fn test_raw_vsock_listener_bind() {
     const QUOTA_PORT_START: u32 = 0xf200_0000;
     const LISTENER_LIMIT: usize = 32;
 
-    let (owner, mut owner_rx) = moto_ipc::io_channel::connect("sys-io").unwrap();
-    let mut bind = moto_sys_io::api_vsock::listener_bind_request(EXPLICIT_PORT).unwrap();
+    let (owner, mut owner_rx) = moto_sdk::ipc::io_channel::connect("sys-io").unwrap();
+    let mut bind = moto_sdk::sys_io::api_vsock::listener_bind_request(EXPLICIT_PORT).unwrap();
     bind.id = 0x564f_6000;
     bind.wake_handle = 0x1234;
     let response = raw_vsock_response(&owner, &mut owner_rx, bind).await;
-    let explicit = moto_sys_io::api_vsock::decode_listener_bind_response(&response).unwrap();
+    let explicit = moto_sdk::sys_io::api_vsock::decode_listener_bind_response(&response).unwrap();
     assert_eq!(explicit.local.port, EXPLICIT_PORT);
 
     let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -481,7 +485,7 @@ pub async fn test_raw_vsock_listener_bind() {
         .unwrap();
     assert_eq!(Some(0), status.code());
 
-    let mut conflict = moto_sys_io::api_vsock::listener_bind_request(EXPLICIT_PORT).unwrap();
+    let mut conflict = moto_sdk::sys_io::api_vsock::listener_bind_request(EXPLICIT_PORT).unwrap();
     conflict.id = bind.id + 1;
     expect_raw_vsock_error(
         &owner,
@@ -491,17 +495,17 @@ pub async fn test_raw_vsock_listener_bind() {
     )
     .await;
 
-    let mut auto = moto_sys_io::api_vsock::listener_bind_request(0).unwrap();
+    let mut auto = moto_sdk::sys_io::api_vsock::listener_bind_request(0).unwrap();
     auto.id = bind.id + 2;
     let response = raw_vsock_response(&owner, &mut owner_rx, auto).await;
-    let auto = moto_sys_io::api_vsock::decode_listener_bind_response(&response).unwrap();
+    let auto = moto_sdk::sys_io::api_vsock::decode_listener_bind_response(&response).unwrap();
     assert!((49_152..u32::MAX).contains(&auto.local.port));
     assert_eq!(auto.local.cid, explicit.local.cid);
     assert_ne!(auto.local.port, explicit.local.port);
     assert_ne!(auto.handle, explicit.handle);
 
-    let (foreign, mut foreign_rx) = moto_ipc::io_channel::connect("sys-io").unwrap();
-    let mut foreign_drop = moto_sys_io::api_vsock::listener_drop_request(explicit.handle);
+    let (foreign, mut foreign_rx) = moto_sdk::ipc::io_channel::connect("sys-io").unwrap();
+    let mut foreign_drop = moto_sdk::sys_io::api_vsock::listener_drop_request(explicit.handle);
     foreign_drop.id = bind.id + 3;
     expect_raw_vsock_error(
         &foreign,
@@ -512,13 +516,13 @@ pub async fn test_raw_vsock_listener_bind() {
     .await;
 
     raw_vsock_listener_drop(&owner, &mut owner_rx, explicit.handle, bind.id + 4).await;
-    let mut stale_drop = moto_sys_io::api_vsock::listener_drop_request(explicit.handle);
+    let mut stale_drop = moto_sdk::sys_io::api_vsock::listener_drop_request(explicit.handle);
     stale_drop.id = bind.id + 5;
     expect_raw_vsock_error(&owner, &mut owner_rx, stale_drop, moto_rt::Error::NotFound).await;
-    let mut rebound = moto_sys_io::api_vsock::listener_bind_request(EXPLICIT_PORT).unwrap();
+    let mut rebound = moto_sdk::sys_io::api_vsock::listener_bind_request(EXPLICIT_PORT).unwrap();
     rebound.id = bind.id + 6;
     let response = raw_vsock_response(&owner, &mut owner_rx, rebound).await;
-    let rebound = moto_sys_io::api_vsock::decode_listener_bind_response(&response).unwrap();
+    let rebound = moto_sdk::sys_io::api_vsock::decode_listener_bind_response(&response).unwrap();
     assert_eq!(rebound.local.cid, explicit.local.cid);
     assert_eq!(rebound.local.port, EXPLICIT_PORT);
     assert_ne!(rebound.handle, explicit.handle);
@@ -527,14 +531,15 @@ pub async fn test_raw_vsock_listener_bind() {
     raw_vsock_listener_drop(&owner, &mut owner_rx, rebound.handle, bind.id + 8).await;
 
     let first_quota_id = bind.id + 9;
-    let mut listeners: Vec<moto_sys_io::api_vsock::ListenerBindResponse> =
+    let mut listeners: Vec<moto_sdk::sys_io::api_vsock::ListenerBindResponse> =
         Vec::with_capacity(LISTENER_LIMIT);
     for index in 0..LISTENER_LIMIT {
         let port = QUOTA_PORT_START + index as u32;
-        let mut request = moto_sys_io::api_vsock::listener_bind_request(port).unwrap();
+        let mut request = moto_sdk::sys_io::api_vsock::listener_bind_request(port).unwrap();
         request.id = first_quota_id + index as u64;
         let response = raw_vsock_response(&owner, &mut owner_rx, request).await;
-        let listener = moto_sys_io::api_vsock::decode_listener_bind_response(&response).unwrap();
+        let listener =
+            moto_sdk::sys_io::api_vsock::decode_listener_bind_response(&response).unwrap();
         assert_eq!(listener.local.cid, explicit.local.cid);
         assert_eq!(listener.local.port, port);
         assert!(listeners.iter().all(|existing| {
@@ -543,9 +548,10 @@ pub async fn test_raw_vsock_listener_bind() {
         listeners.push(listener);
     }
 
-    let mut overflow =
-        moto_sys_io::api_vsock::listener_bind_request(QUOTA_PORT_START + LISTENER_LIMIT as u32)
-            .unwrap();
+    let mut overflow = moto_sdk::sys_io::api_vsock::listener_bind_request(
+        QUOTA_PORT_START + LISTENER_LIMIT as u32,
+    )
+    .unwrap();
     overflow.id = first_quota_id + LISTENER_LIMIT as u64;
     expect_raw_vsock_error(&owner, &mut owner_rx, overflow, moto_rt::Error::OutOfMemory).await;
 
@@ -553,10 +559,11 @@ pub async fn test_raw_vsock_listener_bind() {
     let release_id = overflow.id + 1;
     raw_vsock_listener_drop(&owner, &mut owner_rx, released.handle, release_id).await;
     let mut replacement =
-        moto_sys_io::api_vsock::listener_bind_request(released.local.port).unwrap();
+        moto_sdk::sys_io::api_vsock::listener_bind_request(released.local.port).unwrap();
     replacement.id = release_id + 1;
     let response = raw_vsock_response(&owner, &mut owner_rx, replacement).await;
-    let replacement = moto_sys_io::api_vsock::decode_listener_bind_response(&response).unwrap();
+    let replacement =
+        moto_sdk::sys_io::api_vsock::decode_listener_bind_response(&response).unwrap();
     assert_eq!(replacement.local, released.local);
     assert_ne!(replacement.handle, released.handle);
     listeners.push(replacement);
@@ -588,9 +595,9 @@ pub fn run_vsock_foreign_accept_child(handle: u64) -> ! {
         0,
         "foreign accept child lacks CAP_VSOCK"
     );
-    moto_async::LocalRuntime::new().block_on(async {
-        let (sender, mut receiver) = moto_ipc::io_channel::connect("sys-io").unwrap();
-        let mut accept = moto_sys_io::api_vsock::listener_accept_request(handle, 0).unwrap();
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+        let (sender, mut receiver) = moto_sdk::ipc::io_channel::connect("sys-io").unwrap();
+        let mut accept = moto_sdk::sys_io::api_vsock::listener_accept_request(handle, 0).unwrap();
         accept.id = 0x564f_7200;
         expect_raw_vsock_error(&sender, &mut receiver, accept, moto_rt::Error::NotFound).await;
     });
@@ -611,7 +618,7 @@ pub fn run_vsock_exit_accept_child(port: u32, peer_port: u32, idle: bool) -> ! {
         0,
         "exit accept child lacks CAP_VSOCK"
     );
-    let _owners = moto_async::LocalRuntime::new().block_on(async move {
+    let _owners = moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
         use std::io::Write;
 
         let marker = |bytes: &[u8]| {
@@ -619,24 +626,25 @@ pub fn run_vsock_exit_accept_child(port: u32, peer_port: u32, idle: bool) -> ! {
             stdout.write_all(bytes).unwrap();
             stdout.flush().unwrap();
         };
-        let (sender, mut receiver) = moto_ipc::io_channel::connect("sys-io").unwrap();
-        let mut bind = moto_sys_io::api_vsock::listener_bind_request(port).unwrap();
+        let (sender, mut receiver) = moto_sdk::ipc::io_channel::connect("sys-io").unwrap();
+        let mut bind = moto_sdk::sys_io::api_vsock::listener_bind_request(port).unwrap();
         bind.id = 0x564f_8200;
         let response = raw_vsock_response(&sender, &mut receiver, bind).await;
-        let listener = moto_sys_io::api_vsock::decode_listener_bind_response(&response).unwrap();
+        let listener =
+            moto_sdk::sys_io::api_vsock::decode_listener_bind_response(&response).unwrap();
         assert_eq!(listener.local.port, port);
 
         for index in 0..ACCEPT_LIMIT {
-            let mut accept = moto_sys_io::api_vsock::listener_accept_request(
+            let mut accept = moto_sdk::sys_io::api_vsock::listener_accept_request(
                 listener.handle,
-                index as u8 % moto_sys_io::api_net::IO_SUBCHANNELS,
+                index as u8 % moto_sdk::sys_io::api_net::IO_SUBCHANNELS,
             )
             .unwrap();
             accept.id = FIRST_ID + index as u64;
             sender.send(accept).await.unwrap();
         }
         let mut overflow =
-            moto_sys_io::api_vsock::listener_accept_request(listener.handle, 0).unwrap();
+            moto_sdk::sys_io::api_vsock::listener_accept_request(listener.handle, 0).unwrap();
         overflow.id = FIRST_ID + ACCEPT_LIMIT as u64;
         let response = raw_vsock_response(&sender, &mut receiver, overflow).await;
         assert_eq!(response.status(), Err(moto_rt::Error::OutOfMemory));
@@ -647,7 +655,8 @@ pub fn run_vsock_exit_accept_child(port: u32, peer_port: u32, idle: bool) -> ! {
             .expect("timed out waiting for child accept response")
             .unwrap();
         assert_eq!(response.id, FIRST_ID);
-        let accepted = moto_sys_io::api_vsock::decode_listener_accept_response(&response).unwrap();
+        let accepted =
+            moto_sdk::sys_io::api_vsock::decode_listener_accept_response(&response).unwrap();
         assert_eq!(accepted.local.port, port);
         assert_eq!(accepted.peer.cid, 2);
         marker(b"accepted\n");
@@ -658,7 +667,7 @@ pub fn run_vsock_exit_accept_child(port: u32, peer_port: u32, idle: bool) -> ! {
             .unwrap();
         assert_eq!(
             rx.command,
-            moto_sys_io::api_net::NetCmd::VsockStreamRx as u16
+            moto_sdk::sys_io::api_net::NetCmd::VsockStreamRx as u16
         );
         assert_eq!(rx.handle, accepted.handle);
         assert_eq!(rx.payload.args_64()[1], 1);
@@ -666,12 +675,12 @@ pub fn run_vsock_exit_accept_child(port: u32, peer_port: u32, idle: bool) -> ! {
         assert_eq!(claimed_rx.bytes()[0], b'r');
 
         let tx_page = sender
-            .alloc_page(moto_sys_io::api_net::io_subchannel_mask(0))
+            .alloc_page(moto_sdk::sys_io::api_net::io_subchannel_mask(0))
             .await
             .unwrap();
         tx_page.bytes_mut()[0] = b't';
         sender
-            .send(moto_sys_io::api_vsock::stream_tx_msg(
+            .send(moto_sdk::sys_io::api_vsock::stream_tx_msg(
                 accepted.handle,
                 tx_page,
                 1,
@@ -679,8 +688,8 @@ pub fn run_vsock_exit_accept_child(port: u32, peer_port: u32, idle: bool) -> ! {
             ))
             .await
             .unwrap();
-        let mut connect = moto_sys_io::api_vsock::connect_request(
-            moto_sys_io::api_vsock::VsockAddr {
+        let mut connect = moto_sdk::sys_io::api_vsock::connect_request(
+            moto_sdk::sys_io::api_vsock::VsockAddr {
                 cid: 2,
                 port: peer_port,
             },
@@ -697,7 +706,7 @@ pub fn run_vsock_exit_accept_child(port: u32, peer_port: u32, idle: bool) -> ! {
                 .expect("timed out waiting for idle child's connect response")
                 .unwrap();
             assert_eq!(response.id, connect.id);
-            moto_sys_io::api_vsock::decode_connect_response(&response).unwrap();
+            moto_sdk::sys_io::api_vsock::decode_connect_response(&response).unwrap();
             core::future::poll_fn(|cx| {
                 assert!(receiver.poll_recv(cx).is_pending());
                 core::task::Poll::Ready(())
@@ -733,20 +742,20 @@ pub fn run_vsock_discovery_denied_child(with_ip: bool) -> ! {
         "discovery child unexpectedly has CAP_VSOCK"
     );
 
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = host_channel().await;
         assert_eq!(
-            moto_io::net::vsock::availability(&client).await,
+            moto_sdk::io::net::vsock::availability(&client).await,
             Err(moto_rt::Error::NotAllowed)
         );
         assert_eq!(
-            moto_io::net::vsock::local_cid(&client).await,
+            moto_sdk::io::net::vsock::local_cid(&client).await,
             Err(moto_rt::Error::NotAllowed)
         );
         assert_eq!(client.reservations(), 0);
 
         if with_ip {
-            let socket = moto_io::net::udp::UdpSocket::bind_reserved(
+            let socket = moto_sdk::io::net::udp::UdpSocket::bind_reserved(
                 client.try_reserve().unwrap(),
                 &"127.0.0.1:0".parse().unwrap(),
                 None,
@@ -759,8 +768,8 @@ pub fn run_vsock_discovery_denied_child(with_ip: bool) -> ! {
             crate::net_harness::drain_host_channel(client, driver_task).await;
         }
 
-        let (sender, mut receiver) = moto_ipc::io_channel::connect("sys-io").unwrap();
-        let mut request = moto_sys_io::api_vsock::availability_request();
+        let (sender, mut receiver) = moto_sdk::ipc::io_channel::connect("sys-io").unwrap();
+        let mut request = moto_sdk::sys_io::api_vsock::availability_request();
         request.id = 0x564f_434b;
         assert_eq!(request.handle, 0);
         assert_eq!(request.flags, 0);
@@ -774,14 +783,14 @@ pub fn run_vsock_discovery_denied_child(with_ip: bool) -> ! {
         assert_eq!(response.command, request.command);
         assert_eq!(response.status(), Err(moto_rt::Error::NotAllowed));
 
-        let mut cid = moto_sys_io::api_vsock::local_cid_request();
+        let mut cid = moto_sdk::sys_io::api_vsock::local_cid_request();
         cid.id = request.id + 1;
         expect_raw_vsock_error(&sender, &mut receiver, cid, moto_rt::Error::NotAllowed).await;
         cid.id += 1;
         cid.flags = 1;
         expect_raw_vsock_error(&sender, &mut receiver, cid, moto_rt::Error::NotAllowed).await;
 
-        let mut malformed = moto_sys_io::api_vsock::availability_request();
+        let mut malformed = moto_sdk::sys_io::api_vsock::availability_request();
         malformed.id = request.id + 1;
         malformed.flags = 1;
         sender.send(malformed).await.unwrap();
@@ -794,11 +803,11 @@ pub fn run_vsock_discovery_denied_child(with_ip: bool) -> ! {
         assert_eq!(response.flags, malformed.flags);
         assert_eq!(response.status(), Err(moto_rt::Error::NotAllowed));
 
-        let peer = moto_sys_io::api_vsock::VsockAddr {
+        let peer = moto_sdk::sys_io::api_vsock::VsockAddr {
             cid: 2,
             port: 70_000,
         };
-        let mut connect = moto_sys_io::api_vsock::connect_request(peer, 0).unwrap();
+        let mut connect = moto_sdk::sys_io::api_vsock::connect_request(peer, 0).unwrap();
         connect.id = 0x564f_5000;
         expect_raw_vsock_error(&sender, &mut receiver, connect, moto_rt::Error::NotAllowed).await;
         let mut malformed_connect = connect;
@@ -811,7 +820,8 @@ pub fn run_vsock_discovery_denied_child(with_ip: bool) -> ! {
             moto_rt::Error::NotAllowed,
         )
         .await;
-        let mut accept = moto_sys_io::api_vsock::listener_accept_request(0xfeed_cafe, 0).unwrap();
+        let mut accept =
+            moto_sdk::sys_io::api_vsock::listener_accept_request(0xfeed_cafe, 0).unwrap();
         accept.id = connect.id + 2;
         expect_raw_vsock_error(&sender, &mut receiver, accept, moto_rt::Error::NotAllowed).await;
         let mut malformed_accept = accept;
@@ -857,12 +867,12 @@ fn test_vsock_discovery_inner(mode: &str, with_ip: bool) {
         "disabled" => "shared-endpoint-disabled",
         _ => panic!("unknown vsock discovery mode: {mode}"),
     };
-    let initial =
-        moto_async::LocalRuntime::new().block_on(metrics.measure_idle(topology, initial_state));
+    let initial = moto_sdk::async_runtime::LocalRuntime::new()
+        .block_on(metrics.measure_idle(topology, initial_state));
 
     if mode == "disabled" {
         assert_eq!(
-            moto_ipc::io_channel::ClientConnection::connect("sys-io").err(),
+            moto_sdk::ipc::io_channel::ClientConnection::connect("sys-io").err(),
             Some(moto_rt::Error::NotFound)
         );
         println!("vsock discovery: disabled PASS");
@@ -879,10 +889,16 @@ fn test_vsock_discovery_inner(mode: &str, with_ip: bool) {
         _ => unreachable!(),
     };
 
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = host_channel().await;
-        assert_eq!(moto_io::net::vsock::availability(&client).await, expected);
-        assert_eq!(moto_io::net::vsock::availability(&client).await, expected);
+        assert_eq!(
+            moto_sdk::io::net::vsock::availability(&client).await,
+            expected
+        );
+        assert_eq!(
+            moto_sdk::io::net::vsock::availability(&client).await,
+            expected
+        );
         let after_availability = metrics.snapshot();
         let dormant = if mode == "present" {
             // This transition also contains the NET channel and availability
@@ -902,11 +918,11 @@ fn test_vsock_discovery_inner(mode: &str, with_ip: bool) {
         };
 
         let first_started = moto_rt::time::Instant::now();
-        let first_cid = moto_io::net::vsock::local_cid(&client).await;
+        let first_cid = moto_sdk::io::net::vsock::local_cid(&client).await;
         let first_elapsed = first_started.elapsed();
         assert_eq!(first_cid, expected_cid);
         let warm_started = moto_rt::time::Instant::now();
-        let warm_cid = moto_io::net::vsock::local_cid(&client).await;
+        let warm_cid = moto_sdk::io::net::vsock::local_cid(&client).await;
         let warm_elapsed = warm_started.elapsed();
         assert_eq!(warm_cid, expected_cid);
 
@@ -925,11 +941,11 @@ fn test_vsock_discovery_inner(mode: &str, with_ip: bool) {
         assert_eq!(client.reservations(), 0);
         crate::net_harness::drain_host_channel(client, driver_task).await;
 
-        let (sender, mut receiver) = moto_ipc::io_channel::connect("sys-io").unwrap();
+        let (sender, mut receiver) = moto_sdk::ipc::io_channel::connect("sys-io").unwrap();
         let mut malformed = [
-            moto_sys_io::api_vsock::availability_request(),
-            moto_sys_io::api_vsock::availability_request(),
-            moto_sys_io::api_vsock::availability_request(),
+            moto_sdk::sys_io::api_vsock::availability_request(),
+            moto_sdk::sys_io::api_vsock::availability_request(),
+            moto_sdk::sys_io::api_vsock::availability_request(),
         ];
         malformed[0].handle = 1;
         malformed[1].flags = 1;
@@ -949,7 +965,7 @@ fn test_vsock_discovery_inner(mode: &str, with_ip: bool) {
             assert_eq!(response.status(), Err(moto_rt::Error::InvalidArgument));
         }
 
-        let mut malformed_cid = moto_sys_io::api_vsock::local_cid_request();
+        let mut malformed_cid = moto_sdk::sys_io::api_vsock::local_cid_request();
         malformed_cid.id = 0x564f_4400;
         malformed_cid.flags = 1;
         expect_raw_vsock_error(
@@ -960,19 +976,19 @@ fn test_vsock_discovery_inner(mode: &str, with_ip: bool) {
         )
         .await;
 
-        let mut cid = moto_sys_io::api_vsock::local_cid_request();
+        let mut cid = moto_sdk::sys_io::api_vsock::local_cid_request();
         cid.id = malformed_cid.id + 1;
         let response = raw_vsock_response(&sender, &mut receiver, cid).await;
         assert_eq!(
-            moto_sys_io::api_vsock::decode_local_cid_response(&response),
+            moto_sdk::sys_io::api_vsock::decode_local_cid_response(&response),
             expected_cid
         );
 
-        let peer = moto_sys_io::api_vsock::VsockAddr {
+        let peer = moto_sdk::sys_io::api_vsock::VsockAddr {
             cid: 2,
             port: 70_000,
         };
-        let mut connect = moto_sys_io::api_vsock::connect_request(peer, 0).unwrap();
+        let mut connect = moto_sdk::sys_io::api_vsock::connect_request(peer, 0).unwrap();
         connect.id = 0x564f_5000;
         let mut malformed_connect = connect;
         malformed_connect.id += 1;
@@ -1021,7 +1037,7 @@ pub fn test_vsock_discovery(mode: &str) {
 /// the driver's liveness is meanwhile covered by every other net test, since
 /// the compatibility host runs the same `NetDriver::run`.
 fn test_connect_drive_shutdown() {
-    let completed = moto_async::LocalRuntime::new().block_on(async {
+    let completed = moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = host_channel().await;
         client.request_shutdown();
         bounded(driver_task, 5).await
@@ -1037,15 +1053,15 @@ fn test_connect_drive_shutdown() {
 /// Dropping a driver immediately after connect, before staging any work,
 /// disconnects without allocation and leaves the retained client unusable.
 fn test_drop_driver_immediately_after_connect() {
-    moto_async::LocalRuntime::new().block_on(async {
-        let (client, driver) = moto_io::net::connect()
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+        let (client, driver) = moto_sdk::io::net::connect()
             .await
             .expect("async connect to sys-io failed");
         drop(driver);
         assert_eq!(client.reservations(), 0);
         assert_eq!(client.try_reserve().err(), Some(ReserveError::ShuttingDown));
         assert_eq!(
-            moto_io::net::vsock::availability(&client).await,
+            moto_sdk::io::net::vsock::availability(&client).await,
             Err(moto_rt::Error::NotConnected)
         );
     });
@@ -1071,12 +1087,12 @@ fn test_queued_queries_fail_after_driver_exit() {
         }
     }
 
-    moto_async::LocalRuntime::new().block_on(async {
-        let (client, driver) = moto_io::net::connect()
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+        let (client, driver) = moto_sdk::io::net::connect()
             .await
             .expect("async connect to sys-io failed");
-        let mut availability = Box::pin(moto_io::net::vsock::availability(&client));
-        let mut local_cid = Box::pin(moto_io::net::vsock::local_cid(&client));
+        let mut availability = Box::pin(moto_sdk::io::net::vsock::availability(&client));
+        let mut local_cid = Box::pin(moto_sdk::io::net::vsock::local_cid(&client));
         let availability_woke = Arc::new(WakeFlag(std::sync::atomic::AtomicBool::new(false)));
         let local_cid_woke = Arc::new(WakeFlag(std::sync::atomic::AtomicBool::new(false)));
         {
@@ -1116,7 +1132,7 @@ fn test_queued_queries_fail_after_driver_exit() {
 
         assert_eq!(client.reservations(), 0);
         assert_eq!(
-            moto_io::net::vsock::availability(&client).await,
+            moto_sdk::io::net::vsock::availability(&client).await,
             Err(moto_rt::Error::NotConnected)
         );
     });
@@ -1129,7 +1145,7 @@ fn test_queued_queries_fail_after_driver_exit() {
 /// reservation -- with no `request_shutdown` anywhere -- closes the channel
 /// to new reservations and exits the driver.
 fn test_reservation_lifecycle() {
-    let completed = moto_async::LocalRuntime::new().block_on(async {
+    let completed = moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = host_channel().await;
 
         let capacity = client.capacity();
@@ -1184,18 +1200,18 @@ fn test_reserved_socket_io() {
         peer.write_all(&buf).unwrap();
     });
 
-    let completed = moto_async::LocalRuntime::new().block_on(async {
+    let completed = moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = host_channel().await;
 
         let loopback: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let a = moto_io::net::udp::UdpSocket::bind_reserved(
+        let a = moto_sdk::io::net::udp::UdpSocket::bind_reserved(
             client.try_reserve().unwrap(),
             &loopback,
             None,
         )
         .await
         .expect("reserved UDP bind (a)");
-        let b = moto_io::net::udp::UdpSocket::bind_reserved(
+        let b = moto_sdk::io::net::udp::UdpSocket::bind_reserved(
             client.try_reserve().unwrap(),
             &loopback,
             None,
@@ -1215,7 +1231,7 @@ fn test_reserved_socket_io() {
         assert_eq!(&buf[..len], b"host channel");
         assert_eq!(&from, a.local_addr());
 
-        let stream = moto_io::net::tcp::TcpStream::connect_reserved(
+        let stream = moto_sdk::io::net::tcp::TcpStream::connect_reserved(
             client.try_reserve().unwrap(),
             &echo_addr,
             None,
@@ -1267,11 +1283,11 @@ fn test_reserved_socket_io() {
 fn test_reserved_listener_accept() {
     let loopback: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
 
-    let mut runtime = moto_async::LocalRuntime::new();
+    let mut runtime = moto_sdk::async_runtime::LocalRuntime::new();
     let (completed, peer_thread) = runtime.block_on(async {
         let (client, driver_task) = host_channel().await;
 
-        let listener = moto_io::net::tcp::TcpListener::bind_reserved(
+        let listener = moto_sdk::io::net::tcp::TcpListener::bind_reserved(
             client.try_reserve().unwrap(),
             &loopback,
             None,
@@ -1309,7 +1325,7 @@ fn test_reserved_listener_accept() {
                 arrived = true;
                 break;
             }
-            moto_async::sleep(Duration::from_millis(5)).await;
+            moto_sdk::async_runtime::sleep(Duration::from_millis(5)).await;
         }
         assert!(arrived, "no connection within 10s");
         assert_eq!(listener.accept_load(), (0, 1));
@@ -1366,7 +1382,7 @@ fn spawn_pingpong_peer(addr: std::net::SocketAddr) -> std::thread::JoinHandle<()
 }
 
 /// Serve one ping/pong exchange on the native side of an accepted stream.
-async fn serve_pingpong(stream: &moto_io::net::tcp::TcpStream) {
+async fn serve_pingpong(stream: &moto_sdk::io::net::tcp::TcpStream) {
     let mut pinged = Vec::new();
     while pinged.len() < 4 {
         let mut buf = [0u8; 8];
@@ -1396,11 +1412,11 @@ async fn serve_pingpong(stream: &moto_io::net::tcp::TcpStream) {
 fn test_reserved_accept_parks_until_donation() {
     let loopback: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
 
-    let mut runtime = moto_async::LocalRuntime::new();
+    let mut runtime = moto_sdk::async_runtime::LocalRuntime::new();
     let (completed, peer_thread) = runtime.block_on(async {
         let (client, driver_task) = host_channel().await;
 
-        let listener = moto_io::net::tcp::TcpListener::bind_reserved(
+        let listener = moto_sdk::io::net::tcp::TcpListener::bind_reserved(
             client.try_reserve().unwrap(),
             &loopback,
             None,
@@ -1442,11 +1458,11 @@ fn test_reserved_accept_parks_until_donation() {
 fn test_reserved_cancelled_accept_redelivers() {
     let loopback: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
 
-    let mut runtime = moto_async::LocalRuntime::new();
+    let mut runtime = moto_sdk::async_runtime::LocalRuntime::new();
     let (completed, peer_thread) = runtime.block_on(async {
         let (client, driver_task) = host_channel().await;
 
-        let listener = moto_io::net::tcp::TcpListener::bind_reserved(
+        let listener = moto_sdk::io::net::tcp::TcpListener::bind_reserved(
             client.try_reserve().unwrap(),
             &loopback,
             None,
@@ -1501,11 +1517,11 @@ fn test_reserved_delivered_then_cancelled_accept_redelivers() {
 
     let loopback: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
 
-    let mut runtime = moto_async::LocalRuntime::new();
+    let mut runtime = moto_sdk::async_runtime::LocalRuntime::new();
     let (completed, peer_thread) = runtime.block_on(async {
         let (client, driver_task) = host_channel().await;
 
-        let listener = moto_io::net::tcp::TcpListener::bind_reserved(
+        let listener = moto_sdk::io::net::tcp::TcpListener::bind_reserved(
             client.try_reserve().unwrap(),
             &loopback,
             None,
@@ -1529,7 +1545,7 @@ fn test_reserved_delivered_then_cancelled_accept_redelivers() {
         let mut waited = 0;
         while !flag.0.load(std::sync::atomic::Ordering::Acquire) {
             assert!(waited < 2000, "accept response was never delivered");
-            moto_async::sleep(Duration::from_millis(5)).await;
+            moto_sdk::async_runtime::sleep(Duration::from_millis(5)).await;
             waited += 1;
         }
         drop(accept);
@@ -1551,192 +1567,6 @@ fn test_reserved_delivered_then_cancelled_accept_redelivers() {
     println!("net_driver::test_reserved_delivered_then_cancelled_accept_redelivers PASS");
 }
 
-/// Read this process's published-channel count from its vdso pool.
-fn pool_client_count() -> u64 {
-    moto_rt::internal_helper(0, 1, 0, 0, 0, 0)
-}
-
-/// The Stage 5 coalescing regression: from a cold pool, N simultaneous
-/// sockets must share channels (about ceil(N / capacity) of them), not get
-/// one each. Runs in a spawned child so its pool really is cold.
-pub fn pool_cold_start_child() -> ! {
-    use std::sync::{Arc, Barrier};
-
-    const N: usize = 16;
-    let barrier = Arc::new(Barrier::new(N));
-    let sockets: Vec<_> = (0..N)
-        .map(|_| {
-            let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                barrier.wait();
-                std::net::UdpSocket::bind("127.0.0.1:0").unwrap()
-            })
-        })
-        .collect();
-    let sockets: Vec<_> = sockets.into_iter().map(|t| t.join().unwrap()).collect();
-
-    // 16 concurrent sockets, capacity 4 per channel: 4 channels, with +1 of
-    // provisioning-race slack.
-    let channels = pool_client_count();
-    assert!(
-        (4..=5).contains(&channels),
-        "cold start provisioned {channels} channels for {N} sockets"
-    );
-    drop(sockets);
-    std::process::exit(0);
-}
-
-fn test_pool_cold_start_coalesces() {
-    let status = std::process::Command::new(std::env::args().next().unwrap())
-        .arg("pool-cold-start-child")
-        .status()
-        .expect("failed to spawn the cold-start child");
-    assert!(status.success(), "cold-start child failed: {status:?}");
-    println!("net_driver::test_pool_cold_start_coalesces PASS");
-}
-
-fn active_threads() -> u64 {
-    moto_sys::ProcessStaticPage::get()
-        .active_threads
-        .load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Thread exit follows runtime/TLS cleanup, but precedes stack reclamation.
-/// This is sufficient for live slab bytes, not for the kernel's pages_user.
-fn wait_for_idle_threads(idle: u64) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while active_threads() > idle {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "pool channel threads did not exit"
-        );
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
-/// Drain userspace cleanup between lifetimes so retired threads cannot
-/// accumulate runtime allocations or private allocator caches.
-fn churn_one_channel(idle: u64) {
-    drop(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
-    wait_for_cold_pool();
-    wait_for_idle_threads(idle);
-}
-
-fn live_slab_bytes() -> u64 {
-    moto_rt::internal_helper(0, 6, 0, 0, 0, 0)
-}
-
-/// A pool channel's thread exits with `SysObj::put(SELF)`, which drops
-/// nothing in its frame: a runtime left there leaked a few KiB per channel
-/// lifetime, and russhd, which retires channels all the time, grew without
-/// bound. Runs in a spawned child so that no other socket keeps a channel
-/// open.
-pub fn pool_channel_churn_child() -> ! {
-    const WARMUP: usize = 20;
-    const CHANNELS: usize = 300;
-    const SLACK_BYTES: u64 = 32 * 4096;
-
-    // Record the known idle state before this fresh child opens its first
-    // socket; no channel thread can be included in the baseline.
-    let idle = active_threads();
-    for _ in 0..WARMUP {
-        churn_one_channel(idle);
-    }
-    let before = live_slab_bytes();
-
-    for _ in 0..CHANNELS {
-        churn_one_channel(idle);
-    }
-    let after = live_slab_bytes();
-
-    println!("pool channel churn: live slab bytes {before} -> {after} over {CHANNELS} channels");
-    assert!(
-        after <= before + SLACK_BYTES,
-        "{CHANNELS} channel lifetimes grew live slab allocations from {before} to {after} bytes"
-    );
-    std::process::exit(0);
-}
-
-fn test_pool_channel_churn_frees_runtimes() {
-    let status = std::process::Command::new(std::env::args().next().unwrap())
-        .arg("pool-channel-churn-child")
-        .status()
-        .expect("failed to spawn the channel-churn child");
-    assert!(status.success(), "channel-churn child failed: {status:?}");
-    println!("net_driver::test_pool_channel_churn_frees_runtimes PASS");
-}
-
-fn wait_for_cold_pool() {
-    // The pool must be cold, or an existing channel satisfies the
-    // reservation without provisioning. Idle channels self-close when
-    // their last reservation releases; earlier tests' have drained by now.
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while pool_client_count() != 0 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the pool did not go cold; {} channel(s) live",
-            pool_client_count()
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-/// The fail-all policy: with sys-io connects poisoned and the pool cold,
-/// a socket constructor fails promptly instead of hanging; unpoisoning
-/// restores service.
-fn test_sys_io_unavailable_fails_all() {
-    wait_for_cold_pool();
-    moto_rt::internal_helper(0, 2, 1, 0, 0, 0);
-    let result = std::net::UdpSocket::bind("127.0.0.1:0");
-    moto_rt::internal_helper(0, 2, 0, 0, 0, 0);
-    assert!(
-        result.is_err(),
-        "a bind succeeded while sys-io connects were poisoned"
-    );
-
-    let recovered = std::net::UdpSocket::bind("127.0.0.1:0");
-    assert!(recovered.is_ok(), "bind did not recover after unpoisoning");
-    println!("net_driver::test_sys_io_unavailable_fails_all PASS");
-}
-
-fn test_channel_allocation_failure() {
-    wait_for_cold_pool();
-    moto_rt::internal_helper(0, 4, 1, 0, 0, 0);
-    // Fail after connecting IPC and allocating queue storage. Both bind
-    // veneers must receive the error; neither may publish a partial channel.
-    for _ in 0..4 {
-        let tcp = std::net::TcpListener::bind("127.0.0.1:0");
-        let udp = std::net::UdpSocket::bind("127.0.0.1:0");
-        assert_eq!(tcp.unwrap_err().kind(), std::io::ErrorKind::OutOfMemory);
-        assert_eq!(udp.unwrap_err().kind(), std::io::ErrorKind::OutOfMemory);
-        assert_eq!(pool_client_count(), 0);
-    }
-    moto_rt::internal_helper(0, 4, 0, 0, 0, 0);
-    moto_rt::internal_helper(0, 0, 0, 0, 0, 0); // No waiters or in-flight provisions.
-    let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    drop((tcp, udp));
-    println!("net_driver::test_channel_allocation_failure PASS");
-}
-
-fn test_pool_runtime_allocation_failure() {
-    wait_for_cold_pool();
-    moto_rt::internal_helper(0, 5, 1, 0, 0, 0);
-    for _ in 0..4 {
-        let tcp = std::net::TcpListener::bind("127.0.0.1:0");
-        let udp = std::net::UdpSocket::bind("127.0.0.1:0");
-        assert_eq!(tcp.unwrap_err().kind(), std::io::ErrorKind::OutOfMemory);
-        assert_eq!(udp.unwrap_err().kind(), std::io::ErrorKind::OutOfMemory);
-        assert_eq!(pool_client_count(), 0);
-    }
-    moto_rt::internal_helper(0, 5, 0, 0, 0, 0);
-    moto_rt::internal_helper(0, 0, 0, 0, 0, 0);
-    let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    drop((tcp, udp));
-    println!("net_driver::test_pool_runtime_allocation_failure PASS");
-}
-
 /// Accept requests riding donations from two different channels must not
 /// collide in the listener's in-flight map. Request ids were per-channel
 /// counters, each starting at 1, and the map is keyed by bare id: with one
@@ -1755,8 +1585,8 @@ fn test_accept_ids_unique_across_channels() {
     // single-handle). The thread ends when B's last reservation releases.
     let (client_b_tx, client_b_rx) = std::sync::mpsc::channel();
     let driver_b_thread = std::thread::spawn(move || {
-        moto_async::LocalRuntime::new().block_on(async move {
-            let (client, driver) = moto_io::net::connect()
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
+            let (client, driver) = moto_sdk::io::net::connect()
                 .await
                 .expect("async connect to sys-io failed");
             client_b_tx.send(client).unwrap();
@@ -1765,11 +1595,11 @@ fn test_accept_ids_unique_across_channels() {
     });
     let client_b = client_b_rx.recv().unwrap();
 
-    let mut runtime = moto_async::LocalRuntime::new();
+    let mut runtime = moto_sdk::async_runtime::LocalRuntime::new();
     let result = runtime.block_on(async {
         let (client_a, driver_a) = host_channel().await;
 
-        let listener = moto_io::net::tcp::TcpListener::bind_reserved(
+        let listener = moto_sdk::io::net::tcp::TcpListener::bind_reserved(
             client_a.try_reserve().unwrap(),
             &loopback,
             None,
@@ -1826,6 +1656,64 @@ fn test_accept_ids_unique_across_channels() {
     println!("net_driver::test_accept_ids_unique_across_channels PASS");
 }
 
+/// A readiness check made while TX pages are exhausted must subscribe to
+/// the page-release edge, even when the caller has not attempted a write.
+fn test_writable_check_arms_page_waiter() {
+    use moto_sdk::io::net::readiness::{NetEventListener, Readiness};
+
+    struct Observer(AtomicUsize);
+    impl NetEventListener for Observer {
+        fn on_readiness(&self, edges: Readiness) {
+            if edges.contains(Readiness::WRITABLE) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let peer = std::thread::spawn(move || {
+        let (_stream, _) = listener.accept().unwrap();
+        done_rx.recv().unwrap();
+    });
+
+    let observer = Arc::new(Observer(AtomicUsize::new(0)));
+    let mut runtime = moto_sdk::async_runtime::LocalRuntime::new();
+    runtime.block_on(async {
+        let (client, driver_task) = host_channel().await;
+        let stream = moto_sdk::io::net::tcp::TcpStream::connect_reserved(
+            client.try_reserve().unwrap(),
+            &addr,
+            None,
+            Some(observer.clone() as Arc<dyn NetEventListener>),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let before = observer.0.load(Ordering::SeqCst);
+        stream.with_tx_pages_exhausted_for_test(|| {
+            assert!(!stream.have_write_buffer_space());
+            // This is the native operation the VDSO calls when a WRITABLE
+            // interest is registered. No write is needed to arm the waiter.
+            stream.maybe_can_write();
+            assert_eq!(observer.0.load(Ordering::SeqCst), before);
+        });
+        assert!(stream.have_write_buffer_space());
+        assert!(
+            observer.0.load(Ordering::SeqCst) > before,
+            "TX-page release did not restore WRITABLE"
+        );
+
+        drop(stream);
+        assert!(bounded(driver_task, 5).await, "driver did not exit");
+    });
+    done_tx.send(()).unwrap();
+    peer.join().unwrap();
+    println!("net_driver::test_writable_check_arms_page_waiter PASS");
+}
+
 /// A partial nonblocking write must be answered by a WRITABLE edge once
 /// space returns. Under epoll semantics a partial write means "buffer
 /// full, an edge is owed when it drains", and tokio's PollEvented clears
@@ -1841,7 +1729,7 @@ fn test_accept_ids_unique_across_channels() {
 /// drains, and a second fill led by one 1-page write shifts alignment so
 /// its tail is guaranteed partial.
 fn test_partial_write_raises_writable() {
-    use moto_io::net::readiness::{NetEventListener, Readiness};
+    use moto_sdk::io::net::readiness::{NetEventListener, Readiness};
 
     struct CountingObserver {
         writable: AtomicUsize,
@@ -1854,7 +1742,7 @@ fn test_partial_write_raises_writable() {
         }
     }
 
-    const PAGE: usize = moto_ipc::io_channel::PAGE_SIZE;
+    const PAGE: usize = moto_sdk::ipc::io_channel::PAGE_SIZE;
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let peer_addr = listener.local_addr().unwrap();
@@ -1884,11 +1772,11 @@ fn test_partial_write_raises_writable() {
         writable: AtomicUsize::new(0),
     });
 
-    let mut runtime = moto_async::LocalRuntime::new();
+    let mut runtime = moto_sdk::async_runtime::LocalRuntime::new();
     let saw_edge = runtime.block_on(async {
         let (client, driver_task) = host_channel().await;
 
-        let stream = moto_io::net::tcp::TcpStream::connect_reserved(
+        let stream = moto_sdk::io::net::tcp::TcpStream::connect_reserved(
             client.try_reserve().unwrap(),
             &peer_addr,
             None,
@@ -1914,7 +1802,7 @@ fn test_partial_write_raises_writable() {
                         Ok(_) | Err(_) => {
                             spins += 1;
                             assert!(spins < 2000, "pool never refilled after drain");
-                            moto_async::sleep(Duration::from_millis(5)).await;
+                            moto_sdk::async_runtime::sleep(Duration::from_millis(5)).await;
                         }
                     }
                 }
@@ -1949,7 +1837,7 @@ fn test_partial_write_raises_writable() {
                 saw_edge = true;
                 break;
             }
-            moto_async::sleep(Duration::from_millis(5)).await;
+            moto_sdk::async_runtime::sleep(Duration::from_millis(5)).await;
         }
         drop(stream);
         assert!(
@@ -1974,7 +1862,7 @@ fn test_partial_write_raises_writable() {
 /// sends happen after, so the arrival exercises the edge path, not the
 /// registration-time synthesis.
 fn test_connected_udp_ignores_foreign_datagrams() {
-    use moto_io::net::readiness::{NetEventListener, Readiness};
+    use moto_sdk::io::net::readiness::{NetEventListener, Readiness};
 
     struct CountingObserver {
         readable: AtomicUsize,
@@ -1991,26 +1879,26 @@ fn test_connected_udp_ignores_foreign_datagrams() {
         readable: AtomicUsize::new(0),
     });
 
-    let mut runtime = moto_async::LocalRuntime::new();
+    let mut runtime = moto_sdk::async_runtime::LocalRuntime::new();
     runtime.block_on(async {
         let (client, driver_task) = host_channel().await;
         let loopback: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
 
-        let rx = moto_io::net::udp::UdpSocket::bind_reserved(
+        let rx = moto_sdk::io::net::udp::UdpSocket::bind_reserved(
             client.try_reserve().unwrap(),
             &loopback,
             Some(observer.clone() as Arc<dyn NetEventListener>),
         )
         .await
         .expect("reserved UDP bind (rx)");
-        let peer = moto_io::net::udp::UdpSocket::bind_reserved(
+        let peer = moto_sdk::io::net::udp::UdpSocket::bind_reserved(
             client.try_reserve().unwrap(),
             &loopback,
             None,
         )
         .await
         .expect("reserved UDP bind (peer)");
-        let outside = moto_io::net::udp::UdpSocket::bind_reserved(
+        let outside = moto_sdk::io::net::udp::UdpSocket::bind_reserved(
             client.try_reserve().unwrap(),
             &loopback,
             None,
@@ -2030,7 +1918,7 @@ fn test_connected_udp_ignores_foreign_datagrams() {
             if observer.readable.load(Ordering::SeqCst) > 0 {
                 break;
             }
-            moto_async::sleep(Duration::from_millis(5)).await;
+            moto_sdk::async_runtime::sleep(Duration::from_millis(5)).await;
         }
         assert_eq!(
             observer.readable.load(Ordering::SeqCst),
@@ -2055,7 +1943,7 @@ fn test_connected_udp_ignores_foreign_datagrams() {
                 edged = true;
                 break;
             }
-            moto_async::sleep(Duration::from_millis(5)).await;
+            moto_sdk::async_runtime::sleep(Duration::from_millis(5)).await;
         }
         assert!(edged, "no READABLE for the connected peer's datagram");
         let (len, from) = rx
@@ -2082,7 +1970,7 @@ fn test_dropped_futures_leave_no_waiters() {
     use core::pin::Pin;
     use core::task::Poll;
 
-    const PAGE: usize = moto_ipc::io_channel::PAGE_SIZE;
+    const PAGE: usize = moto_sdk::ipc::io_channel::PAGE_SIZE;
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let peer_addr = listener.local_addr().unwrap();
@@ -2107,11 +1995,11 @@ fn test_dropped_futures_leave_no_waiters() {
         }
     });
 
-    let mut runtime = moto_async::LocalRuntime::new();
+    let mut runtime = moto_sdk::async_runtime::LocalRuntime::new();
     runtime.block_on(async {
         let (client, driver_task) = host_channel().await;
 
-        let stream = moto_io::net::tcp::TcpStream::connect_reserved(
+        let stream = moto_sdk::io::net::tcp::TcpStream::connect_reserved(
             client.try_reserve().unwrap(),
             &peer_addr,
             None,
@@ -2121,7 +2009,7 @@ fn test_dropped_futures_leave_no_waiters() {
         .await
         .expect("reserved TCP connect");
         let loopback: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let udp = moto_io::net::udp::UdpSocket::bind_reserved(
+        let udp = moto_sdk::io::net::udp::UdpSocket::bind_reserved(
             client.try_reserve().unwrap(),
             &loopback,
             None,
@@ -2249,9 +2137,9 @@ fn test_channel_failure_wakes_every_waiter() {
         }
     });
 
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = host_channel().await;
-        let stream = moto_io::net::tcp::TcpStream::connect_reserved(
+        let stream = moto_sdk::io::net::tcp::TcpStream::connect_reserved(
             client.try_reserve().unwrap(),
             &peer_addr,
             None,
@@ -2261,14 +2149,14 @@ fn test_channel_failure_wakes_every_waiter() {
         .await
         .unwrap();
         let loopback: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let udp = moto_io::net::udp::UdpSocket::bind_reserved(
+        let udp = moto_sdk::io::net::udp::UdpSocket::bind_reserved(
             client.try_reserve().unwrap(),
             &loopback,
             None,
         )
         .await
         .unwrap();
-        let listener = moto_io::net::tcp::TcpListener::bind_reserved(
+        let listener = moto_sdk::io::net::tcp::TcpListener::bind_reserved(
             client.try_reserve().unwrap(),
             &loopback,
             None,
@@ -2285,7 +2173,7 @@ fn test_channel_failure_wakes_every_waiter() {
         let mut udp_read = Box::pin(udp.recv_from_future(&mut udp_byte, false));
         let mut accept = Box::pin(listener.accept());
         let mut ttl = Box::pin(stream.ttl_async());
-        let mut local_cid = Box::pin(moto_io::net::vsock::local_cid(&client));
+        let mut local_cid = Box::pin(moto_sdk::io::net::vsock::local_cid(&client));
 
         core::future::poll_fn(|cx| {
             assert!(tcp_read.as_mut().poll(cx).is_pending());
@@ -2345,6 +2233,113 @@ fn test_channel_failure_wakes_every_waiter() {
     println!("net_driver::test_channel_failure_wakes_every_waiter PASS");
 }
 
+/// A terminal UDP event reaches even a bind whose caller has not resumed,
+/// wakes blocked I/O, and leaves another binding on the same channel usable.
+fn test_udp_binding_invalidation() {
+    use core::future::Future;
+    use core::task::{Context, Poll};
+    use moto_sdk::io::net::udp::UdpSocket;
+
+    struct Wakes(AtomicUsize);
+    impl std::task::Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    // This fixture owns all application UDP sockets. The preceding driver's
+    // exit closes its channel before sys-io necessarily finishes teardown;
+    // do not capture those disappearing sockets as a persistent baseline.
+    crate::tcp::wait_for_sys_io_metric("net.udp_sockets", |n| n == 0);
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+        let (client, driver_task) = host_channel().await;
+        let anchor = client.try_reserve().unwrap();
+        let loopback = "127.0.0.1:0".parse().unwrap();
+        let mut bind = Box::pin(UdpSocket::bind_reserved(
+            client.try_reserve().unwrap(),
+            &loopback,
+            None,
+        ));
+        core::future::poll_fn(|cx| {
+            assert!(bind.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        // Drive the response, but do not poll the bind future again yet.
+        crate::net_harness::wait_until("UDP registration before bind resumes", || {
+            client.udp_handles_for_test().len() == 1
+        })
+        .await;
+        let handle = client.udp_handles_for_test()[0];
+        client.invalidate_udp_for_test(handle);
+        let invalid = bind.await.unwrap();
+        let destination = "127.0.0.1:12345".parse().unwrap();
+        assert_eq!(
+            invalid.try_send_to(b"closed", &destination),
+            Err(moto_rt::E_NOT_CONNECTED)
+        );
+        assert_eq!(client.reservations(), 1);
+        drop(invalid);
+
+        let socket = UdpSocket::bind_reserved(client.try_reserve().unwrap(), &loopback, None)
+            .await
+            .unwrap();
+        let survivor = UdpSocket::bind_reserved(client.try_reserve().unwrap(), &loopback, None)
+            .await
+            .unwrap();
+        let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+        let waker = std::task::Waker::from(wakes.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut byte = [0];
+        let mut receive = Box::pin(socket.recv_from_future(&mut byte, false));
+        assert!(receive.as_mut().poll(&mut cx).is_pending());
+        socket.with_tx_pages_exhausted_for_test(|| {
+            for _ in 0..moto_sdk::io_internal::udp_queues::UDP_QUEUE_MAX_DATAGRAMS {
+                assert_eq!(socket.try_send_to(b"queued", &destination), Ok(6));
+            }
+            let mut send = core::pin::pin!(socket.send_to_future(b"blocked", &destination));
+            let mut writable = core::pin::pin!(socket.writable());
+            assert!(send.as_mut().poll(&mut cx).is_pending());
+            assert!(writable.as_mut().poll(&mut cx).is_pending());
+            let before = wakes.0.load(Ordering::Relaxed);
+            client.invalidate_udp_for_test(socket.handle());
+            assert!(wakes.0.load(Ordering::Relaxed) >= before + 3);
+            assert_eq!(
+                send.as_mut().poll(&mut cx),
+                Poll::Ready(Err(moto_rt::E_NOT_CONNECTED))
+            );
+            assert!(writable.as_mut().poll(&mut cx).is_ready());
+            assert!(matches!(
+                receive.as_mut().poll(&mut cx),
+                Poll::Ready(Err(moto_rt::E_NOT_CONNECTED))
+            ));
+        });
+        assert_eq!(socket.rx_waiter_count(), 0);
+        assert_eq!(socket.tx_waiter_count(), 0);
+        assert_eq!(client.reservations(), 2);
+        // Late events are harmless after the handle has been unregistered.
+        client.invalidate_udp_for_test(socket.handle());
+        assert_eq!(survivor.try_send_to(b"live", survivor.local_addr()), Ok(4));
+        let mut bytes = [0; 4];
+        let (length, _) = bounded_output(survivor.recv_from_future(&mut bytes, false), 5)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&bytes[..length], b"live");
+        drop(receive);
+        drop((socket, survivor, anchor));
+        assert!(
+            bounded(driver_task, 5).await,
+            "UDP invalidation driver did not exit"
+        );
+        assert_eq!(client.reservations(), 0);
+    });
+    // Test events model server removal; closing the test channel reclaims the
+    // real server handles left behind by that injection.
+    crate::tcp::wait_for_sys_io_metric("net.udp_sockets", |n| n == 0);
+    println!("net_driver::test_udp_binding_invalidation PASS");
+}
+
 /// The vsock tests of the standard image: the wire codecs, then discovery on
 /// a guest with a NIC and no vsock device. They expect the topology and the
 /// capabilities the test harness provides (`MOTOR_OS_CAPS=0x3cc`), so the
@@ -2365,14 +2360,11 @@ pub fn run_all_tests() {
     test_reserved_cancelled_accept_redelivers();
     test_reserved_delivered_then_cancelled_accept_redelivers();
     test_accept_ids_unique_across_channels();
+    test_writable_check_arms_page_waiter();
     test_partial_write_raises_writable();
     test_connected_udp_ignores_foreign_datagrams();
     test_dropped_futures_leave_no_waiters();
     test_channel_failure_wakes_every_waiter();
-    test_pool_cold_start_coalesces();
-    test_pool_channel_churn_frees_runtimes();
-    test_sys_io_unavailable_fails_all();
-    test_channel_allocation_failure();
-    test_pool_runtime_allocation_failure();
+    test_udp_binding_invalidation();
     crate::net_caps::test_admission();
 }

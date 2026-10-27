@@ -287,9 +287,10 @@ pub fn mapping_charge(data_pages: u64, descriptor_pages: u64) -> u64 {
         .saturating_add(METADATA_FLAT_PAGES)
 }
 
-/// Charge for one lazy page fault: a single data page and its metadata.
+/// Charge for one lazy page fault: a single data page, its descriptor and
+/// their metadata.
 pub fn lazy_fault_charge() -> u64 {
-    mapping_charge(1, 0)
+    mapping_charge(1, 1)
 }
 
 // Fixed charges for the non-mapping operations. Starting points; they are

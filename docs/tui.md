@@ -60,9 +60,9 @@ program's own stdin — immediately, and again on every resize:
 | `CSI 48 ; rows ; cols ; h_px ; w_px t` | terminal → app | the report |
 
 Note **rows before columns**, the opposite order from crossterm's
-`(cols, rows)`. The wire helpers are in `src/sys/lib/moto-tooling/src/mode2048.rs`.
+`(cols, rows)`. The wire helpers are in `src/sys/lib/moto-sdk/src/tooling/mode2048.rs`.
 
-This is not a Motor invention: mode 2048 is an emerging convention among
+This is not a Motor OS invention: mode 2048 is an emerging convention among
 terminals that hit the same wall — foot, Ghostty, iTerm2 and kitty implement
 it — which is why Motor OS adopted it rather than inventing a private one. The
 specification is at
@@ -74,7 +74,7 @@ not ask ever finds unexpected bytes in its input.
 
 A report cannot be early enough for a program's *first* frame. So an owner that
 already knows the size — rmux for a pane, russhd for a pty session — puts it in
-`$COLUMNS`/`$LINES` when it spawns the child. crossterm's Motor backend answers
+`$COLUMNS`/`$LINES` when it spawns the child. crossterm's Motor OS backend answers
 `terminal::size()` from those until a report arrives, so a program under rmux or
 ssh paints its opening frame at the right size without asking anyone. Only the
 physical console lacks this, because nobody there knows the size in advance.
@@ -133,11 +133,11 @@ everything else for the grid. It answers the enable (every time, including a
 repeat), DECRQM, and `CSI 18 t`, and writes a report after any actual pane
 resize — a split, a layout change, or the client's own terminal changing shape.
 
-**crossterm's Motor backend** is the client side for every TUI program here. It
+**crossterm's Motor OS backend** is the client side for every TUI program here. It
 negotiates on entering its event loop, re-asserts after a foreground child that
 may have disabled the mode, disables on leaving raw mode, turns a valid report
 into `Event::Resize`, and prefers the last valid report for `terminal::size()`.
-Applications therefore need no Motor-specific code: red, rush, and the rmux
+Applications therefore need no Motor OS-specific code: red, rush, and the rmux
 client all just consume `Event::Resize`.
 
 ### Rules that keep it honest
@@ -188,7 +188,7 @@ pipe. The provider's end (the parent-side `ChildStdio` that rmux or russhd
 reads and writes) answers false; only the child-side endpoint the provider
 created as a terminal (`SelfStdio` with the terminal flag) answers true.
 
-Motor reserves fd 3 as `moto_rt::FD_TERMINAL`. It is present exactly when a
+Motor OS reserves fd 3 as `moto_rt::FD_TERMINAL`. It is present exactly when a
 process belongs to a terminal session but its stdin is not that terminal. The
 stream is read-only in v1: keys and in-band size reports arrive on it, writes
 fail, and reads return EOF when the terminal provider goes away. When it is
@@ -240,7 +240,7 @@ is not that terminal. It relays from the parent's fd 3 when present, otherwise
 from terminal fd 0, so terminal-unaware intermediaries propagate the session
 without a spawn ABI change. Detached children do not receive it. A spawner can
 also suppress it with the consumed launch key
-`MOTURUS_STDIO_NO_TERMINAL`; rush does this for background jobs because Motor
+`MOTURUS_STDIO_NO_TERMINAL`; rush does this for background jobs because Motor OS
 has no `SIGTTIN` to stop them from stealing input.
 
 ## The terminal-launch hint
@@ -263,7 +263,7 @@ keys.
 
 ## Ctrl+C
 
-Ctrl+C is terminal control, not terminal data. Motor still has no signals or
+Ctrl+C is terminal control, not terminal data. Motor OS still has no signals or
 line discipline: the control state lives in the terminal input pipe, and the
 VDSO that owns a foreground relay applies it to the appropriate process.
 
@@ -288,7 +288,7 @@ Applications normally use one of two adapters instead of the low-level API:
   no event can arrive there.
 - `crossterm::event::enable_ctrl_c_events()` explicitly converts callbacks to
   `KeyCode::Char('c')` with `KeyModifiers::CONTROL`. On other platforms it is
-  a no-op. On Motor it must be called during TUI setup before the first event
+  a no-op. On Motor OS it must be called during TUI setup before the first event
   wait; merely entering raw mode is not an opt-in.
 
 rmux, interactive rush, Gears, and interactive `sysbox less` opt in only when
@@ -352,9 +352,9 @@ a foreground route.
 After a foreground wait, rush treats status 130 as Ctrl+C: `$?` stays 130, a
 pending `trap INT` runs once, and the rest of the pipeline, list, or loop is
 abandoned. This intentionally also treats a voluntary `exit(130)` as an
-interrupt; Motor does not retain a separate exit-cause field after collection.
+interrupt; Motor OS does not retain a separate exit-cause field after collection.
 
-Motor has no process groups and no `SIGTTIN`/`SIGTTOU`. Foreground ownership
+Motor OS has no process groups and no `SIGTTIN`/`SIGTTOU`. Foreground ownership
 is the VDSO relay route, not a process-group broadcast, and suppressing fd 3
 is what prevents background jobs from stealing terminal input.
 
@@ -408,7 +408,7 @@ offset, so every grandchild would start writing where the last one did and
 overwrite it. File-backed inheritance is therefore always a relay through the
 one live `File`, which advances as bytes reach it.
 
-Descendants of a relayed child see pipes and keep the normal Motor
+Descendants of a relayed child see pipes and keep the normal Motor OS
 inherited-stdio dependency on their parent's lifetime. The directly transferred
 process still sees a real file.
 
@@ -500,7 +500,7 @@ number is recorded.
 `is_terminal()` guarantees descriptor consistency, nothing more. It does
 not prove a human is present, identify the peer, or grant authority — a
 process creator can always construct an endpoint that claims terminal
-behavior, on Motor as on systems with ptys. Programs may use it to decide
+behavior, on Motor OS as on systems with ptys. Programs may use it to decide
 whether prompting, colors, or raw-mode editing are practical; code that
 authorizes an operation must use an explicit authorization policy.
 
@@ -529,8 +529,9 @@ All three run from `src/tests/full-test.sh`.
 `src/sys/tests/systest/src/ctrl_c.rs` provides the focused runtime and
 terminal-chain probes. Lower-level atomic classification, route generation,
 batch scanning, and fixed-status process interruption are covered in their
-own moto-ipc, rt.vdso, moto-rt, and kernel tests, all reached transitively by
-`full-test.sh`.
+own tests: moto-sdk's `ipc::stdio_pipe` tests run natively under
+`full-test-dev.sh`, and the rt.vdso, moto-rt, and kernel tests are reached
+transitively by `full-test.sh`.
 
 Redirection has its own set, also run from `full-test.sh`:
 
@@ -547,5 +548,5 @@ Redirection has its own set, also run from `full-test.sh`:
 - `src/sys/tests/systest/src/fs.rs` keeps the position-mutex invariant, with
   concurrent writers through one descriptor required to lose nothing.
 - The ripgrep end-to-end regression runs only when `FULL_TEST_RIPGREP_BIN`
-  points at a Motor ripgrep build, since ripgrep lives in its own repository;
+  points at a Motor OS ripgrep build, since ripgrep lives in its own repository;
   without it that one check is skipped and says so.

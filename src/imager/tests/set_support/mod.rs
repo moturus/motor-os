@@ -1,6 +1,8 @@
-use async_fs::file_block_device::AsyncFileBlockDevice;
-use async_fs::{AccessPermissions as Access, EntryKind, FileSystem, Role, RolePermissions};
 use camino::Utf8Path;
+use moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice;
+use moto_sdk::async_fs::{
+    AccessPermissions as Access, EntryKind, FileSystem, Role, RolePermissions,
+};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Seek, SeekFrom};
@@ -44,7 +46,7 @@ pub fn with_fs<T>(raw: &Path, operation: impl AsyncFnOnce(&mut Fs) -> io::Result
         .unwrap()
 }
 
-pub async fn resolve(fs: &Fs, path: &str) -> io::Result<async_fs::EntryId> {
+pub async fn resolve(fs: &Fs, path: &str) -> io::Result<moto_sdk::async_fs::EntryId> {
     let mut id = motor_fs::ROOT_DIR_ID;
     for name in path.split('/').filter(|name| !name.is_empty()) {
         id = fs.stat(Role::System, id, name).await?.unwrap().0;

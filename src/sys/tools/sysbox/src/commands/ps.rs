@@ -1,4 +1,4 @@
-use moto_stats::{Collector, MetricEntry, ProviderInfo};
+use moto_sdk::stats::{Collector, MetricEntry, ProviderInfo};
 use moto_sys::caps::ProcessRole;
 use moto_sys::stats::{ProcessInfoV1, PID_KERNEL, PID_SYSTEM};
 
@@ -6,12 +6,16 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     eprintln!("Report some process stats.");
     eprintln!("Note 1: PPID = parent pid.");
     eprintln!("Note 2: System processes are marked with '*'; Interactive with '+'.");
-    eprintln!("Note 3: Memory usage here is virtual memory used per process.");
-    eprintln!("        Kernel memory usage is a bit underreported, as some bootup memory is not captured.");
-    eprintln!("        Process memory usage captures shared memory, meaning that total/cumulative");
-    eprintln!("        virtual memory usage is higher than actual physical memory usage.");
-    eprintln!("        Lazily mapped virtual memory (e.g. stacks) is included here, which also");
-    eprintln!("        leads to overstating virtual memory usage vs physical memory usage.\n");
+    eprintln!("Note 3: V_USER/V_KERN count reserved user/kernel memory in 4 KiB pages.");
+    eprintln!("        VIRT_KB is total reserved memory; RES_KB is its RAM backing, in KiB.");
+    eprintln!(
+        "        Untouched lazy pages, unbacked reservations, guards and MMIO use no RES_KB."
+    );
+    eprintln!(
+        "        Shared pages count per mapping; kernel stacks also count in the kernel row."
+    );
+    eprintln!("        Totals are not unique RAM usage. Some boot mappings, fixed process-static");
+    eprintln!("        pages and per-process kernel bookkeeping are outside this accounting.\n");
     eprintln!("usage:\n\tps [-H]\n");
     std::thread::sleep(std::time::Duration::new(0, 50_000_000));
     std::process::exit(exit_code);
@@ -30,6 +34,7 @@ mod metric_names {
     pub const PAGES_USER: &str = "pages_user";
     pub const PAGES_KERNEL: &str = "pages_kernel";
     pub const MEMORY_USAGE: &str = "memory_usage";
+    pub const MEMORY_RESIDENT: &str = "memory_resident";
     pub const CPU_USAGE: &str = "cpu_usage";
 }
 
@@ -42,6 +47,7 @@ struct ColumnIds {
     pages_user: u32,
     pages_kernel: u32,
     memory_usage: u32,
+    memory_resident: u32,
     cpu_usage: u32,
 }
 
@@ -55,8 +61,9 @@ struct ProcRow {
     total_children: u64,
     pages_user: u64,
     pages_kernel: u64,
-    kbytes: u64, // memory_usage >> 10
-    cpu: u64,    // raw cpu_usage, in tsc
+    reserved_kbytes: u64,
+    resident_kbytes: u64,
+    cpu: u64, // raw cpu_usage, in tsc
 }
 
 fn resolve_column_ids(kernel: &ProviderInfo) -> ColumnIds {
@@ -82,6 +89,7 @@ fn resolve_column_ids(kernel: &ProviderInfo) -> ColumnIds {
         pages_user: find(metric_names::PAGES_USER),
         pages_kernel: find(metric_names::PAGES_KERNEL),
         memory_usage: find(metric_names::MEMORY_USAGE),
+        memory_resident: find(metric_names::MEMORY_RESIDENT),
         cpu_usage: find(metric_names::CPU_USAGE),
     }
 }
@@ -140,7 +148,8 @@ pub fn do_command(args: &[String]) {
             total_children: value_of(&entries, ids.total_children),
             pages_user: value_of(&entries, ids.pages_user),
             pages_kernel: value_of(&entries, ids.pages_kernel),
-            kbytes: value_of(&entries, ids.memory_usage) >> 10,
+            reserved_kbytes: value_of(&entries, ids.memory_usage) >> 10,
+            resident_kbytes: value_of(&entries, ids.memory_resident) >> 10,
             cpu: value_of(&entries, ids.cpu_usage),
             ident,
         });
@@ -157,7 +166,7 @@ pub fn do_command(args: &[String]) {
         max_num = max_num.max(row.ident.parent_pid);
         max_num = max_num.max(row.threads_created);
         max_num = max_num.max(row.total_children);
-        max_num = max_num.max(row.kbytes);
+        max_num = max_num.max(row.reserved_kbytes).max(row.resident_kbytes);
         total_cpu += row.cpu;
     }
 
@@ -166,23 +175,24 @@ pub fn do_command(args: &[String]) {
     total_cpu -= rows[0].cpu;
     rows[0].cpu = total_cpu;
 
-    let col_width = max_num.to_string().len();
+    let col_width = max_num.to_string().len().max("VIRT_KB".len());
     let cpu_width = (total_cpu / moto_sys::KernelStaticPage::get().tsc_in_sec)
         .to_string()
         .len()
         + 4;
 
     println!(
-        "{:>w$}* {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:<w$} {:>wsec$}  ST   Name",
+        "{:>w$}* {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>wsec$}  ST   Name",
         "PID",
         "PPID",
         "A_THR",
         "T_THR",
         "A_CHLD",
         "T_CHLD",
-        "P_USER",
-        "P_KERN",
-        "KBYTES",
+        "V_USER",
+        "V_KERN",
+        "VIRT_KB",
+        "RES_KB",
         "CPU",
         w = col_width,
         wsec = cpu_width
@@ -203,7 +213,7 @@ fn print_line(row: &ProcRow, col_width: usize, cpu_width: usize, name_offset: us
     let proc = &row.ident;
 
     println!(
-        "{:>w$}{} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>cpu_width$.3} {} {:off$} {}",
+        "{:>w$}{} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>w$} {:>cpu_width$.3} {} {:off$} {}",
         proc.pid,
         match ProcessRole::try_from(proc.process_role) {
             Ok(ProcessRole::System) => "*",
@@ -218,7 +228,8 @@ fn print_line(row: &ProcRow, col_width: usize, cpu_width: usize, name_offset: us
         row.total_children,
         row.pages_user,
         row.pages_kernel,
-        row.kbytes,
+        row.reserved_kbytes,
+        row.resident_kbytes,
         (row.cpu as f64) / tsc_f64,
         if proc.active == 1 { "RUN " } else { "DEAD" },
         "",

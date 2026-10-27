@@ -32,12 +32,11 @@ for vm in "${vms[@]}"; do
   case "$vm" in wasm:224|wasm:256|dev:224|dev:256) ;; *) echo "test-wasm: bad VM $vm" >&2; exit 2;; esac
 done
 case "$vmm" in qemu) vmm_label=QEMU;; chv) vmm_label="Cloud Hypervisor";; *) exit 2;; esac
-# The repository's toolchain selector names the key, so resolve it from the
-# root whatever the caller's directory is.
+# rust-toolchain.toml names the toolchain, so build from the root whatever the
+# caller's directory is.
 cd "$ROOT_DIR"
-key="$(cat "$(rustc --print sysroot)/lib/rustlib/MOTOR-TOOLCHAIN-KEY")"
 suites=(javy-smoke wasmtime-smoke)
-binary() { echo "$ROOT_DIR/build/obj/$key/release/$1/x86_64-unknown-motor/release/$1"; }
+binary() { echo "$ROOT_DIR/build/obj/release/$1/x86_64-unknown-motor/release/$1"; }
 if [ "$prepare" = true ]; then
   targets=()
   for vm in "${vms[@]}"; do
@@ -45,7 +44,7 @@ if [ "$prepare" = true ]; then
   done
   make -C "$ROOT_DIR" "${targets[@]}" BUILD=release -j"$(nproc)"
   for suite in "${suites[@]}"; do
-    CARGO_TARGET_DIR="$ROOT_DIR/build/obj/$key/release/$suite" cargo build --locked --release \
+    CARGO_TARGET_DIR="$ROOT_DIR/build/obj/release/$suite" cargo build --locked --release \
       --target x86_64-unknown-motor --manifest-path "$WD/$suite/Cargo.toml"
   done
   exit
@@ -75,12 +74,12 @@ flock -n 8 || fail "another test-wasm.sh run is active in this checkout"
 evidence="$ROOT_DIR/build/wasm-images"
 rm -rf "$evidence"
 mkdir -p "$evidence"
-assembly="$("$ROOT_DIR/src/resolve-toolchain-assembly.sh" --resolve)"
-# Test inputs are staged beside the add-ons, outside the images, and uploaded per boot.
-test_inputs="${assembly%/images}/tests"
-for addon in javy wasmtime; do
-  (cd "$test_inputs/$addon" && sha256sum --quiet -c SHA256SUMS) ||
-    fail "no current $addon test inputs; run src/build-motor-os.sh --javy-only --wasmtime-only"
+assembly="$ROOT_DIR/build/assembly/images"
+# Test inputs are staged in the assembly, outside the images, and uploaded per boot.
+test_inputs="$ROOT_DIR/build/assembly/tests"
+for name in javy wasmtime; do
+  (cd "$test_inputs/$name" && sha256sum --quiet -c SHA256SUMS) ||
+    fail "no current $name test inputs; run src/build-motor-os.sh --javy-only --wasmtime-only"
 done
 export MOTO_SMP=2
 export MOTO_CHV_RUNTIME_DIR="$evidence/chv"
@@ -110,11 +109,13 @@ for vm in "${vms[@]}"; do
   installed=(javy/devtools/bin/javy javy/devtools/bin/wasmi wasmtime/devtools/bin/wasmtime-rt)
   {
     for suite in "${suites[@]}"; do printf 'put "%s" /user/tmp/%s\n' "$(binary "$suite")" "$suite"; done
-    # The tools run as role None, which cannot traverse /user/tmp.
-    for addon in javy wasmtime; do
-      printf 'mkdir /none/tmp/%s-tests\n' "$addon"
-      for file in "$test_inputs/$addon"/*; do
-        printf 'put "%s" /none/tmp/%s-tests/%s\n' "$file" "$addon" "${file##*/}"
+    # Keep fixtures and retained outputs on disk for the low-RAM qualification.
+    # Role None can traverse this directory; its own TMPDIR remains on memfs.
+    printf 'mkdir /none/wasm-tests\n'
+    for name in javy wasmtime; do
+      printf 'mkdir /none/wasm-tests/%s-tests\n' "$name"
+      for file in "$test_inputs/$name"/*; do
+        printf 'put "%s" /none/wasm-tests/%s-tests/%s\n' "$file" "$name" "${file##*/}"
       done
     done
     for tool in "${installed[@]}"; do

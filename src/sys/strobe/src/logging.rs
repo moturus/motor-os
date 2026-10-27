@@ -1,5 +1,5 @@
 use crate::io_thread;
-use moto_ipc::sync::*;
+use moto_sdk::ipc::sync::*;
 use moto_sys::{SysHandle, SysObj};
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
@@ -97,7 +97,7 @@ impl LogServer {
         registrations: &mut HashMap<SysHandle, Registration>,
         active_tags: &mut HashMap<String, SysHandle>,
     ) -> RpcOutcome {
-        use moto_log::implementation::*;
+        use moto_sdk::log::implementation::*;
 
         if registrations.contains_key(&conn.handle()) {
             return RpcOutcome::disconnect(moto_rt::E_INVALID_ARGUMENT);
@@ -108,7 +108,7 @@ impl LogServer {
             return RpcOutcome::disconnect(moto_rt::E_INVALID_ARGUMENT);
         };
         if req.header.ver != 0
-            || payload_size > moto_log::MAX_TAG_LEN
+            || payload_size > moto_sdk::log::MAX_TAG_LEN
             || payload_end > conn.channel_size()
         {
             return RpcOutcome::disconnect(moto_rt::E_INVALID_ARGUMENT);
@@ -166,7 +166,7 @@ impl LogServer {
         sender: &std::sync::mpsc::SyncSender<io_thread::Msg>,
         registrations: &HashMap<SysHandle, Registration>,
     ) -> RpcOutcome {
-        use moto_log::implementation::*;
+        use moto_sdk::log::implementation::*;
 
         let Some(registration) = registrations.get(&conn.handle()) else {
             return RpcOutcome::disconnect(moto_rt::E_INVALID_ARGUMENT);
@@ -206,7 +206,7 @@ impl LogServer {
         sender: &std::sync::mpsc::SyncSender<io_thread::Msg>,
         registrations: &HashMap<SysHandle, Registration>,
     ) -> RpcOutcome {
-        use moto_log::implementation::*;
+        use moto_sdk::log::implementation::*;
 
         let Some(registration) = registrations.get(&conn.handle()) else {
             return RpcOutcome::disconnect(moto_rt::E_INVALID_ARGUMENT);
@@ -226,10 +226,18 @@ impl LogServer {
             return RpcOutcome::disconnect(moto_rt::E_INVALID_ARGUMENT);
         }
 
+        let payload = &conn.data()[size_of::<RawLogRequest>()..payload_end];
+        let mut data = Vec::new();
+        if data.try_reserve_exact(payload.len()).is_err() {
+            // The forwarder counts the rejected batch and keeps this
+            // connection for later records; do not abort the log service.
+            return RpcOutcome::keep(moto_rt::E_OUT_OF_MEMORY);
+        }
+        data.extend_from_slice(payload);
         let record = RawLogRecord {
             handle: conn.handle(),
             tag_id: req.tag_id,
-            data: conn.data()[size_of::<RawLogRequest>()..payload_end].to_vec(),
+            data,
         };
         if sender.send(io_thread::Msg::RawRecord(record)).is_err() {
             return RpcOutcome::disconnect(moto_rt::E_INTERNAL_ERROR);
@@ -238,7 +246,7 @@ impl LogServer {
     }
 
     fn process_ipc(&mut self, waker: SysHandle) {
-        use moto_log::implementation::*;
+        use moto_sdk::log::implementation::*;
 
         let LogServer {
             sender,

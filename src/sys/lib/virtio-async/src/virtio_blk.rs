@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use core::sync::atomic::*;
 use moto_rt::spinlock::SpinLock;
-use moto_tooling::iobuf::IoBuf;
+use moto_sdk::iobuf::VirtioIoBuf;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::ErrorKind;
@@ -305,7 +305,7 @@ impl BlockDevice {
     }
 
     #[inline(never)]
-    pub async fn post_read<T: AsMut<IoBuf> + Unpin>(
+    pub async fn post_read<T: AsMut<VirtioIoBuf> + Unpin>(
         self: Rc<Self>,
         sector: u64,
         mut bytes: T,

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-moto-async = { path = "../../lib/moto-async" }
 moto-rt = { path = "../../lib/moto-rt" }
+moto-sdk = { path = "../../lib/moto-sdk" }
 futures = "0.3"
 real-virtio-async = { package = "virtio-async", path = "../../lib/virtio-async" }

@@ -4,15 +4,18 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use futures::FutureExt;
-use moto_ipc::io_channel;
 use moto_netstack::iface::SocketHandle;
 use moto_netstack::phy::ChecksumCapabilities;
 use moto_netstack::socket::icmp;
 use moto_netstack::wire::{Icmpv4Packet, Icmpv4Repr, Icmpv6Packet, Icmpv6Repr, IpAddress};
-use moto_sys_io::api_net;
+use moto_sdk::ipc::io_channel;
+use moto_sdk::sys_io::api_net;
 
 use super::NetRuntime;
 use crate::util::{map_err_into_native, map_native_error};
+
+#[cfg(debug_assertions)]
+pub(super) mod self_test;
 
 struct IcmpSocketGuard {
     runtime: NetRuntime,
@@ -27,6 +30,7 @@ impl Drop for IcmpSocketGuard {
         let device = &mut inner.devices[self.device_idx];
         device.sockets.remove(self.handle);
         device.free_icmp_identifier(self.identifier);
+        inner.devices.reap(self.device_idx);
     }
 }
 
@@ -148,7 +152,7 @@ pub(super) async fn echo(
         ));
     }
 
-    let identifier = runtime.inner.borrow_mut().devices[device_idx]
+    let (identifier, removed) = runtime.inner.borrow_mut().devices[device_idx]
         .get_icmp_identifier()
         .ok_or(ErrorKind::AddrInUse)?;
 
@@ -230,10 +234,13 @@ pub(super) async fn echo(
         Poll::Pending
     })
     .fuse();
-    let timeout = moto_async::sleep(Duration::from_millis(request.timeout_ms as u64)).fuse();
-    futures::pin_mut!(receive, timeout);
+    let timeout =
+        moto_sdk::async_runtime::sleep(Duration::from_millis(request.timeout_ms as u64)).fuse();
+    let removed = removed.fuse();
+    futures::pin_mut!(receive, timeout, removed);
 
     let reply = futures::select_biased! {
+        _ = removed => return Err(ErrorKind::NotConnected.into()),
         source = receive => Some((source, started.elapsed())),
         _ = timeout => None,
     };

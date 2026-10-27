@@ -1,11 +1,11 @@
 use super::credentials::{Credentials, MAX_ARTIFACT_SIZE, SSH_CONFIG, TLS_CERT, TLS_KEY};
 use super::invalid;
 use crate::chmod::{self, TemporaryImage};
-use async_fs::file_block_device::AsyncFileBlockDevice;
-use async_fs::{
+use camino::Utf8Path;
+use moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice;
+use moto_sdk::async_fs::{
     AccessPermissions, EntryId, EntryKind, FileSystem, Role, RolePermissions, BLOCK_SIZE,
 };
-use camino::Utf8Path;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::Path;

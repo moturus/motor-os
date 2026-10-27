@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Wake, Waker};
 use std::time::{Duration, Instant};
 
-use moto_io::net::vsock::{Shutdown, VsockAddr, VsockListener, VsockStream};
-use moto_ipc::io_channel::{CHANNEL_PAGE_COUNT, PAGE_SIZE};
-use moto_sys_io::api_net::IO_SUBCHANNELS;
+use moto_sdk::io::net::vsock::{Shutdown, VsockAddr, VsockListener, VsockStream};
+use moto_sdk::ipc::io_channel::{CHANNEL_PAGE_COUNT, PAGE_SIZE};
+use moto_sdk::sys_io::api_net::IO_SUBCHANNELS;
 
 use crate::net_harness::{bounded, host_channel};
 
@@ -327,11 +327,11 @@ async fn coexistence_ports(sync: &VsockStream) -> (u16, u16) {
 fn coexistence_io(
     path: std::path::PathBuf,
     ports: (u16, u16),
-    ready: moto_async::oneshot::Sender<()>,
+    ready: moto_sdk::async_runtime::oneshot::Sender<()>,
     start: std::sync::mpsc::Receiver<()>,
-    progress: moto_async::oneshot::Sender<()>,
+    progress: moto_sdk::async_runtime::oneshot::Sender<()>,
     resume: std::sync::mpsc::Receiver<()>,
-    done: moto_async::oneshot::Sender<()>,
+    done: moto_sdk::async_runtime::oneshot::Sender<()>,
 ) {
     use std::io::{Read, Seek, Write};
     use std::net::{TcpStream, UdpSocket};
@@ -403,7 +403,7 @@ async fn read_eof(stream: &VsockStream) {
     }
 }
 
-async fn connect(client: &moto_io::net::NetClient, peer: VsockAddr) -> Arc<VsockStream> {
+async fn connect(client: &moto_sdk::io::net::NetClient, peer: VsockAddr) -> Arc<VsockStream> {
     let stream = VsockStream::connect_reserved(client.try_reserve().unwrap(), peer)
         .await
         .expect("outgoing vsock connect failed");
@@ -419,7 +419,7 @@ async fn connect(client: &moto_io::net::NetClient, peer: VsockAddr) -> Arc<Vsock
 }
 
 async fn test_connect_errors(
-    client: &moto_io::net::NetClient,
+    client: &moto_sdk::io::net::NetClient,
     peer: VsockAddr,
     absent_peer: AbsentPeerBehavior,
 ) {
@@ -536,7 +536,7 @@ async fn run_global_stream_capacity(stream: &VsockStream) {
 }
 
 async fn run_native_accept(
-    client: &moto_io::net::NetClient,
+    client: &moto_sdk::io::net::NetClient,
     control: &VsockStream,
 ) -> Vec<Arc<CountWake>> {
     let listener = VsockListener::bind_reserved(client.try_reserve().unwrap(), NATIVE_ACCEPT_PORT)
@@ -582,7 +582,7 @@ async fn run_native_accept(
     expect_frame(control, NATIVE_ACCEPT_DROPPED).await;
     // A later RPC on this channel follows its queued teardown record. Host
     // EOF alone does not prove the native driver released that record yet.
-    moto_io::net::vsock::availability(&accept_client)
+    moto_sdk::io::net::vsock::availability(&accept_client)
         .await
         .unwrap();
     assert_eq!(accept_client.reservations(), 1);
@@ -605,7 +605,7 @@ async fn run_native_accept(
         Err(moto_rt::E_NOT_CONNECTED)
     );
     drop(closed);
-    moto_io::net::vsock::availability(&accept_client)
+    moto_sdk::io::net::vsock::availability(&accept_client)
         .await
         .unwrap();
     assert_eq!(accept_client.reservations(), 1);
@@ -646,7 +646,7 @@ async fn run_native_accept(
         Err(moto_rt::E_NOT_CONNECTED)
     );
     drop(simultaneous);
-    moto_io::net::vsock::availability(&accept_client)
+    moto_sdk::io::net::vsock::availability(&accept_client)
         .await
         .unwrap();
     write_frame(control, NATIVE_ACCEPT_SIMULTANEOUS_CLOSED).await;
@@ -661,7 +661,7 @@ async fn run_native_accept(
     assert_eq!(reuse, NATIVE_ACCEPT_REUSE_PAYLOAD);
     write_all(&reused, NATIVE_ACCEPT_REUSE_REPLY).await;
     drop(reused);
-    moto_io::net::vsock::availability(&accept_client)
+    moto_sdk::io::net::vsock::availability(&accept_client)
         .await
         .unwrap();
     write_frame(control, NATIVE_ACCEPT_REUSED).await;
@@ -725,7 +725,7 @@ async fn run_native_accept(
         let drain = match round % 3 {
             0 => 0,
             1 => 1,
-            _ => moto_ipc::io_channel::QUEUE_SIZE,
+            _ => moto_sdk::ipc::io_channel::QUEUE_SIZE,
         };
         for id in 1..=drain {
             let response = connection.recv().unwrap();
@@ -769,8 +769,8 @@ async fn run_native_accept(
 }
 
 async fn run_pending_shutdowns(control: &VsockStream) {
-    use moto_ipc::io_channel;
-    use moto_sys_io::{api_net, api_vsock};
+    use moto_sdk::ipc::io_channel;
+    use moto_sdk::sys_io::{api_net, api_vsock};
 
     const LIMIT: usize = 8;
     const FIRST_ID: u64 = 0x564f_a000;
@@ -896,7 +896,7 @@ async fn run_pending_shutdowns(control: &VsockStream) {
     println!("vsock pending shutdown dispatch: PASS");
 }
 
-async fn test_native_listener_bind_drop(client: &moto_io::net::NetClient) {
+async fn test_native_listener_bind_drop(client: &moto_sdk::io::net::NetClient) {
     const BIND_PORT: u32 = 80_001;
     const CANCEL_PORT: u32 = 80_002;
     const FAILED_PORT: u32 = 80_003;
@@ -966,7 +966,7 @@ async fn test_native_listener_bind_drop(client: &moto_io::net::NetClient) {
 }
 
 async fn run_action(
-    client: &moto_io::net::NetClient,
+    client: &moto_sdk::io::net::NetClient,
     peer: VsockAddr,
     stream: &VsockStream,
     sync: Option<&VsockStream>,
@@ -1115,13 +1115,13 @@ async fn run_action(
 
             // The in-flight query, not the idle client, owns the second
             // channel after its final connect reservation is released.
-            let (final_client, final_driver) = moto_io::net::connect()
+            let (final_client, final_driver) = moto_sdk::io::net::connect()
                 .await
                 .expect("final-slot channel connect failed");
             let final_connect =
                 VsockStream::connect_reserved(final_client.try_reserve().unwrap(), peer);
             let final_query_wake = Arc::new(CountWake(AtomicUsize::new(0)));
-            let mut final_query = Box::pin(moto_io::net::vsock::availability(&final_client));
+            let mut final_query = Box::pin(moto_sdk::io::net::vsock::availability(&final_client));
             {
                 let waker = Waker::from(final_query_wake.clone());
                 let mut context = Context::from_waker(&waker);
@@ -1133,7 +1133,7 @@ async fn run_action(
             let final_counter = poll_pending(final_connect);
             assert_eq!(final_client.reservations(), 0);
             let final_driver_thread = std::thread::spawn(move || {
-                moto_async::LocalRuntime::new().block_on(final_driver.run());
+                moto_sdk::async_runtime::LocalRuntime::new().block_on(final_driver.run());
             });
 
             let connect = VsockStream::connect_reserved(client.try_reserve().unwrap(), peer);
@@ -1154,12 +1154,12 @@ async fn run_action(
             drop(final_query);
             assert_eq!(final_client.reservations(), 0);
             assert_eq!(
-                moto_io::net::vsock::availability(&final_client).await,
+                moto_sdk::io::net::vsock::availability(&final_client).await,
                 Err(moto_rt::Error::NotConnected)
             );
             assert_eq!(
                 final_client.try_reserve().err(),
-                Some(moto_io::net::ReserveError::ShuttingDown)
+                Some(moto_sdk::io::net::ReserveError::ShuttingDown)
             );
             expect_frame(sync, TRANSFER_DONE).await;
             write_frame(sync, CASE_DONE).await;
@@ -1185,9 +1185,9 @@ async fn run_action(
             let sync = sync.unwrap();
             let path = crate::temp_path("systest-vsock-coexistence");
             let (tcp_port, udp_port) = coexistence_ports(sync).await;
-            let (ready_tx, ready_rx) = moto_async::oneshot();
-            let (progress_tx, progress_rx) = moto_async::oneshot();
-            let (done_tx, done_rx) = moto_async::oneshot();
+            let (ready_tx, ready_rx) = moto_sdk::async_runtime::oneshot();
+            let (progress_tx, progress_rx) = moto_sdk::async_runtime::oneshot();
+            let (done_tx, done_rx) = moto_sdk::async_runtime::oneshot();
             let (start_tx, start_rx) = std::sync::mpsc::channel();
             let (resume_tx, resume_rx) = std::sync::mpsc::channel();
             let io_thread = std::thread::spawn(move || {
@@ -1255,9 +1255,12 @@ pub fn run(args: &[String]) {
     let test_listener_bind = matches!(&action, Action::Echo(0));
     let verdict = args[3..].join(" ");
 
-    let completed = moto_async::LocalRuntime::new().block_on(async {
+    let completed = moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = host_channel().await;
-        assert_eq!(moto_io::net::vsock::availability(&client).await, Ok(()));
+        assert_eq!(
+            moto_sdk::io::net::vsock::availability(&client).await,
+            Ok(())
+        );
         let stream = connect(&client, peer).await;
         let sync = if action.needs_sync() {
             // The selected UDS backends do not expose directional EOF. This

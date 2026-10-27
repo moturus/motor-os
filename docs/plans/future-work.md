@@ -1,5 +1,11 @@
 # Future work -- recorded, deliberately not scheduled
 
+## Shared zero page
+
+Motor OS kernel should have a single shared copy-on-write zero page,
+this will help wasm memory64 grow beyond 4G (and will overall be a
+memory efficiency win)
+
 ## Frusa work
 
 (a) Investigate moving Rust heap from Frusa4k to Frusa16k or Frusa32k
@@ -25,14 +31,14 @@ excluded from `wasmtime-smoke`. rush pipelines do not show it: rush runs
 stages one at a time through temp files, so `writer | head` never starts
 `head` while the writer runs.
 
-## Motor FS behavior that WASI guests see (2026-10-09)
+## Motor OS filesystem behavior that WASI guests see (2026-10-09)
 
 `moto_rt::Error` has no "directory not empty": sys-io's `map_err_into_native`
 sends `DirectoryNotEmpty` as `FileTooLarge`, so native `std::fs::remove_dir`
 on a non-empty directory reports `FileTooLarge`. The Wasmtime adapter maps it
 back for directory removal and rename. A lookup under a deleted directory's
 handle fails with `InvalidData` rather than `NotFound`, which WASI reports as
-`io`. Motor checks write permission on each write, not at open, so an open
+`io`. Motor OS checks write permission on each write, not at open, so an open
 for writing succeeds where POSIX would fail with `EACCES`, and the guest's
 libc reports the failed write as `EIO`. A proper fix for the first needs a
 `moto_rt::Error` variant and std's mapping.
@@ -68,7 +74,7 @@ listening pool can still complete a handshake. On the ESTABLISHED edge,
 `src/sys/sys-io/netstack/src/storage/ring_buffer.rs`, added in `2d9f8d26`).
 `growth_deferred()` looks only at the TCP state, never at memory pressure,
 although `pressure.rs` states that sys-io must stop growing before the kernel
-refuses it. The allocation is refused, `rust_oom` aborts sys-io, and Motor's
+refuses it. The allocation is refused, `rust_oom` aborts sys-io, and Motor OS's
 std implements abort as `exit(-1)`, hence the status. The frames:
 `process_ethernet` → `process_ipv4` → `process_tcp` → `Socket::set_state` →
 `RingBuffer::grow_to` → `handle_alloc_error` → `rust_oom`. sys-io's panic hook
@@ -178,7 +184,7 @@ any process, even one with no capabilities, can kill every process that lacks
 
 This predates the `CAP_NET`/`CAP_FS_WRITE` work. It was found by a review of
 the new-caps IPC fixes, not by a failure. Current callers are Rush's `kill`
-builtin, gears on Motor, and systest (`spawn_wait_kill`, `ipc_service`).
+builtin, gears on Motor OS, and systest (`spawn_wait_kill`, `ipc_service`).
 
 Possible rules, to choose from when this is picked up:
 
@@ -195,7 +201,7 @@ Check what Rush's `kill` and gears need before choosing.
 process instead. rt.vdso's `rt_net::bind` (`src/sys/lib/rt.vdso/src/net/rt_net.rs`)
 makes several infallible allocations before sys-io is asked: the event
 source, the listener observer, and the RPC state in `NetChannel::rpc_bind`
-(`src/sys/lib/moto-io/src/net/channel.rs`: a `oneshot` `Arc` and an
+(`src/sys/lib/moto-sdk/src/io/net/channel.rs`: a `oneshot` `Arc` and an
 `rpc_map` `BTreeMap` insert). If the process heap has no slack left, one of
 them fails and rt.vdso aborts.
 
@@ -212,7 +218,7 @@ Log: `/tmp/claude-1000/-home-posk-motor-dev-motor-os/44e5b204-1009-467e-bf8e-bab
 
 A fix makes the bind path allocate fallibly, or reserve what it needs before
 admission, as `57796b3d` did for network teardown. It touches rt.vdso and
-moto-io, so it needs its own reviewed patch. Until then the test can flake.
+moto-sdk, so it needs its own reviewed patch. Until then the test can flake.
 
 ## IPC listener is published before its missed-wake snapshot (2026-09-26)
 
@@ -314,7 +320,7 @@ entry first, the listing reports one error and ends, so later entries are
 never returned. POSIX lets a listing skip or repeat only the entries that
 change during it.
 
-This keeps Lorry from pipelining builds on Motor. A dependent's rustc lists
+This keeps Lorry from pipelining builds on Motor OS. A dependent's rustc lists
 each dependency directory while a library's rustc still removes temporary
 files there, so the listing could miss a library and the build would fail
 with "can't find crate". Lorry pipelines on Linux only, until `readdir` keeps
@@ -322,7 +328,7 @@ going past a removed entry.
 
 ## A process can take an rmux server's name first (2026-09-27)
 
-rmux on Motor finds its server by a service name made of the server's mask
+rmux on Motor OS finds its server by a service name made of the server's mask
 (`src/bin/rmux/details.md` §4.2.1). Any process may register that name before
 the real server starts. The client checks the holder's mask before sending
 anything, so the impostor learns nothing. But the real server cannot start
@@ -340,7 +346,7 @@ must update those assertions.
 
 ## Any process can use up a sync IPC service's listeners (2026-09-26)
 
-A process can connect to a `moto-ipc::sync` service and never send a request.
+A process can connect to a `moto_sdk::ipc::sync` service and never send a request.
 The kernel has then handed out a listener that the server does not know is
 taken, because a server learns of a connection only from its first request.
 Enough such connections leave no free listener, and other clients get
@@ -622,7 +628,7 @@ The former sys-tty/kernel-log interleaving item is complete; see
    trigger with Ctrl+C on a session.
 
 8. **sys-io's statistics provider is absent for a moment after boot.**
-   `moto_stats::Collector::providers()` does not list sys-io (provider 2)
+   `moto_sdk::stats::Collector::providers()` does not list sys-io (provider 2)
    for a short window after boot: `systest fs-bench` started ~2 s after ssh
    came up panicked on the lookup, and two places in the suite retry around
    it. Fix: register with the stats registry before sys-io accepts its
@@ -771,7 +777,7 @@ the ruling; nothing here should be picked up without a fresh call.
   (the structural fix). Beyond the cap, the current shape is O(n) per park: every SysCpu::wait
   re-validates and re-registers all ~1024 objects (the loop in sys_cpu.rs:78-121), on every one of sys-io's ~130k waits in this run. An
   epoll-like kernel object — register a handle once into a wait set, block on the set's single handle — removes both the cliff and the
-  per-wait linear cost. This fits the netstack-scalability trajectory, but it's a significant kernel + moto-async project.
+  per-wait linear cost. This fits the netstack-scalability trajectory, but it's a significant kernel + async-runtime project.
 
 - **virtio queue: allocation-waiter hygiene and wakeups** (recorded 2026-09-08).
   Releasing a descriptor chain wakes at most two queued allocation waiters,
@@ -811,3 +817,40 @@ Do not raise them again.
 - vsock credit on undecodable headers (finding 14). No credit stall was shown.
   Credit advertisements are cumulative, and malformed headers must not become
   trusted credit input.
+
+## P3: TIME-WAIT sockets still hold 10-25 KiB each (2026-10-18)
+
+A connection that sys-io closes first, as an HTTP server usually does, stays
+in TIME-WAIT for `CLOSE_DELAY`, 10 s
+(`src/sys/sys-io/netstack/src/socket/tcp.rs:388`). Until 2026-10-18 it held
+about 400 KiB of sys-io memory for that time. Its rings were released only if
+the application had closed before FIN-WAIT-2 and the ACK of the FIN carried no
+ACK of data. Its socket also kept the client channel, whose 512 KiB of shared
+pages stayed mapped after the client let go. Both are released now. On a
+224 MiB VM, 200 loopback HTTP/1.1 requests with `Connection: close` to
+`wasmtime-rt serve` leave sys-io about 5 MiB above its baseline for the 10 s,
+against 80 MiB before. With 800 sockets in TIME-WAIT, sys-io is about 10 MiB
+above its baseline.
+
+What stays is the netstack socket, the `MotoSocket` and its linger task. Only
+the tuple and its timer need to stay (`cdd7c886`). A compact TIME-WAIT record
+would bring a server taking 20 new connections a second from 2-5 MiB of
+retained sys-io memory to well under 1 MiB. Measurements and the client used
+are in `build/claude-targets/m3/` (`xtw.sh`, `x3b.sh`, `xtw-*.log`,
+`x3b-224.log`).
+
+## P2: Shrinking descriptor pools (2026-10-17)
+
+Each address space keeps its page-descriptor slabs until teardown. Unmapping
+returns descriptors to its free list, but even a completely unused slab
+stays allocated. Sparse lazy reservations avoid descriptors for untouched
+pages; a long-running process that temporarily touches many pages still
+retains the descriptor pool from that peak.
+
+Return completely unused descriptor slabs to the physical allocator while
+preserving live descriptors and safe reuse under the existing allocator
+lock. Keep reclamation simple and avoid adding boot-time work. Validate
+repeated touch/unmap cycles and concurrent faults inside Motor OS, including
+slab boundaries, and check that reclamation does not regress allocation
+performance. This reclaims kernel bookkeeping memory, independently of
+reserved-versus-resident process statistics.

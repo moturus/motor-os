@@ -6,8 +6,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-async-fs = { path = "../sys/lib/async-fs" }
-fittings = { path = "../sys/lib/fittings" }
+moto-sdk = { path = "../sys/lib/moto-sdk" }
 motor-fs = { path = "../sys/lib/motor-fs", features = ["image-admin"] }
 
 async-trait = "0.1.88"

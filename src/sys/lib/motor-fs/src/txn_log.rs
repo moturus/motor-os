@@ -25,11 +25,11 @@ use crate::MAX_BLOCKS_IN_TXN_LOG;
 use crate::MAX_FLUSH_DELAY_MS;
 use crate::Superblock;
 use crate::TxnLogData;
-use async_fs::AsyncBlockDevice;
-use async_fs::MAX_IO_RUN;
-use async_fs::block_cache::BlockCache;
-use async_fs::block_cache::CachedBlock;
-use async_fs::block_cache::CheckpointedBlock;
+use moto_sdk::async_fs::AsyncBlockDevice;
+use moto_sdk::async_fs::MAX_IO_RUN;
+use moto_sdk::async_fs::block_cache::BlockCache;
+use moto_sdk::async_fs::block_cache::CachedBlock;
+use moto_sdk::async_fs::block_cache::CheckpointedBlock;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::ErrorKind;
@@ -37,7 +37,7 @@ use std::io::Result;
 use std::rc::Rc;
 
 #[cfg(target_os = "motor")]
-use moto_async::Instant;
+use moto_sdk::async_runtime::Instant;
 #[cfg(not(target_os = "motor"))]
 use tokio::time::Instant;
 
@@ -107,7 +107,7 @@ enum CommitterMessage {
     Timeout(u64),
 
     #[cfg(target_os = "motor")]
-    Flush(moto_async::oneshot::Sender<Result<()>>),
+    Flush(moto_sdk::async_runtime::oneshot::Sender<Result<()>>),
 
     #[cfg(not(target_os = "motor"))]
     Flush(tokio::sync::oneshot::Sender<Result<()>>),
@@ -117,7 +117,7 @@ enum CommitterMessage {
 }
 
 #[cfg(target_os = "motor")]
-type TxnBatchSender = moto_async::channel::Sender<CommitterMessage>;
+type TxnBatchSender = moto_sdk::async_runtime::channel::Sender<CommitterMessage>;
 
 #[cfg(not(target_os = "motor"))]
 type TxnBatchSender = tokio::sync::mpsc::Sender<CommitterMessage>;
@@ -148,7 +148,7 @@ pub(crate) struct TxnLogger {
     txn_batch_holder: TxnBatchHolder,
 
     txn_batch_sink: TxnBatchSender,
-    block_cache_stub: async_fs::block_cache::AsyncStub,
+    block_cache_stub: moto_sdk::async_fs::block_cache::AsyncStub,
     replayed_log_on_open: bool,
 }
 
@@ -165,7 +165,7 @@ impl TxnLogger {
         self.replayed_log_on_open
     }
 
-    fn txn_log_start(block_cache_stub: &async_fs::block_cache::AsyncStub) -> u64 {
+    fn txn_log_start(block_cache_stub: &moto_sdk::async_fs::block_cache::AsyncStub) -> u64 {
         block_cache_stub.num_blocks() - MAX_BLOCKS_IN_TXN_LOG as u64
     }
 
@@ -175,7 +175,7 @@ impl TxnLogger {
 
         let timeout_task = async move {
             #[cfg(target_os = "motor")]
-            moto_async::sleep_until(timeout).await;
+            moto_sdk::async_runtime::sleep_until(timeout).await;
 
             #[cfg(not(target_os = "motor"))]
             tokio::time::sleep_until(timeout).await;
@@ -184,20 +184,20 @@ impl TxnLogger {
         };
 
         #[cfg(target_os = "motor")]
-        let _handle = moto_async::LocalRuntime::spawn(timeout_task);
+        let _handle = moto_sdk::async_runtime::LocalRuntime::spawn(timeout_task);
 
         #[cfg(not(target_os = "motor"))]
         let _handle = tokio::task::spawn_local(timeout_task);
     }
 
     fn spawn_txn_committer_task(
-        block_cache_stub: async_fs::block_cache::AsyncStub,
+        block_cache_stub: moto_sdk::async_fs::block_cache::AsyncStub,
         txn_batch_holder: TxnBatchHolder,
     ) -> TxnBatchSender {
         #[warn(clippy::let_and_return)]
         let sender = {
             #[cfg(target_os = "motor")]
-            let (sender, mut receiver) = moto_async::channel(2);
+            let (sender, mut receiver) = moto_sdk::async_runtime::channel(2);
 
             #[cfg(not(target_os = "motor"))]
             let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
@@ -273,7 +273,7 @@ impl TxnLogger {
             };
 
             #[cfg(target_os = "motor")]
-            let _handle = moto_async::LocalRuntime::spawn(committer_task);
+            let _handle = moto_sdk::async_runtime::LocalRuntime::spawn(committer_task);
 
             #[cfg(not(target_os = "motor"))]
             let _handle = tokio::task::spawn_local(committer_task);
@@ -454,7 +454,7 @@ impl TxnLogger {
 
     async fn commit_txn_batch(
         mut txn_batch: TxnBatch,
-        block_cache_stub: async_fs::block_cache::AsyncStub,
+        block_cache_stub: moto_sdk::async_fs::block_cache::AsyncStub,
         #[cfg(test)] error_pct: u8,
     ) -> Result<()> {
         use bytemuck::Zeroable;
@@ -564,7 +564,7 @@ impl TxnLogger {
 
     pub(crate) async fn flush(&mut self) -> Result<()> {
         #[cfg(target_os = "motor")]
-        let (sender, receiver) = moto_async::oneshot();
+        let (sender, receiver) = moto_sdk::async_runtime::oneshot();
 
         #[cfg(not(target_os = "motor"))]
         let (sender, receiver) = tokio::sync::oneshot::channel();

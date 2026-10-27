@@ -5,13 +5,13 @@
 //! only ever read.
 
 use crate::chmod::{self, TemporaryImage};
-use async_fs::block_cache::CheckpointedBlock;
-use async_fs::file_block_device::AsyncFileBlockDevice;
-use async_fs::{AccessPermissions, AsyncBlockDevice, EntryId, EntryKind, FileSystem};
-use async_fs::{Metadata, Role, RolePermissions, BLOCK_SIZE};
 use async_trait::async_trait;
 use camino::Utf8Path;
-use fittings::iobuf::IoBuf;
+use moto_sdk::async_fs::block_cache::CheckpointedBlock;
+use moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice;
+use moto_sdk::async_fs::{AccessPermissions, AsyncBlockDevice, EntryId, EntryKind, FileSystem};
+use moto_sdk::async_fs::{Metadata, Role, RolePermissions, BLOCK_SIZE};
+use moto_sdk::iobuf::IoBuf;
 use motor_fs::MotorFs;
 use std::cell::RefCell;
 use std::collections::HashMap;

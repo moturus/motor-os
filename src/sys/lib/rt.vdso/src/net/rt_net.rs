@@ -1,7 +1,7 @@
 //! The vdso net veneer: the C-ABI shims std/mio call through (bind, listen,
-//! accept, connect, the socket options, DNS), plus the netdev-gated internal
-//! helper. Everything here is caller-thread glue over the moto-io net stack
-//! (`moto_io::net::{tcp, udp, channel}`); it installs the concrete
+//! accept, connect, the socket options, DNS).
+//! Everything here is caller-thread glue over the moto-io net stack
+//! (`moto_sdk::io::net::{tcp, udp, channel}`); it installs the concrete
 //! `EventSourceManaged` listener and downcasts posix files from the FD table
 //! back to the `Rt*` wrapper that owns each descriptor.
 
@@ -19,7 +19,7 @@ use moto_sys::ErrorCode;
 use crate::net::rt_tcp::RtTcpListener;
 use crate::net::rt_tcp::RtTcpStream;
 use crate::net::rt_udp::RtUdpSocket;
-use moto_io::net::tcp::TcpStream;
+use moto_sdk::io::net::tcp::TcpStream;
 
 /// Build the poll-registry event source a socket emits its readiness through.
 /// The vdso owns this choice (the concrete `EventSourceManaged` is a vdso
@@ -43,8 +43,9 @@ fn new_event_source() -> Arc<EventSourceManaged> {
 /// pool -- it created channels under its global lock -- but the connect
 /// retries now sleep on the channel's
 /// own runtime thread instead of the caller's.
-fn reserve_slot() -> Result<moto_io::net::Reservation, ErrorCode> {
-    moto_async::block_on_sync(crate::net::pool::NET_POOL.reserve()).map_err(ErrorCode::from)
+fn reserve_slot() -> Result<moto_sdk::io::net::Reservation, ErrorCode> {
+    moto_sdk::async_runtime::block_on_sync(crate::net::pool::NET_POOL.reserve())
+        .map_err(ErrorCode::from)
 }
 
 pub unsafe extern "C" fn dns_lookup(
@@ -170,8 +171,12 @@ pub extern "C" fn bind(proto: u8, addr: *const netc::sockaddr) -> RtFd {
             Err(err) => return -(err as RtFd),
         };
         let events = new_event_source();
-        let udp_socket = match moto_async::block_on_sync(
-            moto_io::net::udp::UdpSocket::bind_reserved(reservation, &addr, Some(events.clone())),
+        let udp_socket = match moto_sdk::async_runtime::block_on_sync(
+            moto_sdk::io::net::udp::UdpSocket::bind_reserved(
+                reservation,
+                &addr,
+                Some(events.clone()),
+            ),
         ) {
             Ok(x) => x,
             Err(err) => return -(err as RtFd),
@@ -184,15 +189,16 @@ pub extern "C" fn bind(proto: u8, addr: *const netc::sockaddr) -> RtFd {
             Err(err) => return -(err as RtFd),
         };
         let events = new_event_source();
-        let udp_socket =
-            match moto_async::block_on_sync(moto_io::net::udp::UdpSocket::bind_for_remote_reserved(
+        let udp_socket = match moto_sdk::async_runtime::block_on_sync(
+            moto_sdk::io::net::udp::UdpSocket::bind_for_remote_reserved(
                 reservation,
                 &addr,
                 Some(events.clone()),
-            )) {
-                Ok(socket) => socket,
-                Err(err) => return -(err as RtFd),
-            };
+            ),
+        ) {
+            Ok(socket) => socket,
+            Err(err) => return -(err as RtFd),
+        };
         posix::push_file(RtUdpSocket::new(udp_socket, events))
     } else if proto == moto_rt::net::PROTO_TCP {
         let addr = unsafe { (*addr).into() };
@@ -202,16 +208,17 @@ pub extern "C" fn bind(proto: u8, addr: *const netc::sockaddr) -> RtFd {
         };
         let events = new_event_source();
         let observer = crate::net::rt_tcp::ListenerEvents::new(events.clone());
-        let listener =
-            match moto_async::block_on_sync(moto_io::net::tcp::TcpListener::bind_reserved(
+        let listener = match moto_sdk::async_runtime::block_on_sync(
+            moto_sdk::io::net::tcp::TcpListener::bind_reserved(
                 reservation,
                 &addr,
                 Some(observer.clone()),
                 None,
-            )) {
-                Ok(x) => x,
-                Err(err) => return -(err as RtFd),
-            };
+            ),
+        ) {
+            Ok(x) => x,
+            Err(err) => return -(err as RtFd),
+        };
         // The pump needs the bound listener; the observer needed to exist
         // first. No completion can beat `set_pump`: completions follow
         // donations, and donations follow the pump.
@@ -268,7 +275,7 @@ pub extern "C" fn accept(rt_fd: RtFd, peer_addr: *mut netc::sockaddr) -> RtFd {
             Ok(reservation) => listener.inner().post_accept(reservation),
             Err(err) => return -(err as RtFd),
         }
-        moto_async::block_on_sync(listener.inner().accept_observed(&new_event_source))
+        moto_sdk::async_runtime::block_on_sync(listener.inner().accept_observed(&new_event_source))
     };
     // A returned accept -- either variant, either outcome -- may have
     // consumed a queued connection or a donation; let the pump recompute.
@@ -306,7 +313,7 @@ pub extern "C" fn tcp_connect(
     let connected = if nonblocking {
         TcpStream::connect_nonblocking_reserved(reservation, &addr, timeout, Some(events.clone()))
     } else {
-        moto_async::block_on_sync(TcpStream::connect_reserved(
+        moto_sdk::async_runtime::block_on_sync(TcpStream::connect_reserved(
             reservation,
             &addr,
             timeout,
@@ -557,51 +564,6 @@ pub extern "C" fn udp_multicast_op_v6(
     moto_rt::E_NOT_IMPLEMENTED
 }
 
-#[allow(unused)]
-pub fn vdso_internal_helper(a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> u64 {
-    match a1 {
-        #[cfg(feature = "netdev")]
-        0 => {
-            // Give stage-E teardown a moment to settle before the leak check;
-            // the wait is a veneer (caller-thread) concern, kept out of the
-            // moving channel layer.
-            crate::rt_thread::sleep(
-                (moto_rt::time::Instant::now() + core::time::Duration::from_millis(500)).as_u64(),
-            );
-            moto_io::net::channel::assert_runtime_empty();
-            crate::net::pool::NET_POOL.assert_empty();
-        }
-        #[cfg(feature = "netdev")]
-        1 => return crate::net::pool::NET_POOL.client_count() as u64,
-        #[cfg(feature = "netdev")]
-        2 => moto_io::net::channel::poison_connect_for_test(a2 != 0),
-        #[cfg(feature = "netdev")]
-        3 => {
-            let Some(posix_file) = posix::get_file(a2 as RtFd) else {
-                panic!("invalid TCP fd {a2}");
-            };
-            let Some(stream) = (posix_file.as_ref() as &dyn Any).downcast_ref::<RtTcpStream>()
-            else {
-                panic!("fd {a2} is not a TCP stream");
-            };
-            stream.arm_writable_without_pages_for_test();
-        }
-        #[cfg(feature = "netdev")]
-        4 => moto_io::net::channel::fail_construction_for_test(a2 != 0),
-        #[cfg(feature = "netdev")]
-        5 => crate::net::pool::fail_runtime_construction_for_test(a2 != 0),
-        #[cfg(feature = "netdev")]
-        6 => {
-            // Free-list slots still count as in use until reclamation drains
-            // them. This diagnostic runs only after channel threads exit.
-            crate::rt_alloc::FRUSA.reclaim();
-            // Runtime bookkeeping lives in slabs. Exclude allocator metadata,
-            // unused slab capacity, and kernel-managed stacks from leak checks.
-            let stats = crate::rt_alloc::FRUSA.stats();
-            return (stats.in_use - stats.in_use_metadata) as u64;
-        }
-        _ => panic!("Unrecognized option {a1}"),
-    }
-
-    0
+pub fn vdso_internal_helper(a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64) -> u64 {
+    panic!("Unrecognized option {a1}")
 }

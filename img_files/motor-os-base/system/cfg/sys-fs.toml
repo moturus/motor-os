@@ -1,0 +1,6 @@
+# Boot mounts, applied in order. /none/tmp is empty after every reboot.
+[[mount]]
+path = "/none/tmp"
+type = "memfs"
+# max_size = "64M"   # absent: RAM-derived cap, with a separate memory reserve
+# mode = "rwxrwxrwx" # absent: inherit the shadowed directory's permissions

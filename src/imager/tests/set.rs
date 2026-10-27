@@ -1,6 +1,6 @@
 mod set_support;
 
-use async_fs::{AccessPermissions, FileSystem, Role, RolePermissions};
+use moto_sdk::async_fs::{AccessPermissions, FileSystem, Role, RolePermissions};
 use set_support::*;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -244,7 +244,7 @@ fn invalid_destinations_and_secret_permissions_are_rejected() {
                     fs.create_entry(
                         Role::System,
                         parent,
-                        async_fs::EntryKind::Directory,
+                        moto_sdk::async_fs::EntryKind::Directory,
                         "sshd.toml",
                         secret_permissions(),
                     )

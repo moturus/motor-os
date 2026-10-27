@@ -40,13 +40,13 @@ Gears executable for tools and hooks. The shipped hook subscribes to
 `entry`, `before_stop`, `turn_end`, `answer` and `command`, and registers
 the `/remember` and `/remember-host` commands.
 
-Run `src/tests/test-gears-batteries.sh` from the Motor OS repository root for
+Run `src/bin/gears/tests/test-gears-batteries.sh` from the Motor OS repository root for
 the hermetic workflow gate; `test-gears-http.sh` runs the package's tests. It
-builds Linux `rg` offline from the sibling `../ripgrep` checkout into
+builds Linux `rg` offline from `external-sources/ripgrep` into
 `build/gears-batteries-host-rg`, then supplies it to the tests and workflow
 through their PATH. A system-installed `rg` is not required for this gate.
-`--prepare` builds that dependency without running tests; the full-test
-preparation phase invokes it before timing the suite. Direct `cargo test`
+`--prepare` builds that dependency without running tests; the Gears HTTP gate
+invokes it before running the package's tests. Direct `cargo test`
 and ordinary Linux use still need `rg` on PATH.
 
 The release developer-image gate exercises the installed binary, and Lorry

@@ -5,11 +5,11 @@ use alloc::sync::Arc;
 use alloc::{boxed::Box, vec::Vec};
 use core::any::Any;
 use core::sync::atomic::*;
-use moto_ipc::stdio_pipe::StdioPipe;
 use moto_rt::poll::Interests;
 use moto_rt::poll::Token;
 use moto_rt::spinlock::SpinLock;
 use moto_rt::{E_BAD_HANDLE, E_INVALID_ARGUMENT, ErrorCode, RtFd};
+use moto_sdk::ipc::stdio_pipe::StdioPipe;
 use moto_sys::SysHandle;
 
 pub fn new_child_fd(handle: SysHandle) -> RtFd {

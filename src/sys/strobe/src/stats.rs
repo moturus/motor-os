@@ -1,6 +1,6 @@
 //! The Motor OS stats registry daemon.
 //!
-//! A standalone service hosting the well-known [`moto_stats::REGISTRY_URL`]
+//! A standalone service hosting the well-known [`moto_sdk::stats::REGISTRY_URL`]
 //! endpoint. Userspace stats providers register themselves here on startup
 //! (`CMD_REGISTER`); a collector lists the registry (`CMD_LIST`) to discover
 //! which providers exist, then talks to each provider directly. This is the
@@ -10,8 +10,8 @@
 //! The registry is the single piece of well-known wiring; everything else
 //! (provider set, metric names, units) is discovered at runtime.
 
-use moto_ipc::sync::*;
-use moto_stats::{PagedRequest, ProviderRecord, RegisterRequest, RegisterResponse};
+use moto_sdk::ipc::sync::*;
+use moto_sdk::stats::{PagedRequest, ProviderRecord, RegisterRequest, RegisterResponse};
 use moto_sys::{SysHandle, SysObj};
 
 pub struct Registry {
@@ -22,7 +22,7 @@ pub struct Registry {
 
 impl Registry {
     pub fn new() -> Self {
-        let server = LocalServer::new(moto_stats::REGISTRY_URL, ChannelSize::Small, 16, 2)
+        let server = LocalServer::new(moto_sdk::stats::REGISTRY_URL, ChannelSize::Small, 16, 2)
             .expect("sys-stats-reg: failed to create registry endpoint");
         Registry {
             server,
@@ -43,7 +43,7 @@ impl Registry {
         let cmd = unsafe { conn.raw_channel().get::<RequestHeader>().cmd };
 
         match cmd {
-            moto_stats::CMD_REGISTER => {
+            moto_sdk::stats::CMD_REGISTER => {
                 // Copy the requested record out before touching the response,
                 // then stamp the *verified* PID of the connecting process (the
                 // peer of this connection) over whatever id the client claimed.
@@ -63,9 +63,9 @@ impl Registry {
 
                 log::debug!(
                     "sys-stats-reg: registered provider '{}' (id {}) at '{}'",
-                    moto_stats::decode_fixed(&record.name),
+                    moto_sdk::stats::decode_fixed(&record.name),
                     record.provider_id,
-                    moto_stats::decode_fixed(&record.url),
+                    moto_sdk::stats::decode_fixed(&record.url),
                 );
 
                 unsafe {
@@ -75,7 +75,7 @@ impl Registry {
                         .result = moto_rt::E_OK;
                 }
             }
-            moto_stats::CMD_UNREGISTER => {
+            moto_sdk::stats::CMD_UNREGISTER => {
                 // Drop the calling provider's record, identified by its verified
                 // peer PID (a provider can only unregister itself). Idempotent:
                 // dropping a record that isn't there still succeeds.
@@ -94,9 +94,9 @@ impl Registry {
                     conn.raw_channel().get_mut::<ResponseHeader>().result = result;
                 }
             }
-            moto_stats::CMD_LIST => {
+            moto_sdk::stats::CMD_LIST => {
                 let start_index = unsafe { conn.raw_channel().get::<PagedRequest>().start_index };
-                moto_stats::respond_pods(conn.data_mut(), providers, start_index);
+                moto_sdk::stats::respond_pods(conn.data_mut(), providers, start_index);
             }
             _ => unsafe {
                 conn.raw_channel().get_mut::<ResponseHeader>().result = moto_rt::E_INVALID_ARGUMENT;
@@ -109,7 +109,7 @@ impl Registry {
     pub fn run(&mut self) -> ! {
         loop {
             std::thread::sleep(std::time::Duration::from_millis(20));
-            if moto_log::init("strobe-stats").is_ok() {
+            if moto_sdk::log::init("strobe-stats").is_ok() {
                 log::set_max_level(log::LevelFilter::Info);
                 break;
             }

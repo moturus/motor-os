@@ -5,9 +5,9 @@
 //! syscall buffers in untouched pages work, and unusual or malformed images
 //! fall back or are refused.
 
+use moto_sdk::sys_io::api_fs::SpawnRequest;
 use moto_sys::stats::ProcessInfoV1;
 use moto_sys::{SysCpu, SysHandle, SysObj, SysRay};
-use moto_sys_io::api_fs::SpawnRequest;
 use std::io::{BufRead, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -72,6 +72,10 @@ const PROBE: &[u8; PROBE_PAGES * 4096] = &{
     bytes[40960] = b'#';
     bytes
 };
+
+// Read-only bytes a writer toggles on disk while children map the image;
+// a child compares its mapped copy with the file. The last byte toggles.
+static MARKER: [u8; 32] = *b"cold-spawn-marker-7f3a9c1e-ab/A\n";
 
 // Read-only bytes nothing checks: where a test points a relocation.
 static RELOC_TARGET: [u8; 16] = [0; 16];
@@ -194,6 +198,20 @@ pub fn run_child(args: &[String]) -> ! {
             let mut line = String::new();
             while std::io::stdin().lock().read_line(&mut line).unwrap() > 0 {}
         }
+        Some("marker-check") => {
+            // The file must not change while this image maps it: the marker
+            // on disk matches the mapped one for as long as this runs.
+            let offset: u64 = args[3].parse().unwrap();
+            let mapped = unsafe { core::ptr::addr_of!(MARKER).read_volatile() };
+            let mut file = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
+            let mut on_disk = [0_u8; 32];
+            for _ in 0..200 {
+                file.seek(SeekFrom::Start(offset)).unwrap();
+                std::io::Read::read_exact(&mut file, &mut on_disk).unwrap();
+                assert_eq!(on_disk, mapped, "the file changed under a mapped image");
+            }
+            println!("marker-ok");
+        }
         Some("exit-while-faulting") => {
             // One thread faults through relocated pages while the main
             // thread exits; an in-flight relocation read may outlive it.
@@ -278,14 +296,14 @@ fn copy(dir: &Path, name: &str, perm: u64, patch: impl FnOnce(&mut Vec<u8>)) -> 
 /// requester is gone right after the response, so the connection must
 /// outlive every handle the tests hold, as rt.vdso's outlives its process.
 struct Requester {
-    runtime: moto_async::LocalRuntime,
-    client: Rc<moto_io::fs::FsClient>,
+    runtime: moto_sdk::async_runtime::LocalRuntime,
+    client: Rc<moto_sdk::io::fs::FsClient>,
 }
 
 impl Requester {
     fn new() -> Self {
-        let mut runtime = moto_async::LocalRuntime::new();
-        let client = runtime.block_on(async { moto_io::fs::FsClient::connect().unwrap() });
+        let mut runtime = moto_sdk::async_runtime::LocalRuntime::new();
+        let client = runtime.block_on(async { moto_sdk::io::fs::FsClient::connect().unwrap() });
         Self { runtime, client }
     }
 
@@ -404,6 +422,78 @@ fn test_executable_lock(dir: &Path) {
     kill_unstarted(handle, "eager");
     std::fs::remove_file(dir.join("eager-renamed")).unwrap();
     println!("cold_spawn::test_executable_lock PASS");
+}
+
+/// The file offset of `MARKER` in `bytes`, found by its unchanging prefix.
+fn marker_offset(bytes: &[u8]) -> usize {
+    let prefix = &std::hint::black_box(&MARKER)[..MARKER.len() - 2];
+    let mut found = bytes
+        .windows(prefix.len())
+        .enumerate()
+        .filter(|(_, window)| *window == prefix)
+        .map(|(offset, _)| offset);
+    let offset = found.next().expect("the marker in the image");
+    assert!(
+        found.next().is_none(),
+        "the marker appears twice in the image"
+    );
+    offset
+}
+
+/// A writer toggles a read-only byte of the image as fast as it can while
+/// children are launched from it. Mutations check the executable lock
+/// under the filesystem write guard: a write queued behind a spawn's
+/// metadata read must see the lock that spawn then takes. Each child
+/// compares the marker on disk with its mapped copy throughout its run.
+fn test_write_race(dir: &Path) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    const CHILDREN: usize = 8;
+
+    let program = copy(dir, "write-race", EXEC | moto_rt::fs::PERM_WRITE, |_| {});
+    let offset = marker_offset(&std::fs::read(&program).unwrap());
+    let stop = AtomicBool::new(false);
+    let (refused, succeeded) = std::thread::scope(|scope| {
+        let writer = scope.spawn(|| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&program)
+                .unwrap();
+            let (mut refused, mut succeeded) = (0_u64, 0_u64);
+            let mut toggle = false;
+            while !stop.load(Ordering::Acquire) {
+                let byte = if toggle { b'B' } else { b'A' };
+                toggle = !toggle;
+                file.seek(SeekFrom::Start(offset as u64 + 30)).unwrap();
+                match file.write_all(&[byte]) {
+                    Ok(()) => succeeded += 1,
+                    Err(err) if err.raw_os_error() == Some(moto_rt::E_NOT_ALLOWED as i32) => {
+                        refused += 1
+                    }
+                    Err(err) => panic!("marker write failed: {err:?}"),
+                }
+            }
+            (refused, succeeded)
+        });
+        for _ in 0..CHILDREN {
+            let output = child(&program, "marker-check")
+                .arg(offset.to_string())
+                .stdout(Stdio::piped())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{:?}", output.status);
+            assert_eq!(output.stdout, b"marker-ok\n");
+        }
+        stop.store(true, Ordering::Release);
+        writer.join().unwrap()
+    });
+    // Every child lives for milliseconds, and the writer tries every few
+    // microseconds: some writes were refused while a child was mapped.
+    assert!(
+        refused > 0,
+        "no write met a mapped child ({succeeded} succeeded)"
+    );
+    std::fs::remove_file(&program).unwrap();
+    println!("cold_spawn::test_write_race PASS: {refused} writes refused, {succeeded} landed");
 }
 
 /// A killed child releases its mapping references like an exiting one.
@@ -819,8 +909,8 @@ fn test_unauthorized_entries(dir: &Path, requester: &mut Requester) {
 /// the response ring is full by then, so sys-io cannot send the response
 /// before it finds the client gone.
 fn test_abandoned_request(dir: &Path, requester: &mut Requester) {
-    use moto_ipc::io_channel::QUEUE_SIZE;
-    use moto_sys_io::api_fs;
+    use moto_sdk::ipc::io_channel::QUEUE_SIZE;
+    use moto_sdk::sys_io::api_fs;
     use std::time::{Duration, Instant};
 
     let program = copy(dir, "abandoned", EXEC, |_| {});
@@ -848,7 +938,7 @@ fn test_abandoned_request(dir: &Path, requester: &mut Requester) {
     let client = &requester.client;
     let channel = requester.runtime.block_on(async {
         let (entry_id, _) = client.stat(&path).await.unwrap();
-        let (sender, mut receiver) = moto_ipc::io_channel::connect(api_fs::FS_URL).unwrap();
+        let (sender, mut receiver) = moto_sdk::ipc::io_channel::connect(api_fs::FS_URL).unwrap();
         // One request answered: the connection is accepted and served.
         let mut msg = api_fs::metadata_msg_encode(entry_id);
         msg.id = 1;
@@ -928,6 +1018,17 @@ fn test_spawn_under_memory_floor(dir: &Path) {
 }
 
 pub fn run_all_tests() {
+    run_tests(true);
+    println!("cold_spawn::run_all_tests PASS");
+}
+
+/// Repeat beside unrelated workloads without driving them to the memory floor.
+pub fn run_soak_tests() {
+    run_tests(false);
+    println!("paging-soak PASS");
+}
+
+fn run_tests(test_floor: bool) {
     let dir = crate::temp_path(&format!("systest-cold-spawn-{}", moto_sys::current_pid()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir(&dir).unwrap();
@@ -935,6 +1036,7 @@ pub fn run_all_tests() {
     test_image_contents();
     test_concurrent_launches(&dir);
     test_executable_lock(&dir);
+    test_write_race(&dir);
     test_killed_child_unlocks(&dir);
     test_kill_during_startup(&dir);
     test_exit_while_faulting(&dir);
@@ -951,8 +1053,9 @@ pub fn run_all_tests() {
     test_unauthorized_entries(&dir, &mut requester);
     test_abandoned_request(&dir, &mut requester);
     drop(requester);
-    test_spawn_under_memory_floor(&dir);
+    if test_floor {
+        test_spawn_under_memory_floor(&dir);
+    }
 
     std::fs::remove_dir_all(&dir).unwrap();
-    println!("cold_spawn::run_all_tests PASS");
 }

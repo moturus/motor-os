@@ -7,7 +7,7 @@ external source edits called out in every patch report. No code has changed.
 ## 1. Goal
 
 Ship `/devtools/bin/gix` and `/devtools/bin/jj` in the developer image so a
-Motor developer can acquire a repository, inspect history, author and rewrite
+Motor OS developer can acquire a repository, inspect history, author and rewrite
 commits, manage bookmarks and tags, merge and resolve conflicts, fetch, recover
 from mistakes, and publish over SSH. gix is the repository plumbing and the
 Git-ref publisher; jj is the authoring workflow. Neither installs a `git`
@@ -20,7 +20,7 @@ programs that run `git`.
 | Inspect | jj log/diff/show/file, revsets, templates; gix object, ref, index and pack inspection, status, blame. |
 | Author | jj snapshot, commit/describe/new/edit, bookmarks, tags, ignores, executable files, restore. |
 | Integrate | Fetch, then an explicit rebase or merge; conflicts, split/squash/revert/abandon. |
-| Interoperate | Colocated and non-colocated repositories; Git import/export; host Git reads Motor-created objects unchanged. |
+| Interoperate | Colocated and non-colocated repositories; Git import/export; host Git reads Motor OS-created objects unchanged. |
 | Recover | Operation log, undo/restore, recovery after an interrupted operation. |
 | Publish | `gix push` and `jj git push` over SSH through one shared engine, with per-ref results. |
 
@@ -38,13 +38,13 @@ Proposed 2026-09-11; review confirms or changes them before implementation.
 - **D1 Milestones.** Four shippable milestones (section 4), each ending in an
   assembly candidate that passes its gates. Later milestones extend earlier
   ones; nothing already shipped is redefined.
-- **D2 One fork revision.** Rebase the Motor port commit
+- **D2 One fork revision.** Rebase the Motor OS port commit
   `4604ac322369a2e429a805cf6e5b7267712283f1` ("A minimal port to Motor OS",
   gix 0.86.0) onto the upstream commit for gix 0.87.1, jj's requirement, on a
   new `gix-moturus-cli` branch of `moturus/gitoxide`. All gix and jj work uses
   that one revision from the first patch. Lorry's pin is unchanged.
 - **D3 Architecture.** jj's Git subprocess boundary (`lib/src/git_subprocess.rs`)
-  is replaced on Motor by direct gix library calls; upstream subprocess
+  is replaced on Motor OS by direct gix library calls; upstream subprocess
   behaviour stays on other platforms. `gix push` and `jj git push` call one
   send-pack engine in the fork. No C Git port, libgit2, or Git CLI emulation.
 - **D4 Transports.** HTTPS through the existing `/system/bin/curl` child and
@@ -59,9 +59,9 @@ Proposed 2026-09-11; review confirms or changes them before implementation.
   not invented inode or ctime semantics.
 - **D6 Trust.** No helper, filter, hook, signing tool or installed-Git
   discovery executes from configuration. The fork's `gix-sec` ownership check
-  returning `Ok(true)` on Motor is not treated as trust to execute anything.
+  returning `Ok(true)` on Motor OS is not treated as trust to execute anything.
 - **D7 Panic.** Both binaries build with an explicit `panic = "abort"` profile,
-  overriding the [Motor target's unwind default](../toolchain.md#rust-runtime-and-native-formatting).
+  overriding the [Motor OS target's unwind default](../toolchain.md#rust-runtime-and-native-formatting).
   Errors and cancellation use ordinary returns and RAII; jj's `catch_unwind`
   uses are audited.
 - **D8 GC.** `jj util gc` and gix repacking return an unsupported error until
@@ -82,7 +82,7 @@ Proposed 2026-09-11; review confirms or changes them before implementation.
 | Source | Identity |
 | --- | --- |
 | Motor OS | `be8dd555`, branch `frusa`; toolchain `1.99.0-beta-f47d5bb-motor.dev.1` |
-| Motor gitoxide fork | `4604ac322369a2e429a805cf6e5b7267712283f1`: gix 0.86.0, gitoxide 0.56.0, gitoxide-core 0.60.0 |
+| Motor OS gitoxide fork | `4604ac322369a2e429a805cf6e5b7267712283f1`: gix 0.86.0, gitoxide 0.56.0, gitoxide-core 0.60.0 |
 | Upstream gitoxide | `766543702cbf39d1c466de58fcefaed78c91af75` |
 | Upstream jj | `a4a61b3916f2a46eb3fb9f49b4e9021f26fdc893`, 0.45.1: gix 0.87.1, Rust 1.89, Tokio 1.52.3, crossterm 0.29, ctrlc 3.5.2, tempfile 3.27.0, mimalloc |
 
@@ -98,22 +98,22 @@ Facts the plan relies on, checked in source:
   legacy ref parsing, packet-line IO, `RequestWriter::into_parts()`, object
   traversal and pack writing exist.
 - The fork's SSH launcher adds `-o SendEnv=GIT_PROTOCOL` unless the protocol
-  is V1. Motor's ssh rejects any unknown `-o` key and supports
+  is V1. Motor OS's ssh rejects any unknown `-o` key and supports
   `StrictHostKeyChecking`, `BatchMode`, `-i` and `-p`. russhd's client
   separates stderr, sends EOF and returns the remote exit status; its
   `client_protocol` test proves large output is drained while stdin blocks.
-- In the fork: `gix-sec` ownership is `Ok(true)` on Motor; `gix-fs` has no
-  Motor `Capabilities` default and its non-Unix executable probe returns
+- In the fork: `gix-sec` ownership is `Ok(true)` on Motor OS; `gix-fs` has no
+  Motor OS `Capabilities` default and its non-Unix executable probe returns
   false; `gix-index` loading still uses `memmap2` and `filetime`;
-  `gix/src/lib.rs` exports a Motor `strlen`; `gix-motor-tempfile` and a clone
+  `gix/src/lib.rs` exports a Motor OS `strlen`; `gix-motor-tempfile` and a clone
   transport factory exist; `gitoxide-core` unconditionally enables worktree,
   status, interrupt and credentials features and uses `open::that` and
   `tempfile`. `src/gix.rs` needs the `pretty-cli` feature.
-- Motor std: symlink, hard link and `set_times` are unsupported; file locks,
+- Motor OS std: symlink, hard link and `set_times` are unsupported; file locks,
   metadata, rename and permissions work. `moto_rt` provides
   `ctrl_c_register_handler`/`ctrl_c_wait`, `set_perm`/`set_file_perm` and
   `FileAttr::entry_id`. The base target sets `PanicStrategy::Abort`.
-- Motor curl accepts `--header`, `--data-binary @-` (body from stdin),
+- Motor OS curl accepts `--header`, `--data-binary @-` (body from stdin),
   `--cacert`, `--proto`, `--location`, `--max-time`, `--write-out`,
   `--variable %NAME` and `--expand-header`; it has no `--user`, `-K` or netrc.
   Lorry's `src/bin/lorry/src/git/http.rs` implements gix's blocking `Http`
@@ -123,7 +123,7 @@ Facts the plan relies on, checked in source:
   `assembly_required_executables`; `full-test.sh` runs guest developer checks
   under `FULL_TEST_VERIFY_DEV_SOURCES=1` and asserts the main image has no
   `/devtools`.
-- A host experiment pushed with Git 2.53 through the host-built Motor `ssh`
+- A host experiment pushed with Git 2.53 through the host-built Motor OS `ssh`
   to the host-built `russhd` running host `git-receive-pack`: an 8 MiB initial
   push, fast-forward, annotated tag, stale-lease rejection, leased rewrite,
   delete, mixed hook rejection and `git fsck --strict` all passed. This proves
@@ -154,8 +154,8 @@ successful `cargo check` is never evidence of runtime support.
    `std::io::IsTerminal` or gate a command together with its dependency
    (`open::that` in graph display, `tempfile` in core pack paths).
    Deterministic version identity instead of `build.rs` `git describe`.
-   Motor `panic = "abort"` profile (D7). Stream stdout; test broken pipes.
-3. **Filesystem and worktree.** Motor `Capabilities` defaults and a real
+   Motor OS `panic = "abort"` profile (D7). Stream stdout; test broken pipes.
+3. **Filesystem and worktree.** Motor OS `Capabilities` defaults and a real
    executable-bit probe in `gix-fs`; replace `memmap2`/`filetime` in
    `gix-index` and any commit-graph or status path the CLI reaches with the
    fork's owned-buffer pattern, fallible allocation and checked lengths; map
@@ -174,7 +174,7 @@ successful `cargo check` is never evidence of runtime support.
    (`gitoxide-core/src/repository/clone.rs` enables `git_binary`), no helper,
    filter, hook or signing execution (D6). Precedence is `-c`, repository
    data, explicit user configuration, supported environment; resolve the user
-   configuration path from Motor's home conventions and report it via
+   configuration path from Motor OS's home conventions and report it via
    `gix env`. Replace `signal-hook` with `moto_rt::process::ctrl_c_*` driving
    gix's interrupt flag without consuming stdin; cancellation stops transfer,
    pack and checkout work, kills and reaps children, releases this process's
@@ -182,7 +182,7 @@ successful `cargo check` is never evidence of runtime support.
    ELF are `DYN` with no interpreter, `NEEDED`, TLS segment, executable stack
    or unresolved symbols; reconcile the `strlen` export with the linked
    runtime rather than adding stubs.
-5. **HTTPS transport.** A Motor backend in `gix-transport`'s blocking HTTP
+5. **HTTPS transport.** A Motor OS backend in `gix-transport`'s blocking HTTP
    module behind a feature, selected by `gitoxide-core` for clone, fetch and
    remote-ref listing alike. Implement `Http` over the curl child: bounded
    pipes and staging, typed response metadata, CA
@@ -206,12 +206,12 @@ run; Ctrl+C is clean; the assembly rebuilds reproducibly.
 1. **Dependency contract.** Pin the inspected jj revision in an external
    checkout. Patch the whole `gix-*` closure to the D2 revision; keep CLI-only
    crates out of jj's target graph. Align Tokio, ctrlc and crossterm with the
-   existing Motor forks; audit every selected `getrandom` version; keep
-   `mimalloc` out of the Motor build. Record the first
+   existing Motor OS forks; audit every selected `getrandom` version; keep
+   `mimalloc` out of the Motor OS build. Record the first
    `cargo check -p jj-cli --bin jj --no-default-features --features git
    --target x86_64-unknown-motor` diagnostics. Enumerate every reachable guest
    `git` invocation and classify it: replaced, unsupported error, or M4.
-2. **Platform boundary.** Motor arms in `core/src/file_util.rs`, `lib/src/lock`
+2. **Platform boundary.** Motor OS arms in `core/src/file_util.rs`, `lib/src/lock`
    and `lib/src/local_working_copy.rs`: lossless paths, `entry_id` identity,
    std file locks for jj's advisory state locks (distinct from Git `.lock`
    files), exclusive same-filesystem temporary publication with sync ordering,
@@ -227,7 +227,7 @@ run; Ctrl+C is clean; the assembly rebuilds reproducibly.
    (D9). Colocated repositories and Git import/export verified against host
    Git, including index, HEAD, tags, modes and symlink text. Linked-worktree
    and submodule commands fail explicitly.
-4. **Fetch and clone.** Implement jj's Git-operation boundary on Motor with
+4. **Fetch and clone.** Implement jj's Git-operation boundary on Motor OS with
    typed gix fetch and ref results plus progress and cancellation callbacks;
    keep `GitFetch`/`import_refs()` transaction logic. Cover refspecs, branch
    and tag selection, shallow/deepen, rejected updates, pruning from
@@ -247,10 +247,10 @@ HTTPS clone and a second fetch after a host-side update pass in the VM.
 ### M3 — SSH: shared push engine, `gix push`, `jj git push`, SSH fetch
 
 Design in section 5. Each step first passes a host slice against loopback host
-Git through the host-built Motor `ssh` and `russhd`, then the same slice in
+Git through the host-built Motor OS `ssh` and `russhd`, then the same slice in
 the VM.
 
-1. **SSH adapter** in the fork's `gix-transport` ssh module: the Motor
+1. **SSH adapter** in the fork's `gix-transport` ssh module: the Motor OS
    argument set (`-i`, `-p`, `-o StrictHostKeyChecking=…`, `-o BatchMode=yes`,
    no PTY), protocol V1 so `SendEnv` is never passed, a quoted remote path,
    bidirectional binary pipes with a stderr drain, cancellation, and child
@@ -265,7 +265,7 @@ the VM.
    leases, the empty-pack and all-delete cases.
 4. **`gix push` command.** The contract in section 5.3, with standalone
    fixtures containing no `.jj` and no `jj` executable.
-5. **jj integration.** Replace the `push_updates()` subprocess path on Motor
+5. **jj integration.** Replace the `push_updates()` subprocess path on Motor OS
    with typed per-ref results; keep tag IDs, guarded rewrites, no-op rules,
    dry-run and `unexported_bookmarks` reporting.
 6. **Workflow gate.** `src/tests/test-git-workflows.sh`: jj author and export
@@ -358,27 +358,24 @@ selection are rejected. Direct URL pushes never invent a remote name.
 
 ## 6. Packaging, tests and gates (both tools)
 
-- gix and jj are userspace add-ons, not parts of the toolchain (see
+- gix and jj are external sources, not parts of the toolchain (see
   [toolchain.md](../toolchain.md)). `src/build-motor-os.sh` declares each
   fork and the branch to follow next to Lua, ripgrep, and Helix; nothing is
   added to `src/toolchain-versions.sh`, to a key, or to the assembly
   manifest, and no key schema changes.
-- `build_addons` builds them after the assembly is complete: the
-  branch-following checkout, an explicit dependency fetch, then a
+- `build_external_sources` builds them after the assembly is complete: the
+  branch-following checkout in `external-sources/`, an explicit dependency fetch, then a
   `--locked --offline` build of `-p gitoxide --bin gix` and `-p jj-cli --bin jj`
   with the assembly linker; host build scripts and proc macros stay on the
   host target. Version metadata is deterministic and runs no guest Git or jj.
-  Each records its built commit in `ADDON-gix` and `ADDON-jj` and is rebuilt
-  alone when its branch head changes. If the feature recipe or profile must
-  also force a rebuild, record it next to the commit.
+  Every run builds them again; Cargo keeps that incremental.
 - Stage only the executable, licences and a short version/feature/limits
   record in the overlays `images/gix` and `images/jj`. Add `gix` and `jj` to
   `assembly_dirs` and `gix/devtools/bin/gix` and `jj/devtools/bin/jj` to
   `assembly_required_executables` in `motor-os-dev.yaml`; base and main
   manifests are unchanged.
-- The host contract `src/tests/test-build-addons.sh` gains their cases
-  (branch selection, flags, staging, permissions, rebuild on a changed
-  source).
+- The host contract `src/tests/test-external-sources.sh` gains their cases
+  (branch selection, flags, staging, permissions).
   Guest drivers `test-gix.sh`, `test-jj.sh` and `test-git-workflows.sh` run
   from the `FULL_TEST_VERIFY_DEV_SOURCES=1` branch after SSH is up, each with
   a mode for an already running VM.
@@ -396,7 +393,7 @@ selection are rejected. Direct URL pushes never invent a remote name.
   stripped size, on a small loose and a larger packed history. Enable gix's
   `parallel` feature only after serial commands work and the whole-pack buffer
   cost is measured; audit any `parking_lot` backend for idle spinning.
-- Per patch: focused host tests, Motor check/link, the relevant guest fixture,
+- Per patch: focused host tests, Motor OS check/link, the relevant guest fixture,
   repository-selected `cargo fmt`, clippy, shell syntax and `git diff --check`.
   Per milestone: `test-toolchain-*.sh`, `test-gix.sh`/`test-jj.sh --release`,
   `full-test.sh`, `full-test.sh --release`, `full-test-dev.sh --release`.

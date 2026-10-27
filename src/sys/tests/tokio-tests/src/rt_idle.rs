@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(target_os = "motor")]
 fn test_idle_parking_lot_runtime_parks_workers() {
-    use moto_stats::Collector;
+    use moto_sdk::stats::Collector;
 
     const SAMPLE_TIME: Duration = Duration::from_millis(250);
 

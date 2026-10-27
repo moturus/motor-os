@@ -436,7 +436,8 @@ prepare_host() {
         -C linker="$MOTOR_LINKER" -Clink-self-contained=no \
         -Cdefault-linker-libraries=yes -C panic=abort \
         "$SCRIPT_DIR/helpers/recovery-probe.rs" -o "$WORK/recovery-probe"
-    diff -qr "$motor_toolchain_sysroot/lib/rustlib/$MOTOR_TARGET" \
+    # The Linux toolchain also keeps its C cross sysroot beside the libraries.
+    diff -qr -x sysroot "$motor_toolchain_sysroot/lib/rustlib/$MOTOR_TARGET" \
         "$MOTOR_SYSROOT/lib/rustlib/$MOTOR_TARGET" >"$WORK/sysroot-diff" || {
         cat "$WORK/sysroot-diff" >&2
         fail "Linux and image Motor target sysroots differ"

@@ -10,14 +10,10 @@ ifeq ($(shell command -v rustc 2>/dev/null),)
 $(error rustc is not on PATH; open a new shell or run: . "$$HOME/.cargo/env")
 endif
 TOOLCHAIN_SYSROOT := $(shell rustc --print sysroot 2>/dev/null)
-MOTOR_TOOLCHAIN_KEY := $(strip $(shell \
-	stamp="$(TOOLCHAIN_SYSROOT)/lib/rustlib/MOTOR-TOOLCHAIN-KEY"; \
-	test -f "$$stamp" && grep -Ex '[0-9a-f]{64}' "$$stamp"))
-ifeq ($(MOTOR_TOOLCHAIN_KEY),)
-$(error selected Rust toolchain is not a stamped Motor toolchain; run src/build-motor-os.sh)
 endif
-endif
-OBJ_ROOT := $(ROOT_DIR)/build/obj/$(MOTOR_TOOLCHAIN_KEY)
+OBJ_ROOT := $(ROOT_DIR)/build/obj
+# The cross sysroot: motor-clang, motor-clang++, and the C/C++ headers and libraries.
+MOTOR_SYSROOT := $(TOOLCHAIN_SYSROOT)/lib/rustlib/x86_64-unknown-motor/sysroot
 
 ifeq ($(BUILD), release)
 	CARGO_RELEASE := --release
@@ -38,7 +34,7 @@ endif
 IMAGER_LOCK := $(ROOT_DIR)/build/imager.lock
 IMAGER_TARGET_DIR := $(OBJ_DIR)/imager
 IMAGER_BIN := $(IMAGER_TARGET_DIR)/$(IMG_CMD)/imager
-ASSEMBLY_RESOLVER := $(ROOT_DIR)/src/resolve-toolchain-assembly.sh
+ASSEMBLY_IMAGE_ROOT := $(ROOT_DIR)/build/assembly/images
 DO_BUILD = cargo build --target x86_64-unknown-motor $(CARGO_RELEASE)
 
 DO_CLIPPY = cargo clippy --target x86_64-unknown-motor $(CARGO_RELEASE)
@@ -49,7 +45,7 @@ ifeq ($(MAKELEVEL),0)
 MAKE_GOALS := $(or $(MAKECMDGOALS),all)
 .PHONY: $(MAKE_GOALS)
 $(firstword $(MAKE_GOALS)):
-	@$(ROOT_DIR)/src/make-driver.sh $(MAKE) --no-print-directory BUILD=$(BUILD) $(MAKE_GOALS)
+	@$(ROOT_DIR)/src/build-scripts/make-driver.sh $(MAKE) --no-print-directory BUILD=$(BUILD) $(MAKE_GOALS)
 ifneq ($(words $(MAKE_GOALS)),1)
 $(filter-out $(firstword $(MAKE_GOALS)),$(MAKE_GOALS)): $(firstword $(MAKE_GOALS))
 	@:
@@ -63,9 +59,9 @@ core: kernel vdso
 sys-base: strobe sys-io sys-init sys-tty
 sys: sys-base dns-resolver
 user-base: sysbox rush red rmux russhd
-user: user-base kibim httpd httpd-axum ssh
+user: user-base kibim httpd httpd-axum ssh wg
 user-dev: user curl gears gix lorry mdbg rnetbench crossbench \
-	systest mio-test tokio-tests crossterm-smoke
+	systest mio-test tokio-tests crossterm-smoke wg-self-test
 
 .PHONY: all images boot core sys-base sys user-base user user-dev
 .PHONY: base.img main.img raw.img dev.img wasm.img system-tty.img vsock-test.img
@@ -73,12 +69,9 @@ user-dev: user curl gears gix lorry mdbg rnetbench crossbench \
 .PHONY: strobe sys-io sys-init sys-tty dns-resolver
 .PHONY: sysbox sysbox-tests systest mio-test tokio-tests crossterm-smoke
 .PHONY: rush kibim red rmux russhd ssh httpd httpd-axum gears
-.PHONY: gix lorry curl
+.PHONY: gix lorry curl wg wg-self-test
 .PHONY: mdbg rnetbench crossbench
-.PHONY: clean clippy assembly-resolved
-
-assembly-resolved:
-	@"$(ASSEMBLY_RESOLVER)" --resolve >/dev/null
+.PHONY: clean clippy
 
 mbr.bin:
 	mkdir -p $(BIN_DIR)
@@ -181,6 +174,19 @@ rush:
 	cd src/bin/rush && CARGO_TARGET_DIR="$(OBJ_DIR)/rush" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/rush" "$(OBJ_DIR)/rush/$(SUB_DIR)/rush"
 
+wg:
+	mkdir -p $(BIN_DIR)
+	cd src/bin/wg && CC_x86_64_unknown_motor="$(MOTOR_SYSROOT)/bin/motor-clang" \
+		AR_x86_64_unknown_motor=ar CARGO_TARGET_DIR="$(OBJ_DIR)/wg" $(DO_BUILD) --locked
+	strip -o "$(BIN_DIR)/wg" "$(OBJ_DIR)/wg/$(SUB_DIR)/wg"
+
+wg-self-test:
+	mkdir -p $(BIN_DIR)
+	cd src/bin/wg && CC_x86_64_unknown_motor="$(MOTOR_SYSROOT)/bin/motor-clang" \
+		AR_x86_64_unknown_motor=ar CARGO_TARGET_DIR="$(OBJ_DIR)/wg" $(DO_BUILD) \
+		--locked --features native-tests --bin wg-self-test
+	strip -o "$(BIN_DIR)/wg-self-test" "$(OBJ_DIR)/wg/$(SUB_DIR)/wg-self-test"
+
 russhd:
 	mkdir -p $(BIN_DIR)
 	cd src/bin/russhd && CARGO_TARGET_DIR="$(OBJ_DIR)/russhd" $(DO_BUILD) --bin russhd
@@ -226,15 +232,11 @@ rnetbench:
 gears:
 	mkdir -p $(BIN_DIR)
 	cd src/bin/gears && CARGO_TARGET_DIR="$(OBJ_DIR)/gears" \
-		$(DO_BUILD) --bins --examples
+		$(DO_BUILD) --bins
 	strip -o "$(BIN_DIR)/gears" "$(OBJ_DIR)/gears/$(SUB_DIR)/gears"
 	strip -o "$(BIN_DIR)/gears-batteries" "$(OBJ_DIR)/gears/$(SUB_DIR)/gears-batteries"
-# Test programs, installed under /devtools/tests/gears.
-	strip -o "$(BIN_DIR)/gears-tool-smoke" "$(OBJ_DIR)/gears/$(SUB_DIR)/examples/tool-smoke"
-	strip -o "$(BIN_DIR)/gears-batteries-smoke" "$(OBJ_DIR)/gears/$(SUB_DIR)/examples/workflow-smoke"
-	strip -o "$(BIN_DIR)/gears-mock-provider" "$(OBJ_DIR)/gears/$(SUB_DIR)/examples/mock-provider"
 
-lorry: assembly-resolved
+lorry:
 	mkdir -p $(BIN_DIR)
 	# Prepare the exact cc-rs archive used by the offline C++ contract.
 	mkdir -p "$(OBJ_DIR)/lorry-cxx-deps/src"
@@ -243,36 +245,26 @@ lorry: assembly-resolved
 		> "$(OBJ_DIR)/lorry-cxx-deps/Cargo.toml"
 	touch "$(OBJ_DIR)/lorry-cxx-deps/src/lib.rs"
 	cargo fetch --manifest-path "$(OBJ_DIR)/lorry-cxx-deps/Cargo.toml"
-	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
-	assembly_sysroot="$$(realpath "$$assembly_image_root/../sysroot")" && \
 	cd src/bin/lorry && \
-		CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$$assembly_sysroot/bin/motor-clang" \
+		CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$(MOTOR_SYSROOT)/bin/motor-clang" \
 		CARGO_TARGET_DIR="$(OBJ_DIR)/lorry" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/lorry" "$(OBJ_DIR)/lorry/$(SUB_DIR)/lorry"
 
-gix: assembly-resolved
+gix:
 	mkdir -p $(BIN_DIR)
-	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
-	assembly_sysroot="$$(realpath "$$assembly_image_root/../sysroot")" && \
 	cd src/bin/gix && \
 		cargo fetch --locked && \
-		CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$$assembly_sysroot/bin/motor-clang" \
+		CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$(MOTOR_SYSROOT)/bin/motor-clang" \
 		CARGO_TARGET_DIR="$(OBJ_DIR)/gix" $(DO_BUILD) --locked --offline
-	bash -c '. "$$1/src/toolchain-lib.sh"; . "$$1/src/toolchain-native.sh"; \
-		toolchain_validate_native_elf "$$2" "$$3"' _ "$(ROOT_DIR)" \
-		"$(OBJ_DIR)/gix/$(SUB_DIR)/gix" "$$(command -v readelf)"
+	src/build-scripts/validate-native-elf.sh "$(OBJ_DIR)/gix/$(SUB_DIR)/gix"
 	strip -o "$(BIN_DIR)/gix" "$(OBJ_DIR)/gix/$(SUB_DIR)/gix"
-	bash -c '. "$$1/src/toolchain-lib.sh"; . "$$1/src/toolchain-native.sh"; \
-		toolchain_validate_native_elf "$$2" "$$3"' _ "$(ROOT_DIR)" \
-		"$(BIN_DIR)/gix" "$$(command -v readelf)"
+	src/build-scripts/validate-native-elf.sh "$(BIN_DIR)/gix"
 
 # ring's Git checkout generates packaged assembly on the Linux host. Curl is
 # therefore cross-built by Cargo and is not part of the native Lorry surface.
-curl: assembly-resolved
+curl:
 	mkdir -p $(BIN_DIR)
-	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
 	cd src/bin/curl && MOTO_BIN="$(BIN_DIR)" \
-		MOTOR_ASSEMBLY_IMAGE_ROOT="$$assembly_image_root" \
 		CARGO_TARGET_DIR="$(OBJ_DIR)/curl" \
 		./build-motor.sh $(CARGO_RELEASE)
 
@@ -294,24 +286,22 @@ BUILD_IMAGER = CARGO_TARGET_DIR="$(IMAGER_TARGET_DIR)" cargo rustc $(CARGO_RELEA
 	--bin imager -- -C target-feature=+crt-static -A linker-messages
 
 # The standard image adds production networking and user programs to base.
-main.img: assembly-resolved boot core sys user
-	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
+main.img: boot core sys user
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)" && \
 	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.qcow2" && \
 	cd src/imager && ( flock 9 && $(BUILD_IMAGER) && \
-		MOTOR_ASSEMBLY_IMAGE_ROOT="$$assembly_image_root" \
+		MOTOR_ASSEMBLY_IMAGE_ROOT="$(ASSEMBLY_IMAGE_ROOT)" \
 		"$(IMAGER_BIN)" "$(ROOT_DIR)" $(IMG_CMD) motor-os.yaml ) 9>"$(IMAGER_LOCK)"
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the standard Motor OS image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.qcow2"
 
 # The standard image in the raw format required by Firecracker. This remains
 # explicit: default and aggregate image targets do not depend on it.
-raw.img: assembly-resolved boot core sys user
-	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
+raw.img: boot core sys user
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)" && \
 	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.img" && \
 	cd src/imager && ( flock 9 && $(BUILD_IMAGER) && \
-		MOTOR_ASSEMBLY_IMAGE_ROOT="$$assembly_image_root" \
+		MOTOR_ASSEMBLY_IMAGE_ROOT="$(ASSEMBLY_IMAGE_ROOT)" \
 		"$(IMAGER_BIN)" "$(ROOT_DIR)" $(IMG_CMD) motor-os.yaml --raw-output motor-os.img ) 9>"$(IMAGER_LOCK)"
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the raw standard Motor OS image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.img"
@@ -341,7 +331,7 @@ system-tty.img: boot core sys-base user-base
 vsock-test.img: boot core sys-base sysbox rush systest
 	$(call BUILD_TEST_IMAGE,vsock-test)
 
-# The minimal base image; it does not consume toolchain assembly overlays.
+# The minimal base image; it takes nothing from the assembly.
 base.img: boot core sys-base user-base
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
 	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-base.img"
@@ -350,25 +340,26 @@ base.img: boot core sys-base user-base
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the Motor OS base image in $(ROOT_DIR)/vm_images/$(IMG_CMD)"
 
-# The dev image adds diagnostics, tests, sources, and native toolchains.
-dev.img: assembly-resolved boot core sys user-dev
-	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
+# The dev image adds diagnostics, tests, sources, and native toolchains. A VM
+# then prepares its staged library sources for offline native tests; their
+# dependencies come from src/build-motor-os.sh --sys-lib-deps-only.
+dev.img: boot core sys user-dev
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)" && \
 	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.img" \
 		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.qcow2" && \
 	cd src/imager && ( flock 9 && $(BUILD_IMAGER) && \
-		MOTOR_ASSEMBLY_IMAGE_ROOT="$$assembly_image_root" \
+		MOTOR_ASSEMBLY_IMAGE_ROOT="$(ASSEMBLY_IMAGE_ROOT)" \
 		"$(IMAGER_BIN)" "$(ROOT_DIR)" $(IMG_CMD) motor-os-dev.yaml ) 9>"$(IMAGER_LOCK)"
 	$(INSTALL_VM_SCRIPTS)
+	"$(ROOT_DIR)/src/build-scripts/prepare-dev-image.sh" $(IMG_CMD)
 	@echo "built the Motor OS dev image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.qcow2"
 
-# Release wasm add-ons are prepared by src/build-motor-os.sh --javy-only --wasmtime-only.
-wasm.img: assembly-resolved boot core sys user
-	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
+# Release Javy and Wasmtime are prepared by src/build-motor-os.sh --javy-only --wasmtime-only.
+wasm.img: boot core sys user
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)" && \
 	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-wasm.qcow2" && \
 	cd src/imager && ( flock 9 && $(BUILD_IMAGER) && \
-		MOTOR_ASSEMBLY_IMAGE_ROOT="$$assembly_image_root" \
+		MOTOR_ASSEMBLY_IMAGE_ROOT="$(ASSEMBLY_IMAGE_ROOT)" \
 		"$(IMAGER_BIN)" "$(ROOT_DIR)" $(IMG_CMD) motor-os-wasm.yaml ) 9>"$(IMAGER_LOCK)"
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the Motor OS wasm image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-wasm.qcow2"
@@ -388,6 +379,8 @@ clippy: vdso
 	cd src/sys/tests/tokio-tests && $(DO_CLIPPY)
 	cd src/bin/rush && $(DO_CLIPPY)
 	cd src/bin/russhd && $(DO_CLIPPY)
+	cd src/bin/wg && CC_x86_64_unknown_motor="$(MOTOR_SYSROOT)/bin/motor-clang" \
+		AR_x86_64_unknown_motor=ar $(DO_CLIPPY) --locked
 	cd src/bin/httpd && $(DO_CLIPPY)
 	cd src/bin/httpd-axum && $(DO_CLIPPY) --locked
 	cd src/bin/kibim && $(DO_CLIPPY)
@@ -395,11 +388,9 @@ clippy: vdso
 	cd src/bin/rmux && $(DO_CLIPPY)
 	cd src/bin/rnetbench && $(DO_CLIPPY)
 	cd src/bin/gears && $(DO_CLIPPY) --bins --examples
-	assembly_image_root="$$($(ASSEMBLY_RESOLVER) --resolve)" && \
-	assembly_sysroot="$$(realpath "$$assembly_image_root/../sysroot")" && \
 	cd src/bin/gix && \
 		cargo fetch --locked && \
-		CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$$assembly_sysroot/bin/motor-clang" \
+		CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$(MOTOR_SYSROOT)/bin/motor-clang" \
 		CARGO_TARGET_DIR="$(OBJ_DIR)/gix" $(DO_CLIPPY) --locked --offline
 	cd src/bin/lorry && $(DO_CLIPPY)
 	cd src/imager && CARGO_TARGET_DIR="$(IMAGER_TARGET_DIR)" cargo clippy $(CARGO_RELEASE)
@@ -415,8 +406,8 @@ clean:
 	rm -rf src/imager/target
 	cd src/bin && rm -rf */target
 	cd src/sys && rm -rf */target
-	rm -f lib/rt.vdso/rt.vdso
-	rm -rf src/bin/lorry/tests/metadata-schema/target
-	rm -rf src/tests/rust-analyzer-smoke/fixtures/motor/target
+	rm -f src/sys/lib/rt.vdso/rt.vdso
+	rm -rf src/bin/lorry/tests/*/target
+	rm -rf src/tests/rust-analyzer-smoke/fixtures/*/target
 
 endif

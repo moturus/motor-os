@@ -466,7 +466,7 @@ imager publish-www &lt;SITE DIRECTORY&gt; --ssh-password &lt;PASSWORD&gt; \
 
 <p>Examples below use <code>imager</code> for the host executable. Every image target in the
 Makefile installs a statically linked copy as <code>vm_images/PROFILE/tools/imager</code>, whose
-editing commands need neither the Motor toolchain nor a checkout. To invoke it through Cargo, use
+editing commands need neither the Motor OS toolchain nor a checkout. To invoke it through Cargo, use
 the repository-selected toolchain, change to <code>src/imager</code>, and run <code>cargo run
 --release -- &lt;arguments&gt;</code>. That directory&#x27;s Cargo configuration supplies the
 required build flags. Cargo&#x27;s <code>--release</code> selects the host tool&#x27;s build
@@ -493,7 +493,7 @@ imager /path/to/motor-os release /path/to/motor-os/src/imager/motor-os-base.yaml
 <code>MOTORH</code> environment variable for the checkout&#x27;s parent development directory.</p>
 
 <p>Creation packages already-built binaries from <code>REPO ROOT/build/bin/PROFILE/</code> and the
-configured file trees. It assembles the MBR, boot loader, initrd, and Motor FS data partition. It
+configured file trees. It assembles the MBR, boot loader, initrd, and Motor OS filesystem data partition. It
 does not compile the guest binaries. <code>REPO ROOT/vm_images/PROFILE/</code> must already exist.
 The image is written there under <code>img_name</code>, alongside <code>initrd</code> and
 <code>kloader</code> boot artifacts. An existing output can be replaced. Scratch files under
@@ -564,8 +564,9 @@ host ownership or host read/write permissions.</p>
 
 <p>Configurations with assembly inputs require <code>MOTOR_ASSEMBLY_IMAGE_ROOT</code> to name a
 normalized absolute host directory. Assembly paths in YAML must be normalized relative paths. The
-Make recipes obtain the root from <code>src/resolve-toolchain-assembly.sh --resolve</code>; see <a
-href="toolchain.html">assembly resolution</a> for the build workflow.</p>
+Make recipes pass <code>build/assembly/images</code>, which holds the files of the native toolchain
+and of the external sources; see <a href="build.html">Building Motor OS</a> for the build
+workflow.</p>
 
 <h2 id="change-guest-permissions">Change guest permissions</h2>
 
@@ -607,7 +608,7 @@ See <a href="filesystem.html">filesystem permissions</a> for runtime permission 
 <pre><code>imager resize -i original.qcow2 -o larger.qcow2 --size 4G
 imager resize -i original.qcow2 -o smaller.img --size 512M</code></pre>
 
-<p><code>resize</code> copies the input into an output whose <strong>Motor FS data
+<p><code>resize</code> copies the input into an output whose <strong>Motor OS filesystem data
 partition</strong> has the requested size. <code>SIZE</code> is a positive decimal integer followed
 by uppercase <code>M</code> or <code>G</code>: <code>M</code> means MiB and <code>G</code> means
 GiB. This is not the total image size or its allocated host disk space. Fractions, lowercase
@@ -619,7 +620,7 @@ suffixes, and a bare number are not accepted. <code>-i</code>, <code>-o</code>, 
 different files, including through hard links or symlinks. An existing output is replaced only after
 the new image is complete.</p>
 
-<p>The input must contain exactly one Motor FS partition, and that partition must be last. Both
+<p>The input must contain exactly one Motor OS filesystem partition, and that partition must be last. Both
 growth and shrinking are supported; shrinking fails if the contents and filesystem metadata do not
 fit. Guest files and their metadata are copied to a newly formatted filesystem. Earlier boot
 contents are preserved, and the MBR data-partition size is updated. The input is only read; the

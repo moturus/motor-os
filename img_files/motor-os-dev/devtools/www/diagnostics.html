@@ -463,7 +463,7 @@ stdout and stderr to a file for long runs, and enable serial console capture on 
 provider before first boot.</p>
 
 <h2>Service logs</h2>
-<p>Services log through <code>moto-log</code>, a <code>log</code>-crate facade that sends
+<p>Services log through moto-sdk's <code>log</code> module, a <code>log</code>-crate facade that sends
 records over IPC to <code>strobe</code>. strobe writes one file per registered tag,
 <code>/system/logs/TAG.log</code>, and rotates it to <code>TAG.log.prev</code>. The
 directory is <code>rwxr-x---</code> and the files <code>rw-r-----</code>: strobe, running
@@ -509,8 +509,8 @@ image, under <code>/devtools/bin</code>) pauses the process through the kernel's
 interface, walks each thread's stack, and prints raw addresses, marking frames that are
 inside the runtime. Symbolize them on the host with <code>addr2line</code> against the
 unstripped binary from the build tree, for example
-<code>build/obj/sys-io/x86_64-unknown-motor/debug/sys-io</code>, and against
-<code>build/obj/vdso/x86_64-unknown-motor/debug/rt</code> for runtime frames. This is the
+<code>build/obj/debug/sys-io/x86_64-unknown-motor/debug/sys-io</code>, and against
+<code>build/obj/debug/vdso/x86_64-unknown-motor/debug/rt</code> for runtime frames. This is the
 first thing to reach for when a process hangs: it distinguishes a lost wakeup from a
 deadlock in a minute. When a program cannot be reached over SSH, drive mdbg from the
 serial console.</p>

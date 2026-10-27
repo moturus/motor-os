@@ -451,7 +451,9 @@ guest-layout assertions.
 
 The Motor development image supplies an installed curl, CA bundle, native
 tools, a writable user-repository location, and explicit executable-code
-grants. It deliberately contains no dependency objects. A first `vendor`
+grants. Its only dependency objects and cache entries belong to the library
+sources it stages in `/devtools/src/motor-os/sys/lib`, which the image build
+vendors and compiles natively. For any other project, a first `vendor`
 operation populates the writable repository and project-local Git trees over
 the network; all compilation commands remain offline. Cargo comparisons and
 the release-VM lifecycle are validation code under `tests/`, not product

@@ -5,8 +5,8 @@ use std::io::ErrorKind;
 use std::io::Result;
 use std::rc::Rc;
 
+use moto_sdk::iobuf::VirtioIoBuf;
 use moto_sys::sys_mem::PAGE_SIZE_SMALL;
-use moto_tooling::iobuf::IoBuf;
 
 use super::le16;
 use super::virtio_device::VirtioDevice;
@@ -476,7 +476,7 @@ impl NetDevice {
     }
 
     #[inline(never)]
-    pub async fn post_read(self: Rc<Self>, bytes: IoBuf) -> NetReadCompletion {
+    pub async fn post_read(self: Rc<Self>, bytes: VirtioIoBuf) -> NetReadCompletion {
         let chain_head = VqAlloc::new(self.virtq_rx.clone(), 2).await;
         let mut virtqueue = self.virtq_rx.borrow_mut();
 
@@ -525,9 +525,9 @@ impl NetDevice {
     #[inline(never)]
     pub async fn post_write(
         self: Rc<Self>,
-        mut bytes: IoBuf,
+        mut bytes: VirtioIoBuf,
         tso_seg_size: u16,
-    ) -> (WriteCompletion<IoBuf>, usize) {
+    ) -> (WriteCompletion<VirtioIoBuf>, usize) {
         use super::virtio_queue::UserData;
 
         // Split the packet into physically-contiguous runs: the buffer is
@@ -611,7 +611,7 @@ impl NetDevice {
 /// can have asked for (`validate`) — to the buffer exactly as it was posted,
 /// so the caller can post it again.
 pub struct NetReadCompletion {
-    vq_completion: VqCompletion<IoBuf>,
+    vq_completion: VqCompletion<VirtioIoBuf>,
     posted_len: usize,
     guest_csum: bool,
     guest_gso: bool,
@@ -625,7 +625,7 @@ impl NetReadCompletion {
     /// Nothing rejected here is reachable from the network: the device is the
     /// host, which Motor trusts for availability. But a device that reports a
     /// length its own header cannot fit, or one past the end of our buffer,
-    /// would otherwise reach `IoBuf::set_len` — an underflow to ~4 GiB or a
+    /// would otherwise reach `VirtioIoBuf::set_len` — an underflow to ~4 GiB or a
     /// plain overrun, both of which its release-live assertion turns into a
     /// sys-io abort. A hypervisor bug should surface as a counter instead.
     fn validate(&self, consumed: u32) -> Result<(usize, RxMeta)> {
@@ -672,7 +672,7 @@ impl NetReadCompletion {
 }
 
 impl Future for NetReadCompletion {
-    type Output = (IoBuf, Result<RxMeta>);
+    type Output = (VirtioIoBuf, Result<RxMeta>);
 
     fn poll(
         self: std::pin::Pin<&mut Self>,

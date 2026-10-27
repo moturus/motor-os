@@ -59,7 +59,7 @@ git clone --branch motor-os-rt-v17 https://github.com/moturus/rust.git
 cd rust
 ```
 
-`motor-os-rt-v17` is the base Motor Rust branch. It contains the standard
+`motor-os-rt-v17` is the base Motor OS Rust branch. It contains the standard
 library implementation matched to moto-rt 0.17; building an arbitrary upstream
 Rust checkout here is no longer supported.
 

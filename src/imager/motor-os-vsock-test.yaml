@@ -24,6 +24,7 @@ static_dirs:
   - "img_files/motor-os-base"
   - "img_files/test-system-tty"
   - "img_files/test-vsock"
+ca_bundle: "/etc/ssl/certs/ca-certificates.crt"
 filesystem: "motor-fs"
 img_name: "motor-os-vsock-test.img"
 image_format: "raw"

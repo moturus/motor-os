@@ -1,8 +1,8 @@
 use super::block_io::{self, Message, Reply};
-use async_fs::block_cache::CheckpointedBlock;
 use async_trait::async_trait;
-use moto_async::channel;
-use moto_tooling::iobuf::IoBuf;
+use moto_sdk::async_fs::block_cache::CheckpointedBlock;
+use moto_sdk::async_runtime::channel;
+use moto_sdk::iobuf::VirtioIoBuf;
 use std::io::{ErrorKind, Result};
 
 const FS_BLOCK_SIZE: usize = 4096;
@@ -46,14 +46,14 @@ impl VirtioPartition {
 }
 
 #[async_trait(?Send)]
-impl async_fs::AsyncBlockDevice for VirtioPartition {
+impl moto_sdk::async_fs::AsyncBlockDevice for VirtioPartition {
     type Completion = Reply<Vec<CheckpointedBlock>>;
 
     fn num_blocks(&self) -> u64 {
         self.virtio_blocks >> 3
     }
 
-    async fn read_block<T: AsMut<IoBuf> + Unpin>(
+    async fn read_block<T: AsMut<VirtioIoBuf> + Unpin>(
         &self,
         block_no: u64,
         mut block: T,
@@ -76,7 +76,7 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
         (block, result)
     }
 
-    async fn read_blocks<T: AsMut<IoBuf> + Unpin>(
+    async fn read_blocks<T: AsMut<VirtioIoBuf> + Unpin>(
         &self,
         first_block_no: u64,
         mut blocks: Vec<T>,
@@ -106,7 +106,7 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
         (blocks, result)
     }
 
-    async fn write_block<T: AsRef<IoBuf> + Unpin>(
+    async fn write_block<T: AsRef<VirtioIoBuf> + Unpin>(
         &self,
         block_no: u64,
         block: T,
@@ -134,7 +134,7 @@ impl async_fs::AsyncBlockDevice for VirtioPartition {
         let pages = blocks
             .iter()
             .map(|block| {
-                let buffer: &IoBuf = block.as_ref();
+                let buffer: &VirtioIoBuf = block.as_ref();
                 assert_eq!(buffer.len(), FS_BLOCK_SIZE);
                 buffer.phys_addr() as u64
             })

@@ -21,7 +21,7 @@ imager publish-www <SITE DIRECTORY> --ssh-password <PASSWORD> \
 
 Examples below use `imager` for the host executable. Every image target in
 the Makefile installs a statically linked copy as `vm_images/PROFILE/tools/imager`,
-whose editing commands need neither the Motor toolchain nor a checkout. To invoke it through
+whose editing commands need neither the Motor OS toolchain nor a checkout. To invoke it through
 Cargo, use the repository-selected toolchain, change to `src/imager`, and
 run `cargo run --release -- <arguments>`. That directory's Cargo configuration
 supplies the required build flags. Cargo's `--release` selects the host tool's
@@ -52,7 +52,7 @@ environment variable for the checkout's parent development directory.
 
 Creation packages already-built binaries from `REPO ROOT/build/bin/PROFILE/`
 and the configured file trees. It assembles the MBR, boot loader, initrd,
-and Motor FS data partition. It does not compile the guest binaries.
+and Motor OS filesystem data partition. It does not compile the guest binaries.
 `REPO ROOT/vm_images/PROFILE/` must already exist. The image is written there
 under `img_name`, alongside `initrd` and `kloader` boot artifacts. An existing
 output can be replaced. Scratch files under
@@ -99,6 +99,7 @@ descriptions in [`src/imager`](../src/imager), such as `motor-os-base.yaml`,
 | `assembly_dirs` | Optional list of overlay directories relative to `MOTOR_ASSEMBLY_IMAGE_ROOT`. Appended after `static_dirs`. Defaults to empty. |
 | `assembly_required_executables` | Optional executable checks relative to the same assembly root. Defaults to empty. |
 | `source_dirs` | Optional list of `{source, destination}` mappings. Relative host sources use `REPO ROOT`; destinations are absolute guest directories. Defaults to empty. |
+| `ca_bundle` | Optional host PEM file installed as `/system/cfg/ssl/ca-certificates.crt`. Relative paths use `REPO ROOT`. The build fails unless it exists and contains only certificates; text outside PEM blocks is allowed. |
 
 Source snapshots are added after static overlays and exclude `.git`, `.lorry`,
 `__pycache__`, and `target` directories. Static overlays omit `devtools`
@@ -107,11 +108,18 @@ below it. File modes come from the
 [permission policy](fs-permissions.md#imager-enforcement), not host ownership
 or host read/write permissions.
 
+The CA bundle is added last and replaces any overlay file at its destination.
+Every image configuration names the build host's
+`/etc/ssl/certs/ca-certificates.crt`, so the guest trust store holds exactly
+the roots the host trusted at build time: hosts with different bundles build
+different images, and a rebuild picks up host CA updates. The imager prints
+the bundle's certificate count and SHA-256.
+
 Configurations with assembly inputs require `MOTOR_ASSEMBLY_IMAGE_ROOT` to
 name a normalized absolute host directory. Assembly paths in YAML must be
-normalized relative paths. The Make recipes obtain the root from
-`src/resolve-toolchain-assembly.sh --resolve`; see
-[assembly resolution](assembly-resolution.md) for the build workflow.
+normalized relative paths. The Make recipes pass `build/assembly/images`,
+which holds the overlays of the native toolchain and of the external sources;
+see [toolchain.md](toolchain.md#4-the-assembly) for the build workflow.
 
 ## Change guest permissions
 
@@ -154,7 +162,7 @@ imager resize -i original.qcow2 -o larger.qcow2 --size 4G
 imager resize -i original.qcow2 -o smaller.img --size 512M
 ```
 
-`resize` copies the input into an output whose **Motor FS data partition**
+`resize` copies the input into an output whose **Motor OS filesystem data partition**
 has the requested size. `SIZE` is a positive decimal integer followed by
 uppercase `M` or `G`: `M` means MiB and `G` means GiB. This is not the total
 image size or its allocated host disk space. Fractions, lowercase suffixes,
@@ -166,7 +174,7 @@ for raw. Format conversion can accompany resizing. Input and output must
 refer to different files, including through hard links or symlinks. An
 existing output is replaced only after the new image is complete.
 
-The input must contain exactly one Motor FS partition, and that partition
+The input must contain exactly one Motor OS filesystem partition, and that partition
 must be last. Both growth and shrinking are supported; shrinking fails if
 the contents and filesystem metadata do not fit. Guest files and their
 metadata are copied to a newly formatted filesystem. Earlier boot contents

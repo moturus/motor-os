@@ -21,17 +21,17 @@ use crate::Txn;
 use crate::bplus_tree;
 use crate::bplus_tree::Node;
 use crate::bplus_tree::RootNode;
-use async_fs::AsyncBlockDevice;
-pub use async_fs::BLOCK_SIZE;
-use async_fs::Block;
-pub use async_fs::EntryId;
-pub use async_fs::EntryKind;
-use async_fs::Metadata;
-use async_fs::Timestamp;
 use bytemuck::Pod;
+use moto_sdk::async_fs::AsyncBlockDevice;
+pub use moto_sdk::async_fs::BLOCK_SIZE;
+use moto_sdk::async_fs::Block;
+pub use moto_sdk::async_fs::EntryId;
+pub use moto_sdk::async_fs::EntryKind;
+use moto_sdk::async_fs::Metadata;
+use moto_sdk::async_fs::Timestamp;
 use std::io::Result;
 
-pub const MAX_FILENAME_LEN: usize = 255;
+pub use moto_sdk::async_fs::{MAX_FILENAME_LEN, validate_filename};
 pub const RESERVED_BLOCKS: usize = MAX_BLOCKS_IN_TXN_LOG + 2;
 
 pub(crate) const MAX_BLOCKS_IN_TXN: usize = 16;
@@ -149,7 +149,7 @@ pub(crate) struct Superblock {
     version: u64,           // 1 at the moment.
     num_blocks: u64,        // Num blocks (may be less than what the device has).
     free_blocks: u64,       // The number of unused blocks.
-    generation: u64,        // Auto-incrementing. Used in EntityId.
+    generation: u64,        // Incremented for new directory entries. Used in EntryId.
     freelist_head: BlockNo, // The head of the block freelist.
     empty_area_start: u64,  // All blocks after this one are unused.
     _reserved: u64,
@@ -209,48 +209,56 @@ impl Superblock {
         self.free_blocks
     }
 
-    #[inline]
-    pub(crate) fn check_accounting(&self) -> Result<()> {
+    /// The free-block accounting error while the freelist is empty: positive
+    /// for a deficit, negative for a surplus. The arithmetic is wide enough
+    /// that a corrupt superblock yields an error instead of an overflow.
+    fn accounting_error(&self) -> Option<i128> {
         if !self.freelist_head.is_null() {
-            Ok(())
-        } else {
-            if self.num_blocks
-                == self.empty_area_start + self.free_blocks + MAX_BLOCKS_IN_TXN_LOG as u64
-            {
-                Ok(())
-            } else {
-                let mut error_count: i64 = (self.num_blocks as i64)
-                    - ((self.empty_area_start + self.free_blocks + MAX_BLOCKS_IN_TXN_LOG as u64)
-                        as i64);
-                let verb = if error_count > 0 {
-                    "deficit"
-                } else {
-                    error_count *= -1;
-                    "surplus"
-                };
-                log::error!(
-                    "Free block accounting error: num_blocks: {} empty_area_start: {} free_blocks: {}\n\tFree block {}: {}",
-                    self.num_blocks,
-                    self.empty_area_start,
-                    self.free_blocks,
-                    verb,
-                    error_count
-                );
-                #[cfg(test)]
-                {
-                    panic!();
-                }
-                #[cfg(not(test))]
-                Err(ErrorKind::InvalidData.into())
-            }
+            return None;
         }
+        let accounted = self.empty_area_start as i128
+            + self.free_blocks as i128
+            + MAX_BLOCKS_IN_TXN_LOG as i128;
+        let error = self.num_blocks as i128 - accounted;
+        (error != 0).then_some(error)
     }
 
-    // Allocate a new/empty block. Also increments generation.
-    #[allow(clippy::await_holding_refcell_ref)]
-    pub async fn allocate_block<BD: AsyncBlockDevice>(
+    #[inline]
+    pub(crate) fn check_accounting(&self) -> Result<()> {
+        let Some(error) = self.accounting_error() else {
+            return Ok(());
+        };
+        log::error!(
+            "Free block accounting error: num_blocks: {} empty_area_start: {} free_blocks: {}\n\tFree block {}: {}",
+            self.num_blocks,
+            self.empty_area_start,
+            self.free_blocks,
+            if error > 0 { "deficit" } else { "surplus" },
+            error.unsigned_abs()
+        );
+        #[cfg(test)]
+        {
+            panic!();
+        }
+        #[cfg(not(test))]
+        Err(ErrorKind::InvalidData.into())
+    }
+
+    /// Allocate a directory entry with a fresh generation, including for files.
+    pub async fn allocate_entry<BD: AsyncBlockDevice>(
         txn: &mut Txn<'_, BD>,
     ) -> Result<EntryIdInternal> {
+        let block_no = Self::allocate_block(txn).await?;
+        let mut sb_block = txn.get_block(BlockNo(0)).await?;
+        let mut superblock_ref = sb_block.block_mut();
+        let superblock = superblock_ref.get_mut_at_offset::<Self>(0);
+        superblock.generation += 1;
+        Ok(EntryIdInternal::new(block_no, superblock.generation))
+    }
+
+    // Allocate a new/empty block without assigning an entry generation.
+    #[allow(clippy::await_holding_refcell_ref)]
+    pub async fn allocate_block<BD: AsyncBlockDevice>(txn: &mut Txn<'_, BD>) -> Result<BlockNo> {
         #[cfg(test)]
         ALLOC_BLOCK_CALLS.with(|c| c.set(c.get() + 1));
 
@@ -268,11 +276,7 @@ impl Superblock {
             superblock.check_accounting()?;
             superblock.free_blocks -= 1;
             superblock.empty_area_start += 1;
-            superblock.generation += 1;
-            return Ok(EntryIdInternal::new(
-                BlockNo(superblock.empty_area_start - 1),
-                superblock.generation,
-            ));
+            return Ok(BlockNo(superblock.empty_area_start - 1));
         };
 
         // Refcell may get re-borrowed in Self::reallocate_first_block, so we should drop the ref.
@@ -306,10 +310,7 @@ impl Superblock {
             superblock.freelist_head = next_head;
         }
         superblock.free_blocks -= 1;
-        superblock.generation += 1;
-        let generation = superblock.generation;
-
-        Ok(EntryIdInternal::new(res, generation))
+        Ok(res)
     }
 
     /// Take the first block in use by the file entry, detach it from the file, and return it.
@@ -764,18 +765,18 @@ impl DirEntryBlock {
         let sb_block = txn.get_block(BlockNo(0)).await?;
         let free_blocks_prev = sb_block.block().get_at_offset::<Superblock>(0).free_blocks;
 
-        let data_block_id = Superblock::allocate_block(txn).await?;
+        let data_block_no = Superblock::allocate_block(txn).await?;
         // We just allocated a new data block: need to zero it out.
-        let _ = txn.get_empty_block_mut(data_block_id.block_no);
+        let _ = txn.get_empty_block_mut(data_block_no);
 
-        Self::link_child_block(txn, file_id.block_no, data_block_id.block_no, block_key).await?;
+        Self::link_child_block(txn, file_id.block_no, data_block_no, block_key).await?;
 
         let used_blocks =
             free_blocks_prev - sb_block.block().get_at_offset::<Superblock>(0).free_blocks;
 
         Self::increment_blocks_in_use(txn, file_id.block_no, used_blocks).await?;
 
-        Ok(data_block_id.block_no)
+        Ok(data_block_no)
     }
 
     /// Converts a file from inline storage to B+ tree storage. The file's inline
@@ -840,9 +841,9 @@ impl DirEntryBlock {
         txn: &'b mut Txn<'a, BD>,
         parent_id: EntryIdInternal,
         entry_id: EntryIdInternal,
-        kind: async_fs::EntryKind,
+        kind: moto_sdk::async_fs::EntryKind,
         filename: &str,
-        permissions: async_fs::RolePermissions,
+        permissions: moto_sdk::async_fs::RolePermissions,
     ) {
         let mut child_block = txn.get_empty_block_mut(entry_id.block_no);
         let mut child_block_ref = child_block.block_mut();
@@ -1163,18 +1164,6 @@ impl DirEntryBlock {
     }
 }
 
-pub fn validate_filename(filename: &str) -> Result<()> {
-    if filename.len() > MAX_FILENAME_LEN || filename.contains('/') || filename.starts_with("..") {
-        return Err(ErrorKind::InvalidFilename.into());
-    }
-
-    if filename.trim().len() != filename.len() {
-        return Err(ErrorKind::InvalidFilename.into());
-    }
-
-    Ok(())
-}
-
 // Note: this macro returns a refcell's ref, which clippy flags when held across .await.
 // This may or may not be an issue. In any case, the worse that would happen is a panic,
 // not a silent data corruption.
@@ -1185,3 +1174,29 @@ macro_rules! dir_entry {
 }
 
 pub(crate) use dir_entry;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytemuck::Zeroable;
+
+    #[test]
+    fn corrupt_accounting_does_not_overflow() {
+        let mut sb = Superblock::zeroed();
+        sb.num_blocks = 100;
+        sb.empty_area_start = 2;
+        sb.free_blocks = 100 - 2 - MAX_BLOCKS_IN_TXN_LOG as u64;
+        assert_eq!(sb.accounting_error(), None);
+        sb.free_blocks = u64::MAX;
+        assert_eq!(
+            sb.accounting_error(),
+            Some(100 - 2 - u64::MAX as i128 - MAX_BLOCKS_IN_TXN_LOG as i128)
+        );
+        sb.empty_area_start = u64::MAX;
+        sb.num_blocks = u64::MAX;
+        assert!(sb.accounting_error().is_some_and(|error| error < 0));
+        // Only an empty freelist is checked.
+        sb.freelist_head = BlockNo(2);
+        assert_eq!(sb.accounting_error(), None);
+    }
+}

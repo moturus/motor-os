@@ -19,8 +19,8 @@ stable anchors.
 
 ## 1. Problem
 
-Motor FS permissions are per-role: `async_fs::Role { None = 0, Interactive = 1,
-System = 2 }` (`src/sys/lib/async-fs/src/filesystem.rs:52`), with one
+Motor OS filesystem permissions are per-role: `moto_sdk::async_fs::Role { None = 0,
+Interactive = 1, System = 2 }` (`src/sys/lib/moto-sdk/src/async_fs/filesystem.rs:49`), with one
 permission byte per role persisted in every entry's `Metadata`. Before this
 design, the OS itself distinguished only two classes of process: "system"
 (`CAP_SYS` set) and everything else. The consequences were:
@@ -198,8 +198,8 @@ implemented design.)
 
 ### Two enums, same discriminants — deliberately
 
-`async-fs` must keep building on the host (the imager links motor-fs/async-fs
-natively) and therefore cannot depend on `moto-sys`. So
+moto-sdk's `async_fs` must keep building on the host (the imager links
+motor-fs and moto-sdk natively), where moto-sdk has no `moto-sys`. So
 `moto_sys::caps::ProcessRole` and `async_fs::Role` remain distinct types with
 identical discriminants. Convert with an exhaustive three-arm match rather than
 an integer cast; a `const` assert in sys-io still pins the intentional wire/disk
@@ -382,7 +382,7 @@ is a policy statement, so the demotion path must not fail open.
 `CAP_LOG` admits its holder to both the kernel log syscall and strobe's
 `sys-log` record channel. Strobe checks the connection-bound peer capability
 word before accepting a tag. The bit does not grant access to
-`/system/logs`; lower-role holders submit records through `moto_log` while
+`/system/logs`; lower-role holders submit records through `moto_sdk::log` while
 System-role strobe alone creates and rotates the files. The `kernel` tag and
 its byte-preserving raw operation additionally require `CAP_IO_MANAGER`.
 Interactive sys-tty holds both bits and submits the kernel ring through this
@@ -402,7 +402,7 @@ so `std::fs` permission views agree with enforcement.
 
 ### 5.3 Enforce file execute permission in the loader
 
-Motor-fs cannot enforce file `x` because it never executes a file; its design
+`motor-fs` cannot enforce file `x` because it never executes a file; its design
 assigns that check to the exec-time consumer above the FS. That consumer is
 `rt.vdso/src/rt_process.rs`:
 
@@ -420,7 +420,7 @@ This uses the existing `FileAttr.perm` and `E_NOT_ALLOWED` surfaces. It does not
 add a moto-rt API or vtable field.
 
 Scope, stated plainly: this check is cooperative, not a security boundary.
-Spawn on Motor is a pure userspace loader — any `CAP_SPAWN` holder can read a
+Spawn on Motor OS is a pure userspace loader — any `CAP_SPAWN` holder can read a
 file (the lattice gives `x ⇒ r`, not the converse) and assemble the child
 address space with the same syscalls rt.vdso uses, bypassing the check
 entirely. File `x` is enforced policy for the standard runtime and every
@@ -589,7 +589,7 @@ belong to `PERMISSIONS_DESIGN.md`:
   narrowing or either exact transition `Rw` → `Rx` and `Rx` → `Rwx`, cascades
   removed permissions to lower roles, and rejects other direct self-widens.
   Each change still obeys the immediately higher role's ceiling; System has
-  none. Motor FS also requires the caller's `w` on the entry's current parent
+  none. The Motor OS filesystem also requires the caller's `w` on the entry's current parent
   directory, even for narrowing or an unchanged mode; only System may chmod
   `/`. Entry-ID changes need parent `w`, while pathname lookup needs `x` too.
   This applies to files and directories. A future
@@ -616,8 +616,8 @@ belong to `PERMISSIONS_DESIGN.md`:
   directories are `Rwx` for the creator and higher roles and `Rx` for lower
   roles. A distinct
   `create_entry_with_permissions` request carries a complete mode and asks
-  Motor FS to validate creation authority and monotonicity before linking the
-  entry; rejection is atomic.
+  the Motor OS filesystem to validate creation authority and monotonicity before
+  linking the entry; rejection is atomic.
 - On Motor OS, `std::fs::copy` preserves the source permission visible to the
   caller and the source permissions of every lower role the caller controls.
   Lower bytes are intersected with the finalized caller byte to retain

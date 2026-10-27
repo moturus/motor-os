@@ -54,8 +54,13 @@ pub(super) struct SocketBase {
     runtime: super::NetRuntime,
     backend: SocketBackend,
 
-    // Denormalized for quick validation.
-    client_sender: ClientSender,
+    // The owning client's channel. A TCP socket retired to TIME-WAIT drops
+    // it: nothing goes to the client again, and the channel's shared pages
+    // must not outlive the client by the ten seconds of TIME-WAIT.
+    client_sender: Option<ClientSender>,
+    // The channel's handle, which keys the client's socket set; denormalized
+    // for quick validation and kept after the sender is dropped.
+    client_handle: SysHandle,
 
     // The socket is "detached" from its client and should be
     // dropped when last TX bytes are out (RX is not happening
@@ -65,8 +70,32 @@ pub(super) struct SocketBase {
 
 pub(super) struct IpSocketBackend {
     device_idx: usize,
-    device_notify: Rc<moto_async::LocalNotify>,
+    device_notify: Rc<moto_sdk::async_runtime::LocalNotify>,
     local_addr: SocketAddr,
+    publication: IpSocketPublication,
+}
+
+enum IpSocketPublication {
+    Private,
+    Sending(moto_sdk::async_runtime::oneshot::Receiver<bool>),
+    Published,
+}
+
+pub(super) struct RemovalNotice {
+    sender: ClientSender,
+    message: moto_sdk::ipc::io_channel::Msg,
+    reply_ready: Option<moto_sdk::async_runtime::oneshot::Receiver<bool>>,
+}
+
+impl RemovalNotice {
+    pub(super) async fn send(self) {
+        if let Some(ready) = self.reply_ready
+            && ready.await != Ok(true)
+        {
+            return;
+        }
+        let _ = self.sender.send(self.message).await;
+    }
 }
 
 pub(super) enum SocketBackend {
@@ -94,8 +123,10 @@ impl SocketBase {
                 device_idx,
                 device_notify,
                 local_addr: socket_addr,
+                publication: IpSocketPublication::Private,
             }),
-            client_sender,
+            client_handle: client_sender.remote_handle(),
+            client_sender: Some(client_sender),
             lingering: false,
         }
     }
@@ -114,7 +145,8 @@ impl SocketBase {
             socket_id,
             runtime,
             backend: SocketBackend::Vsock(tuple),
-            client_sender,
+            client_handle: client_sender.remote_handle(),
+            client_sender: Some(client_sender),
             lingering: false,
         }
     }
@@ -128,13 +160,21 @@ impl SocketBase {
             socket_id,
             runtime,
             backend: SocketBackend::VsockListener,
-            client_sender,
+            client_handle: client_sender.remote_handle(),
+            client_sender: Some(client_sender),
             lingering: false,
         }
     }
 
     pub(super) fn ip_backend(&self) -> &IpSocketBackend {
         let SocketBackend::Ip(backend) = &self.backend else {
+            panic!("vsock has no IP backend")
+        };
+        backend
+    }
+
+    fn ip_backend_mut(&mut self) -> &mut IpSocketBackend {
+        let SocketBackend::Ip(backend) = &mut self.backend else {
             panic!("vsock has no IP backend")
         };
         backend
@@ -147,8 +187,20 @@ impl SocketBase {
         tuple
     }
 
+    /// The client's channel; a socket that dropped it never sends again.
     pub(super) fn sender(&self) -> &ClientSender {
-        &self.client_sender
+        self.client_sender
+            .as_ref()
+            .expect("socket released its client channel")
+    }
+
+    pub(super) fn client_handle(&self) -> SysHandle {
+        self.client_handle
+    }
+
+    /// Drops this socket's reference to the client's channel.
+    pub(super) fn release_client_sender(&mut self) {
+        self.client_sender = None;
     }
 
     pub(super) fn runtime(&self) -> &super::NetRuntime {
@@ -163,7 +215,7 @@ impl IpSocketBackend {
         socket_id.into()
     }
 
-    pub(super) fn device_notify(&self) -> Rc<moto_async::LocalNotify> {
+    pub(super) fn device_notify(&self) -> Rc<moto_sdk::async_runtime::LocalNotify> {
         self.device_notify.clone()
     }
 }
@@ -202,7 +254,7 @@ impl Drop for MotoSocket {
         }
 
         let socket_id = base.socket_id;
-        let client_handle = base.client_sender.remote_handle();
+        let client_handle = base.client_handle;
         let ip = base.ip_backend();
         let device_idx = ip.device_idx;
         let netstack_handle = ip.handle(socket_id);
@@ -217,10 +269,139 @@ impl Drop for MotoSocket {
         runtime_ref.devices[device_idx]
             .sockets
             .remove(netstack_handle);
+        runtime_ref.devices.reap(device_idx);
     }
 }
 
 impl MotoSocket {
+    pub(super) fn device_index(&self) -> Option<usize> {
+        match &self.base.backend {
+            SocketBackend::Ip(ip) => Some(ip.device_idx),
+            _ => None,
+        }
+    }
+
+    fn removal_notice(
+        &mut self,
+        pending_connect: Option<moto_sdk::ipc::io_channel::Msg>,
+    ) -> Option<RemovalNotice> {
+        use moto_sdk::{ipc::io_channel::Msg, sys_io::api_net};
+
+        let ip = self.base.ip_backend_mut();
+        let publication = std::mem::replace(&mut ip.publication, IpSocketPublication::Private);
+        let (published, reply_ready) = match publication {
+            IpSocketPublication::Private => (false, None),
+            IpSocketPublication::Sending(ready) => (true, Some(ready)),
+            IpSocketPublication::Published => (true, None),
+        };
+        let sender = self.base.client_sender.clone()?;
+        let mut message = if let Some(mut connect) = pending_connect {
+            connect.status = moto_rt::E_NOT_CONNECTED;
+            connect
+        } else if published {
+            let mut message = Msg::new();
+            message.status = moto_rt::E_OK;
+            if self.is_tcp() {
+                message.command = api_net::NetCmd::EvtTcpStreamStateChanged as u16;
+                message.payload.args_32_mut()[0] = api_net::TcpState::Closed.into();
+                message.payload.args_32_mut()[1] = api_net::TCP_STATE_CHANGE_CAUSE_RESET;
+            } else {
+                message.command = api_net::NetCmd::EvtUdpSocketInvalidated as u16;
+            }
+            message
+        } else {
+            return None;
+        };
+        message.handle = self.base.socket_id;
+        Some(RemovalNotice {
+            sender,
+            message,
+            reply_ready,
+        })
+    }
+
+    pub(super) fn is_udp_transport_on(&self, address: std::net::IpAddr, device_idx: usize) -> bool {
+        matches!(&self.state, SocketState::Udp(state) if state.physical_transport)
+            && self.device_index() == Some(device_idx)
+            && self.base.ip_backend().local_addr.ip() == address
+    }
+
+    /// Remove queued output before address-change processing can poll the NIC.
+    /// Only delivery of the terminal notice may wait on a slow client.
+    pub(super) fn invalidate_udp_socket(socket: Rc<RefCell<Self>>) -> Option<RemovalNotice> {
+        let (runtime, socket_id, client_handle, notice) = {
+            let mut socket = socket.borrow_mut();
+            assert!(matches!(socket.state, SocketState::Udp(_)));
+            let notice = socket.removal_notice(None);
+            (
+                socket.base.runtime.clone(),
+                socket.base.socket_id,
+                socket.base.client_handle,
+                notice,
+            )
+        };
+        {
+            let mut inner = runtime.inner.borrow_mut();
+            if let Some(client) = inner.clients.get_mut(&client_handle) {
+                client.sockets.remove(&socket_id);
+            }
+            inner.sockets.remove(&socket_id);
+        }
+        drop(socket);
+        notice
+    }
+
+    pub(super) async fn invalidate_ip_socket(socket: Rc<RefCell<Self>>) -> Option<RemovalNotice> {
+        if !socket.borrow().is_tcp() {
+            return Self::invalidate_udp_socket(socket);
+        }
+        let pending_connect = Self::prepare_removed_tcp(&socket);
+        let notice = socket.borrow_mut().removal_notice(pending_connect);
+        Self::drop_tcp_socket(socket).await;
+        notice
+    }
+
+    /// Publish the handle before starting I/O. Removal can take the receiver
+    /// to order its terminal notification after this reply without retaining
+    /// the socket while a client is not reading its channel.
+    pub(super) async fn publish_ip_socket(
+        socket: Rc<RefCell<Self>>,
+        reply: moto_sdk::ipc::io_channel::Msg,
+    ) -> bool {
+        use futures::FutureExt;
+
+        let sender = socket.borrow().base.sender().clone();
+        // The usual reply fits immediately and needs no extra allocation.
+        if let Some(result) = sender.send(reply).now_or_never() {
+            if result.is_ok() {
+                socket.borrow_mut().base.ip_backend_mut().publication =
+                    IpSocketPublication::Published;
+            }
+            return result.is_ok();
+        }
+        let (sent, ready) = moto_sdk::async_runtime::oneshot();
+        {
+            let mut socket = socket.borrow_mut();
+            let ip = socket.base.ip_backend_mut();
+            assert!(matches!(ip.publication, IpSocketPublication::Private));
+            ip.publication = IpSocketPublication::Sending(ready);
+        }
+        let weak = Rc::downgrade(&socket);
+        drop(socket);
+        let success = sender.send(reply).await.is_ok();
+        let published = weak.upgrade().is_some_and(|socket| {
+            let mut socket = socket.borrow_mut();
+            let ip = socket.base.ip_backend_mut();
+            if !success || !matches!(ip.publication, IpSocketPublication::Sending(_)) {
+                return false;
+            }
+            ip.publication = IpSocketPublication::Published;
+            true
+        });
+        let _ = sent.send(success);
+        published
+    }
+
     pub(super) fn socket_id(&self) -> u64 {
         self.base.socket_id
     }
@@ -253,7 +434,7 @@ impl MotoSocket {
         let socket_id = base.socket_id;
         let device_idx = base.ip_backend().device_idx;
         let netstack_handle = base.ip_backend().handle(socket_id);
-        let client_handle = base.client_sender.remote_handle();
+        let client_handle = base.client_handle;
         let mut inner = runtime.inner.borrow_mut();
         if !inner
             .clients
@@ -283,7 +464,7 @@ impl MotoSocket {
     ) -> std::io::Result<Rc<RefCell<Self>>> {
         let runtime = base.runtime.clone();
         let socket_id = base.socket_id;
-        let client_handle = base.client_sender.remote_handle();
+        let client_handle = base.client_handle;
         let mut inner = runtime.inner.borrow_mut();
         if !inner
             .clients
@@ -316,7 +497,7 @@ impl MotoSocket {
     ) -> std::io::Result<Rc<RefCell<Self>>> {
         let runtime = base.runtime.clone();
         let socket_id = base.socket_id;
-        let client_handle = base.client_sender.remote_handle();
+        let client_handle = base.client_handle;
         let mut inner = runtime.inner.borrow_mut();
         if !inner
             .clients
@@ -345,7 +526,7 @@ impl MotoSocket {
 
     // Accepted TCP/vsock sockets may move to another channel of the owner.
     pub(super) fn set_client_sender(&mut self, client_sender: &ClientSender) -> bool {
-        let prev_handle = self.base.client_sender.remote_handle();
+        let prev_handle = self.base.client_handle;
         let next_handle = client_sender.remote_handle();
         let mut runtime_ref = self.base.runtime.inner.borrow_mut();
         if !runtime_ref
@@ -369,7 +550,8 @@ impl MotoSocket {
                     .sockets
                     .insert(self.socket_id())
             );
-            self.base.client_sender = client_sender.clone();
+            self.base.client_sender = Some(client_sender.clone());
+            self.base.client_handle = next_handle;
         }
         true
     }

@@ -494,7 +494,7 @@ fn run_elf(
 
     // sys-io loads the executable and creates the stopped child with us as
     // its parent; the handle is ours.
-    let request = moto_sys_io::api_fs::SpawnRequest {
+    let request = moto_sdk::sys_io::api_fs::SpawnRequest {
         entry_id,
         capabilities: caps,
         detached,

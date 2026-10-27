@@ -1,4 +1,4 @@
-use async_fs::{AccessPermissions, RolePermissions};
+use moto_sdk::async_fs::{AccessPermissions, RolePermissions};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -499,8 +499,11 @@ trees:
                 mode
             );
         }
+        // Interactive owns /devtools, so a user can install a toolchain there.
         for (path, mode) in [
-            ("/devtools/lorry", "rwxr-xr-x"),
+            ("/devtools", "rwxrwxr-x"),
+            ("/devtools/llvm/bin", "rwxrwxr-x"),
+            ("/devtools/lorry", "rwxrwxr-x"),
             ("/devtools/lorry/user/cache", "rwxrwx---"),
             ("/devtools/lorry/none/cache", "rwxrwxrwx"),
         ] {

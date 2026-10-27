@@ -1,12 +1,12 @@
-use async_fs::AccessPermissions;
-use async_fs::AsyncBlockDevice;
-use async_fs::EntryId;
-use async_fs::EntryKind;
-use async_fs::FileSystem;
-use async_fs::Role;
-use async_fs::RolePermissions;
-use async_fs::file_block_device::AsyncFileBlockDevice;
 use camino::Utf8PathBuf;
+use moto_sdk::async_fs::AccessPermissions;
+use moto_sdk::async_fs::AsyncBlockDevice;
+use moto_sdk::async_fs::EntryId;
+use moto_sdk::async_fs::EntryKind;
+use moto_sdk::async_fs::FileSystem;
+use moto_sdk::async_fs::Role;
+use moto_sdk::async_fs::RolePermissions;
+use moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice;
 use rand::Rng;
 use std::cell::Cell;
 use std::io::ErrorKind;
@@ -31,7 +31,8 @@ async fn create_fs(tag: &str, num_blocks: u64) -> Result<MotorFs> {
     let path = Utf8PathBuf::from_path_buf(path).unwrap();
     std::fs::remove_file(path.clone()).ok();
 
-    let bd = async_fs::file_block_device::AsyncFileBlockDevice::create(&path, num_blocks).await?;
+    let bd = moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice::create(&path, num_blocks)
+        .await?;
     MotorFs::format(Box::new(bd)).await
 }
 
@@ -39,7 +40,7 @@ async fn open_fs(tag: &str) -> Result<MotorFs> {
     let path = std::env::temp_dir().join(tag);
     let path = Utf8PathBuf::from_path_buf(path).unwrap();
 
-    let bd = async_fs::file_block_device::AsyncFileBlockDevice::open(&path).await?;
+    let bd = moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice::open(&path).await?;
     MotorFs::open(Box::new(bd)).await
 }
 
@@ -56,7 +57,7 @@ impl AsyncBlockDevice for FlushErrorBlockDevice {
         self.inner.num_blocks()
     }
 
-    async fn read_block<T: AsMut<fittings::iobuf::IoBuf> + Unpin>(
+    async fn read_block<T: AsMut<moto_sdk::iobuf::IoBuf> + Unpin>(
         &self,
         block_no: u64,
         block: T,
@@ -64,7 +65,7 @@ impl AsyncBlockDevice for FlushErrorBlockDevice {
         self.inner.read_block(block_no, block).await
     }
 
-    async fn write_block<T: AsRef<fittings::iobuf::IoBuf> + Unpin>(
+    async fn write_block<T: AsRef<moto_sdk::iobuf::IoBuf> + Unpin>(
         &self,
         block_no: u64,
         block: T,
@@ -75,7 +76,7 @@ impl AsyncBlockDevice for FlushErrorBlockDevice {
     async fn write_blocks_with_completion(
         &self,
         first_block_no: u64,
-        blocks: Vec<async_fs::block_cache::CheckpointedBlock>,
+        blocks: Vec<moto_sdk::async_fs::block_cache::CheckpointedBlock>,
     ) -> Result<Self::Completion> {
         self.inner
             .write_blocks_with_completion(first_block_no, blocks)
@@ -97,6 +98,50 @@ fn basic() {
     let rt = tokio::runtime::LocalRuntime::new().unwrap();
 
     rt.block_on(basic_test()).unwrap();
+}
+
+#[test]
+fn generation_advances_only_for_entries() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+
+    rt.block_on(async {
+        let mut fs = create_fs("motor_fs_entry_generation_test", 1024).await?;
+        let first = fs
+            .create_entry(
+                Role::System,
+                crate::ROOT_DIR_ID,
+                EntryKind::File,
+                "first",
+                RolePermissions::all(AccessPermissions::Rwx),
+            )
+            .await?;
+        let first_generation = crate::EntryIdInternal::from(first).generation;
+
+        let bytes = [0x5a; moto_sdk::async_fs::BLOCK_SIZE];
+        for offset in (0..2 * 1024 * 1024).step_by(bytes.len()) {
+            assert_eq!(
+                fs.write(Role::System, first, offset as u64, &bytes).await?,
+                bytes.len()
+            );
+        }
+
+        let second = fs
+            .create_entry(
+                Role::System,
+                crate::ROOT_DIR_ID,
+                EntryKind::File,
+                "second",
+                RolePermissions::all(AccessPermissions::Rwx),
+            )
+            .await?;
+        assert_eq!(
+            crate::EntryIdInternal::from(second).generation,
+            first_generation + 1
+        );
+        Ok::<(), std::io::Error>(())
+    })
+    .unwrap();
 }
 
 #[test]
@@ -399,7 +444,7 @@ async fn basic_test() -> Result<()> {
         .create_entry(
             Role::System,
             root,
-            async_fs::EntryKind::Directory,
+            moto_sdk::async_fs::EntryKind::Directory,
             "first",
             RolePermissions::all(AccessPermissions::Rwx),
         )
@@ -413,7 +458,7 @@ async fn basic_test() -> Result<()> {
         fs.create_entry(
             Role::System,
             first,
-            async_fs::EntryKind::Directory,
+            moto_sdk::async_fs::EntryKind::Directory,
             "/",
             RolePermissions::all(AccessPermissions::Rwx)
         )
@@ -1828,7 +1873,7 @@ async fn random_file_test() -> Result<()> {
         let block_idx: usize = rng.r#gen::<usize>() % blocks.len();
         let block_no = blocks.remove(block_idx);
 
-        let mut block = Box::new(async_fs::Block::new_zeroed());
+        let mut block = Box::new(moto_sdk::async_fs::Block::new_zeroed());
         rng.fill_bytes(block.as_bytes_mut());
 
         fs.write(
@@ -1848,7 +1893,7 @@ async fn random_file_test() -> Result<()> {
     // Fill the remainder.
     loop {
         let block_no = bytes.len();
-        let mut block = Box::new(async_fs::Block::new_zeroed());
+        let mut block = Box::new(moto_sdk::async_fs::Block::new_zeroed());
         rng.fill_bytes(block.as_bytes_mut());
 
         match fs
@@ -1888,7 +1933,7 @@ async fn random_file_test() -> Result<()> {
     assert_eq!((file_sz / 4096) as usize, bytes.len());
 
     // Check the data.
-    let mut file_bytes = async_fs::Block::new_zeroed();
+    let mut file_bytes = moto_sdk::async_fs::Block::new_zeroed();
     for idx in 0..bytes.len() {
         fs.read(
             Role::System,
@@ -2825,7 +2870,7 @@ async fn write_speed_test() -> Result<()> {
 
     let mut fs = create_fs("motor_fs_write_speed_test", NUM_BLOCKS).await?;
 
-    let mut block = Box::new(async_fs::Block::new_zeroed());
+    let mut block = Box::new(moto_sdk::async_fs::Block::new_zeroed());
     rng.fill_bytes(block.as_bytes_mut());
 
     let file_id = fs
@@ -2877,7 +2922,7 @@ async fn native_write_speed_test() -> Result<()> {
 
     const FILE_BLOCKS: u64 = NUM_BLOCKS - (RESERVED_BLOCKS as u64 + NUM_BLOCKS / 100 + 1);
 
-    let mut block = Box::new(async_fs::Block::new_zeroed());
+    let mut block = Box::new(moto_sdk::async_fs::Block::new_zeroed());
     rng.fill_bytes(block.as_bytes_mut());
 
     let mut file = std::fs::File::create("/tmp/motor_fs_native_write_speed_test").unwrap();
@@ -2911,7 +2956,7 @@ async fn native_write_speed_async_test() -> Result<()> {
 
     const FILE_BLOCKS: u64 = NUM_BLOCKS - (RESERVED_BLOCKS as u64 + NUM_BLOCKS / 100 + 1);
 
-    let mut block = Box::new(async_fs::Block::new_zeroed());
+    let mut block = Box::new(moto_sdk::async_fs::Block::new_zeroed());
     rng.fill_bytes(block.as_bytes_mut());
 
     let mut file = tokio::fs::File::create("/tmp/motor_fs_native_write_speed_async_test")
@@ -2991,7 +3036,7 @@ fn access_triple_and_gate() {
 #[test]
 fn access_zeroed_metadata_is_rwx() {
     // (§8.2) A zeroed Metadata reads back as fully permissive for every role.
-    let m = async_fs::Metadata::zeroed();
+    let m = moto_sdk::async_fs::Metadata::zeroed();
     for role in [Role::None, Role::Interactive, Role::System] {
         assert_eq!(m.access(role).unwrap(), AccessPermissions::Rwx);
     }
@@ -3042,15 +3087,15 @@ fn perms_monotonic_check() {
     let idx = |n: AccessPermissions, i: AccessPermissions, s: AccessPermissions| {
         RolePermissions::new(s, i, n)
     };
-    assert!(async_fs::perms_monotonic(idx(R, Rw, Rwx)));
-    assert!(async_fs::perms_monotonic(idx(
+    assert!(moto_sdk::async_fs::perms_monotonic(idx(R, Rw, Rwx)));
+    assert!(moto_sdk::async_fs::perms_monotonic(idx(
         AccessPermissions::None,
         R,
         Rwx
     )));
-    assert!(async_fs::perms_monotonic(idx(Rwx, Rwx, Rwx)));
-    assert!(!async_fs::perms_monotonic(idx(Rwx, R, R))); // None wider than Interactive
-    assert!(!async_fs::perms_monotonic(idx(
+    assert!(moto_sdk::async_fs::perms_monotonic(idx(Rwx, Rwx, Rwx)));
+    assert!(!moto_sdk::async_fs::perms_monotonic(idx(Rwx, R, R))); // None wider than Interactive
+    assert!(!moto_sdk::async_fs::perms_monotonic(idx(
         AccessPermissions::None,
         Rx,
         Rw
@@ -3061,7 +3106,7 @@ fn perms_monotonic_check() {
 fn may_set_matrix() {
     // (§8.7) exhaustive authority matrix and the two self-role exceptions.
     use AccessPermissions::{R, Rw, Rwx, Rx};
-    use async_fs::may_set;
+    use moto_sdk::async_fs::may_set;
     let roles = [Role::None, Role::Interactive, Role::System];
     for &c in &roles {
         for &t in &roles {
@@ -3311,7 +3356,7 @@ async fn permissions_require_parent_write_test() -> Result<()> {
     }
 
     let root_before = fs.metadata(Role::System, root).await?;
-    for root_id in [root, async_fs::ROOT_ID] {
+    for root_id in [root, moto_sdk::async_fs::ROOT_ID] {
         assert_eq!(
             ErrorKind::PermissionDenied,
             fs.set_permissions(
@@ -3336,8 +3381,12 @@ async fn permissions_require_parent_write_test() -> Result<()> {
         root_before.modified.as_nanos(),
         fs.metadata(Role::System, root).await?.modified.as_nanos()
     );
-    fs.set_all_permissions(Role::System, async_fs::ROOT_ID, root_before.permissions()?)
-        .await?;
+    fs.set_all_permissions(
+        Role::System,
+        moto_sdk::async_fs::ROOT_ID,
+        root_before.permissions()?,
+    )
+    .await?;
 
     // Known entry IDs need only parent write, even without traversal.
     let rw_parent = fs
@@ -4028,14 +4077,14 @@ struct CountingBlockDevice {
 }
 
 #[async_trait::async_trait(?Send)]
-impl async_fs::AsyncBlockDevice for CountingBlockDevice {
-    type Completion = <AsyncFileBlockDevice as async_fs::AsyncBlockDevice>::Completion;
+impl moto_sdk::async_fs::AsyncBlockDevice for CountingBlockDevice {
+    type Completion = <AsyncFileBlockDevice as moto_sdk::async_fs::AsyncBlockDevice>::Completion;
 
     fn num_blocks(&self) -> u64 {
         self.inner.num_blocks()
     }
 
-    async fn read_block<T: AsMut<fittings::iobuf::IoBuf> + Unpin>(
+    async fn read_block<T: AsMut<moto_sdk::iobuf::IoBuf> + Unpin>(
         &self,
         block_no: u64,
         block: T,
@@ -4054,7 +4103,7 @@ impl async_fs::AsyncBlockDevice for CountingBlockDevice {
         result
     }
 
-    async fn write_block<T: AsRef<fittings::iobuf::IoBuf> + Unpin>(
+    async fn write_block<T: AsRef<moto_sdk::iobuf::IoBuf> + Unpin>(
         &self,
         block_no: u64,
         block: T,
@@ -4065,7 +4114,7 @@ impl async_fs::AsyncBlockDevice for CountingBlockDevice {
     async fn write_blocks_with_completion(
         &self,
         first_block_no: u64,
-        blocks: Vec<async_fs::block_cache::CheckpointedBlock>,
+        blocks: Vec<moto_sdk::async_fs::block_cache::CheckpointedBlock>,
     ) -> Result<Self::Completion> {
         self.inner
             .write_blocks_with_completion(first_block_no, blocks)
@@ -4289,4 +4338,301 @@ fn concurrent_miss_dedup() {
     init_logger();
     let rt = tokio::runtime::LocalRuntime::new().unwrap();
     rt.block_on(concurrent_miss_dedup_test()).unwrap();
+}
+
+/// Serves `inner`, but records and refuses any access past the device instead
+/// of forwarding it: the filesystem must never issue one, whatever entry ids a
+/// caller passes.
+struct RangeCheckingBlockDevice {
+    inner: AsyncFileBlockDevice,
+    out_of_range: Rc<Cell<Option<u64>>>,
+}
+
+impl RangeCheckingBlockDevice {
+    fn check(&self, block_no: u64) -> Result<()> {
+        if block_no < self.inner.num_blocks() {
+            return Ok(());
+        }
+        self.out_of_range.set(Some(block_no));
+        Err(ErrorKind::InvalidInput.into())
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl AsyncBlockDevice for RangeCheckingBlockDevice {
+    type Completion = <AsyncFileBlockDevice as AsyncBlockDevice>::Completion;
+
+    fn num_blocks(&self) -> u64 {
+        self.inner.num_blocks()
+    }
+
+    async fn read_block<T: AsMut<moto_sdk::iobuf::IoBuf> + Unpin>(
+        &self,
+        block_no: u64,
+        block: T,
+    ) -> (T, Result<()>) {
+        if let Err(err) = self.check(block_no) {
+            return (block, Err(err));
+        }
+        self.inner.read_block(block_no, block).await
+    }
+
+    async fn write_block<T: AsRef<moto_sdk::iobuf::IoBuf> + Unpin>(
+        &self,
+        block_no: u64,
+        block: T,
+    ) -> (T, Result<()>) {
+        if let Err(err) = self.check(block_no) {
+            return (block, Err(err));
+        }
+        self.inner.write_block(block_no, block).await
+    }
+
+    async fn write_blocks_with_completion(
+        &self,
+        first_block_no: u64,
+        blocks: Vec<moto_sdk::async_fs::block_cache::CheckpointedBlock>,
+    ) -> Result<Self::Completion> {
+        self.check(first_block_no)?;
+        self.inner
+            .write_blocks_with_completion(first_block_no, blocks)
+            .await
+    }
+
+    async fn flush(&self) -> Result<()> {
+        self.inner.flush().await
+    }
+}
+
+fn entry_id_at(block_no: u64, generation: u64) -> EntryId {
+    crate::EntryIdInternal::new(crate::BlockNo::from_u64(block_no), generation).into()
+}
+
+fn assert_refused<T>(result: Result<T>, operation: &str, block_no: u64) {
+    match result {
+        Err(err) if err.kind() == ErrorKind::InvalidInput => {}
+        Err(err) => panic!("{operation} on block {block_no:#x}: {err:?}, not InvalidInput"),
+        Ok(_) => panic!("{operation} on block {block_no:#x} succeeded"),
+    }
+}
+
+// Entry ids come from untrusted callers. Block numbers that cannot hold an
+// entry (the superblock, the transaction log, anything past the device) are
+// refused by every operation, and the device never sees them.
+async fn entry_id_range_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 1024;
+    let path = std::env::temp_dir().join("motor_fs_entry_id_range_test");
+    let path = Utf8PathBuf::from_path_buf(path).unwrap();
+    std::fs::remove_file(path.clone()).ok();
+
+    let out_of_range = Rc::new(Cell::new(None));
+    let device = RangeCheckingBlockDevice {
+        inner: AsyncFileBlockDevice::create(&path, NUM_BLOCKS).await?,
+        out_of_range: out_of_range.clone(),
+    };
+    let mut fs = crate::MotorFs::format(Box::new(device)).await?;
+    let role = Role::System;
+    let root = crate::ROOT_DIR_ID;
+    let all = RolePermissions::all(AccessPermissions::Rwx);
+    let file = fs
+        .create_entry(role, root, EntryKind::File, "file", all)
+        .await?;
+    assert_eq!(fs.write(role, file, 0, b"original").await?, 8);
+
+    let generation = crate::EntryIdInternal::from(file).generation;
+    let txn_log_start = NUM_BLOCKS - crate::MAX_BLOCKS_IN_TXN_LOG as u64;
+    let mut buf = [0_u8; 8];
+    for block_no in [
+        0,
+        txn_log_start,
+        NUM_BLOCKS - 1,
+        NUM_BLOCKS,
+        1 << 56,
+        u64::MAX,
+    ] {
+        let id = entry_id_at(block_no, generation);
+        assert_refused(fs.stat(role, id, "file").await, "stat", block_no);
+        assert_refused(
+            fs.create_entry(role, id, EntryKind::File, "new", all).await,
+            "create_entry",
+            block_no,
+        );
+        assert_refused(
+            fs.set_permissions(role, id, role, AccessPermissions::Rw)
+                .await,
+            "set_permissions",
+            block_no,
+        );
+        assert_refused(
+            fs.set_all_permissions(role, id, all).await,
+            "set_all_permissions",
+            block_no,
+        );
+        assert_refused(fs.delete_entry(role, id).await, "delete_entry", block_no);
+        assert_refused(
+            fs.move_entry(role, id, root, "moved").await,
+            "move_entry",
+            block_no,
+        );
+        assert_refused(
+            fs.move_entry(role, file, id, "moved").await,
+            "move_entry into",
+            block_no,
+        );
+        assert_refused(
+            fs.move_noreplace(role, id, root, "moved").await,
+            "move_noreplace",
+            block_no,
+        );
+        assert_refused(
+            fs.move_noreplace(role, file, id, "moved").await,
+            "move_noreplace into",
+            block_no,
+        );
+        assert_refused(
+            fs.get_first_entry(role, id).await,
+            "get_first_entry",
+            block_no,
+        );
+        assert_refused(
+            fs.get_next_entry(role, id).await,
+            "get_next_entry",
+            block_no,
+        );
+        assert_refused(fs.get_parent(role, id).await, "get_parent", block_no);
+        assert_refused(fs.name(role, id).await, "name", block_no);
+        assert_refused(fs.metadata(role, id).await, "metadata", block_no);
+        assert_refused(fs.read(role, id, 0, &mut buf).await, "read", block_no);
+        assert_refused(fs.write(role, id, 0, b"x").await, "write", block_no);
+        assert_refused(fs.resize(role, id, 0).await, "resize", block_no);
+        assert_refused(
+            fs.copy_file_range(role, id, 0, file, 0, 8).await,
+            "copy_file_range from",
+            block_no,
+        );
+        assert_refused(
+            fs.copy_file_range(role, file, 0, id, 0, 8).await,
+            "copy_file_range into",
+            block_no,
+        );
+        fs.prefetch(id, 0, 1).await;
+    }
+    assert_eq!(
+        out_of_range.get(),
+        None,
+        "the device saw a block past its end"
+    );
+
+    // Nothing above touched the filesystem, and the root is still reachable
+    // both as `ROOT_ID` and by its own entry id.
+    assert_eq!(fs.metadata(role, root).await?.size, 1);
+    assert!(
+        fs.stat(role, moto_sdk::async_fs::ROOT_ID, "file")
+            .await?
+            .is_some()
+    );
+    assert!(fs.stat(role, root, "file").await?.is_some());
+    assert_eq!(fs.read(role, file, 0, &mut buf).await?, 8);
+    assert_eq!(&buf, b"original");
+    Ok(())
+}
+
+#[test]
+fn entry_id_range() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+    rt.block_on(entry_id_range_test()).unwrap();
+}
+
+// A block inside the entry area that holds no entry: `stat` used to read the
+// parent's kind before validating the block, and `kind` panics on anything
+// that is not an entry. Both a never-written block and a file data block,
+// whose bytes the caller chose, must be refused like any other bad id.
+async fn stat_non_entry_parent_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 256;
+    let mut fs = create_fs("motor_fs_stat_non_entry_parent_test", NUM_BLOCKS).await?;
+    let role = Role::System;
+    let all = RolePermissions::all(AccessPermissions::Rwx);
+    let file = fs
+        .create_entry(role, crate::ROOT_DIR_ID, EntryKind::File, "file", all)
+        .await?;
+    // A whole block of data does not fit inline, so it gets a block of its own.
+    let data = [0xa5_u8; moto_sdk::async_fs::BLOCK_SIZE];
+    assert_eq!(fs.write(role, file, 0, &data).await?, data.len());
+
+    let txn_log_start = NUM_BLOCKS - crate::MAX_BLOCKS_IN_TXN_LOG as u64;
+    let mut data_block = None;
+    for block_no in 2..txn_log_start {
+        if fs
+            .block_cache()
+            .get_block(block_no)
+            .await?
+            .block()
+            .as_bytes()
+            == &data[..]
+        {
+            data_block = Some(block_no);
+            break;
+        }
+    }
+    let data_block = data_block.expect("the file's data block");
+
+    let generation = crate::EntryIdInternal::from(file).generation;
+    let never_written = txn_log_start - 1;
+    assert_refused(
+        fs.stat(role, entry_id_at(never_written, generation), "x")
+            .await,
+        "stat",
+        never_written,
+    );
+    assert!(
+        fs.stat(role, entry_id_at(data_block, generation), "x")
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn stat_non_entry_parent() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+    rt.block_on(stat_non_entry_parent_test()).unwrap();
+}
+
+// sys-io protects replacement targets with this lookup: the backends let a
+// caller replace an entry with only `w` on the directory.
+async fn lookup_unchecked_test() -> Result<()> {
+    let mut fs = create_fs("motor_fs_lookup_unchecked_test", 256).await?;
+    let role = Role::System;
+    let all = RolePermissions::all(AccessPermissions::Rwx);
+    let dir = fs
+        .create_entry(role, crate::ROOT_DIR_ID, EntryKind::Directory, "dir", all)
+        .await?;
+    let file = fs
+        .create_entry(role, dir, EntryKind::File, "file", all)
+        .await?;
+    fs.set_all_permissions(role, dir, RolePermissions::all(AccessPermissions::Rw))
+        .await?;
+    assert_eq!(
+        fs.stat(role, dir, "file").await.unwrap_err().kind(),
+        ErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        fs.lookup_unchecked(dir, "file").await?,
+        Some((file, EntryKind::File))
+    );
+    assert_eq!(fs.lookup_unchecked(dir, "absent").await?, None);
+    assert_eq!(
+        fs.lookup_unchecked(file, "x").await.unwrap_err().kind(),
+        ErrorKind::NotADirectory
+    );
+    Ok(())
+}
+
+#[test]
+fn lookup_unchecked() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+    rt.block_on(lookup_unchecked_test()).unwrap();
 }

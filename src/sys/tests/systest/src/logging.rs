@@ -1,6 +1,6 @@
-use moto_io::fs::{AccessPermissions, FsClient, RolePermissions};
-use moto_ipc::sync::{ChannelSize, ClientConnection, RequestHeader, ResponseHeader};
-use moto_log::implementation::{
+use moto_sdk::io::fs::{AccessPermissions, FsClient, RolePermissions};
+use moto_sdk::ipc::sync::{ChannelSize, ClientConnection, RequestHeader, ResponseHeader};
+use moto_sdk::log::implementation::{
     CMD_LOG, ConnectRequest, ConnectResponse, LogRequest, RawLogRequest,
 };
 use std::io::Write;
@@ -71,7 +71,7 @@ fn connected_tag(tag: &str) -> (ClientConnection, u64) {
 
 fn derived_tag(slot: &str, suffix: &str) -> String {
     let tag = format!("{slot}-{suffix}");
-    assert!(tag.len() <= moto_log::MAX_TAG_LEN);
+    assert!(tag.len() <= moto_sdk::log::MAX_TAG_LEN);
     tag
 }
 
@@ -95,7 +95,7 @@ fn prepare_log(conn: &mut ClientConnection, tag_id: u64, payload: &[u8]) {
     let req = conn.req::<LogRequest>();
     req.header.cmd = CMD_LOG;
     req.header.ver = 0;
-    req.log_level = moto_log::implementation::LOG_LEVEL_INFO;
+    req.log_level = moto_sdk::log::implementation::LOG_LEVEL_INFO;
     req.payload_size = payload.len() as u32;
     req.tag_id = tag_id;
     req.timestamp = moto_rt::time::Instant::now().as_u64();
@@ -118,14 +118,14 @@ pub fn run_child(args: &[String]) -> ! {
             expect_error_and_disconnect(conn, moto_rt::E_NOT_ALLOWED);
         }
         FALLBACK_CHILD => {
-            moto_log::init(tag).unwrap();
-            moto_log::test_set_tag_id(u64::MAX);
+            moto_sdk::log::init(tag).unwrap();
+            moto_sdk::log::test_set_tag_id(u64::MAX);
             log::error!("first failed RPC fallback");
-            assert!(!moto_log::test_rpc_enabled());
+            assert!(!moto_sdk::log::test_rpc_enabled());
             log::error!("second disabled RPC fallback");
         }
         NONE_LOG_CHILD => {
-            moto_log::init(tag).unwrap();
+            moto_sdk::log::init(tag).unwrap();
             log::set_max_level(log::LevelFilter::Info);
             log::info!("{}", args.get(3).expect("logging child marker"));
         }
@@ -176,7 +176,7 @@ fn protocol_hardening(slot: &str) {
     let mut conn = raw_connection();
     ConnectRequest::prepare(
         conn.data_mut(),
-        "x".repeat(moto_log::MAX_TAG_LEN + 1).as_str(),
+        "x".repeat(moto_sdk::log::MAX_TAG_LEN + 1).as_str(),
     );
     expect_error_and_disconnect(conn, moto_rt::E_INVALID_ARGUMENT);
 
@@ -235,7 +235,7 @@ fn protocol_hardening(slot: &str) {
 
 /// Read the log once it holds at least `want` complete lines.
 ///
-/// `moto_log::init()` and each `log!` are synchronous RPCs to strobe, but its
+/// `moto_sdk::log::init()` and each `log!` are synchronous RPCs to strobe, but its
 /// RPC thread only queues the record: a separate io thread creates the file and
 /// writes it. So both the file's existence and its contents lag the client by an
 /// unbounded amount under load, and a fixed sleep here is a race. Requiring a
@@ -256,7 +256,7 @@ fn wait_for_records(path: &str, records: &[String]) -> String {
 }
 
 fn assert_permissions(path: &str, expected: RolePermissions) {
-    let permissions = moto_async::LocalRuntime::new().block_on(async {
+    let permissions = moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().unwrap();
         let (entry_id, _) = client.stat(path).await.unwrap();
         client
@@ -270,13 +270,13 @@ fn assert_permissions(path: &str, expected: RolePermissions) {
 }
 
 fn fs_available_bytes() -> u64 {
-    let provider = moto_stats::Collector::provider_by_name("sys-io").unwrap();
-    let metric = moto_stats::Collector::describe(&provider)
+    let provider = moto_sdk::stats::Collector::provider_by_name("sys-io").unwrap();
+    let metric = moto_sdk::stats::Collector::describe(&provider)
         .unwrap()
         .into_iter()
         .find(|metric| metric.name == "fs.available_bytes")
         .unwrap();
-    moto_stats::Collector::read(&provider, metric.id, moto_stats::SCOPE_GLOBAL).unwrap()
+    moto_sdk::stats::Collector::read(&provider, metric.id, moto_sdk::stats::SCOPE_GLOBAL).unwrap()
 }
 
 fn previous_log_bytes() -> u64 {
@@ -348,7 +348,7 @@ fn rotation_and_space_cleanup(slot: &str) {
 
 fn basic(slot: &str) {
     let path = log_path(slot);
-    moto_log::init(slot).unwrap();
+    moto_sdk::log::init(slot).unwrap();
     log::set_max_level(log::LevelFilter::Trace);
 
     let marker = format!(
@@ -419,7 +419,7 @@ fn basic(slot: &str) {
 /// brought close to the rotation size first, so the drain that writes the
 /// held records out also rotates the file partway through.
 fn records_under_pressure(slot: &str) {
-    const HELD: usize = 64;
+    const HELD: usize = 128;
     let tag = derived_tag(slot, "pressure");
     let path = log_path(&tag);
     let previous_path = format!("{path}.prev");
@@ -457,9 +457,10 @@ fn records_under_pressure(slot: &str) {
     moto_sys::SysRay::log(&kernel_before).unwrap();
     crate::kernel_log::wait_for_file_records(&[kernel_before.as_bytes()]);
 
-    // Everything the episode sends is built now: 64 records of 3 KiB are
-    // three times the backlog, so most of them can only be dropped. Kernel
-    // records go through sys-tty's own queue first; a few is enough.
+    // Build the episode before squeezing memory. The 128 records of 3 KiB
+    // exceed both strobe's 64-message I/O queue and its 64 KiB backlog, so
+    // some must be dropped before the RPCs finish. Kernel records go through
+    // sys-tty's own queue first; a few is enough.
     let held: Vec<String> = (0..HELD)
         .map(|i| {
             let prefix = format!("{nonce} held {i:03} ");

@@ -1,6 +1,6 @@
 # Filesystem permissions in Motor OS images
 
-Motor OS images are built with a declarative Motor FS permission policy. The
+Motor OS images are built with a declarative Motor OS filesystem permission policy. The
 development image contains the complete policy surface; the base, standard,
 and System-tty images contain subsets of the same destination paths and apply
 the same mode to every shared entry.
@@ -9,9 +9,28 @@ This document describes permissions on newly built images. It does not define
 a migration for existing images and does not impose an OS-wide W^X rule on
 files created after boot.
 
+`/none/tmp` is an empty, volatile memfs after each boot. Its root inherits the
+image's `rwxrwxrwx` mode through `/system/cfg/sys-fs.toml`; only System may
+change a mounted root's mode. `/user/tmp` and `/system/tmp` remain on disk.
+Memfs charges live data and metadata against its configured capacity. With
+the default configuration the cap is guest RAM rounded down to 16 MiB, minus
+16 MiB, with an 8 MiB minimum. Allocating requests also preserve a sampled
+16 MiB memory reserve (8 MiB below 32 MiB RAM); cached free pages are reclaimed
+before a memory refusal. A large explicit capacity does not reserve RAM.
+Sparse logical length and holes do not consume data storage.
+
+Copies between disk and memfs work normally. Renaming between them returns
+`CrossesDevices` (`EXDEV` in libc); moving or deleting a mount root, or replacing
+one by rename, returns `PermissionDenied`. `remove_dir_all("/none/tmp")` can
+empty the mount before failing to remove its root. Prefer a private subtree
+for temporary work. The native `FsClient::mounts()` API lists all mounts,
+configured paths, capacities and sampled usage for every role. sys-io's
+`fs.capacity_bytes` and `fs.available_bytes` metrics describe only the data
+partition; memfs usage appears in the listing and the `fs.memfs.*` totals.
+
 ## Permission model
 
-A Motor FS mode contains three permission triplets in **System, Interactive,
+A Motor OS filesystem mode contains three permission triplets in **System, Interactive,
 None** order. For example, `rw-r-----` grants System read/write, Interactive
 read, and None no access. The legal triplets are `rwx`, `rw-`, `r-x`, `r--`,
 and `---`. Permissions are monotonic:
@@ -35,23 +54,23 @@ Interactive-owned locations.
 
 The initial image policy follows these principles:
 
-- System owns installed OS and toolchain content. Installed executable ELFs
-  are read/execute-only. Files directly under `/system/bin` are also
+- System owns installed OS content. Installed executable ELFs are
+  read/execute-only. Files directly under `/system/bin` are also
   read/execute-only when they are scripts.
 - Interactive may read and run installed programs, but cannot replace content
-  in `/system` or the installed parts of `/devtools`.
-- `/user` is Interactive-owned. Interactive may install programs, edit
-  configuration, and create work there.
-- Scripts directly under `/user/bin` and `/devtools/bin` are writable by
-  Interactive. Compiled programs in those directories remain non-writable.
-- `/devtools/src` is the Interactive-writable development workspace.
+  in `/system`.
+- `/user` and `/devtools` are Interactive-owned. Interactive may install
+  programs, edit configuration, and create work there; in `/devtools` it may
+  replace the installed toolchain with a newer one.
+- Scripts are writable by Interactive in its trees. Compiled programs there
+  remain non-writable, but Interactive may replace them.
 - None may read and execute public installed content, but may write only its
   own `/none/cfg` and `/none/tmp`. Lower-role services submit logs over IPC;
   None cannot traverse `/user/cfg`, `/user/tmp`, `/system/tmp`, or
   `/system/logs`.
-- Host owner/group/other read and write bits do not map to Motor roles. Host
+- Host owner/group/other read and write bits do not map to Motor OS roles. Host
   execute bits select which files require script or ELF classification; the
-  image policy supplies all three complete Motor permission triplets.
+  image policy supplies all three complete Motor OS permission triplets.
 
 ## Development-image policy
 
@@ -77,19 +96,17 @@ ELF whose type is `ET_EXEC` or `ET_DYN`.
 | `/none` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | The None role's home; None cannot add entries here |
 | `/none/cfg` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | None-role configuration, which None may write |
 | `/none/tmp` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | None-role scratch |
-| `/devtools/bin` | `rwxr-xr-x` | `rw-r--r--` | `rwxrwxr-x` | `r-xr-xr-x` | Fixed installed tools and Interactive-editable launcher scripts |
-| `/devtools/lorry` | `rwxr-xr-x` | `rw-r--r--` | `rwxr-xr-x` | `r-xr-xr-x` | Holds the two role trees below |
+| `/devtools` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | The Interactive-owned development tree: tools and launchers, the toolchain, tests, sources, and project-local Lorry state |
 | `/devtools/lorry/user` | `rwxrwx---` | `rw-rw----` | `rwxrwx---` | `r-xr-x---` | Interactive Lorry repository and cache, hidden from None |
 | `/devtools/lorry/none` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | None-role Lorry repository and cache |
-| `/devtools/src` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Editable sources and project-local Lorry state |
 
 Before any runtime permission changes, the directory modes have these effects:
 
 - Interactive cannot create a new root-level tree or replace `/system`.
-- Interactive can create and replace entries throughout `/user`, except where
-  a longer tree rule restricts access.
-- Interactive can edit a script in `/devtools/bin` in place, but cannot add,
-  delete, or rename entries there because the directory is `rwxr-xr-x`.
+- Interactive can create and replace entries throughout `/user` and
+  `/devtools`, except where a longer tree rule restricts access. A native
+  toolchain archive's `install.sh` relies on this to replace `/devtools/llvm`
+  and `/devtools/rust` ([toolchain.md](toolchain.md)).
 - Each role can create and replace entries in its own temporary directory
   and in those of lower roles. None can use only `/none/tmp`, and Interactive
   cannot reach `/system/tmp`.
@@ -108,13 +125,12 @@ Several installed trees deliberately use the default rule:
 - Most of `/system/cfg`, including the implicit `/system/cfg/ssl` directory,
   is System-writable and publicly readable. None-role services have not yet
   been audited for configuration reads.
-- `/devtools/llvm`, `/devtools/rust`, `/devtools/tests`, and `/devtools/www`
-  are installed content. Clang reads its target configuration from
-  `/devtools/llvm/cfg`. `/devtools/lorry/user` and `/devtools/lorry/none` hold
-  the Interactive and None repositories and caches of the installed Lorry
-  tool; Lorry refuses to run as System.
-  Other guest build and test writes belong under `/devtools/src` or the
-  role's temporary directory.
+- Under `/devtools`, `llvm`, `rust`, `tests`, and `www` hold installed
+  content that Interactive may replace. Clang reads its target configuration
+  from `/devtools/llvm/cfg`. `/devtools/lorry/user` and `/devtools/lorry/none`
+  hold the Interactive and None repositories and caches of the installed
+  Lorry tool; Lorry refuses to run as System. Other guest build and test
+  writes belong under `/devtools/src` or the role's temporary directory.
 - Development source trees staged in `/devtools/src` are consumed in place;
   project build output belongs under `/devtools/src` and scratch output in
   the role's temporary directory. Git dependencies are fetched by the build
@@ -213,9 +229,9 @@ Source classification uses the host execute bits only as a gate:
 4. Any other executable source is rejected.
 
 Host read/write bits and host owner/group/other classes never influence the
-Motor mode.
+Motor OS mode.
 
-The Motor FS root and every explicit or implicit directory are created with
+The Motor OS filesystem root and every explicit or implicit directory are created with
 their resolved policy modes. Files whose final mode lets System write are
 created with that final mode. Files whose final mode denies System write are
 created temporarily as `rw-------`, populated, and atomically changed through
@@ -232,7 +248,7 @@ classification.
 
 Imager tests cover policy parsing and validation, rule precedence, source
 classification, content overlays, the root mode, and file finalization by
-building and reopening a small Motor FS image.
+building and reopening a small Motor OS filesystem image.
 
 Guest acceptance tests intentionally limit exhaustive mode checks to direct
 entries matching `/*/bin/*`:
@@ -244,9 +260,10 @@ entries matching `/*/bin/*`:
   suite.
 
 With the initial image permissions, the development-image suite proves that
-Interactive can edit `/devtools/bin/www` in place but cannot delete or rename it. Functional checks
-prove that Interactive cannot create a root-level directory and can write the
-appropriate scratch and source trees. Tests do not walk and assert the modes of
+Interactive can edit `/devtools/bin/www` in place and rename it, and installs
+a native toolchain into `/devtools`. Functional checks prove that Interactive
+cannot create a root-level directory and can write the appropriate scratch and
+source trees. Tests do not walk and assert the modes of
 every other image file.
 
 The VM harnesses share their guest directories (`src/tests/test-roots.sh`).
@@ -281,8 +298,8 @@ absent.
   lower roles, and unchanged-mode requests. Entry-ID operations need parent
   `w` but not `x`; pathname lookup still needs `x`. Only System may change
   `/`. A file's own `w` still permits editing its contents when its parent
-  denies permission changes. For example, Interactive can write to
-  `/devtools/bin/www` in place but cannot chmod it.
+  denies permission changes: a file that Interactive may write in a
+  directory whose `w` it has dropped can be edited but not chmodded.
 - An SFTP upload onto an existing file replaces its contents in place and
   keeps its installed mode: OPEN's mode is a creation hint. The exception is
   an upload whose mode excludes a lower role that can currently read the
@@ -318,7 +335,7 @@ absent.
   linked with their final mode.
 - Runtime logs are created atomically as `rw-r-----` by System-role strobe via
   the exact-permissions API. Rotation renames the current file to `.prev`,
-  preserving its mode. Authorized lower-role processes use `moto_log`;
+  preserving its mode. Authorized lower-role processes use `moto_sdk::log`;
   `CAP_LOG` admits a peer to strobe but does not grant direct filesystem
   access.
 - The remaining `/system/cfg` content, including `sys-init.cfg` and
@@ -391,13 +408,13 @@ after they are accepted.
    resolved entry. Guest tests concentrate on executable installation
    boundaries and functional access checks, avoiding a brittle duplicate of
    the complete image manifest.
-9. **`rmux` creates `$TMPDIR` only when it is absent.** On Motor, rmux's
-   client and server meet over `moto-ipc` and need no port file. The client
+9. **`rmux` creates `$TMPDIR` only when it is absent.** On Motor OS, rmux's
+   client and server meet over the SDK's IPC (`moto_sdk::ipc`) and need no port file. The client
    still creates a caller-selected, absent `TMPDIR` before it starts a server,
    because panes inherit it and Rush stages pipelines there. Blindly calling
-   `create_dir_all` on an existing directory first asks Motor FS to create
-   it, and Motor FS checks write access to the parent before detecting the
-   existing child, so a role that may not write the parent is refused.
+   `create_dir_all` on an existing directory first asks the Motor OS filesystem
+   to create it, and the filesystem checks write access to the parent before
+   detecting the existing child, so a role that may not write the parent is refused.
    Testing whether the directory exists first avoids that request.
 10. **Denial acceptance tests assert filesystem postconditions.** During
     implementation, the sysbox `mkdir` and `mv` applets printed a permission
@@ -429,8 +446,8 @@ after they are accepted.
 13. **Systest creates its temporary directory only when it is absent.** A
     role's temporary directory can be writable while its parent is not, as
     with `/none/tmp` for None. Unconditionally calling
-    `create_dir_all` for that existing directory asks Motor FS for create
-    permission on the non-writable parent before it observes the child, so
+    `create_dir_all` for that existing directory asks the Motor OS filesystem
+    for create permission on the non-writable parent before it observes the child, so
     the systest receives `PermissionDenied`. Making the parent writable
     would broaden the image policy, and changing
     `create_dir_all` semantics is outside image-policy scope. A shared systest
@@ -439,8 +456,8 @@ after they are accepted.
 14. **Lorry likewise preserves a non-writable parent of an existing staging
     directory.** Lorry's atomic-output helper used `create_dir_all` on every
     staging parent, including an existing temporary directory used for
-    admission, review, and vendoring scratch. Motor FS consequently required
-    create permission on that directory's parent before Lorry could create a
+    admission, review, and vendoring scratch. The Motor OS filesystem consequently
+    required create permission on that directory's parent before Lorry could create a
     private child inside it. The helper now creates the parent only when it is
     not already a directory. This preserves absent custom staging paths,
     Lorry's private-child and atomic-publication behavior, and the image's

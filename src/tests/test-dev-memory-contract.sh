@@ -7,7 +7,7 @@ trap 'rm -rf "$temporary"' EXIT
 mkdir -p "$temporary/src/tests" "$temporary/src/bin/lorry/tests" \
   "$temporary/src/bin/httpd-axum/tests" "$temporary/bin"
 cp "$WD/full-test-dev.sh" "$temporary/src/tests/"
-for script in full-test.sh test-dev-sources.sh; do
+for script in full-test.sh test-dev-sources.sh test-native-toolchain-install.sh; do
   printf '%s\n' '#!/bin/bash' \
     'printf "%s %s %s\n" "${0##*/}" "${MOTO_MEMORY_MIB:-unset}" "$*" >> "$MEMORY_TEST_LOG"' \
     > "$temporary/src/tests/$script"
@@ -17,18 +17,6 @@ printf '%s\n' '#!/bin/bash' \
   'printf "test-wasm.sh %s\n" "$*" >> "$MEMORY_TEST_LOG"' \
   > "$temporary/src/tests/test-wasm.sh"
 chmod +x "$temporary/src/tests/test-wasm.sh"
-# The native Gears phase is enabled only by the developer wrapper.
-sed -i '2i [ "${TEST_DEV_SOURCES_GEARS_TESTS:-0}" = 1 ] || exit 1' \
-  "$temporary/src/tests/test-dev-sources.sh"
-# Host Gears gates get only the profile, regardless of VM options.
-for script in test-gears-http.sh test-gears-batteries.sh; do
-  cat > "$temporary/src/tests/$script" <<'EOF'
-#!/bin/bash
-[ "$#" = 1 ] && [ "$1" = --release ] || exit 1
-printf '%s %s\n' "${0##*/}" "$*" >> "$GEARS_TEST_LOG"
-EOF
-done
-export GEARS_TEST_LOG="$temporary/gears-observed"
 printf '%s\n' '#!/bin/bash' 'exit 0' > "$temporary/bin/python3"
 cp "$temporary/bin/python3" "$temporary/src/bin/lorry/tests/test-all.sh"
 chmod +x "$temporary/bin/python3" "$temporary/src/bin/lorry/tests/test-all.sh"
@@ -42,7 +30,7 @@ export PATH="$temporary/bin:$PATH"
 wasm_expected=$'\ntest-wasm.sh --prepare --vm wasm:224 --vm dev:256 --release\ntest-wasm.sh --vm wasm:224 --vm dev:256 --linux-identity --release'
 
 env -u MOTO_MEMORY_MIB -u MOTO_IMAGE bash "$temporary/src/tests/full-test-dev.sh" --release > "$temporary/wrapper.log"
-expected=$'full-test.sh 8192 --release\nhttpd-axum 4096 motor-os-dev.qcow2 --motor --release\ntest-dev-sources.sh 4096 --release'
+expected=$'full-test.sh 8192 --release\nhttpd-axum 4096 motor-os-dev.qcow2 --motor --release\ntest-dev-sources.sh 4096 --release\ntest-native-toolchain-install.sh 4096 --release'
 expected+="$wasm_expected"
 [ "$(<"$MEMORY_TEST_LOG")" = "$expected" ] || {
   echo 'developer VM defaults changed' >&2; exit 1;
@@ -50,7 +38,7 @@ expected+="$wasm_expected"
 : > "$MEMORY_TEST_LOG"
 MOTO_MEMORY_MIB=6144 MOTO_IMAGE=caller.qcow2 \
   bash "$temporary/src/tests/full-test-dev.sh" --release >> "$temporary/wrapper.log"
-expected=$'full-test.sh 6144 --release\nhttpd-axum 6144 motor-os-dev.qcow2 --motor --release\ntest-dev-sources.sh 6144 --release'
+expected=$'full-test.sh 6144 --release\nhttpd-axum 6144 motor-os-dev.qcow2 --motor --release\ntest-dev-sources.sh 6144 --release\ntest-native-toolchain-install.sh 6144 --release'
 expected+="$wasm_expected"
 [ "$(<"$MEMORY_TEST_LOG")" = "$expected" ] || {
   echo 'developer VM caller override was not preserved' >&2; exit 1;
@@ -60,7 +48,7 @@ expected+="$wasm_expected"
 env -u MOTO_MEMORY_MIB \
   bash "$temporary/src/tests/full-test-dev.sh" --release --vmm chv \
   >> "$temporary/wrapper.log"
-expected=$'full-test.sh 8192 --release --vmm chv\nhttpd-axum 4096 motor-os-dev.qcow2 --motor --release --vmm chv\ntest-dev-sources.sh 4096 --release --vmm chv'
+expected=$'full-test.sh 8192 --release --vmm chv\nhttpd-axum 4096 motor-os-dev.qcow2 --motor --release --vmm chv\ntest-dev-sources.sh 4096 --release --vmm chv\ntest-native-toolchain-install.sh 4096 --release --vmm chv'
 expected+="${wasm_expected//--release/--release --vmm chv}"
 [ "$(<"$MEMORY_TEST_LOG")" = "$expected" ] || {
   echo 'developer VMM selection was not forwarded to every phase' >&2; exit 1;
@@ -74,10 +62,6 @@ fi
 [ ! -s "$MEMORY_TEST_LOG" ] || {
   echo 'developer wrapper rejected Firecracker after starting a phase' >&2; exit 1;
 }
-
-expected=$'test-gears-http.sh --release\ntest-gears-batteries.sh --release'
-printf '%s\n%s\n%s\n' "$expected" "$expected" "$expected" > "$temporary/gears-expected"
-diff -u "$temporary/gears-expected" "$GEARS_TEST_LOG"
 
 # The candidate wrapper has its own 8 GiB default and preserves an override.
 cp "$WD/test-candidate-vm.sh" "$temporary/src/tests/"

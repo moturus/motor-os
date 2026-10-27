@@ -9,8 +9,8 @@ pub(in crate::runtime::fs) mod self_test;
 use super::elf;
 use super::{ExecLocks, RelocIndex, SpawnStats, native, read_range};
 use crate::runtime::fs::FsRuntime;
-use async_fs::{EntryId, Role};
-use moto_async::AsFuture;
+use moto_sdk::async_fs::{EntryId, Role};
+use moto_sdk::async_runtime::AsFuture;
 use moto_sys::{SysHandle, SysMem};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
@@ -221,7 +221,7 @@ async fn relocate(
         let n = (last - idx).min(CHUNK);
         if idx != first {
             // A long run of records must not hold up other sys-io clients.
-            moto_async::yield_to_io().await;
+            moto_sdk::async_runtime::yield_to_io().await;
             if !runtime.pager.is_live(id) {
                 return Ok(());
             }
@@ -320,7 +320,7 @@ async fn serve(runtime: FsRuntime, id: u64, page: u64) {
 pub(crate) async fn run(runtime: FsRuntime, notify: SysHandle) {
     let mut signal = notify.as_future();
     // Tickets bound the fills in flight; a serve returns its ticket when done.
-    let (ticket_tx, mut ticket_rx) = moto_async::channel(MAX_SERVES);
+    let (ticket_tx, mut ticket_rx) = moto_sdk::async_runtime::channel(MAX_SERVES);
     for _ in 0..MAX_SERVES {
         let _ = ticket_tx.send(()).await;
     }
@@ -342,7 +342,7 @@ pub(crate) async fn run(runtime: FsRuntime, notify: SysHandle) {
             let _ticket = ticket_rx.recv().await;
             let runtime = runtime.clone();
             let ticket_tx = ticket_tx.clone();
-            moto_async::LocalRuntime::spawn(async move {
+            moto_sdk::async_runtime::LocalRuntime::spawn(async move {
                 serve(runtime, id, page).await;
                 let _ = ticket_tx.send(()).await;
             });

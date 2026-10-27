@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Native Lorry builds of real Motor OS projects in the release developer image:
-# red, rush, gears and russhd from this checkout, and Helix from its managed
-# fork checkout ($MOTORH/helix, as in src/build-motor-os.sh). Each project is
+# red, rush and russhd from this checkout, and Helix from its managed
+# fork checkout (external-sources/helix, as in src/build-motor-os.sh). Each project is
 # vendored online in the guest, then built with /devtools/bin/lorry: a debug
 # build, or a release build with --release. Every project is attempted; the
 # run fails if any of them failed.
@@ -10,8 +10,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LORRY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-MOTORH="$(readlink -f "${MOTORH:-$ROOT_DIR/..}")"
-HELIX="$MOTORH/helix"
+HELIX="$ROOT_DIR/external-sources/helix"
 WD="$ROOT_DIR/src/tests"
 IMG_DIR="$ROOT_DIR/vm_images/release"
 BUDGET_SECONDS="${LORRY_NATIVE_PROJECTS_TIMEOUT:-3600}"
@@ -20,7 +19,6 @@ REMOTE_ROOT=/user/tmp/lorry-native-projects
 PROJECTS=(
     "red motor-os/src/bin/red red"
     "rush motor-os/src/bin/rush rush"
-    "gears motor-os/src/bin/gears gears"
     "russhd motor-os/src/bin/russhd russhd"
     "helix helix hx"
 )
@@ -83,7 +81,7 @@ stage() {
         tar -C "$checkout" --null -T - -cf - | tar -C "$destination" -xf -
 }
 stage "$ROOT_DIR" "$WORK/lorry-native-projects/motor-os" \
-    src/bin/red src/bin/rush src/bin/gears src/bin/russhd src/sys/lib
+    src/bin/red src/bin/rush src/bin/russhd src/sys/lib
 stage "$HELIX" "$WORK/lorry-native-projects/helix" .
 printf 'profile: %s\nhelix: %s\n' "$PROFILE" "$(git -C "$HELIX" rev-parse HEAD)" >"$EVIDENCE_DIR/summary.txt"
 
@@ -128,4 +126,4 @@ for entry in "${PROJECTS[@]}"; do
 done
 
 [ "${#failed[@]}" -eq 0 ] || fail "native builds failed: ${failed[*]}"
-echo "PASS: Lorry natively built red, rush, gears, russhd and Helix ($PROFILE)"
+echo "PASS: Lorry natively built red, rush, russhd and Helix ($PROFILE)"

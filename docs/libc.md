@@ -25,9 +25,10 @@ From the application down:
 | `moto-rt-cabi` (`libmoto_rt_cabi.a`) | the C-ABI shim over the RT.VDSO |
 | RT.VDSO / `moto-rt` | the same process runtime Rust std uses |
 
-The shim (`src/sys/lib/moto-rt-cabi`) is the single bridge between C-world and
-the Motor runtime. It owns emulated TLS — `__emutls_get_address` implemented
-directly over the VDSO TLS API — and `__cxa_thread_atexit`, which clang emits
+The shim lives in the mlibc fork at `sysdeps/motor/moto-rt-cabi` and is the
+single bridge between C-world and the Motor OS runtime. It owns emulated TLS —
+`__emutls_get_address` implemented directly over the VDSO TLS API — and
+`__cxa_thread_atexit`, which clang emits
 calls to under emulated TLS as well. compiler-rt's stock `emutls.c` is removed
 from the builtins so the shim is the sole emulated-TLS owner; the kernel
 reserves the `libc_tcb` UTCB field for it. Because C and Rust share one
@@ -39,7 +40,7 @@ Properties that follow, and that every consumer can rely on:
 - **Everything is static.** Binaries are static PIEs; there is no dynamic
   linking and no `dlopen`. The loader applies only relative relocations and
   rejects `PT_TLS`, which is why all TLS is emulated (`-femulated-tls` is a
-  Motor clang target default) and binaries carry no `.tdata`/`.tbss`.
+  Motor OS clang target default) and binaries carry no `.tdata`/`.tbss`.
 - **ELF constructors run.** mlibc's `crt1.o` startup executes `.init_array`.
   This is the C-linked entry path; the pure-Rust `motor_start` path does not
   walk constructors, so a Rust program that needs them (e.g. `inventory`-style
@@ -52,8 +53,8 @@ Properties that follow, and that every consumer can rely on:
 ## Supported surface
 
 Brought up and gated milestone by milestone during the port, and exercised
-today by the assembly validation, the native Lua build, and the full-test
-suites:
+today by the toolchain build's checks, the native Lua build, and the
+full-test suites:
 
 - **ANSI C**: formatted I/O both directions (including correct `%.17g`
   round-trips), buffered file stdio, `malloc`, `setjmp`/`longjmp`, `abort`
@@ -72,7 +73,7 @@ suites:
   arming path.
 - **Signals-lite**: `signal`/`sigaction`/`sigprocmask`/`raise`/`kill(self)`.
   Dispositions are recorded and handlers dispatch synchronously on `raise`;
-  Motor has no kernel signals, so **nothing is ever delivered
+  Motor OS has no kernel signals, so **nothing is ever delivered
   asynchronously**. (Terminal Ctrl+C is a separate mechanism — see
   [tui.md](tui.md).)
 - **C++**: iostreams, containers, `to_chars`/`from_chars`, RTTI, statics
@@ -81,7 +82,7 @@ suites:
   libc++abi.
 - **A native toolchain**: the on-image clang/clang++/lld multicall behind the
   `/devtools/bin/cc` and `c++` launchers compiles and links C and C++ on
-  Motor itself. Lua 5.4.8 builds from unmodified sources as the standing
+  Motor OS itself. Lua 5.4.8 builds from unmodified sources as the standing
   end-to-end proof.
 
 ## Known limitations
@@ -92,14 +93,14 @@ suites:
 - `__cxa_thread_atexit` destructors run at *thread* exit. `main` returning
   can end the process via `proc_exit` without draining the main thread's
   destructor list; the caveat is recorded at the implementation,
-  `src/sys/lib/moto-rt-cabi/src/cxa.rs`.
+  mlibc's `sysdeps/motor/moto-rt-cabi/src/cxa.rs`.
 - Executable-permission support is a cross-repository compatibility boundary
   between the fd wrapper, mlibc, and LLVM revisions; never mix components
-  across assembly tuples ([build-llvm.md](build-llvm.md), "Source identity").
+  of different toolchains ([build-llvm.md](build-llvm.md), "Sources").
 
 ## On-image layout and configuration
 
-Motor keeps the toolchain and libc out of the classic Unix `/usr` + `/etc`
+Motor OS keeps the toolchain and libc out of the classic Unix `/usr` + `/etc`
 trees and uses the ownership-based `/devtools` and `/system` trees:
 
 | What | Where |
@@ -116,14 +117,14 @@ tree is development-image-only ([build-llvm.md](build-llvm.md)).
 Three of these locations are compiled in, which matters when relocating
 anything:
 
-1. the clang driver's Motor toolchain paths (`Motor.cpp`, a single
+1. the clang driver's Motor OS toolchain paths (`Motor.cpp`, a single
    `/devtools/llvm` prefix) — baked into both the host cross clang and the
    native multicall;
 2. the native driver's config-file directory
    (`-DCLANG_CONFIG_FILE_SYSTEM_DIR=/devtools/llvm/cfg`, a cmake cache
    entry); and
 3. mlibc's `MLIBC_SYSCONFDIR`, injected as `"/system/cfg/libc"` through the
-   Motor meson cross-file. Every functional config reader in mlibc —
+   Motor OS meson cross-file. Every functional config reader in mlibc —
    `resolv.conf`, `hosts`, `protocols`, `passwd`/`group`, `shells`,
    `localtime`, `shadow` — and the `_PATH_*` macros route through it, so libc
    configuration lives at `/system/cfg/libc/resolv.conf`,
@@ -133,8 +134,11 @@ anything:
 
 ## Versioning
 
-The mlibc commit is declared as `MOTOR_MLIBC_REV` in `src/toolchain-versions.sh`, which
-enters `MOTOR_ASSEMBLY_KEY`, so a libc change selects a new assembly rather
-than mutating an existing one. The shim's sources (`moto-rt`, `moto-sys`,
-`moto-rt-cabi`) are not keyed. The rules and procedures are in
-[toolchain.md](toolchain.md).
+mlibc is part of the Motor OS toolchain: the toolchain repository's
+`versions.sh` names its branch as `MOTOR_MLIBC_BRANCH`, so a libc change is a
+new toolchain release rather than a change to an existing one. That branch
+also carries the shim, its C header, and its `Cargo.lock`, which selects
+published `moto-rt` and `moto-sys` crates. Building the shim requires no
+Motor OS source checkout. A compile-time assertion checks the header's
+`MOTO_RT_VERSION` against the selected `moto-rt::RT_VERSION`. The procedures
+are in the toolchain repository's README and in [toolchain.md](toolchain.md).

@@ -1,17 +1,17 @@
 //! Statistics for the FS runtime.
 //!
 //! sys-io's stats provider (`crate::stats_server`) runs on its own thread, but
-//! the FS lives in this single-threaded async runtime (`Rc<LocalRwLock<FS>>`) and
-//! can't be read from there directly. Instead the stats-server thread *polls*
-//! them: it sends a request over a cross-thread channel that
-//! [`stats_responder_task`] (running in the FS runtime) answers with a freshly
-//! built snapshot. Best effort, never precise — mirrors `crate::runtime::net::stats`.
+//! the mounted filesystems live in this single-threaded async runtime (the
+//! mount table, one `LocalRwLock<FS>` per mount) and can't be read from there
+//! directly. Instead the stats-server thread *polls* them: it sends a request
+//! over a cross-thread channel that [`stats_responder_task`] (running in the FS
+//! runtime) answers with a freshly built snapshot. Best effort, never precise —
+//! mirrors `crate::runtime::net::stats`.
 
-use super::FS;
-use async_fs::FileSystem;
-use moto_async::LocalRwLock;
-use moto_stats::{MetricDescWire, MetricEntry};
-use std::{cell::Cell, rc::Rc, sync::OnceLock};
+use super::{FS, mounts};
+use moto_sdk::async_fs::FileSystem;
+use moto_sdk::stats::{MetricDescWire, MetricEntry};
+use std::{cell::Cell, sync::OnceLock};
 
 /// Data-path performance counters for the FS runtime. Diagnostics only: pure
 /// counters, no behavior. Everything that touches them — the command handlers,
@@ -50,6 +50,8 @@ pub(super) struct FsStats {
     pub pressure_refused: Cell<u64>,
     /// New FS clients dropped at accept under memory pressure.
     pub pressure_refused_clients: Cell<u64>,
+    /// Memfs allocations refused after reclaiming cached pages and resampling.
+    pub reserve_refused: Cell<u64>,
 }
 
 /// Compile-time switch for the TSC timing pairs (`read_ticks`,
@@ -80,6 +82,8 @@ fn ticks_to_ns(ticks: u64) -> u64 {
 /// FS metric ids. They are private to sys-io: collectors learn their names
 /// dynamically via `CMD_DESCRIBE` (moto-stats hardcodes no metric ids).
 mod ids {
+    // The data partition (mount 0) only. memfs reports its totals below and
+    // per-mount figures through the mount listing.
     pub const FS_CAPACITY_BYTES: u32 = 1000;
     pub const FS_AVAILABLE_BYTES: u32 = 1001;
 
@@ -122,32 +126,22 @@ mod ids {
     pub const PAGER_FAILED_FILLS: u32 = 1025;
     pub const SPAWN_SCAN_US: u32 = 1026;
     pub const PAGER_SERVE_US: u32 = 1027;
+    pub const MEMFS_USED_BYTES: u32 = 1028;
+    pub const MEMFS_ENTRIES: u32 = 1029;
+    pub const MEMFS_CACHED_FREE_BYTES: u32 = 1030;
+    pub const FS_RESERVE_REFUSED: u32 = 1031;
 }
 
 /// Build a snapshot of the FS metrics in moto-stats wire form. Mirrors
 /// [`descriptors`].
-async fn entries(
-    fs: &FS,
-    stats: &FsStats,
-    channels: u64,
-    locked_files: u64,
-    spawn: &super::spawn::SpawnStats,
-    pager: &super::spawn::pager::Pager,
-) -> Vec<MetricEntry> {
-    let num_blocks = fs.num_blocks();
-    let empty_blocks = fs
-        .empty_blocks()
-        .await
-        .inspect_err(|err| log::error!("FS::empty_blocks() failed: {err:?}"))
-        .unwrap_or(0);
-    let cache_stats = fs.cache_stats();
+pub(super) async fn entries(runtime: &super::FsRuntime) -> Vec<MetricEntry> {
+    let stats = &runtime.fs_stats;
+    let channels = runtime.channel_budget.fs_channels();
+    let locked_files = runtime.exec_locks.borrow().num_locked() as u64;
+    let spawn = &runtime.spawn_stats;
+    let pager = &runtime.pager;
 
-    vec![
-        MetricEntry::global(ids::FS_CAPACITY_BYTES, num_blocks * 4096),
-        MetricEntry::global(ids::FS_AVAILABLE_BYTES, empty_blocks * 4096),
-        MetricEntry::global(ids::FS_CACHE_HITS, cache_stats.hits),
-        MetricEntry::global(ids::FS_CACHE_MISSES, cache_stats.misses),
-        MetricEntry::global(ids::FS_CACHE_DEDUP_WAITS, cache_stats.dedup_waits),
+    let mut metrics = vec![
         MetricEntry::global(ids::FS_READ_MSGS, stats.read_msgs.get()),
         MetricEntry::global(ids::FS_READ_NS_TOTAL, ticks_to_ns(stats.read_ticks.get())),
         MetricEntry::global(ids::FS_READAHEAD_SPAWNS, stats.readahead_spawns.get()),
@@ -166,7 +160,6 @@ async fn entries(
             stats.pressure_refused_clients.get(),
         ),
         MetricEntry::global(ids::FS_CHANNELS, channels),
-        MetricEntry::global(ids::FS_CACHE_CAPACITY_BYTES, cache_stats.capacity * 4096),
         MetricEntry::global(ids::EXEC_LOCKED_FILES, locked_files),
         MetricEntry::global(ids::SPAWNS, spawn.requests.get()),
         MetricEntry::global(ids::SPAWN_BUILD_US, spawn.build_us.get()),
@@ -177,7 +170,69 @@ async fn entries(
         MetricEntry::global(ids::PAGER_FAILED_FILLS, pager.failed_fills.get()),
         MetricEntry::global(ids::SPAWN_SCAN_US, spawn.scan_us.get()),
         MetricEntry::global(ids::PAGER_SERVE_US, pager.serve_us.get()),
-    ]
+        MetricEntry::global(ids::FS_RESERVE_REFUSED, stats.reserve_refused.get()),
+    ];
+    if let Ok(root) = runtime.root()
+        && let Ok(fs) = root.read().await
+        && let Ok(empty) = fs.empty_blocks().await
+        && root.healthy().is_ok()
+    {
+        let blocks = fs.num_blocks();
+        let capacity = blocks.checked_mul(moto_sdk::async_fs::BLOCK_SIZE as u64);
+        metrics.extend(capacity.map(|bytes| MetricEntry::global(ids::FS_CAPACITY_BYTES, bytes)));
+        // Omitted when a corrupt superblock counts more free blocks than exist.
+        let available = mounts::disk_free(blocks, empty);
+        metrics.extend(available.map(|bytes| MetricEntry::global(ids::FS_AVAILABLE_BYTES, bytes)));
+        if let Some(cache) = fs.cache_stats() {
+            metrics.extend([
+                MetricEntry::global(ids::FS_CACHE_HITS, cache.hits),
+                MetricEntry::global(ids::FS_CACHE_MISSES, cache.misses),
+                MetricEntry::global(ids::FS_CACHE_DEDUP_WAITS, cache.dedup_waits),
+                MetricEntry::global(ids::FS_CACHE_CAPACITY_BYTES, cache.capacity * 4096),
+            ]);
+        }
+    }
+    if let Some((used, entries, cached)) = memfs_totals(runtime).await {
+        metrics.extend([
+            MetricEntry::global(ids::MEMFS_USED_BYTES, used),
+            MetricEntry::global(ids::MEMFS_ENTRIES, entries),
+            MetricEntry::global(ids::MEMFS_CACHED_FREE_BYTES, cached),
+        ]);
+    }
+    metrics
+}
+
+async fn memfs_totals(runtime: &super::FsRuntime) -> Option<(u64, u64, u64)> {
+    let mut totals = (0, 0, 0);
+    let count = runtime.mounts.borrow().iter().count();
+    for index in 0..count {
+        let (id, kind) = {
+            let table = runtime.mounts.borrow();
+            let mount = table.iter().nth(index)?;
+            (mount.id, mount.kind)
+        };
+        if kind != moto_sdk::sys_io::api_fs::MountKind::MemFs {
+            continue;
+        }
+        let entry =
+            mounts::Resolved::on_mount(&runtime.mounts, id, moto_sdk::async_fs::ROOT_ID).ok()?;
+        let fs = entry.read().await.ok()?;
+        if let FS::MemFs(fs) = &*fs {
+            totals.0 += fs.used_bytes();
+            totals.1 += fs.entry_count();
+            totals.2 += fs.cached_free_bytes();
+        }
+    }
+    if runtime
+        .mounts
+        .borrow()
+        .iter()
+        .any(|mount| mount.kind == moto_sdk::sys_io::api_fs::MountKind::MemFs && mount.corrupted)
+    {
+        None
+    } else {
+        Some(totals)
+    }
 }
 
 /// The metric descriptors this provider exposes (the response to `CMD_DESCRIBE`).
@@ -216,21 +271,26 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::PAGER_FAILED_FILLS, "pager.failed_fills"),
         MetricDescWire::new(ids::SPAWN_SCAN_US, "spawn.scan_us"),
         MetricDescWire::new(ids::PAGER_SERVE_US, "pager.serve_us"),
+        MetricDescWire::new(ids::MEMFS_USED_BYTES, "fs.memfs.used_bytes"),
+        MetricDescWire::new(ids::MEMFS_ENTRIES, "fs.memfs.entries"),
+        MetricDescWire::new(ids::MEMFS_CACHED_FREE_BYTES, "fs.memfs.cached_free_bytes"),
+        MetricDescWire::new(ids::FS_RESERVE_REFUSED, "fs.reserve_refused"),
     ]
 }
 
 /// Requests handled on the FS runtime, with a one-shot reply to the caller.
 enum StatsRequest {
-    Snapshot(moto_async::oneshot::Sender<Vec<MetricEntry>>),
+    Snapshot(moto_sdk::async_runtime::oneshot::Sender<Vec<MetricEntry>>),
     #[cfg(debug_assertions)]
-    TestExecutableLocks(moto_async::oneshot::Sender<Result<(), String>>),
+    TestExecutableLocks(moto_sdk::async_runtime::oneshot::Sender<Result<(), String>>),
     #[cfg(debug_assertions)]
-    TestPagerWindows(moto_async::oneshot::Sender<Result<(), String>>),
+    TestPagerWindows(moto_sdk::async_runtime::oneshot::Sender<Result<(), String>>),
 }
 
 /// Sender half of the request channel. Set once, when the FS runtime spawns its
 /// responder task; read by the stats-server thread in [`query_metrics`].
-static STATS_REQUESTS: OnceLock<moto_async::channel::Sender<StatsRequest>> = OnceLock::new();
+static STATS_REQUESTS: OnceLock<moto_sdk::async_runtime::channel::Sender<StatsRequest>> =
+    OnceLock::new();
 
 /// Capacity of the request channel. The stats-server thread serializes its
 /// queries (one outstanding at a time), so this only needs slack for races.
@@ -239,35 +299,25 @@ const STATS_REQUEST_CAPACITY: usize = 4;
 /// Spawn the task that answers metric-snapshot requests from the stats-server
 /// thread. Call once, from the FS runtime.
 pub(super) fn spawn_stats_responder(runtime: super::FsRuntime) {
-    let (tx, rx) = moto_async::channel(STATS_REQUEST_CAPACITY);
+    let (tx, rx) = moto_sdk::async_runtime::channel(STATS_REQUEST_CAPACITY);
     if STATS_REQUESTS.set(tx).is_err() {
         log::error!("sys-io: fs stats responder already started");
         return;
     }
 
-    let _ = moto_async::LocalRuntime::spawn(stats_responder_task(runtime, rx));
+    let _ = moto_sdk::async_runtime::LocalRuntime::spawn(stats_responder_task(runtime, rx));
 }
 
 /// Listen for stats requests and answer each with a fresh snapshot of the
 /// (single-threaded) FS stats. Runs in the FS runtime.
 async fn stats_responder_task(
     runtime: super::FsRuntime,
-    mut requests: moto_async::channel::Receiver<StatsRequest>,
+    mut requests: moto_sdk::async_runtime::channel::Receiver<StatsRequest>,
 ) {
     while let Some(req) = requests.recv().await {
         match req {
             StatsRequest::Snapshot(respond_to) => {
-                // Not borrowed across the await below.
-                let locked_files = runtime.exec_locks.borrow().num_locked() as u64;
-                let snapshot = entries(
-                    &*runtime.fs.read().await,
-                    &runtime.fs_stats,
-                    runtime.channel_budget.fs_channels(),
-                    locked_files,
-                    &runtime.spawn_stats,
-                    &runtime.pager,
-                )
-                .await;
+                let snapshot = entries(&runtime).await;
                 // The receiver is gone if the stats-server thread stopped waiting; ignore.
                 let _ = respond_to.send(snapshot);
             }
@@ -294,8 +344,8 @@ pub(crate) fn query_metrics() -> Vec<MetricEntry> {
 
     // This thread has no async runtime, so spin up a throwaway one to drive the
     // cross-thread request/response round-trip to completion.
-    moto_async::LocalRuntime::new().block_on(async move {
-        let (respond_to, response) = moto_async::oneshot();
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
+        let (respond_to, response) = moto_sdk::async_runtime::oneshot();
         if requests
             .send(StatsRequest::Snapshot(respond_to))
             .await
@@ -312,11 +362,11 @@ pub(crate) fn query_metrics() -> Vec<MetricEntry> {
 /// handlers. `request` wraps the reply sender in the matching request.
 #[cfg(debug_assertions)]
 fn run_fs_self_test(
-    request: fn(moto_async::oneshot::Sender<Result<(), String>>) -> StatsRequest,
+    request: fn(moto_sdk::async_runtime::oneshot::Sender<Result<(), String>>) -> StatsRequest,
 ) -> Result<(), String> {
     let requests = STATS_REQUESTS.get().ok_or("FS runtime not started")?;
-    moto_async::LocalRuntime::new().block_on(async {
-        let (respond_to, response) = moto_async::oneshot();
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+        let (respond_to, response) = moto_sdk::async_runtime::oneshot();
         requests
             .send(request(respond_to))
             .await

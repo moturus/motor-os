@@ -3,7 +3,7 @@
 Status: **implemented** (Phase 0 trait wiring → Phase 1 Mode S → Phase 2 Mode E,
 per §9). Enforcement lives in `motor-fs/src/fs.rs` (`require_access` + the §5
 insertion points), the txn logic in `txn.rs` (`do_set_permissions_txn`), and the
-types in `async-fs/src/filesystem.rs`. Ungated in v1: `metadata`, `name`,
+types in `moto-sdk/src/async_fs/filesystem.rs`. Ungated in v1: `metadata`, `name`,
 `get_parent` (each still carries the `role` param for a future phase).
 Audience: an engineer (human or LLM) maintaining or extending this feature.
 
@@ -103,9 +103,9 @@ migration or superblock version bump is required.
 
 Permissions live in the existing `Metadata` struct, which is embedded in every
 `DirEntryBlock` and already returned to callers by `MotorFs::metadata()`. The
-struct is defined in the **`async-fs`** crate:
+struct is defined in moto-sdk's **`async_fs`** module:
 
-- File: `src/sys/lib/async-fs/src/filesystem.rs`
+- File: `src/sys/lib/moto-sdk/src/async_fs/filesystem.rs`
 - Struct: `Metadata` (currently around line 112), `#[repr(C, align(8))]`, `Pod`,
   pinned to **128 bytes** by `const _: () = assert!(128 == size_of::<Metadata>())`.
 
@@ -184,9 +184,9 @@ caller; ordinary runtime creation uses the creator-relative defaults in §6.3.
 
 ---
 
-## 3. New types (`async-fs`, next to `Metadata`)
+## 3. New types (moto-sdk's `async_fs`, next to `Metadata`)
 
-`AccessPermissions` and `Role` are placed in `async-fs` because `Metadata` lives there and
+`AccessPermissions` and `Role` are placed in `async_fs` because `Metadata` lives there and
 callers need them to interpret `metadata()`. Follow the existing cfg-branched
 error pattern used by `EntryKind`'s `TryFrom<u8>` (filesystem.rs:19–45):
 `InvalidData` is `std::io::ErrorKind::InvalidData` under `std`, and
@@ -481,7 +481,7 @@ Notes:
 
 ## 6. API changes
 
-These touch the `FileSystem` trait (`async-fs/src/filesystem.rs`) and its impl
+These touch the `FileSystem` trait (`moto-sdk/src/async_fs/filesystem.rs`) and its impl
 in `motor-fs/src/fs.rs` + the txn layer (`motor-fs/src/txn.rs`). Changing the
 trait is a breaking change for all impls; updating non-FS impl sites is out of
 scope for this crate's work but must be kept in mind.
@@ -616,9 +616,9 @@ change needed for reporting.
 
 ## 8. Test plan
 
-Add to `motor-fs/src/tests.rs` (and unit tests in `async-fs` for the pure types):
+Add to `motor-fs/src/tests.rs` (and unit tests in `async_fs` for the pure types):
 
-**Pure type tests (`async-fs`):**
+**Pure type tests (`async_fs`):**
 1. `AccessPermissions::try_from` round-trips 0..=4; rejects 5..=255 with `InvalidData`.
 2. Zeroed byte decodes to `AccessPermissions::Rwx`; `Metadata::zeroed().access(role) == Rwx`
    for all roles.

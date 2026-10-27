@@ -2,8 +2,8 @@ use std::collections::VecDeque;
 use std::mem::size_of;
 use std::sync::{Arc, Condvar, Mutex};
 
-use moto_ipc::sync::{ChannelSize, ClientConnection, ResponseHeader};
-use moto_log::implementation::{ConnectRequest, ConnectResponse, RawLogRequest};
+use moto_sdk::ipc::sync::{ChannelSize, ClientConnection, ResponseHeader};
+use moto_sdk::log::implementation::{ConnectRequest, ConnectResponse, RawLogRequest};
 
 use crate::output::Output;
 
@@ -84,6 +84,9 @@ impl FileQueue {
         if self.disabled {
             return Err(record);
         }
+        if record.is_empty() {
+            return Ok(());
+        }
         if record.len() > self.capacity {
             self.dropped = self.dropped.saturating_add(1);
             return Ok(());
@@ -92,6 +95,10 @@ impl FileQueue {
             let dropped = self.records.pop_front().unwrap();
             self.bytes -= dropped.len();
             self.dropped = self.dropped.saturating_add(1);
+        }
+        if self.records.try_reserve(1).is_err() {
+            self.dropped = self.dropped.saturating_add(1);
+            return Ok(());
         }
         self.bytes += record.len();
         self.records.push_back(record);
@@ -113,24 +120,33 @@ impl FileQueue {
         }
 
         let reported_drops = self.dropped;
-        let marker = if reported_drops == 0 {
-            Vec::new()
-        } else {
-            format!("[kernel log: {reported_drops} records dropped: file backlog]\n").into_bytes()
-        };
+        // Formatting the loss report must not need another heap allocation.
+        let mut marker = [0; 80];
+        let mut cursor = std::io::Cursor::new(marker.as_mut_slice());
+        if reported_drops != 0 {
+            use std::io::Write;
+            writeln!(
+                cursor,
+                "[kernel log: {reported_drops} records dropped: file backlog]"
+            )
+            .unwrap();
+        }
+        let marker_len = cursor.position() as usize;
+        let marker = &marker[..marker_len];
         if marker.len() > max_payload {
             return None;
         }
-        self.dropped = 0;
-        if marker.len() + self.records.front().unwrap().len() > max_payload {
-            return Some(Batch {
-                data: marker,
-                record_count: 0,
-                reported_drops,
-            });
+        let mut data = Vec::new();
+        if data.try_reserve_exact(max_payload).is_err() {
+            // Keep the loss count for the next deliverable batch. Waiting
+            // for new input avoids spinning on a refused allocation.
+            self.dropped = self.dropped.saturating_add(self.records.len() as u64);
+            self.records.clear();
+            self.bytes = 0;
+            return None;
         }
-
-        let mut data = marker;
+        data.extend_from_slice(marker);
+        self.dropped = 0;
         let mut record_count = 0_u64;
         while self
             .records
@@ -147,6 +163,18 @@ impl FileQueue {
             record_count,
             reported_drops,
         })
+    }
+
+    fn rejected_batch(&mut self, batch: Batch) {
+        self.dropped = self
+            .dropped
+            .saturating_add(batch.record_count)
+            .saturating_add(batch.reported_drops)
+            .saturating_add(self.records.len() as u64);
+        // A marker-only batch leaves its records queued. Discard those too,
+        // so refusal cannot retry the same loss report without fresh input.
+        self.records.clear();
+        self.bytes = 0;
     }
 
     pub fn disable(&mut self, in_flight: Batch) -> u64 {
@@ -264,6 +292,10 @@ impl Forwarder {
                 }
             };
             if let Err(error) = Self::send(&mut connection, tag_id, &batch) {
+                if error == moto_rt::E_OUT_OF_MEMORY {
+                    self.shared.queue.lock().unwrap().rejected_batch(batch);
+                    continue;
+                }
                 let lost = self.shared.queue.lock().unwrap().disable(batch);
                 Self::report_disabled(&output, error, lost);
                 return;
@@ -324,5 +356,41 @@ pub fn run_self_tests() {
     );
 
     assert_eq!(FileQueue::new().capacity, FILE_QUEUE_CAPACITY);
+
+    let mut queue = FileQueue::with_capacity(8);
+    queue.offer(b"one".to_vec()).unwrap();
+    queue.offer(b"two".to_vec()).unwrap();
+    // A failed reservation loses records, but preserves their count and
+    // leaves the forwarder usable. No giant allocation reaches the kernel.
+    assert!(queue.take_batch(usize::MAX).is_none());
+    assert_eq!(queue.bytes, 0);
+    assert!(queue.records.is_empty());
+    queue.offer(b"next".to_vec()).unwrap();
+    let rejected = queue.take_batch(80).unwrap();
+    assert_eq!(
+        rejected.data,
+        b"[kernel log: 2 records dropped: file backlog]\nnext"
+    );
+    queue.rejected_batch(rejected);
+    queue.offer(b"last".to_vec()).unwrap();
+    assert_eq!(
+        queue.take_batch(80).unwrap().data,
+        b"[kernel log: 3 records dropped: file backlog]\nlast"
+    );
+    assert_eq!(queue.dropped, 0);
+
+    queue.offer(b"oversized".to_vec()).unwrap();
+    queue.offer(b"pending".to_vec()).unwrap();
+    let marker = queue.take_batch(expected_marker.len()).unwrap();
+    assert_eq!(marker.record_count, 0);
+    queue.rejected_batch(marker);
+    assert_eq!(queue.bytes, 0);
+    assert_eq!(queue.dropped, 2);
+    assert!(queue.take_batch(80).is_none());
+    queue.offer(b"after".to_vec()).unwrap();
+    assert_eq!(
+        queue.take_batch(80).unwrap().data,
+        b"[kernel log: 2 records dropped: file backlog]\nafter"
+    );
     println!("sys-tty forwarder self-test PASS");
 }

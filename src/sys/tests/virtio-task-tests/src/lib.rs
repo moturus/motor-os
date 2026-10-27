@@ -64,7 +64,7 @@ impl Drop for Buffer {
 fn message(
     operation: u8,
     pages: Vec<u64>,
-    reply: moto_async::oneshot::Sender<std::io::Result<()>>,
+    reply: moto_sdk::async_runtime::oneshot::Sender<std::io::Result<()>>,
 ) -> block_io::Message {
     match operation {
         0 => block_io::Message::Read {
@@ -85,7 +85,7 @@ fn message(
 fn scenario(operation: u8, pages: usize, seg_max: usize, capacity: usize, errors: bool) {
     let device = Rc::new(BlockDevice::new(capacity, seg_max));
     let stats = Rc::new(stats::FsStats::default());
-    let (sender, receiver) = moto_async::channel(2);
+    let (sender, receiver) = moto_sdk::async_runtime::channel(2);
     let mut task = Box::pin(block_io::run(device.clone(), receiver, stats.clone()));
     let drops = Rc::new(Cell::new(0));
     let addresses: Vec<_> = (0..pages).map(|n| 4096 * (n as u64 + 1)).collect();
@@ -169,7 +169,7 @@ fn scenario(operation: u8, pages: usize, seg_max: usize, capacity: usize, errors
 }
 
 fn admission_and_drop() {
-    let (sender, receiver) = moto_async::channel(1);
+    let (sender, receiver) = moto_sdk::async_runtime::channel(1);
     let drops = Rc::new(Cell::new(0));
     let mut cx = Context::from_waker(Waker::noop());
     // A closed inbox returns the buffer without arming a reply guard.
@@ -189,7 +189,7 @@ fn admission_and_drop() {
 fn concurrent_requests() {
     let configs = [(0, 1_usize), (1, 17), (0, 3), (1, 0), (1, 8), (2, 0)];
     let device = Rc::new(BlockDevice::new(3, 2));
-    let (sender, receiver) = moto_async::channel(2);
+    let (sender, receiver) = moto_sdk::async_runtime::channel(2);
     let mut task = Box::pin(block_io::run(
         device.clone(),
         receiver,
@@ -283,18 +283,18 @@ fn concurrent_requests() {
 fn runtime_wakeups() {
     use futures::{StreamExt, stream::FuturesUnordered};
 
-    moto_async::LocalRuntime::new().block_on(async {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let device = Rc::new(BlockDevice::new(3, 2));
-        let (sender, receiver) = moto_async::channel(2);
-        let (task_done, task_result) = moto_async::oneshot();
+        let (sender, receiver) = moto_sdk::async_runtime::channel(2);
+        let (task_done, task_result) = moto_sdk::async_runtime::oneshot();
         let task_device = device.clone();
-        moto_async::LocalRuntime::spawn(async move {
+        moto_sdk::async_runtime::LocalRuntime::spawn(async move {
             block_io::run(task_device, receiver, Rc::new(stats::FsStats::default())).await;
             task_done.send(()).unwrap();
         });
-        let (device_done, device_result) = moto_async::oneshot();
+        let (device_done, device_result) = moto_sdk::async_runtime::oneshot();
         let completing = device.clone();
-        moto_async::LocalRuntime::spawn(async move {
+        moto_sdk::async_runtime::LocalRuntime::spawn(async move {
             for index in 0..17 {
                 let done = loop {
                     let next = {
@@ -313,7 +313,7 @@ fn runtime_wakeups() {
                 };
                 // Completion must resume sleeping tasks through their actual
                 // registered wakers, without the manual model's extra polls.
-                moto_async::sleep(std::time::Duration::from_millis(1)).await;
+                moto_sdk::async_runtime::sleep(std::time::Duration::from_millis(1)).await;
                 done.send(Ok(())).unwrap();
             }
             device_done.send(()).unwrap();
@@ -345,7 +345,7 @@ fn runtime_wakeups() {
 }
 
 pub fn test_premature_reply_drop() {
-    let (sender, _receiver) = moto_async::channel(1);
+    let (sender, _receiver) = moto_sdk::async_runtime::channel(1);
     let mut send = Box::pin(block_io::send(&sender, (), |reply| {
         message(1, vec![4096], reply)
     }));
@@ -1375,7 +1375,8 @@ fn test_vsock_listener() {
     let mut waiting = listener::ListenerState::new().unwrap();
     let mut receivers = Vec::new();
     for _ in 0..listener::MAX_PENDING_ACCEPTS {
-        let (ready, mut receiver) = moto_async::oneshot::<Result<u64, moto_rt::Error>>();
+        let (ready, mut receiver) =
+            moto_sdk::async_runtime::oneshot::<Result<u64, moto_rt::Error>>();
         assert!(waiting.enqueue_accept(ready).is_ok());
         let signal = Arc::new(Signal(AtomicBool::new(false)));
         let waker = Waker::from(signal.clone());

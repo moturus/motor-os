@@ -250,78 +250,21 @@ impl UserAddressSpace {
         other: &UserAddressSpace,
     ) -> Result<(u64, u64), ErrorCode> {
         log::trace!("alloc_user_shared: 0x{vaddr:x}");
-        self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
-
-        if other
-            .stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)
-            .is_err()
-        {
+        let bytes = num_pages << PAGE_SIZE_SMALL_LOG2;
+        self.stats_user_add(bytes)?;
+        if other.stats_user_add(bytes).is_err() {
             log::debug!("other OOM.");
-            self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
+            self.stats_user_sub(bytes);
             return Err(moto_rt::E_OUT_OF_MEMORY);
         }
-
-        // Allocate in self.
-        let self_segment = {
-            if vaddr != u64::MAX {
-                match self
-                    .inner
-                    .vmem_allocate_user_fixed(vaddr, num_pages, mapping_options)
-                {
-                    Err(err) => {
-                        self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-                        other.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-                        return Err(err);
-                    }
-                    Ok(seg) => seg,
-                }
-            } else {
-                match self.inner.vmem_allocate_pages(
-                    VmemKind::Unmapped, /* not used */
-                    num_pages,
-                    Some(mapping_options),
-                ) {
-                    Err(err) => {
-                        self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-                        other.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-                        return Err(err);
-                    }
-                    Ok(seg) => seg,
-                }
-            }
-        };
-
-        // Allocate in other.
-        let other_segment =
-            match other
-                .inner
-                .vmem_allocate_pages(VmemKind::Unmapped, num_pages, None)
-            {
-                Err(err) => {
-                    self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-                    other.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-                    return Err(err);
-                }
-                Ok(seg) => seg,
-            };
-
-        let addr_here = self_segment.start;
-        let addr_there = other_segment.start;
-
+        // Both reservations, the share and any rollback happen under the
+        // region locks; each side's charge stays until its own unmap.
         self.inner
-            .share_with(
-                addr_here,
-                &other.inner,
-                addr_there,
-                super::MappingOptions::USER_ACCESSIBLE
-                    | super::MappingOptions::READABLE
-                    | super::MappingOptions::WRITABLE
-                    | super::MappingOptions::DONT_ZERO,
-            )
-            .unwrap();
-
-        log::trace!("alloc_user_shared ok: 0x{addr_here:x} 0x{addr_there:x}");
-        Ok((addr_here, addr_there))
+            .alloc_shared(vaddr, num_pages, mapping_options, &other.inner)
+            .inspect_err(|_| {
+                self.stats_user_sub(bytes);
+                other.stats_user_sub(bytes);
+            })
     }
 
     pub fn user_page_table(&self) -> u64 {
@@ -371,11 +314,11 @@ impl UserAddressSpace {
         // When dropping, we count the full segment, with guard pages, so when adding,
         // we need to do the same.
         self.stats_kernel_add(num_pages)?;
-        super::virt::vmem_allocate_pages(super::virt::VmemKind::KernelStack, num_pages).inspect_err(
-            |_| {
+        super::virt::vmem_allocate_pages(super::virt::VmemKind::KernelStack, num_pages)
+            .inspect(|_| self.kernel_mem_stats.add_resident(num_pages - 2))
+            .inspect_err(|_| {
                 self.stats_kernel_sub(num_pages);
-            },
-        )
+            })
     }
 
     fn do_drop_user_stack(&self, user_stack: super::MemorySegment) {
@@ -387,6 +330,8 @@ impl UserAddressSpace {
 
         super::virt::KERNEL_ADDRESS_SPACE
             .free(kernel_stack.start, super::virt::VmemKind::KernelStack);
+        self.kernel_mem_stats
+            .sub_resident((kernel_stack.size >> PAGE_SIZE_SMALL_LOG2) - 2);
     }
 
     pub fn drop_stacks(&self, user_stack: &UserStack, kernel_stack: &Option<super::MemorySegment>) {
@@ -439,25 +384,6 @@ impl UserAddressSpace {
             })
     }
 
-    /// Reserves `num_pages` at `vaddr` (no frames) and lets `fill` map
-    /// shared frames into the reservation, undoing it if that fails.
-    fn fill_fixed<F>(&self, vaddr: u64, num_pages: u64, fill: F) -> Result<(), ErrorCode>
-    where
-        F: FnOnce(&UserAddressSpaceBase) -> Result<(), ErrorCode>,
-    {
-        self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
-        if let Err(err) =
-            self.inner
-                .vmem_allocate_user_fixed(vaddr, num_pages, super::MappingOptions::empty())
-        {
-            self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-            return Err(err);
-        }
-        fill(&self.inner).inspect_err(|_| {
-            let _ = self.unmap(vaddr); // Gives the stats back too.
-        })
-    }
-
     /// Maps `source`'s segment at `source_addr` into this address space at
     /// `vaddr`, sharing its frames. The segments must be the same size, and
     /// nothing may be mapped at `vaddr` yet.
@@ -469,11 +395,17 @@ impl UserAddressSpace {
         num_pages: u64,
         mapping_options: super::MappingOptions,
     ) -> Result<(), ErrorCode> {
-        self.fill_fixed(vaddr, num_pages, |inner| {
-            source
-                .inner
-                .share_with(source_addr, inner, vaddr, mapping_options)
-        })
+        let bytes = num_pages << PAGE_SIZE_SMALL_LOG2;
+        self.stats_user_add(bytes)?;
+        self.inner
+            .share_into_fixed(
+                vaddr,
+                num_pages,
+                &source.inner,
+                source_addr,
+                mapping_options,
+            )
+            .inspect_err(|_| self.stats_user_sub(bytes))
     }
 
     /// Maps `num_pages` of kernel-static memory at `kernel_vaddr` into this
@@ -487,9 +419,11 @@ impl UserAddressSpace {
         mapping_options: super::MappingOptions,
     ) -> Result<(), ErrorCode> {
         debug_assert!(!mapping_options.contains(super::MappingOptions::WRITABLE));
-        self.fill_fixed(vaddr, num_pages, |inner| {
-            inner.share_kernel_static(kernel_vaddr, vaddr, mapping_options)
-        })
+        let bytes = num_pages << PAGE_SIZE_SMALL_LOG2;
+        self.stats_user_add(bytes)?;
+        self.inner
+            .fill_kernel_static(vaddr, kernel_vaddr, num_pages, mapping_options)
+            .inspect_err(|_| self.stats_user_sub(bytes))
     }
 
     pub fn alloc_user_lazy(&self, num_pages: u64) -> Result<super::MemorySegment, ErrorCode> {
@@ -509,6 +443,32 @@ impl UserAddressSpace {
             .inspect_err(|_| {
                 self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
             })
+    }
+
+    /// `num_pages` small pages between two guard pages that are never
+    /// mapped, eager or lazy. The segment is `num_pages + 2` pages, guards
+    /// included and nothing rounded: that is what the caller sees, is
+    /// charged for and unmaps.
+    pub fn alloc_user_guarded(
+        &self,
+        num_pages: u64,
+        lazy: bool,
+    ) -> Result<super::MemorySegment, ErrorCode> {
+        let num_pages = num_pages
+            .checked_add(2)
+            .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+        let mut options = MappingOptions::READABLE
+            | MappingOptions::WRITABLE
+            | MappingOptions::USER_ACCESSIBLE
+            | MappingOptions::GUARD;
+        if lazy {
+            options |= MappingOptions::LAZY;
+        }
+        let bytes = num_pages << PAGE_SIZE_SMALL_LOG2;
+        self.stats_user_add(bytes)?;
+        self.inner
+            .vmem_allocate_pages(VmemKind::User, num_pages, Some(options))
+            .inspect_err(|_| self.stats_user_sub(bytes))
     }
 
     pub fn alloc_user_unmapped(&self, num_pages: u64) -> Result<super::MemorySegment, ErrorCode> {
@@ -877,6 +837,7 @@ pub fn huge_mapping_self_test() {
     // the policy retained for the segment.
     let fallback = space.alloc_user_heap(HUGE_PAGES).unwrap();
     assert_eq!(fallback.size, PAGE_SIZE_MID);
+    assert_eq!(space.user_mem_stats().resident(), PAGE_SIZE_MID);
     assert_eq!(fallback.start & (PAGE_SIZE_MID - 1), 0);
     for page in [0, 1, HUGE_PAGES - 1] {
         assert_eq!(
@@ -910,6 +871,7 @@ pub fn huge_mapping_self_test() {
     );
     assert_eq!(space.read_from_user(fallback.start, 6).unwrap(), b"intact");
     space.unmap(fallback.start).unwrap();
+    assert_eq!(space.user_mem_stats().resident(), 0);
     assert_eq!(block_metrics().taken, taken_held);
 
     // Exactly one whole block free, dirtied first: the eligible request
@@ -926,6 +888,7 @@ pub fn huge_mapping_self_test() {
     drop(frame);
     let huge = space.alloc_user_heap(HUGE_PAGES).unwrap();
     assert_eq!(huge.size, PAGE_SIZE_MID);
+    assert_eq!(space.user_mem_stats().resident(), PAGE_SIZE_MID);
     assert_eq!(huge.start & (PAGE_SIZE_MID - 1), 0);
     assert_eq!(table.leaf_kind(huge.start), Some(PageType::MidPage));
     assert_eq!(table.virt_to_phys(huge.start + 12345), Some(phys + 12345));
@@ -961,6 +924,7 @@ pub fn huge_mapping_self_test() {
 
     // Teardown returns the block; the frame count observes it.
     space.unmap(huge.start).unwrap();
+    assert_eq!(space.user_mem_stats().resident(), 0);
     assert_eq!(block_metrics().taken, taken_held - 1);
     assert_eq!(table.leaf_kind(huge.start), None);
     drop(held);
@@ -1005,9 +969,14 @@ pub fn huge_mapping_self_test() {
     }
     assert_eq!(HeapSizing::new(u64::MAX).mapped_pages, u64::MAX);
     let usage_before = space.user_mem_stats().total();
+    let resident_before = space.user_mem_stats().resident();
     let mixed = space.alloc_user_heap(HUGE_PAGES + 256).unwrap();
     assert_eq!(mixed.size, PAGE_SIZE_MID + 256 * PAGE_SIZE_SMALL);
     assert_eq!(space.user_mem_stats().total() - usage_before, mixed.size);
+    assert_eq!(
+        space.user_mem_stats().resident() - resident_before,
+        mixed.size
+    );
     let boundary = mixed.start + PAGE_SIZE_MID;
     assert_eq!(table.leaf_kind(mixed.start), Some(PageType::MidPage));
     assert_eq!(
@@ -1030,6 +999,416 @@ pub fn huge_mapping_self_test() {
     space.unmap(rounded.start).unwrap();
     space.unmap(mixed.start).unwrap();
     assert_eq!(space.user_mem_stats().total(), usage_before);
+    assert_eq!(space.user_mem_stats().resident(), resident_before);
     assert_eq!(block_metrics().taken, taken_before);
     crate::raw_log!("huge mapping tests PASS");
+}
+
+// A share is validated in full before the first destination PTE changes: a
+// lazy source with an untouched page is refused and the destination keeps
+// its bytes, the same source is accepted once every page is touched, and a
+// lazy destination is refused whatever its state.
+#[cfg(debug_assertions)]
+pub fn share_validation_self_test() {
+    const PAGES: u64 = 4;
+    let source_space = UserAddressSpace::new().unwrap();
+    let dest_space = UserAddressSpace::new().unwrap();
+    let options =
+        MappingOptions::READABLE | MappingOptions::WRITABLE | MappingOptions::USER_ACCESSIBLE;
+    let refused: Result<(), ErrorCode> = Err(moto_rt::E_INVALID_ARGUMENT);
+    let page = |segment: super::MemorySegment, idx: u64| segment.start + idx * PAGE_SIZE_SMALL;
+    let share = |dest: super::MemorySegment, source: super::MemorySegment| {
+        UserAddressSpace::map_shared(
+            &dest_space,
+            dest.start,
+            &source_space,
+            source.start,
+            options,
+        )
+    };
+
+    // The source: a lazy segment with its third page untouched.
+    let lazy = source_space.alloc_user_lazy(PAGES).unwrap();
+    for idx in [0, 1, 3] {
+        source_space.fix_pagefault(page(lazy, idx), 6).unwrap();
+    }
+    source_space.copy_to_user(b"source", lazy.start).unwrap();
+
+    // The destination: eager pages holding known bytes.
+    let dest = dest_space.alloc_user_heap(PAGES).unwrap();
+    dest_space.copy_to_user(b"intact", dest.start).unwrap();
+    let dest_phys = |idx: u64| {
+        dest_space
+            .inner
+            .page_table_ref()
+            .virt_to_phys(page(dest, idx))
+            .unwrap()
+    };
+    let source_phys = |idx: u64| {
+        source_space
+            .inner
+            .page_table_ref()
+            .virt_to_phys(page(lazy, idx))
+            .unwrap()
+    };
+    let before: [u64; PAGES as usize] = core::array::from_fn(|idx| dest_phys(idx as u64));
+
+    assert_eq!(share(dest, lazy), refused);
+    assert_eq!(
+        dest_space.user_mem_stats().resident(),
+        PAGES * PAGE_SIZE_SMALL
+    );
+    assert_eq!(dest_space.read_from_user(dest.start, 6).unwrap(), b"intact");
+    for (idx, phys_before) in before.iter().enumerate() {
+        assert_eq!(dest_phys(idx as u64), *phys_before);
+    }
+
+    // Touched in full, the same source is accepted, and the destination
+    // reads the source's bytes through the shared frames.
+    source_space.fix_pagefault(page(lazy, 2), 6).unwrap();
+    share(dest, lazy).unwrap();
+    assert_eq!(
+        dest_space.user_mem_stats().resident(),
+        PAGES * PAGE_SIZE_SMALL
+    );
+    assert_eq!(dest_space.read_from_user(dest.start, 6).unwrap(), b"source");
+    for idx in 0..PAGES {
+        assert_eq!(dest_phys(idx), source_phys(idx));
+    }
+
+    // A lazy destination is refused, untouched or touched; an untouched
+    // lazy source is refused too.
+    let lazy_dest = dest_space.alloc_user_lazy(PAGES).unwrap();
+    assert_eq!(share(lazy_dest, lazy), refused);
+    for idx in 0..PAGES {
+        dest_space.fix_pagefault(page(lazy_dest, idx), 6).unwrap();
+    }
+    assert_eq!(share(lazy_dest, lazy), refused);
+    let untouched = source_space.alloc_user_lazy(PAGES).unwrap();
+    assert_eq!(share(dest, untouched), refused);
+    assert_eq!(dest_space.read_from_user(dest.start, 6).unwrap(), b"source");
+
+    // A source whose last page is untouched runs out of pages before the
+    // destination does.
+    let short = source_space.alloc_user_lazy(PAGES).unwrap();
+    for idx in 0..PAGES - 1 {
+        source_space.fix_pagefault(page(short, idx), 6).unwrap();
+    }
+    assert_eq!(share(dest, short), refused);
+    assert_eq!(dest_space.read_from_user(dest.start, 6).unwrap(), b"source");
+
+    for (space, segment) in [
+        (&dest_space, dest),
+        (&dest_space, lazy_dest),
+        (&source_space, lazy),
+        (&source_space, untouched),
+        (&source_space, short),
+    ] {
+        space.unmap(segment.start).unwrap();
+    }
+    crate::raw_log!("share validation tests PASS");
+    assert_eq!(source_space.user_mem_stats().resident(), 0);
+    assert_eq!(dest_space.user_mem_stats().resident(), 0);
+}
+
+// Sparse lazy segments: an untouched reservation holds no page descriptors
+// at any size, the first touch creates one, repeated touches keep the data,
+// guard pages and plain reservations still refuse faults, and unmapping
+// gives the accounting and the descriptors back.
+#[cfg(debug_assertions)]
+pub fn sparse_lazy_self_test() {
+    let space = UserAddressSpace::new().unwrap();
+    let descriptors = || space.inner.page_descriptors();
+    let accounted = || space.user_mem_stats().total();
+    let resident = || space.user_mem_stats().resident();
+    let table = space.inner.page_table_ref();
+    let (descriptors_before, accounted_before) = (descriptors(), accounted());
+    let refused: Result<(), ErrorCode> = Err(moto_rt::E_INVALID_ARGUMENT);
+
+    // 4 GiB, untouched: nothing but the segment node.
+    let lazy = space.alloc_user_lazy(1 << 20).unwrap();
+    assert_eq!(lazy.size, 4 << 30);
+    assert_eq!(descriptors(), descriptors_before);
+    assert_eq!(accounted(), accounted_before + lazy.size);
+    assert_eq!(resident(), 0);
+    assert_eq!(table.virt_to_phys(lazy.start), None);
+    assert!(space.read_from_user(lazy.start, 1).is_err());
+
+    // The first touch creates the descriptor; a later fault on the same
+    // page takes the concurrent-fault shortcut and keeps the data.
+    let middle = lazy.start + lazy.size / 2;
+    let last = lazy.end() - PAGE_SIZE_SMALL;
+    space.fix_pagefault(lazy.start, 6).unwrap();
+    assert_eq!(descriptors(), descriptors_before + 1);
+    space.copy_to_user(b"first", lazy.start).unwrap();
+    space.fix_pagefault(lazy.start + 100, 6).unwrap();
+    assert_eq!(resident(), PAGE_SIZE_SMALL);
+    assert_eq!(space.read_from_user(lazy.start, 5).unwrap(), b"first");
+    space.fix_pagefault(middle, 6).unwrap();
+    space.fix_pagefault(last, 4).unwrap();
+    assert_eq!(descriptors(), descriptors_before + 3);
+    assert_eq!(resident(), 3 * PAGE_SIZE_SMALL);
+    assert_eq!(space.read_from_user(last, 1).unwrap(), [0]);
+    assert_eq!(table.virt_to_phys(lazy.start + PAGE_SIZE_SMALL), None);
+
+    // A user stack: its top page is mapped at creation, its guards refuse
+    // faults, and an interior page is created on first touch.
+    let stack = space.alloc_user_stack(14).unwrap();
+    assert_eq!(stack.segment.size, 16 * PAGE_SIZE_SMALL);
+    assert_eq!(descriptors(), descriptors_before + 4);
+    assert_eq!(space.fix_pagefault(stack.segment.start, 6), refused);
+    assert_eq!(space.fix_pagefault(stack.segment.end() - 1, 6), refused);
+    assert_eq!(resident(), 4 * PAGE_SIZE_SMALL);
+    space
+        .fix_pagefault(stack.segment.start + PAGE_SIZE_SMALL, 6)
+        .unwrap();
+    assert_eq!(descriptors(), descriptors_before + 5);
+
+    // A plain reservation is dense and still refuses faults.
+    let plain = space.alloc_user_unmapped(2).unwrap();
+    assert_eq!(descriptors(), descriptors_before + 7);
+    assert_eq!(space.fix_pagefault(plain.start, 6), refused);
+    assert_eq!(resident(), 5 * PAGE_SIZE_SMALL);
+
+    // A quarter of the user region, in one segment.
+    let quarter = space.alloc_user_lazy(1 << 31).unwrap();
+    assert_eq!(quarter.size, 8 << 40);
+    assert_eq!(descriptors(), descriptors_before + 7);
+    space
+        .fix_pagefault(quarter.end() - PAGE_SIZE_SMALL, 6)
+        .unwrap();
+    assert_eq!(descriptors(), descriptors_before + 8);
+
+    space.unmap(quarter.start).unwrap();
+    space.unmap(plain.start).unwrap();
+    space.drop_stacks(&stack, &None);
+    space.unmap(lazy.start).unwrap();
+    assert_eq!(descriptors(), descriptors_before);
+    assert_eq!(accounted(), accounted_before);
+    assert_eq!(resident(), 0);
+    crate::raw_log!("sparse lazy tests PASS");
+}
+
+// Guarded heaps: an eager one is dense, exactly `pages + 2` small pages with
+// a frameless descriptor at each end, never rounded or huge; a lazy one is
+// sparse. Both refuse faults on their guards, neither end of a share may be
+// guarded, and unmapping gives everything back.
+#[cfg(debug_assertions)]
+pub fn guarded_heap_self_test() {
+    use super::PageType;
+    // A heap would round this to 512 pages.
+    const PAGES: u64 = (PAGE_SIZE_MID >> PAGE_SIZE_SMALL_LOG2) / 2 + 1;
+    let space = UserAddressSpace::new().unwrap();
+    let peer = UserAddressSpace::new().unwrap();
+    let descriptors = || space.inner.page_descriptors();
+    let accounted = || space.user_mem_stats().total();
+    let resident = || space.user_mem_stats().resident();
+    let table = space.inner.page_table_ref();
+    let (descriptors_before, accounted_before, resident_before) =
+        (descriptors(), accounted(), resident());
+    let refused: Result<(), ErrorCode> = Err(moto_rt::E_INVALID_ARGUMENT);
+    let options =
+        MappingOptions::READABLE | MappingOptions::WRITABLE | MappingOptions::USER_ACCESSIBLE;
+
+    // The smallest allocation of either kind: one page between the guards.
+    for lazy in [false, true] {
+        let one = space.alloc_user_guarded(1, lazy).unwrap();
+        let page = one.start + PAGE_SIZE_SMALL;
+        assert_eq!(one.size, 3 * PAGE_SIZE_SMALL);
+        assert_eq!(accounted(), accounted_before + one.size);
+        assert_eq!(table.virt_to_phys(page).is_some(), !lazy);
+        assert_eq!(space.fix_pagefault(one.start, 6), refused);
+        assert_eq!(space.fix_pagefault(one.end() - 1, 4), refused);
+        space.fix_pagefault(page, 6).unwrap();
+        assert_eq!(resident(), resident_before + PAGE_SIZE_SMALL);
+        space.copy_to_user(b"one", page).unwrap();
+        assert_eq!(space.read_from_user(page, 3).unwrap(), b"one");
+        space.unmap(one.start).unwrap();
+        assert_eq!(descriptors(), descriptors_before);
+        assert_eq!(accounted(), accounted_before);
+        assert_eq!(resident(), resident_before);
+    }
+
+    // Eager: exactly PAGES + 2 pages, every interior page resident; the
+    // guards have no frame and no translation, and refuse faults whatever
+    // the access.
+    let eager = space.alloc_user_guarded(PAGES, false).unwrap();
+    assert_eq!(eager.size, (PAGES + 2) * PAGE_SIZE_SMALL);
+    assert_eq!(descriptors(), descriptors_before + PAGES + 2);
+    assert_eq!(accounted(), accounted_before + eager.size);
+    assert_eq!(resident(), resident_before + PAGES * PAGE_SIZE_SMALL);
+    let (lower, upper) = (eager.start, eager.end() - PAGE_SIZE_SMALL);
+    assert_eq!(table.virt_to_phys(lower), None);
+    assert_eq!(table.virt_to_phys(upper), None);
+    assert_eq!(
+        table.leaf_kind(lower + PAGE_SIZE_SMALL),
+        Some(PageType::SmallPage)
+    );
+    assert_eq!(
+        table.leaf_kind(upper - PAGE_SIZE_SMALL),
+        Some(PageType::SmallPage)
+    );
+    assert_eq!(space.fix_pagefault(lower, 6), refused);
+    assert_eq!(space.fix_pagefault(lower + PAGE_SIZE_SMALL - 1, 4), refused);
+    assert_eq!(space.fix_pagefault(upper, 4), refused);
+    assert_eq!(space.fix_pagefault(upper + PAGE_SIZE_SMALL - 1, 6), refused);
+    space
+        .copy_to_user(b"guarded", lower + PAGE_SIZE_SMALL)
+        .unwrap();
+    assert_eq!(
+        space.read_from_user(lower + PAGE_SIZE_SMALL, 7).unwrap(),
+        b"guarded"
+    );
+    assert!(space.copy_to_user(b"x", lower).is_err());
+    assert!(space.read_from_user(upper, 1).is_err());
+    assert_eq!(descriptors(), descriptors_before + PAGES + 2);
+
+    // Lazy: nothing until touched; the guards refuse and never get a
+    // descriptor, an interior page gets one on first touch.
+    let lazy = space.alloc_user_guarded(PAGES, true).unwrap();
+    assert_eq!(lazy.size, (PAGES + 2) * PAGE_SIZE_SMALL);
+    assert_eq!(descriptors(), descriptors_before + PAGES + 2);
+    assert_eq!(accounted(), accounted_before + eager.size + lazy.size);
+    assert_eq!(space.fix_pagefault(lazy.start, 6), refused);
+    assert_eq!(space.fix_pagefault(lazy.end() - 1, 4), refused);
+    assert!(space.read_from_user(lazy.start, 1).is_err());
+    assert_eq!(descriptors(), descriptors_before + PAGES + 2);
+    space
+        .fix_pagefault(lazy.start + PAGE_SIZE_SMALL, 6)
+        .unwrap();
+    space
+        .fix_pagefault(lazy.end() - PAGE_SIZE_SMALL - 1, 4)
+        .unwrap();
+    assert_eq!(descriptors(), descriptors_before + PAGES + 4);
+    assert_eq!(resident(), resident_before + (PAGES + 2) * PAGE_SIZE_SMALL);
+    assert_eq!(table.virt_to_phys(lazy.start), None);
+
+    // Neither can be a share source: a guard has no frame.
+    let dest = peer.alloc_user_unmapped(PAGES + 2).unwrap();
+    for source in [eager, lazy] {
+        assert_eq!(
+            UserAddressSpace::map_shared(&peer, dest.start, &space, source.start, options),
+            refused
+        );
+    }
+    peer.unmap(dest.start).unwrap();
+
+    // Nor a share destination, which would put frames in the guards. The
+    // refused destination keeps its guards, bytes, translation and accounting.
+    let source = peer.alloc_user_heap(3).unwrap();
+    peer.copy_to_user(b"src", source.start).unwrap();
+    let guarded = space.alloc_user_guarded(1, false).unwrap();
+    let page = guarded.start + PAGE_SIZE_SMALL;
+    space.copy_to_user(b"dst", page).unwrap();
+    let phys = table.virt_to_phys(page).unwrap();
+    let full = (descriptors(), accounted(), resident());
+    let peer_resident = peer.user_mem_stats().resident();
+    assert_eq!(
+        UserAddressSpace::map_shared(&space, guarded.start, &peer, source.start, options),
+        refused
+    );
+    assert_eq!(table.virt_to_phys(guarded.start), None);
+    assert_eq!(table.virt_to_phys(guarded.end() - PAGE_SIZE_SMALL), None);
+    assert_eq!(table.virt_to_phys(page), Some(phys));
+    assert_eq!(space.read_from_user(page, 3).unwrap(), b"dst");
+    assert_eq!(space.fix_pagefault(guarded.start, 6), refused);
+    assert_eq!((descriptors(), accounted(), resident()), full);
+    assert_eq!(peer.user_mem_stats().resident(), peer_resident);
+    space.unmap(guarded.start).unwrap();
+    peer.unmap(source.start).unwrap();
+
+    space.unmap(lazy.start).unwrap();
+    space.unmap(eager.start).unwrap();
+    assert_eq!(descriptors(), descriptors_before);
+    assert_eq!(accounted(), accounted_before);
+    assert_eq!(resident(), resident_before);
+    crate::raw_log!("guarded heap tests PASS");
+}
+
+// alloc_user_shared cleans up after itself: when the peer cannot reserve
+// the counterpart, the first mapping is unmapped and each charge is
+// reversed exactly once.
+#[cfg(debug_assertions)]
+pub fn shared_alloc_cleanup_self_test() {
+    let space = UserAddressSpace::new().unwrap();
+    let peer = UserAddressSpace::new().unwrap();
+    let options =
+        MappingOptions::READABLE | MappingOptions::WRITABLE | MappingOptions::USER_ACCESSIBLE;
+    let usage = |space: &UserAddressSpace| {
+        (
+            space.total_usage.load(Ordering::Relaxed),
+            space.user_mem_stats().total(),
+            space.user_mem_stats().resident(),
+            space.inner.page_descriptors(),
+        )
+    };
+    let (space_before, peer_before) = (usage(&space), usage(&peer));
+
+    // Fill the peer's address space with lazy reservations, cheap now,
+    // until a small one no longer fits.
+    let mut held = alloc::vec::Vec::new();
+    let mut pages = 1_u64 << 32;
+    while pages >= 16 {
+        match peer.alloc_user_lazy(pages) {
+            Ok(segment) => held.push(segment.start),
+            Err(_) => pages >>= 1,
+        }
+    }
+    assert!(peer.alloc_user_unmapped(16).is_err());
+
+    // The first refused call may grow kernel slabs that are never given
+    // back; the second must leave the pool exactly where it found it.
+    let peer_full = usage(&peer);
+    let refused = Err(moto_rt::E_OUT_OF_MEMORY);
+    assert_eq!(
+        space.alloc_user_shared(u64::MAX, 16, options, &peer),
+        refused
+    );
+    let free_before = super::phys::available_small_pages();
+    assert_eq!(
+        space.alloc_user_shared(u64::MAX, 16, options, &peer),
+        refused
+    );
+    assert_eq!(usage(&space), space_before);
+    assert_eq!(usage(&peer), peer_full);
+    assert_eq!(super::phys::available_small_pages(), free_before);
+
+    // With a fixed address, the first mapping is made and then undone, so
+    // the address is free for the next caller.
+    const FIXED: u64 = 1 << 40;
+    assert_eq!(space.alloc_user_shared(FIXED, 16, options, &peer), refused);
+    assert_eq!(usage(&space), space_before);
+    let other = UserAddressSpace::new().unwrap();
+    let (here, there) = space.alloc_user_shared(FIXED, 16, options, &other).unwrap();
+    assert_eq!(here, FIXED);
+    space.unmap(here).unwrap();
+    other.unmap(there).unwrap();
+    assert_eq!(usage(&space), space_before);
+
+    // A refused share into a fixed address undoes its reservation the same
+    // way; an untouched lazy source is refused.
+    let untouched = other.alloc_user_lazy(16).unwrap();
+    let readable = MappingOptions::READABLE | MappingOptions::USER_ACCESSIBLE;
+    assert_eq!(
+        space.share_from(&other, untouched.start, FIXED, 16, readable),
+        Err(moto_rt::E_INVALID_ARGUMENT)
+    );
+    assert_eq!(usage(&space), space_before);
+    for idx in 0..16 {
+        other
+            .fix_pagefault(untouched.start + idx * PAGE_SIZE_SMALL, 6)
+            .unwrap();
+    }
+    space
+        .share_from(&other, untouched.start, FIXED, 16, readable)
+        .unwrap();
+    space.unmap(FIXED).unwrap();
+    other.unmap(untouched.start).unwrap();
+    assert_eq!(usage(&space), space_before);
+
+    for start in held {
+        peer.unmap(start).unwrap();
+    }
+    assert_eq!(usage(&peer), peer_before);
+    crate::raw_log!("shared alloc cleanup tests PASS");
 }

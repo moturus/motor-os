@@ -268,29 +268,29 @@ transition race, every free-list rule of §2 and §5, and Frusa2M at small
 populations. Work bounds are asserted with test-only counters (index
 probes, stack entries examined, guards taken), never with wall-clock time.
 
-`systest alloc-bench` prints per-workload timings on Motor for retained
+`systest alloc-bench` prints per-workload timings on Motor OS for retained
 populations, immediate alloc/free of one fixed size and of random sizes,
 the 4 KiB class on every CPU, a FIFO queue, rings of live objects, and a
 producer/consumer pair. A host harness with the same workloads compares the
 crate's shared and cached paths against glibc over a common page backend;
 it lives outside the repository.
 
-Measured on the host (i9-10885H, release builds) and on Motor (release
+Measured on the host (i9-10885H, release builds) and on Motor OS (release
 image, QEMU with 4 vCPUs on the same host), nanoseconds per alloc+free
 pair, one thread unless noted, per thread where several:
 
-| Workload | glibc, host | frusa, host | frusa, Motor |
+| Workload | glibc, host | frusa, host | frusa, Motor OS |
 |---|---:|---:|---:|
 | fixed 64 B | 6 | 21 | 30 |
-| fixed 64 B, 8 threads (4 on Motor) | 10 | 19 | 30 |
-| fixed 4 KiB, 8 threads (4 on Motor) | 37 | 22 | 30 |
-| random 16 B to 4 KiB, 8 threads (4 on Motor) | 18 to 26 | 86 | 53 to 56 |
+| fixed 64 B, 8 threads (4 on Motor OS) | 10 | 19 | 30 |
+| fixed 4 KiB, 8 threads (4 on Motor OS) | 37 | 22 | 30 |
+| random 16 B to 4 KiB, 8 threads (4 on Motor OS) | 18 to 26 | 86 | 53 to 56 |
 | FIFO queue of 64 x 64 B | 7.5 | 25 | 31 |
 | ring of 4,096 live, random sizes, 1 thread | 49 | 43 | 60 |
-| ring, 8 threads (4 on Motor) | 55 | 123 | 135 |
+| ring, 8 threads (4 on Motor OS) | 55 | 123 | 135 |
 | free 262K x 64 B in random order, per free | 82 | 85 | - |
 
-On Motor the temporaries row is about 9 ns above the host: the vDSO entry
+On Motor OS the temporaries row is about 9 ns above the host: the vDSO entry
 path (vtable call, layout re-validation, shard store), the largest fixed
 cost per operation. glibc leads on that row by the two locked instructions
 of the bitmap path against none.
@@ -298,7 +298,7 @@ of the bitmap path against none.
 ## 9. Known limits
 
 Requests above 4 KiB are a `SysMem::alloc` and `SysMem::free` pair each on
-Motor, where glibc serves up to 128 KiB from its heap. Power-of-two classes
+Motor OS, where glibc serves up to 128 KiB from its heap. Power-of-two classes
 waste up to half of each object. Index memory is 16 bytes per block. The
 4 KiB class has no private block (caching it would hold 256 KiB per
 thread), so its temporaries go through the free lists. Listed memory, at

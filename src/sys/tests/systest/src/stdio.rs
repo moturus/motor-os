@@ -1,4 +1,4 @@
-use moto_ipc::stdio_pipe::StdioPipe;
+use moto_sdk::ipc::stdio_pipe::StdioPipe;
 
 const INHERITED_RELAY_MIDDLE: &str = "stdio-inherited-relay-middle";
 const INHERITED_RELAY_WRITER: &str = "stdio-inherited-relay-writer";
@@ -82,7 +82,7 @@ pub fn test_wait_drains_inherited_output() {
 fn test_stdio_pipe_basic() {
     use moto_sys::syscalls::*;
 
-    let (d1, d2) = moto_ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
+    let (d1, d2) = moto_sdk::ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
 
     let reader = unsafe { StdioPipe::new_reader(d1) };
     let writer = unsafe { StdioPipe::new_writer(d2) };
@@ -127,11 +127,11 @@ fn test_stdio_pipe_basic() {
 }
 
 fn test_stdio_pipe_ctrl_c_scan() {
-    use moto_ipc::stdio_pipe::CtrlCAction;
+    use moto_sdk::ipc::stdio_pipe::CtrlCAction;
     use moto_sys::SysHandle;
 
     let (reader_data, writer_data) =
-        moto_ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
+        moto_sdk::ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
     let ring_len = writer_data.buf_size >> 1;
     let reader = unsafe { StdioPipe::new_reader(reader_data) };
     let writer = unsafe { StdioPipe::new_writer(writer_data) };
@@ -1418,7 +1418,7 @@ fn test_stdio_pipe_async_fd() {
 fn test_stdio_pipe_flush() {
     use moto_sys::syscalls::*;
 
-    let (d1, d2) = moto_ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
+    let (d1, d2) = moto_sdk::ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
 
     let reader = unsafe { StdioPipe::new_reader(d1) };
     let writer = unsafe { StdioPipe::new_writer(d2) };
@@ -1450,7 +1450,7 @@ fn test_stdio_pipe_take_unread() {
     use core::sync::atomic::{AtomicUsize, Ordering};
     use moto_sys::SysHandle;
 
-    let (d1, d2) = moto_ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
+    let (d1, d2) = moto_sdk::ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
     let reader = unsafe { StdioPipe::new_reader(d1) };
     let writer = unsafe { StdioPipe::new_writer(d2) };
     assert_eq!(writer.write(b"abcdef").unwrap(), 6);
@@ -1459,7 +1459,7 @@ fn test_stdio_pipe_take_unread() {
     assert_eq!(&prefix, b"ab");
     assert_eq!(writer.take_unread().unwrap(), b"cdef");
 
-    let (d1, d2) = moto_ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
+    let (d1, d2) = moto_sdk::ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
     let writer_addr = d2.buf_addr;
     let ring_len = d2.buf_size >> 1;
     let _reader = unsafe { StdioPipe::new_reader(d1) };
@@ -1479,7 +1479,7 @@ fn test_stdio_pipe_take_unread() {
 fn test_stdio_reader_wake_on_writer_drop() {
     use moto_sys::SysHandle;
 
-    let (d1, d2) = moto_ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
+    let (d1, d2) = moto_sdk::ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
 
     let reader = unsafe { StdioPipe::new_reader(d1) };
     let writer = unsafe { StdioPipe::new_writer(d2) };
@@ -1512,7 +1512,7 @@ fn test_stdio_reader_wake_on_writer_drop() {
 fn test_stdio_reader_drains_after_writer_drop() {
     use moto_sys::SysHandle;
 
-    let (d1, d2) = moto_ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
+    let (d1, d2) = moto_sdk::ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
 
     let reader = unsafe { StdioPipe::new_reader(d1) };
     let writer = unsafe { StdioPipe::new_writer(d2) };
@@ -1536,7 +1536,7 @@ fn test_stdio_reader_drains_after_writer_drop() {
 fn test_stdio_writer_wake_on_reader_drop() {
     use moto_sys::SysHandle;
 
-    let (d1, d2) = moto_ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
+    let (d1, d2) = moto_sdk::ipc::stdio_pipe::make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
 
     let reader = unsafe { StdioPipe::new_reader(d1) };
     let writer = unsafe { StdioPipe::new_writer(d2) };

@@ -1,10 +1,11 @@
+use futures::FutureExt;
 use std::io::ErrorKind;
 use std::rc::Weak;
 use std::{cell::RefCell, net::SocketAddr, rc::Rc, task::Poll};
 
-use moto_io_internal::udp_queues::{UdpDefragmentingQueue, UdpFragmentingQueue};
+use moto_sdk::io_internal::udp_queues::{UdpDefragmentingQueue, UdpFragmentingQueue};
+use moto_sdk::sys_io::api_net;
 use moto_sys::SysHandle;
-use moto_sys_io::api_net;
 
 use crate::runtime::channel_budget::ClientSender;
 
@@ -14,9 +15,11 @@ use super::SocketBase;
 use super::SocketState;
 
 pub struct UdpState {
+    pub(super) physical_transport: bool,
     ephemeral_port: Option<u16>,
     tx_queue: UdpDefragmentingQueue,
     rx_queue: Rc<RefCell<UdpFragmentingQueue>>,
+    cancel_rx: Option<moto_sdk::async_runtime::oneshot::Sender<()>>,
 }
 
 impl MotoSocket {
@@ -47,6 +50,7 @@ impl MotoSocket {
         ephemeral_port: Option<u16>,
         client_sender: ClientSender,
         subchannel_mask: u64,
+        physical_transport: bool,
     ) -> std::io::Result<Rc<RefCell<MotoSocket>>> {
         let rx_buffer = moto_netstack::socket::udp::PacketBuffer::new(
             vec![moto_netstack::socket::udp::PacketMetadata::EMPTY; 64],
@@ -78,7 +82,9 @@ impl MotoSocket {
         MotoSocket::new_ip(
             base,
             SocketState::Udp(UdpState {
+                physical_transport,
                 ephemeral_port,
+                cancel_rx: None,
                 tx_queue: UdpDefragmentingQueue::new_bounded(),
                 rx_queue: Rc::new(RefCell::new(UdpFragmentingQueue::new(
                     socket_id,
@@ -88,7 +94,7 @@ impl MotoSocket {
         )
     }
 
-    async fn udp_rx(weak_socket: Weak<RefCell<MotoSocket>>) {
+    async fn udp_rx(weak_socket: Weak<RefCell<MotoSocket>>) -> bool {
         let weak_clone = weak_socket.clone();
 
         // Poll for packet.
@@ -112,7 +118,10 @@ impl MotoSocket {
                     Poll::Ready(true)
                 } else {
                     #[cfg(debug_assertions)]
-                    log::debug!("rx empty/pending: task id: {}", moto_async::task_id(cx));
+                    log::debug!(
+                        "rx empty/pending: task id: {}",
+                        moto_sdk::async_runtime::task_id(cx)
+                    );
 
                     netstack_socket.register_recv_waker(cx.waker());
                     Poll::Pending
@@ -122,18 +131,18 @@ impl MotoSocket {
         .await;
 
         if !cont {
-            return;
+            return false;
         }
 
         let Some(socket) = weak_socket.upgrade() else {
-            return; // The socket is gone.
+            return false; // The socket is gone.
         };
         let mut socket_ref = socket.borrow_mut();
         let socket_mut = &mut *socket_ref;
         let Self { base, state } = socket_mut;
         let udp_state = state.unwrap_udp();
 
-        let sender = base.client_sender.clone();
+        let sender = base.sender().clone();
         let page_allocator = async |subchannel_mask| {
             sender
                 .alloc_page(subchannel_mask)
@@ -154,29 +163,82 @@ impl MotoSocket {
             msg.status = moto_rt::E_OK;
 
             log::debug!("RX msg for UDP socket 0x{socket_id:x}");
-            let _ = sender.send(msg).await;
+            if msg.payload.args_16()[10] == 0 {
+                let _ = sender.send(msg).await;
+            } else {
+                let _ = sender
+                    .send_with_owned_page(msg, msg.payload.shared_pages()[11])
+                    .await;
+            }
         }
 
-        Self::spawn_udp_rx_task(weak_socket);
+        true
     }
 
     fn spawn_udp_rx_task(weak_socket: Weak<RefCell<MotoSocket>>) {
-        // Note: because the socket has been created, there is no need to sync this
-        // task, as no RX packets will be losts.
-        let _ = moto_async::LocalRuntime::spawn(async move {
-            Self::udp_rx(weak_socket).await;
+        let Some(socket) = weak_socket.upgrade() else {
+            return;
+        };
+        let (cancel, removed) = moto_sdk::async_runtime::oneshot();
+        {
+            let mut socket = socket.borrow_mut();
+            // Removal can overtake a bind reply blocked on channel capacity.
+            if socket
+                .base
+                .runtime
+                .inner
+                .borrow()
+                .devices
+                .get(socket.base.ip_backend().device_idx)
+                .is_none()
+            {
+                return;
+            }
+            assert!(
+                socket
+                    .state
+                    .unwrap_udp()
+                    .cancel_rx
+                    .replace(cancel)
+                    .is_none()
+            );
+        }
+        let (runtime, device_idx) = {
+            let socket = socket.borrow();
+            (
+                socket.base.runtime.clone(),
+                socket.base.ip_backend().device_idx,
+            )
+        };
+        drop(socket);
+        runtime.spawn_device_task(device_idx, async move {
+            let receive = async {
+                while Self::udp_rx(weak_socket.clone()).await {
+                    moto_sdk::async_runtime::yield_now().await;
+                }
+            }
+            .fuse();
+            let removed = removed.fuse();
+            futures::pin_mut!(receive, removed);
+            // Cancellation also interrupts a receive waiting for IPC pages
+            // or reply space, releasing its privately queued datagrams.
+            futures::select_biased! {
+                _ = removed => (),
+                _ = receive => (),
+            }
         });
     }
 
     // TODO: this message was used before async channel was a thing. Maybe we don't need it now?
-    async fn udp_tx_ack(sender: &moto_ipc::io_channel::Sender, socket_id: u64) {
-        let mut msg = moto_ipc::io_channel::Msg::new();
+    async fn udp_tx_ack(sender: &moto_sdk::ipc::io_channel::Sender, socket_id: u64) {
+        let mut msg = moto_sdk::ipc::io_channel::Msg::new();
         msg.command = api_net::NetCmd::UdpSocketTxRxAck.as_u16();
         msg.handle = socket_id;
         let _ = sender.send(msg).await;
     }
 
     pub(super) fn on_udp_socket_drop(base: &mut super::SocketBase, state: &mut UdpState) {
+        state.cancel_rx.take();
         // UDP sockets don't linger.
         let runtime = base.runtime.clone();
         let device_idx = base.ip_backend().device_idx;
@@ -222,11 +284,11 @@ impl MotoSocket {
     /* ----------------------------------- API calls ------------------------------------ */
     pub async fn udp_bind_for_remote(
         runtime: &NetRuntime,
-        mut msg: moto_ipc::io_channel::Msg,
+        mut msg: moto_sdk::ipc::io_channel::Msg,
         sender: &ClientSender,
     ) -> std::io::Result<()> {
         let remote_addr = api_net::get_socket_addr(&msg.payload);
-        if remote_addr.ip().is_unspecified() {
+        if msg.flags != 0 || remote_addr.ip().is_unspecified() {
             return Err(ErrorKind::InvalidInput.into());
         }
 
@@ -246,15 +308,25 @@ impl MotoSocket {
 
     pub async fn udp_bind(
         runtime: &NetRuntime,
-        mut msg: moto_ipc::io_channel::Msg,
+        mut msg: moto_sdk::ipc::io_channel::Msg,
         sender: &ClientSender,
     ) -> std::io::Result<()> {
         let requested = api_net::get_socket_addr(&msg.payload);
+        if msg.flags & !api_net::UDP_BIND_PHYSICAL_TRANSPORT != 0 {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        let physical_transport = msg.flags & api_net::UDP_BIND_PHYSICAL_TRANSPORT != 0;
+        if physical_transport && requested.ip().is_unspecified() {
+            return Err(ErrorKind::InvalidInput.into());
+        }
         let (socket_addr, device_idx) = if requested.ip().is_unspecified() {
             let inner = runtime.inner.borrow();
             let mut fallback = None;
             let mut selected = None;
-            for (device_idx, device) in inner.devices.iter().enumerate() {
+            for (device_idx, device) in inner.devices.iter() {
+                if device.is_packet() {
+                    continue;
+                }
                 for ip_addr in device.ip_addesses() {
                     if ip_addr.is_ipv4() != requested.is_ipv4() {
                         continue;
@@ -284,12 +356,20 @@ impl MotoSocket {
             (requested, device_idx)
         };
 
+        if physical_transport {
+            let inner = runtime.inner.borrow();
+            let device = &inner.devices[device_idx];
+            if !device.is_external() || device.is_packet() {
+                return Err(ErrorKind::InvalidInput.into());
+            }
+        }
+
         Self::udp_bind_on_device(runtime, msg, sender, socket_addr, device_idx).await
     }
 
     async fn udp_bind_on_device(
         runtime: &NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
+        msg: moto_sdk::ipc::io_channel::Msg,
         sender: &ClientSender,
         mut socket_addr: SocketAddr,
         device_idx: usize,
@@ -338,6 +418,7 @@ impl MotoSocket {
             allocated_port,
             sender.clone(),
             subchannel_mask,
+            msg.flags & api_net::UDP_BIND_PHYSICAL_TRANSPORT != 0,
         ) {
             Ok(socket) => socket,
             Err(err) => {
@@ -371,9 +452,9 @@ impl MotoSocket {
 
         resp.handle = socket_id;
         resp.status = moto_rt::E_OK;
-        let _ = sender.send(resp).await;
-
-        Self::spawn_udp_rx_task(weak_socket);
+        if Self::publish_ip_socket(udp_socket, resp).await {
+            Self::spawn_udp_rx_task(weak_socket);
+        }
 
         Ok(())
     }
@@ -390,8 +471,8 @@ impl MotoSocket {
     /// size field, not the page index, decides whether there is one.
     fn drop_undeliverable_udp_tx(
         runtime: &NetRuntime,
-        msg: &moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        msg: &moto_sdk::ipc::io_channel::Msg,
+        sender: &moto_sdk::ipc::io_channel::Sender,
     ) {
         if msg.payload.args_16()[10] != 0 {
             let _io_page = sender.get_page(msg.payload.shared_pages()[11]);
@@ -404,8 +485,8 @@ impl MotoSocket {
 
     pub async fn udp_tx(
         runtime: &NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        msg: moto_sdk::ipc::io_channel::Msg,
+        sender: &moto_sdk::ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
         let socket_id = msg.handle;
 
@@ -419,7 +500,7 @@ impl MotoSocket {
         let socket_mut = &mut *socket_ref;
         let Self { base, state } = socket_mut;
 
-        if base.sender().remote_handle() != sender.remote_handle() {
+        if base.client_handle() != sender.remote_handle() {
             log::debug!("UDP TX: wrong client for socket");
             Self::drop_undeliverable_udp_tx(runtime, &msg, sender);
             return Ok(());
@@ -460,12 +541,8 @@ impl MotoSocket {
         let mut need_udp_tx_ack = fragment_id != 0 || (admission_dropped && fragment_size != 0);
 
         let mut inner_ref = runtime.inner.borrow_mut();
-        let mut inner = &mut *inner_ref;
-        let netstack_socket = inner.devices[base.ip_backend().device_idx]
-            .sockets
-            .get_mut::<moto_netstack::socket::udp::Socket>(
-            base.ip_backend().handle(base.socket_id),
-        );
+        let inner = &mut *inner_ref;
+        let device_idx = base.ip_backend().device_idx;
 
         loop {
             let Ok(datagram) = udp_state.tx_queue.next_datagram() else {
@@ -482,7 +559,44 @@ impl MotoSocket {
                 break;
             };
 
-            if let Err(err) = netstack_socket.send_slice(datagram.slice(), datagram.addr) {
+            // A binding keeps its source and device. Only explicit physical
+            // transports bypass packet-device routes, including default routes.
+            if !udp_state.physical_transport
+                && !inner.udp_route_allowed(device_idx, &datagram.addr.ip())
+            {
+                need_udp_tx_ack |= !datagram.slice().is_empty();
+                runtime
+                    .stats
+                    .udp_tx_boundary_drops
+                    .set(runtime.stats.udp_tx_boundary_drops.get() + 1);
+                continue;
+            }
+
+            // Local delivery follows boundary policy. Physical transports must
+            // also bypass local packet-device addresses, not just their routes.
+            let local_device =
+                inner
+                    .ip_addresses
+                    .get(&datagram.addr.ip())
+                    .copied()
+                    .filter(|&index| {
+                        !udp_state.physical_transport || !inner.devices[index].is_packet()
+                    });
+            let result = if let Some(index) = local_device {
+                inner.devices[index].sockets.udp_deliver_local(
+                    base.ip_backend().local_addr.into(),
+                    datagram.addr.into(),
+                    datagram.slice(),
+                )
+            } else {
+                inner.devices[device_idx]
+                    .sockets
+                    .get_mut::<moto_netstack::socket::udp::Socket>(
+                        base.ip_backend().handle(base.socket_id),
+                    )
+                    .send_slice(datagram.slice(), datagram.addr)
+            };
+            if let Err(err) = result {
                 match err {
                     moto_netstack::socket::udp::SendError::Unaddressable => {
                         log::debug!("Cannot send UDP packet to {:?}.", datagram.addr);
@@ -506,7 +620,9 @@ impl MotoSocket {
                     datagram.slice().len(),
                     datagram.addr
                 );
-                base.ip_backend().device_notify.notify_one();
+                if local_device.is_none() {
+                    base.ip_backend().device_notify.notify_one();
+                }
             }
         }
 
@@ -527,8 +643,8 @@ impl MotoSocket {
 
     pub async fn udp_getsockopt(
         runtime: &NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        msg: moto_sdk::ipc::io_channel::Msg,
+        sender: &moto_sdk::ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
         let socket_id = msg.handle;
         let Some(moto_socket) = runtime.inner.borrow().sockets.get(&socket_id).cloned() else {
@@ -537,7 +653,7 @@ impl MotoSocket {
 
         {
             let socket_ref = moto_socket.borrow();
-            if socket_ref.base.sender().remote_handle() != sender.remote_handle() {
+            if socket_ref.base.client_handle() != sender.remote_handle() {
                 return Err(ErrorKind::NotFound.into());
             }
             if !matches!(socket_ref.state, SocketState::Udp(_)) {
@@ -563,8 +679,8 @@ impl MotoSocket {
 
     pub async fn udp_setsockopt(
         runtime: &NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        msg: moto_sdk::ipc::io_channel::Msg,
+        sender: &moto_sdk::ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
         let socket_id = msg.handle;
         let Some(moto_socket) = runtime.inner.borrow().sockets.get(&socket_id).cloned() else {
@@ -573,7 +689,7 @@ impl MotoSocket {
 
         {
             let socket_ref = moto_socket.borrow();
-            if socket_ref.base.sender().remote_handle() != sender.remote_handle() {
+            if socket_ref.base.client_handle() != sender.remote_handle() {
                 return Err(ErrorKind::NotFound.into());
             }
             if !matches!(socket_ref.state, SocketState::Udp(_)) {
@@ -601,8 +717,8 @@ impl MotoSocket {
 
     pub async fn udp_socket_drop(
         runtime: &NetRuntime,
-        msg: moto_ipc::io_channel::Msg,
-        sender: &moto_ipc::io_channel::Sender,
+        msg: moto_sdk::ipc::io_channel::Msg,
+        sender: &moto_sdk::ipc::io_channel::Sender,
     ) -> std::io::Result<()> {
         let socket_id = msg.handle;
 
@@ -615,7 +731,7 @@ impl MotoSocket {
             let socket_mut = &mut *socket_ref;
             let Self { base, state } = socket_mut;
 
-            if base.sender().remote_handle() != sender.remote_handle() {
+            if base.client_handle() != sender.remote_handle() {
                 log::debug!("UDP TX: wrong client for socket");
                 return Err(ErrorKind::NotFound.into());
             }

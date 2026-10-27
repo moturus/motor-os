@@ -458,7 +458,7 @@ Motor OS VM, and open it from the host.</p>
 
 <h2>The program</h2>
 <p>Create the project inside the Motor OS checkout, so that the repository's
-<code>rust-toolchain.toml</code> selects the Motor toolchain for it (<code>build/</code> is
+<code>rust-toolchain.toml</code> selects the Motor OS toolchain for it (<code>build/</code> is
 ignored by git):</p>
 <pre><code>cd "$MOTORH/motor-os"
 mkdir -p build/examples
@@ -642,8 +642,9 @@ impl Worker {
 <h2>Build it for Motor OS</h2>
 <pre><code>cargo build --release --target x86_64-unknown-motor</code></pre>
 <p>No toolchain selector is needed: the checkout's <code>rust-toolchain.toml</code> names
-the exact Motor toolchain the build installed. For a project outside the checkout, copy
-that file next to its <code>Cargo.toml</code>. See <a href="toolchain.html">Toolchains</a>.
+the exact Motor OS toolchain installed before building the images. For a project outside
+the checkout, copy that file next to its <code>Cargo.toml</code>. See
+<a href="toolchain.html">Toolchains</a>.
 The result is <code>target/x86_64-unknown-motor/release/hello</code>.</p>
 
 <h2>Copy it into the VM</h2>

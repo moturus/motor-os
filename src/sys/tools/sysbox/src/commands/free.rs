@@ -48,7 +48,7 @@ pub fn do_command(args: &[String]) {
     // direct syscall, so `free` consumes the same federated API that also serves
     // userspace providers like sys-io. Metrics are resolved by name — nothing is
     // hardcoded to a numeric id; the kernel describes its own metric set.
-    use moto_stats::Collector;
+    use moto_sdk::stats::Collector;
     let kernel = Collector::kernel();
     let metrics = Collector::query(&kernel).unwrap_or_default();
     let descs = Collector::describe(&kernel).unwrap_or_default();
@@ -58,7 +58,7 @@ pub fn do_command(args: &[String]) {
         };
         metrics
             .iter()
-            .find(|e| e.metric == desc.id && e.scope == moto_stats::SCOPE_GLOBAL)
+            .find(|e| e.metric == desc.id && e.scope == moto_sdk::stats::SCOPE_GLOBAL)
             .map(|e| e.value)
             .unwrap_or(0)
     };

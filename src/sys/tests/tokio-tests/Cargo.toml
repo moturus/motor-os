@@ -13,7 +13,7 @@ tokio-metrics = "0.4.2"
 tokio-test = "0.4.4"
 
 [target.'cfg(target_os = "motor")'.dependencies]
-moto-stats = { path = "../../lib/moto-stats" }
+moto-sdk = { path = "../../lib/moto-sdk" }
 moto-sys = { path = "../../lib/moto-sys" }
 
 [lints.rust]

@@ -28,7 +28,7 @@ mod imp {
 mod imp {
     use std::time::Instant;
 
-    use moto_stats::{Collector, MetricEntry, ProviderInfo};
+    use moto_sdk::stats::{Collector, MetricEntry, ProviderInfo};
 
     // Kernel per-process metrics sampled for sys-io and for this process.
     const KERNEL_METRICS: [&str; 3] = ["cpu_usage", "sys_cpu_waits", "sys_cpu_wakes"];
@@ -81,7 +81,7 @@ mod imp {
 
             println!("--- sys-io metrics for '{phase}' ({elapsed:.2}s) ---");
 
-            let tsc_in_sec = moto_sys::KernelStaticPage::get().tsc_in_sec as f64;
+            let tsc_in_sec = moto_sdk::sys::KernelStaticPage::get().tsc_in_sec as f64;
             let cpu_pct = |b: &[u64; 3], a: &[u64; 3]| {
                 (a[CPU_USAGE].saturating_sub(b[CPU_USAGE]) as f64) / tsc_in_sec / elapsed * 100.0
             };
@@ -192,7 +192,7 @@ mod imp {
 
             // A userspace provider's id is its PID, which is also its kernel scope.
             let sys_io_kernel = read_scope(&kernel, &ids, sys_io.id)?;
-            let self_kernel = read_scope(&kernel, &ids, moto_sys::current_pid())?;
+            let self_kernel = read_scope(&kernel, &ids, moto_sdk::sys::current_pid())?;
 
             Some(Stats {
                 sys_io,

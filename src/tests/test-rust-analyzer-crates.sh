@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Run against the already booted developer-image VM. Provisioning fetches only
-# what the analyzer build needs; the crates' own test graphs are fetched here.
+# Run against the already booted developer-image VM: the command-debug fixture
+# of the rust-analyzer smoke test, built against the selected Motor standard
+# library, must pass on Motor.
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 WD="$ROOT_DIR/src/tests"
@@ -21,47 +22,11 @@ if [ "${1:-}" = --run-motor ]; then
 fi
 [ "$#" = 0 ] || { echo "usage: $0 [--run-motor BINARY ARGS...]" >&2; exit 2; }
 
-for helper in lib sources runtime assembly patched-crates rust-analyzer; do
-	. "$ROOT_DIR/src/toolchain-$helper.sh"
-done
-. "$ROOT_DIR/src/patches/crates.sh"
-MOTORH="$(realpath "${MOTORH:-$ROOT_DIR/..}")"
 temporary="$(mktemp -d)"
 trap 'rm -rf "$temporary"' EXIT
-cargo="$(rustup which cargo)"
-export RUSTC="$(rustup which rustc)"
-assembly_images="$("$ROOT_DIR/src/resolve-toolchain-assembly.sh" --resolve)"
-linker="${assembly_images%/images}/sysroot/bin/motor-clang"
-
-# Cargo's runner receives the artifact path, avoiding assumptions about the
-# Motor toolchain's test-binary layout. Escape the path as a TOML string.
-runner="$WD/test-rust-analyzer-crates.sh"
-runner="${runner//\\/\\\\}"
-runner="${runner//\"/\\\"}"
-runner_config="target.x86_64-unknown-motor.runner=[\"bash\",\"$runner\",\"--run-motor\"]"
-test_crate() {
-	local name="$1" test_target="$2" source
-	source="$(toolchain_rust_analyzer_crate "$ROOT_DIR" "$MOTORH" \
-		"${CARGO_HOME:-$HOME/.cargo}" "$name" false)"
-	# The published lockfile pins dev-dependencies (bencher, wasm-bindgen-test)
-	# that no build step fetches. `--locked` cannot rewrite it, and the digest
-	# check below confirms the tree is untouched. The tests then run offline.
-	"$cargo" fetch --locked --manifest-path "$source/Cargo.toml"
-	local args=(--release --locked --offline --manifest-path "$source/Cargo.toml"
-		--test "$test_target" --target-dir "$temporary/target")
-	"$cargo" test "${args[@]}"
-	CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$linker" \
-	CARGO_TARGET_X86_64_UNKNOWN_MOTOR_RUSTFLAGS='-C link-self-contained=no -C default-linker-libraries=yes' \
-		"$cargo" test "${args[@]}" --target x86_64-unknown-motor --config "$runner_config"
-
-	# Locked tests must not mutate the published/patched source tree either.
-	toolchain_rust_analyzer_crate "$ROOT_DIR" "$MOTORH" \
-		"${CARGO_HOME:-$HOME/.cargo}" "$name" false >/dev/null
-}
-test_crate url unit
-test_crate inventory test
+rustc="$(cd "$ROOT_DIR" && rustup which rustc)"
 # Exercise the actual selected Motor stdlib, not a host-side formatter adapter.
-"$RUSTC" --test --edition=2024 -O --target x86_64-unknown-motor \
+"$rustc" --test --edition=2024 -O --target x86_64-unknown-motor \
   "$WD/rust-analyzer-smoke/fixtures/command-debug.rs" -o "$temporary/command-debug"
 "$WD/test-rust-analyzer-crates.sh" --run-motor "$temporary/command-debug"
 echo 'test-rust-analyzer-crates PASS'

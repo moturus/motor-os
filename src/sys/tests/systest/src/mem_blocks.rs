@@ -227,7 +227,7 @@ struct BlockMetrics {
 
 impl BlockMetrics {
     fn read() -> Self {
-        use moto_stats::Collector;
+        use moto_sdk::stats::Collector;
 
         let kernel = Collector::kernel();
         let descs = Collector::describe(&kernel).unwrap();
@@ -239,7 +239,7 @@ impl BlockMetrics {
                 .unwrap_or_else(|| panic!("no kernel metric '{name}'"));
             entries
                 .iter()
-                .find(|e| e.metric == desc.id && e.scope == moto_stats::SCOPE_GLOBAL)
+                .find(|e| e.metric == desc.id && e.scope == moto_sdk::stats::SCOPE_GLOBAL)
                 .map(|e| e.value)
                 .unwrap_or_else(|| panic!("kernel metric '{name}' not reported"))
         };

@@ -8,19 +8,19 @@
 //! built snapshot. Best effort, never precise.
 //!
 //! This module also hosts the `sys-io-stats-service` sync-RPC service (see
-//! [`moto_sys_io::stats`]) that lists live TCP sockets. It runs on its own
+//! [`moto_sdk::sys_io::stats`]) that lists live TCP sockets. It runs on its own
 //! thread and reuses the same cross-thread polling mechanism to read the socket
 //! table out of the net runtime.
 
-use moto_ipc::sync::{ChannelSize, LocalServer, ResponseHeader};
-use moto_stats::{MetricDescWire, MetricEntry};
-use moto_sys::SysHandle;
+use moto_sdk::ipc::sync::{ChannelSize, LocalServer, ResponseHeader};
+use moto_sdk::stats::{MetricDescWire, MetricEntry};
 #[cfg(debug_assertions)]
-use moto_sys_io::stats::{CMD_SELF_TEST, MAX_SELF_TEST_FAILURE_LEN, SelfTestResponse};
-use moto_sys_io::stats::{
+use moto_sdk::sys_io::stats::{CMD_SELF_TEST, MAX_SELF_TEST_FAILURE_LEN, SelfTestResponse};
+use moto_sdk::sys_io::stats::{
     CMD_TCP_STATS, GetTcpSocketStatsRequest, GetTcpSocketStatsResponse, MAX_TCP_SOCKET_STATS,
     TcpSocketStatsV1, URL_IO_STATS,
 };
+use moto_sys::SysHandle;
 use std::{cell::Cell, rc::Rc, sync::OnceLock};
 
 /// Net metric ids. They are private to sys-io: collectors learn their names
@@ -118,6 +118,15 @@ mod ids {
     pub const NET_TCP_ABORT_FAILED: u32 = 70;
     pub const NET_UDP_TX_UNREACHABLE_DROPS: u32 = 71;
     pub const NET_NEIGHBOR_SOLICITATION_SUPPRESSED: u32 = 72;
+    pub const NET_DEVICE_SLOTS: u32 = 73;
+    pub const NET_DEVICE_SLOT_BYTES: u32 = 74;
+    pub const NET_PACKET_DEVICES: u32 = 75;
+    pub const NET_PACKET_BUFFER_BYTES: u32 = 76;
+    pub const NET_PACKET_MALFORMED: u32 = 77;
+    pub const NET_PACKET_RX_DROPPED: u32 = 78;
+    pub const NET_PACKET_RX_HIGH_WATER: u32 = 79;
+    pub const NET_PACKET_TX_HIGH_WATER: u32 = 80;
+    pub const NET_UDP_TX_BOUNDARY_DROPS: u32 = 81;
 }
 
 /// Upper bounds, in bytes, of the received-frame size histogram. A frame larger
@@ -157,6 +166,17 @@ fn rx_size_metric_name(idx: usize) -> String {
 #[derive(Default)]
 pub(super) struct NetStats {
     pub num_devices: Cell<u64>,
+    // Device tables are sampled when answering metrics. Queue bytes stay
+    // charged until their last token/adapter reference has been released.
+    pub device_slots: Cell<u64>,
+    pub device_slot_bytes: Cell<u64>,
+    pub packet_devices: Cell<u64>,
+    pub packet_buffer_bytes: Cell<u64>,
+    pub packet_malformed: Cell<u64>,
+    pub packet_rx_dropped: Cell<u64>,
+    /// Largest per-direction occupancy seen on any packet device.
+    pub packet_rx_high_water: Cell<u64>,
+    pub packet_tx_high_water: Cell<u64>,
     pub active_clients: Cell<u64>,
     pub total_clients: Cell<u64>,
     pub tcp_sockets: Cell<u64>,
@@ -207,6 +227,8 @@ pub(super) struct NetStats {
     pub udp_tx_dropped: Cell<u64>,
     /// Complete UDP datagrams discarded at the per-socket TX admission limits.
     pub udp_tx_admission_drops: Cell<u64>,
+    /// Complete UDP datagrams whose route would change the packet device.
+    pub udp_tx_boundary_drops: Cell<u64>,
     /// Complete UDP datagrams discarded because the netstack TX ring was full.
     pub udp_tx_buffer_full_drops: Cell<u64>,
     /// UDP datagrams discarded because their route or next-hop neighbor could
@@ -403,6 +425,10 @@ impl NetStats {
             MetricEntry::global(ids::NET_POLL_RUNS, self.poll_runs.get()),
             MetricEntry::global(ids::NET_UDP_TX_DROPPED, self.udp_tx_dropped.get()),
             MetricEntry::global(
+                ids::NET_UDP_TX_BOUNDARY_DROPS,
+                self.udp_tx_boundary_drops.get(),
+            ),
+            MetricEntry::global(
                 ids::NET_UDP_TX_ADMISSION_DROPS,
                 self.udp_tx_admission_drops.get(),
             ),
@@ -534,6 +560,22 @@ impl NetStats {
                 self.pressure_refused_clients.get(),
             ),
         ]);
+        entries.extend([
+            MetricEntry::global(ids::NET_DEVICE_SLOTS, self.device_slots.get()),
+            MetricEntry::global(ids::NET_DEVICE_SLOT_BYTES, self.device_slot_bytes.get()),
+            MetricEntry::global(ids::NET_PACKET_DEVICES, self.packet_devices.get()),
+            MetricEntry::global(ids::NET_PACKET_BUFFER_BYTES, self.packet_buffer_bytes.get()),
+            MetricEntry::global(ids::NET_PACKET_MALFORMED, self.packet_malformed.get()),
+            MetricEntry::global(ids::NET_PACKET_RX_DROPPED, self.packet_rx_dropped.get()),
+            MetricEntry::global(
+                ids::NET_PACKET_RX_HIGH_WATER,
+                self.packet_rx_high_water.get(),
+            ),
+            MetricEntry::global(
+                ids::NET_PACKET_TX_HIGH_WATER,
+                self.packet_tx_high_water.get(),
+            ),
+        ]);
         entries
     }
 }
@@ -568,6 +610,7 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::NET_TCP_RX_ALLOC_WAITS, "net.tcp.rx_alloc_waits"),
         MetricDescWire::new(ids::NET_POLL_RUNS, "net.poll_runs"),
         MetricDescWire::new(ids::NET_UDP_TX_DROPPED, "net.udp.tx_dropped"),
+        MetricDescWire::new(ids::NET_UDP_TX_BOUNDARY_DROPS, "net.udp.tx_boundary_drops"),
         MetricDescWire::new(
             ids::NET_UDP_TX_ADMISSION_DROPS,
             "net.udp.tx_admission_drops",
@@ -685,6 +728,16 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
             "net.pressure_refused_clients",
         ),
     ]);
+    descriptors.extend([
+        MetricDescWire::new(ids::NET_DEVICE_SLOTS, "net.device_slots"),
+        MetricDescWire::new(ids::NET_DEVICE_SLOT_BYTES, "net.device_slot_bytes"),
+        MetricDescWire::new(ids::NET_PACKET_DEVICES, "net.ip_device.devices"),
+        MetricDescWire::new(ids::NET_PACKET_BUFFER_BYTES, "net.ip_device.buffer_bytes"),
+        MetricDescWire::new(ids::NET_PACKET_MALFORMED, "net.ip_device.malformed"),
+        MetricDescWire::new(ids::NET_PACKET_RX_DROPPED, "net.ip_device.rx_dropped"),
+        MetricDescWire::new(ids::NET_PACKET_RX_HIGH_WATER, "net.ip_device.rx_high_water"),
+        MetricDescWire::new(ids::NET_PACKET_TX_HIGH_WATER, "net.ip_device.tx_high_water"),
+    ]);
     descriptors
 }
 
@@ -692,19 +745,20 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
 /// channel to respond on. Answered by [`stats_responder_task`] in the net runtime.
 enum StatsRequest {
     /// A metrics snapshot for the moto-stats provider (`crate::stats_server`).
-    Metrics(moto_async::oneshot::Sender<Vec<MetricEntry>>),
+    Metrics(moto_sdk::async_runtime::oneshot::Sender<Vec<MetricEntry>>),
     /// A page of TCP socket stats (ids >= `start_id`, ordered) for the
     /// `sys-io-stats-service`.
     TcpSockets {
         start_id: u64,
-        respond_to: moto_async::oneshot::Sender<Vec<TcpSocketStatsV1>>,
+        respond_to: moto_sdk::async_runtime::oneshot::Sender<Vec<TcpSocketStatsV1>>,
     },
 }
 
 /// Sender half of the request channel. Set once, when the net runtime spawns its
 /// responder task; read by the polling threads in [`query_metrics`] and
 /// [`query_tcp_socket_stats`].
-static STATS_REQUESTS: OnceLock<moto_async::channel::Sender<StatsRequest>> = OnceLock::new();
+static STATS_REQUESTS: OnceLock<moto_sdk::async_runtime::channel::Sender<StatsRequest>> =
+    OnceLock::new();
 
 /// Capacity of the request channel. Each polling thread keeps only one query
 /// outstanding at a time, so this only needs slack for races.
@@ -713,25 +767,40 @@ const STATS_REQUEST_CAPACITY: usize = 4;
 /// Spawn the task that answers snapshot requests from the polling threads. Call
 /// once, from the net runtime.
 pub(super) fn spawn_stats_responder(runtime: super::NetRuntime) {
-    let (tx, rx) = moto_async::channel(STATS_REQUEST_CAPACITY);
+    let (tx, rx) = moto_sdk::async_runtime::channel(STATS_REQUEST_CAPACITY);
     if STATS_REQUESTS.set(tx).is_err() {
         log::error!("sys-io: net stats responder already started");
         return;
     }
 
-    let _ = moto_async::LocalRuntime::spawn(stats_responder_task(runtime, rx));
+    let _ = moto_sdk::async_runtime::LocalRuntime::spawn(stats_responder_task(runtime, rx));
 }
 
 /// Listen for stats requests and answer each with a fresh snapshot built from the
 /// (single-threaded) net runtime. Runs in the net runtime.
 async fn stats_responder_task(
     runtime: super::NetRuntime,
-    mut requests: moto_async::channel::Receiver<StatsRequest>,
+    mut requests: moto_sdk::async_runtime::channel::Receiver<StatsRequest>,
 ) {
     while let Some(req) = requests.recv().await {
         // The receiver is gone if the polling thread stopped waiting; ignore.
         match req {
             StatsRequest::Metrics(respond_to) => {
+                {
+                    let inner = runtime.inner.borrow();
+                    runtime
+                        .stats
+                        .device_slots
+                        .set(inner.devices.slot_count() as u64);
+                    runtime
+                        .stats
+                        .device_slot_bytes
+                        .set(inner.devices.slot_bytes() as u64);
+                    runtime
+                        .stats
+                        .packet_devices
+                        .set(inner.devices.packet_count() as u64);
+                }
                 let _ =
                     respond_to.send(runtime.stats.entries(runtime.channel_budget.net_channels()));
             }
@@ -754,8 +823,8 @@ pub(crate) fn query_metrics() -> Vec<MetricEntry> {
 
     // This thread has no async runtime, so spin up a throwaway one to drive the
     // cross-thread request/response round-trip to completion.
-    moto_async::LocalRuntime::new().block_on(async move {
-        let (respond_to, response) = moto_async::oneshot();
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
+        let (respond_to, response) = moto_sdk::async_runtime::oneshot();
         if requests
             .send(StatsRequest::Metrics(respond_to))
             .await
@@ -775,8 +844,8 @@ fn query_tcp_socket_stats(start_id: u64) -> Vec<TcpSocketStatsV1> {
         return Vec::new();
     };
 
-    moto_async::LocalRuntime::new().block_on(async move {
-        let (respond_to, response) = moto_async::oneshot();
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async move {
+        let (respond_to, response) = moto_sdk::async_runtime::oneshot();
         if requests
             .send(StatsRequest::TcpSockets {
                 start_id,
@@ -814,7 +883,7 @@ fn collect_tcp_socket_stats(runtime: &super::NetRuntime, start_id: u64) -> Vec<T
 }
 
 /// Spawn the `sys-io-stats-service` thread, which serves the TCP socket listing
-/// (see [`moto_sys_io::stats`]). Safe to call before the net runtime is up: it
+/// (see [`moto_sdk::sys_io::stats`]). Safe to call before the net runtime is up: it
 /// simply returns no sockets until the responder task is running.
 pub(crate) fn start_socket_stats_service() {
     let _ = std::thread::Builder::new()
