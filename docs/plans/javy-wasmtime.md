@@ -1,9 +1,12 @@
 # Javy and Wasmtime infrastructure for Motor OS
 
-Owner direction, 2026-10-27: use Wasmtime's native execution and compilation
-workflow as on Linux. Add executable-memory support to Motor OS, then run
-native code directly inside Wasmtime. The former Pulley-first delivery and
-Motor-specific ELF packaging design are superseded.
+Owner direction, 2026-10-27: match Wasmtime on Linux as closely as Motor's APIs
+permit, including native execution, compilation, p3 enablement and resource
+defaults. Compare the same Wasmtime version with equivalent build features and
+options. This supersedes the earlier Motor-specific p3 opt-in and finite store
+defaults. Add executable-memory support, then run native code directly inside
+Wasmtime. The former Pulley-first delivery and Motor-specific ELF packaging
+design are superseded.
 
 This revision plans the OS change and rolls back the pending integration for
 the old workflow. It does not implement a kernel API or change the currently
@@ -19,6 +22,7 @@ git history; `2cf4ecdc` contains the previous plan and evidence record.
 | HTTP, sockets and filesystem | Native adapters and shared WASI hosts are delivered. Existing lifecycle, timeout, grant, service-mask and p3 regressions pass. System CA loading is delivered. |
 | Full CLI foundation | Local Wasmtime commit `4eede7f3e23371317b2da19514b117ab17447381` shares authority checks, native network checks, lazy memories and guarded fibers between both CLIs, and enables CLI help and Wasm text parsing. Retain this work. |
 | Full CLI image integration | The uncommitted Pulley-first build/image changes, pin bump, documentation and compiler-smoke additions have been rolled back. Deliver the full CLI after native execution works. |
+| Default policy | Owner approved Linux defaults, including p3 and store limits. The current fork still has Motor-specific overrides; remove them in 4b and update the existing assertions and user documentation with that implementation. |
 | Native workflow | Next: review and implement executable-memory support, connect Wasmtime to it, select the native target by default, then deliver and validate the installed tools. |
 
 The main tree remains pinned to Javy
@@ -60,6 +64,8 @@ Ship `/devtools/bin/javy`, `/devtools/bin/wasmi`, `/devtools/bin/wasmtime` and
 | `wasmtime run --allow-precompiled program.cwasm` | Load and execute a compatible native artifact directly. |
 | `wasmtime-rt run` / `serve` with `--allow-precompiled` | Load compatible native artifacts through the same host and code-memory adapter, without linking Cranelift into the runtime-only binary. |
 | Explicit `--target pulley64` | Keep upstream Pulley support as an explicit option. It is not the Motor default. |
+| WASI p3 | Use upstream's feature-dependent default and explicit enable/disable options; no Motor-only default rejection. |
+| Resource limits | Use upstream defaults and command-line overrides; no additional limits selected solely because this is Motor OS or a small VM. |
 
 There is no Motor `package` command, runtime ELF template, populated executable
 format, fixed native-code envelope or required compile/package/execute sequence
@@ -72,10 +78,11 @@ configuration and CPU compatibility checks. Compiler and runtime artifacts
 must come from matching builds; a Linux artifact is not automatically a Motor
 artifact. Do not add a separate publisher/template version protocol.
 
-The objective is the native CLI workflow and Wasm behavior. Native filesystem,
-networking, process authority and clocks still use Motor APIs. Executable-memory
-support does not turn those APIs into Unix APIs. Keep documented native adapter
-semantics and existing OS permission checks.
+The objective includes the native CLI workflow, Wasm behavior and defaults.
+Native filesystem, networking, process authority and clocks still use Motor
+APIs. Retain a behavioral difference only where a concrete native API or OS
+permission constraint requires it, and document that constraint. Previously
+chosen Motor-only policies are not exceptions merely because they already exist.
 
 ## Milestone 4: native execution and delivery
 
@@ -123,6 +130,25 @@ host target instead of forcing `pulley64`. Retain explicit Pulley selection.
 Verify that both freshly compiled code and deserialized native code use the
 adapter. The runtime-only build must continue to reject raw Wasm because it
 contains no compiler.
+
+In `src/common.rs`, restore upstream's feature-dependent `P3_DEFAULT` and remove
+the Motor-only fallback limits in `RunCommon::store_limits`: 32,768 table
+elements, 64 instances and 16 tables. Use the upstream builder defaults and
+preserve explicit `-W` overrides. Keep p3's upstream experimental status; it
+does not justify a different default on Motor.
+
+Audit remaining Motor-only runtime and compiler settings against the equivalent
+Linux build, including memory reservation/growth, stack policy and concurrency.
+Remove policy-only differences and retain native backing/lifetime protections.
+Document any remaining difference with its actual platform constraint and the
+upstream mechanism used to accommodate it. Small-VM resource targets are
+measurements to satisfy, not a reason to silently impose additional defaults.
+
+Update the existing command/HTTP p3 assertions to check the upstream default
+and explicit `-S p3=n` rejection. Test requested limits with explicit options,
+and default behavior without the old Motor caps, using the existing fixtures.
+Update `docs/wasm.md` with the delivered behavior when the new fork is pinned;
+its description of the currently installed runtime remains valid until then.
 
 Keep native compilation on Cranelift with normal optimization and register
 allocation. Do not add Motor-only compiler input/output quotas, alternative
@@ -192,6 +218,8 @@ existing hello, TypeScript and HTTP programs. Validate the behavior changed by
   and out-of-bounds accesses, without an unhandled CPU exception.
 - Existing process masks, WASI grants, CLI help/version and artifact
   compatibility refusals retain their meaning on the native path.
+- P3 enablement, default resource limits and explicit overrides match the
+  equivalent Linux build, using the existing command and HTTP fixtures.
 - The tools and their normal inputs/outputs fit the 1 GiB wasm image and the
   existing 224/256 MiB VM requirements. Record native compiler and execution
   memory separately, using the existing harness measurements.
@@ -228,11 +256,11 @@ network access needs its normal network capability, and raw native execution
 must not acquire I/O-manager authority. The new code-memory API's exact
 permission policy is reviewed in 4a.
 
-Scope clarification requested from the owner: whether the previously explicit
-p3 opt-in and finite store-limit defaults also change to upstream Linux defaults.
-Those existing settings are not changed by this rollback. Resolve that question
-before changing their behavior or associated assertions; it does not change the
-executable-memory prerequisite or reinstate any packaging/fixture work.
+The owner confirmed that Linux parity includes p3 and resource defaults.
+The earlier opt-in and finite-store-default decisions are superseded; their
+implementation and assertion changes belong to 4b. Required native adapters,
+permission checks and explicit-check trap handling remain platform adaptations,
+with their constraints recorded rather than presented as Linux behavior.
 
 ## Working rules
 
