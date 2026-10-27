@@ -123,7 +123,7 @@ per VM, zero admission refusals. Formatting, Motor release Clippy with warnings
 denied and the external-source host checks pass. Evidence is in
 `build/wasm-m3-grants/`. No runtime or fork changes were needed.
 
-**Sys-init service masks (3e).** `test-wasm.sh --services --suite wasmtime`
+**Sys-init service masks (3e, tree `b674858e`).** `test-wasm.sh --services --suite wasmtime`
 uses separate test-image variants; preparation adds published p2/p3 hello
 artifacts and `svc:256:` entries. Native process metadata must show both
 servers as active None-role children of sys-init. Each serves four fragmented
@@ -141,6 +141,14 @@ is in `build/wasm-m3-service/` (`qemu.log`, `chv.log`, `normal.log`). No
 production boot configuration, runtime, external fork or `src/sys` code changed.
 The older reset remains open, but missing historical evidence does not block
 other wasm work (owner instruction 2026-10-27).
+
+**Next decision (3f).** The remaining TypeScript HTTP fixture needs an
+adapter because pinned Javy cannot export the HTTP interface directly.
+[The composition proposal](javy-typescript-http-fixture.md) describes bounded
+Rust I/O and p2/p3 wrappers around the Javy command, with a small feasibility
+patch first. It is pending owner review under AGENTS.md's non-obvious-decision
+rule; no adapter implementation has started. Hermetic TLS (3d), the retained
+reset diagnosis, and milestone 4 also remain open.
 
 **Continuation, 2026-10-26 (3b/3c/3f, tree `c8a8dce3`).**
 `src/build-scripts/build-wasmtime.sh` now builds four published upstream
