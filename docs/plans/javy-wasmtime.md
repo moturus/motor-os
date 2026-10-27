@@ -8,9 +8,9 @@ defaults. Add executable-memory support, then run native code directly inside
 Wasmtime. The former Pulley-first delivery and Motor-specific ELF packaging
 design are superseded.
 
-This revision plans the OS change and rolls back the pending integration for
-the old workflow. It does not implement a kernel API or change the currently
-installed runtime's execution mode. Historical qualification details remain in
+The OS prerequisite and native Wasmtime fork changes are committed. The
+committed main-tree pin still selects the earlier Pulley runtime; prepared
+local images contain the native implementation. Historical qualification details remain in
 git history; `2cf4ecdc` contains the previous plan and evidence record.
 
 ## Status and resume point (2026-10-27)
@@ -18,19 +18,21 @@ git history; `2cf4ecdc` contains the previous plan and evidence record.
 | Area | Current state |
 | --- | --- |
 | Javy/Wasmi | Delivered in the developer and small wasm images. Static/dynamic compilation, TypeScript, plugins, byte identity, memory backing and runner regressions are maintained. |
-| Runtime-only Wasmtime | Delivered for precompiled Pulley command/HTTP execution. Native loading currently depends on the old prototype ELF template; direct native loading remains to implement. |
+| Runtime-only Wasmtime | The committed main-tree pin selects the earlier Pulley runtime. The local fork and prepared images load native command/HTTP artifacts directly, with no template or compiler in the runtime-only binary. |
 | HTTP, sockets and filesystem | Native adapters and shared WASI hosts are delivered. Existing lifecycle, timeout, grant, service-mask and p3 regressions pass. System CA loading is delivered. |
 | Full CLI foundation | Local Wasmtime commit `4eede7f3e23371317b2da19514b117ab17447381` shares authority checks, native network checks, lazy memories and guarded fibers between both CLIs, and enables CLI help and Wasm text parsing. Retain this work. |
-| Full CLI image integration | The uncommitted Pulley-first build/image changes, pin bump, documentation and compiler-smoke additions have been rolled back. Deliver the full CLI after native execution works. |
-| Default policy | Owner approved Linux defaults, including p3 and store limits. The current fork still has Motor-specific overrides; remove them in 4b and update the existing assertions and user documentation with that implementation. |
-| Native workflow | Next: review and implement executable-memory support, connect Wasmtime to it, select the native target by default, then deliver and validate the installed tools. |
+| Full CLI image integration | Native integration is prepared locally: separate full/runtime builds, both required image binaries, normal host cross-compilation, and updated existing smoke checks. Publication and the main-tree pin remain pending. |
+| Default policy | Local fork `3fb032396e` restores the native target, upstream p3 and store defaults, and normal artifact versioning. It removes the 4 GiB memory64 cap and the prototype ELF packaging path. |
+| Executable memory | Delivered in main-tree commit `9b97640d`, with kernel-only implementation and in-VM systests. No moto-sys, moto-rt or stdlib change was needed. |
+| Native workflow | Local fork `21c1436ca8` owns executable code mappings in both CLIs. Native run/serve/compile, direct loading, traps, TypeScript, p3, limits and memory64 growth passed the installed suite on both images at 224 and 256 MiB. |
 
-The main tree remains pinned to Javy
+The committed main tree remains pinned to Javy
 `12a6c52d7dbd62056ead74d8ddea3f8a235f278f` and Wasmtime
 `633e7de368b913a696e7e15d4f546c55fc2eadaf` in
-`src/build-scripts/external-sources.sh`. The local Wasmtime foundation commit
-is retained in `external-sources/wasmtime/`; it is not a published main-tree
-prerequisite yet. The owner publishes fork commits before the main-tree pin
+`src/build-scripts/external-sources.sh`. The prepared pin update and local Wasmtime branch select
+`3fb032396ea3898de562786e9a4060783e83e286` in `external-sources/wasmtime/`;
+it is not a published main-tree prerequisite yet. The owner publishes fork
+commits before the main-tree pin
 and dependent integration are committed.
 
 Completed HTTP regression work is retained: commits `c8a8dce3`, `50dfb4a7`,
@@ -88,36 +90,48 @@ chosen Motor-only policies are not exceptions merely because they already exist.
 
 ### 4a — executable-memory support
 
-The current kernel rejects executable mappings into the calling process without
-`CAP_IO_MANAGER` in `src/sys/kernel/src/uspace/sys_mem.rs`. Replace that
-restriction with a reviewed facility suitable for ordinary language runtimes;
-do not give Wasmtime the broad I/O-manager capability.
+Completed in `9b97640d`. Ordinary processes may create executable mappings in
+their own address space. Other-process mapping permissions, the rejection of
+sharing an existing mapping into self, and the prohibition of a writable and
+executable mapping remain intact.
 
-First review the exact native API and authority policy. It must support owned,
-page-backed code allocations with stable virtual addresses, writing generated
-or deserialized code, publishing it as read/execute, and releasing it after all
-execution has ended. Publication must revoke write access, including writable
-aliases, before executing the code. Cross-core permission changes and address
-ownership checks belong in the OS contract, not in Wasmtime conventions.
+The existing `SysMem::map2(SELF, F_SHARE_SELF | F_READABLE | F_EXECUTABLE, ...)`
+returns separate RX and RW aliases of fresh frames. The runtime owns both,
+copies the code through RW, then unmaps RW before exposing RX for execution.
+`SysMem::free` synchronously revokes the unmapped alias across CPUs. RX stays
+owned until all users of the code have finished. The OS does not automatically
+remove aliases or provide an in-place protection-change API.
 
-Use standard Rust and native Motor APIs. Keep changes limited to the kernel
-memory interface and the necessary native wrappers under `src/sys/lib`.
-Identify the exact files and review the interface before implementation.
-Any required moto-rt, rt.vdso or Rust stdlib change must be discussed and vetted
-under AGENTS.md; do not add stdlib-specific Wasmtime logic. No new boot-time
-initialization or service is needed.
-
-Add focused in-VM kernel tests for successful code publication/execution,
-permission and ownership rejection, and allocation/protection cleanup. Kernel
-tests run inside Motor OS and are included in `src/tests/full-test.sh`.
-Before committing core changes, the full main-image gate must pass three debug
-and three release runs, as AGENTS.md requires. Diagnose failures rather than
-adding retries, larger timeouts or ignored assertions.
-
-Output: the reviewed executable-memory contract, native API implementation and
-kernel validation. This step is the prerequisite for direct native execution.
+Only the kernel and systest changed. The in-VM tests cover execution, rejection
+of writes through RX, rejection of execution through RW, and access after
+unmapping. By the owner's explicit instruction, validation was one debug and
+one release `src/tests/full-test.sh`, both passing. Evidence is retained under
+`build/self-executable-mappings/`. The small test-harness expectation fix was
+committed separately as `5e7201ff` before this work resumed.
 
 ### 4b — Wasmtime code-memory adapter and native defaults
+
+Implemented locally in `21c1436ca8` and `3fb032396e`; image qualification and
+publication follow below. The retained platform differences are:
+
+- `CodeMemory` copies position-independent machine code into an owned RX
+  mapping, unmaps its RW alias, and retains the serialized image for metadata
+  and serialization. Both fresh compilation and deserialization use this path.
+  Motor has no in-place protection changes; code editing through `unpublish`
+  therefore returns an error. The delivered CLI feature set does not enable
+  that debugger path.
+- Native target defaults and `Config::motor_runtime` keep explicit traps,
+  no CoW/guard-based memory assumptions, and coalesced data initialization
+  without large sparse images. Explicit Pulley uses the same backing settings.
+  The native target and CPU detection are otherwise upstream defaults; the
+  separate Motor artifact-version marker has been removed.
+- `MemoryCreator` uses stable lazy reservations. Memory32 is bounded by its
+  4 GiB address range; memory64 uses the kernel's 1 TiB per-allocation limit,
+  with no smaller Motor policy cap. There is no resize/remap API, so these
+  reservations do not move. User-requested `-W` limits remain effective.
+- `StackCreator` provides lazy guarded stacks of the requested sizes. Its two
+  cached stacks are a reuse optimization, not a stack/concurrency limit.
+  HTTP request/connection limits and deadlines remain upstream's defaults.
 
 Implement the platform adapter in the separate repository
 `external-sources/wasmtime/`, using the new native API. Wasmtime already exposes
@@ -176,6 +190,14 @@ the shared host, with Pulley available explicitly and no ELF packaging path.
 
 ### 4c — reproducible image integration
 
+Prepared and validated locally at `3fb032396ea3898de562786e9a4060783e83e286`.
+The normal `src/build-motor-os.sh --wasmtime-only` pipeline built both CLIs
+with a local revision override, and `test-wasm.sh --prepare` built both images.
+The pending main-tree patch pins that revision, requires and checksums both
+binaries, and uses the normal host CLI to compile native test artifacts. No
+manually installed binary or old prototype compiler is a build prerequisite.
+Only owner publication and the dependent main-tree commits remain.
+
 After the fork changes are qualified and published, pin the exact revision in
 `src/build-scripts/external-sources.sh`. Build the Cranelift-capable CLI and
 runtime-only CLI in separate Cargo output directories and stage both binaries
@@ -206,6 +228,32 @@ Output: all four tools installed by the normal release build in both images,
 with documentation matching their actual native behavior.
 
 ### 4d — focused native validation and resource check
+
+Passed: `src/tests/test-wasm.sh --suite wasmtime --release`, 143 commands each
+on `wasm:224`, `wasm:256`, `dev:224` and `dev:256`, with zero memory-admission
+refusals. The existing `--services --suite wasmtime --vm wasm:224 --vm dev:256`
+gate also passed for native p2/p3 services started by sys-init as role None
+with capability mask 256. The final suite includes an out-of-bounds load from
+the existing memory fixture in addition to `unreachable`, timeout and the
+fork's existing engine regressions. No new guest fixture was introduced.
+
+Sampled whole-VM peaks in MiB (not process RSS; sampling can miss short peaks):
+
+| VM | Native `compile` of lifecycle WAT | TypeScript raw compile + run | TypeScript precompiled runtime |
+| --- | ---: | ---: | ---: |
+| wasm:224 | 45.7 | 165.0 | 78.6 |
+| wasm:256 | 55.8 | 174.0 | 88.2 |
+| dev:224 | 45.5 | 164.3 | 78.6 |
+| dev:256 | 56.0 | 175.6 | 89.4 |
+
+The full CLI is 24,090,792 bytes and the runtime-only CLI is 13,868,816 bytes.
+Both fit the existing wasm image's 1 GiB data partition; the built qcow2 uses
+87.1 MiB on the host. Evidence, build logs and per-VM measurements are under
+`build/wasm-m4-native/`, especially `installed-evidence/`, `installed-matrix.log`
+and `services.log`. Lockfile validation, shell syntax, formatter and existing
+test-selection checks passed. No new main-tree compiler warnings were emitted;
+the fork retains its existing warnings. Ordinary Wasmtime work did not repeat
+the already completed kernel gates or the unrelated developer-source suite.
 
 Reuse `src/tests/wasmtime-smoke`, `wasm-smoke-suite` and `test-wasm.sh` with the
 existing hello, TypeScript and HTTP programs. Validate the behavior changed by
