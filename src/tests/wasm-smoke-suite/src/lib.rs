@@ -226,10 +226,20 @@ pub struct Job {
 impl Job {
     /// Waits until the command's stdout contains `text`.
     pub fn wait_stdout(&mut self, text: &str) -> Result<()> {
+        self.wait_output(text, false).map(|_| ())
+    }
+
+    /// Waits for a diagnostic and returns stderr, including reported addresses.
+    pub fn wait_stderr(&mut self, text: &str) -> Result<String> {
+        self.wait_output(text, true)
+    }
+
+    fn wait_output(&mut self, text: &str, use_stderr: bool) -> Result<String> {
         loop {
             let (stdout, stderr) = self.logs()?;
-            if stdout.contains(text) {
-                return Ok(());
+            let output = if use_stderr { &stderr } else { &stdout };
+            if output.contains(text) {
+                return Ok(output.clone());
             }
             if let Some(status) = self.child.try_wait()? {
                 return Err(

@@ -27,6 +27,9 @@ WASMTIME_FILESYSTEM_PROGRAMS=(p1_close_preopen p1_dangling_fd p1_dir_fd_op_failu
 # Core-module fixtures in the fork's motor-runtime/fixtures.
 WASMTIME_CORE_FIXTURES=(lifecycle limits-elements limits-memories limits-tables memory-grow
 	memory64-grow memory-too-large)
+# Published upstream handlers; the in-VM client checks serving and shutdown.
+WASMTIME_HTTP_PROGRAMS=(p2_cli_serve_hello_world p2_api_proxy_streaming
+	p3_cli_serve_hello_world p3_http_echo)
 
 # Fixtures are precompiled by a host compiler built from the runtime's own
 # sources, so their engine version and configuration always match it.
@@ -48,7 +51,8 @@ build_wasmtime_fixtures() {
 		export RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN"
 		cargo fetch --locked
 		local bins=() program
-		for program in "${WASMTIME_GUEST_PROGRAMS[@]}" "${WASMTIME_FILESYSTEM_PROGRAMS[@]}"; do
+		for program in "${WASMTIME_GUEST_PROGRAMS[@]}" "${WASMTIME_FILESYSTEM_PROGRAMS[@]}" \
+			"${WASMTIME_HTTP_PROGRAMS[@]}"; do
 			bins+=(--bin "$program")
 		done
 		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$build/guests" cargo build --locked --release \
@@ -64,7 +68,8 @@ build_wasmtime_fixtures() {
 	# Native code for a Pulley runtime: the runtime must refuse it.
 	"$compile" x86_64-unknown-motor core "$root/motor-runtime/fixtures/lifecycle.wat" \
 		"$out/lifecycle-native.cwasm"
-	for name in "${WASMTIME_GUEST_PROGRAMS[@]}" "${WASMTIME_FILESYSTEM_PROGRAMS[@]}"; do
+	for name in "${WASMTIME_GUEST_PROGRAMS[@]}" "${WASMTIME_FILESYSTEM_PROGRAMS[@]}" \
+		"${WASMTIME_HTTP_PROGRAMS[@]}"; do
 		"$compile" pulley64 component "$build/guests/wasm32-wasip2/release/$name.wasm" \
 			"$out/$name.cwasm"
 	done

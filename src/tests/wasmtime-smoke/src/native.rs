@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use wasm_smoke_suite::{Job, Result, Suite, process_active};
 
 mod filesystem;
+mod http;
 
 const RUNTIME: &str = "/devtools/bin/wasmtime-rt";
 /// Precompiled fixtures that test-wasm.sh uploads; they are not part of the images.
@@ -210,7 +211,8 @@ pub fn run_suite(suite: &mut Suite) -> Result<()> {
     }
 
     // WASI p2 filesystem and stdio.
-    filesystem::run(suite)
+    filesystem::run(suite)?;
+    http::run(suite)
 }
 
 /// Ctrl+C on the terminal ends a foreground `run` spinning in Pulley with

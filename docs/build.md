@@ -193,12 +193,15 @@ checks on the first VM only: Javy static and
 dynamic compilation, TypeScript, default and custom plugins, Wasmi execution,
 memory limits and a deliberately refused page fault, errors, fuel and
 permission refusals, and `wasmtime-rt` lifecycle, limits, artifact
-refusals, TypeScript and WASI p2 sockets. `src/tests/full-test-dev.sh --release`
+refusals, TypeScript, WASI p2 sockets/filesystem, and p2/p3 HTTP hello/echo.
+HTTP checks include fragmented headers, bounded concurrency, p3 opt-in and
+instance turnover, foreground Ctrl-C and shutdown during an active response.
+`src/tests/full-test-dev.sh --release`
 runs them on the wasm image at 224 MiB and the developer image at 256 MiB, and
 the Linux identity checks once; debug suites skip them.
-Engine regressions remain in the owning forks. Upstream Brotli is used; compressed
-source bytes can differ between Linux and Motor OS because their math libraries
-round some logarithms differently.
+Engine regressions remain in the owning forks. Upstream Brotli is used; the
+Linux identity checks require equal output bytes, including compressed source,
+with the same inputs and plugin.
 
 For the external sources, the build stages, and their outputs, see
 [Building Motor OS with its external sources](build-motor-os.md); for how the
