@@ -29,7 +29,7 @@ Code review against Motor OS `99ca2b45`, Javy `12a6c52d` and Wasmtime
 | 3b / 3f: serving lifecycle and integration | In progress. Installed tests cover hello/echo, concurrent and fragmented traffic, slow readers, disconnect recovery, foreground/background active-request shutdown, and optional request deadlines with capacity recovery. Diagnosis of the retained reset and a TypeScript HTTP fixture remain. |
 | 3c: opt-in p3 | Done at the current pin. Installed command/serve default rejection and explicit p3 operation pass, including instance turnover, post-return streaming/work, command lifetime, stream-resource reuse and task-resource limits. P3 remains experimental; retain the selected upstream regressions across rebases. |
 | 3d: TLS | System CA loading is implemented at `633e7de36`; only the recorded local-CA probe is qualified. The maintained hermetic success/failure and streaming/cancellation matrix remains. |
-| 3e: service masks | Open tests, with no forced-`CAP_LOG` blocker: sys-init requires an explicit decimal mask and passes it through unchanged. Qualify a `svc:256:` wasm server under the existing guard, and audit outgoing HTTP grants separately from socket grants. |
+| 3e: service masks | Outgoing HTTP/socket grant separation is qualified below. The `svc:256:` service test remains; sys-init requires an explicit decimal mask and passes it through unchanged, so there is no forced-`CAP_LOG` blocker. |
 | 4: compiler and native packaging | Prototype compiler/publisher and policy tests exist in the fork. Full CLI image delivery and authority checks, production `package` subcommand, publisher hardening/version identity, masked flows, resource budgets and final matrix remain. |
 
 **Current build/test layout.** External checkouts are
@@ -85,7 +85,7 @@ Clippy with warnings denied, and the external-source and suite-selection
 host checks passed. Evidence is in `build/wasm-m3-deadline/`; all handlers
 come from the existing published Wasmtime pin, with no fork changes.
 
-**Selected p3 regressions (3c).** Five more published upstream programs are
+**Selected p3 regressions (3c, tree `7154e47b`).** Five more published upstream programs are
 built from `633e7de36`. `p3_cli_hello_stdout` checks command opt-in and stdout.
 `p3_cli_hello_stdout_post_return` checks the upstream command lifetime:
 `run` returns before suspended post-return output runs, including explicit
@@ -105,9 +105,26 @@ The corrected focused matrix passes on both images at both sizes under
 QEMU and Cloud Hypervisor: 118 commands per VM, zero admission refusals.
 Formatting, Motor release Clippy with warnings denied, and external-source
 host checks pass; matrix evidence is in `build/wasm-m3-p3/`.
-Next is the separate outgoing HTTP/socket grant audit (3e). The older reset
-remains open, but missing historical evidence does not block other wasm work
-(owner instruction 2026-10-27).
+
+**Outgoing HTTP grant audit (3e).** Published p2/p3
+`http_outbound_request_get` programs run against a bounded standard-Rust
+loopback server. Socket grants alone cannot link their HTTP imports, with
+HTTP left at its default or explicitly disabled. Enabling HTTP while disabling
+`inherit-network`, TCP, UDP and name lookup permits the exact GET request and
+validated response under `CAP_NET`. Removing that OS capability makes the
+guest fail without reaching the listener; upstream maps the connect error to
+`ConnectionRefused`. The published `p3_cli_deny_listen` additionally checks
+p2/p3 socket-bind denial with HTTP enabled and `inherit-network=n`.
+`serve` enables HTTP imports, including outgoing requests, independently of
+socket grants; `docs/wasm.md` documents this boundary.
+
+Both images at both sizes pass under QEMU and Cloud Hypervisor: 127 commands
+per VM, zero admission refusals. Formatting, Motor release Clippy with warnings
+denied and the external-source host checks pass. Evidence is in
+`build/wasm-m3-grants/`. No runtime or fork changes were needed.
+Next is the sys-init service-mask test. The older reset remains open, but
+missing historical evidence does not block other wasm work (owner instruction
+2026-10-27).
 
 **Continuation, 2026-10-26 (3b/3c/3f, tree `c8a8dce3`).**
 `src/build-scripts/build-wasmtime.sh` now builds four published upstream

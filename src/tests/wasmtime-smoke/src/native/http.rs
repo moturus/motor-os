@@ -9,6 +9,7 @@ use wasm_smoke_suite::{Job, Result, Suite, process_active, used_memory};
 use super::{FIXTURES, RUNTIME, runtime_pid};
 
 mod deadline;
+mod grants;
 mod lifecycle;
 mod post_return;
 
@@ -17,6 +18,7 @@ const RESPONSE_LIMIT: u64 = 1024 * 1024;
 const CONCURRENCY: usize = 4;
 
 pub(super) fn run(suite: &mut Suite) -> Result<()> {
+    grants::run(suite)?;
     suite.refusal(
         "p3-default-disabled",
         &format!(

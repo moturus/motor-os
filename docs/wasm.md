@@ -56,6 +56,16 @@ epoch interruption: a server with a timeout refuses artifacts compiled
 without epochs, and a server without one refuses artifacts compiled with
 them.
 
+Outgoing HTTP and guest sockets use independent WASI grants. `run -S http`
+enables HTTP imports; `serve` enables them automatically, including outgoing
+requests. `-S inherit-network`, `tcp`, `udp` and `allow-ip-name-lookup` control
+guest socket access. Turning those socket options off leaves outgoing HTTP
+available when HTTP is enabled. Both paths require the process's `CAP_NET`
+(`MOTOR_OS_CAPS=0x100`, optionally combined with filesystem write access).
+
+WASI p3 remains experimental and is disabled by default. Enable it explicitly
+with `-W component-model-async -S p3` for a matching precompiled component.
+
 ## Run the example
 
 In the developer VM's shell:

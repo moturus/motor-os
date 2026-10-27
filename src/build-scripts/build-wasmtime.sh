@@ -27,13 +27,13 @@ WASMTIME_FILESYSTEM_PROGRAMS=(p1_close_preopen p1_dangling_fd p1_dir_fd_op_failu
 # Core-module fixtures in the fork's motor-runtime/fixtures.
 WASMTIME_CORE_FIXTURES=(lifecycle limits-elements limits-memories limits-tables memory-grow
 	memory64-grow memory-too-large)
-# Published upstream handlers; the in-VM client checks serving and shutdown.
+# Published upstream HTTP programs; in-VM peers check serving and outbound grants.
 WASMTIME_HTTP_PROGRAMS=(p2_cli_serve_hello_world p2_api_proxy_streaming
 	p3_cli_serve_hello_world p3_http_echo p2_cli_serve_sleep p3_cli_serve_sleep
-	p3_cli_serve_post_return)
+	p3_cli_serve_post_return p2_http_outbound_request_get p3_http_outbound_request_get)
 # Selected upstream p3 command lifetime and resource-table regressions.
 WASMTIME_P3_PROGRAMS=(p3_cli_hello_stdout p3_cli_hello_stdout_post_return
-	p3_cli_many_stream p3_cli_many_tasks)
+	p3_cli_many_stream p3_cli_many_tasks p3_cli_deny_listen)
 
 # Fixtures are precompiled by a host compiler built from the runtime's own
 # sources, so their engine version and configuration always match it.
