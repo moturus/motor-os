@@ -8,13 +8,13 @@ runtime-only `wasmtime-rt` build through the normal external-source workflow, sh
 the developer and small wasm images, and pass their installed-tool checks on
 both images at 256 and 224 MiB. HTTP serving (milestone 3) and the full
 compiler with native packaging (milestone 4) are ahead; see
-[Status and resume point](#status-and-resume-point-2026-10-26).
+[Status and resume point](#status-and-resume-point-2026-10-27).
 
 This document records the requirements, the design contracts, a short account
 of the completed work and the detailed plan for the milestones ahead. The
 settled points of the earlier plan reviews are folded in.
 
-## Status and resume point (2026-10-26)
+## Status and resume point (2026-10-27)
 
 Evidence under `build/` is host-local and not required.
 
@@ -26,7 +26,7 @@ Code review against Motor OS `99ca2b45`, Javy `12a6c52d` and Wasmtime
 | 0–1: Javy/Wasmi | Done, including 1f–1l and R1–R6. Build/image integration, custom plugins, byte identity, runner regressions and exhaustion checks are maintained in `build-javy.sh` and `javy-smoke`. |
 | 2: runtime-only Wasmtime | Done. Both images install `wasmtime-rt`; `wasmtime-smoke` covers commands, lifecycle, limits, artifacts, p2 sockets, filesystem and stdio. |
 | 3a: HTTP resource defaults | Done at the published pins: sparse memories, lazy guarded stacks, TIME-WAIT release and the owner's upstream-default decisions. The publication and SDK prerequisites below are historical, not blockers. |
-| 3b / 3f: serving lifecycle and integration | In progress. The fork has the shared host, p3 worker lifetime tracking and graceful shutdown. The continuation below adds installed hello/echo, concurrent and fragmented traffic, Ctrl-C and active-request shutdown tests. Slow readers, disconnects/cancellation, diagnosis of the retained reset and a TypeScript HTTP fixture remain. |
+| 3b / 3f: serving lifecycle and integration | In progress. Installed tests cover hello/echo, concurrent and fragmented traffic, slow readers, disconnect recovery, and foreground/background active-request shutdown. Deadline/cancellation checks before a response, diagnosis of the retained reset and a TypeScript HTTP fixture remain. |
 | 3c: opt-in p3 | Build support and `P3_DEFAULT=false` are present. The continuation below checks installed default rejection and explicit p3 hello/echo, including instance turnover and post-return streaming. Further selected p3 regressions remain. |
 | 3d: TLS | System CA loading is implemented at `633e7de36`; only the recorded local-CA probe is qualified. The maintained hermetic success/failure and streaming/cancellation matrix remains. |
 | 3e: service masks | Open tests, with no forced-`CAP_LOG` blocker: sys-init requires an explicit decimal mask and passes it through unchanged. Qualify a `svc:256:` wasm server under the existing guard, and audit outgoing HTTP grants separately from socket grants. |
@@ -44,6 +44,32 @@ installed tools against the assembly. The release developer gate calls it
 for `wasm:224` and `dev:256`; standalone qualification covers both images
 at both sizes, under QEMU and Cloud Hypervisor. The smoke harness uses the
 published `moto-sdk = "0.1"`; that migration is complete.
+
+**Continuation, 2026-10-27 (3b).** The validated 2026-10-26 tests are
+committed as `c8a8dce3`, and the plan audit as `87467db2`. Tree `5f7e3fd2`
+adds `test-wasm.sh --suite javy|wasmtime|both`, retaining `both` as the
+default. Its host regression is called by `full-test.sh` and checks build
+selection, invalid selections and forwarding through the existing timeout.
+It enables focused Wasmtime matrices with the same image/fixture verification.
+
+The next lifecycle slice uses the same published p2/p3 echo handlers. Four
+concurrent slow clients read 1 KiB per millisecond and verify complete
+256 KiB echoes. Each server then sees three rounds of four disconnects:
+before any bytes, during headers, during upload after response headers, and
+after response-body bytes begin. A complete fresh echo after each close,
+followed by clean server shutdown, checks request-capacity recovery and task
+teardown. Separate foreground servers must finish an in-flight echo after
+their first Ctrl-C. On failure, the suite retains bounded server logs in its
+host-visible output. The tests do not add retries or change runtime defaults.
+
+The focused release gate passed on both images at both sizes under QEMU
+and Cloud Hypervisor: 105 commands per VM, zero admission refusals.
+Motor release Clippy with warnings denied and formatting passed as well.
+Evidence is in `build/wasm-m3-lifecycle/` (`qemu.log`, `chv.log` and preserved
+per-VM evidence).
+Next is deadline enforcement and capacity recovery for handlers that never
+produce a response. The older reset remains open, but missing historical
+evidence does not block the other wasm work (owner instruction 2026-10-27).
 
 **Continuation, 2026-10-26 (3b/3c/3f, tree `c8a8dce3`).**
 `src/build-scripts/build-wasmtime.sh` now builds four published upstream
@@ -1213,7 +1239,7 @@ qualified with locally built binaries on both images at 224 MiB (evidence in
 `build/wasm-milestone2/`). 2d is done and 2f is partly done (below); since
 2026-10-09 the delivered runtime passes the matrix under both VMMs. Since
 2026-10-11 all items are done, and since 2026-10-18 the published heads are
-gated ([the resume point](#status-and-resume-point-2026-10-26)).
+gated ([the resume point](#status-and-resume-point-2026-10-27)).
 
 - **2b:** owned lazy reservations (then 96 MiB per memory, 128 MiB and four
   per process; 4 GiB and no total or count since 2026-10-18) back every

@@ -276,7 +276,8 @@ impl Job {
             .collect())
     }
 
-    fn logs(&self) -> Result<(String, String)> {
+    /// Reads bounded stdout/stderr snapshots for an interactive case's failure.
+    pub fn logs(&self) -> Result<(String, String)> {
         let read = |path: &Path| -> Result<String> {
             if fs::metadata(path)?.len() > 256 * 1024 {
                 return Err(format!("oversized command log: {path:?}").into());

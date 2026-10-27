@@ -8,6 +8,8 @@ use wasm_smoke_suite::{Job, Result, Suite, process_active, used_memory};
 
 use super::{FIXTURES, RUNTIME, runtime_pid};
 
+mod lifecycle;
+
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const RESPONSE_LIMIT: u64 = 1024 * 1024;
 const CONCURRENCY: usize = 4;
@@ -90,7 +92,14 @@ pub(super) fn run(suite: &mut Suite) -> Result<()> {
             })?;
         }
         if echo {
-            drain_request(addr, shutdown, &body, &mut job)?;
+            if let Err(error) = lifecycle::run(addr, &body) {
+                let logs = job
+                    .logs()
+                    .map(|(out, err)| format!("{out}\n{err}"))
+                    .unwrap_or_else(|error| format!("could not read server logs: {error}"));
+                return Err(format!("{program}: {error}\n{logs}").into());
+            }
+            drain_request(addr, Some(shutdown), &body, &mut job)?;
         } else {
             job.ctrl_c()?;
         }
@@ -104,6 +113,29 @@ pub(super) fn run(suite: &mut Suite) -> Result<()> {
             rounds * CONCURRENCY,
             gap.as_micros()
         );
+    }
+    // The foreground path must also drain a live response on its first Ctrl-C.
+    for (program, options) in [
+        ("p2_api_proxy_streaming", "-S cli"),
+        ("p3_http_echo", "-W component-model-async -S p3,cli"),
+    ] {
+        let mut job = suite.start(
+            &format!("{program}-active-ctrl-c"),
+            &format!(
+                "MOTOR_OS_CAPS=0x100 {RUNTIME} serve --allow-precompiled {options} \
+                 --addr 127.0.0.1:0 --max-concurrent-requests {CONCURRENCY} \
+                 {FIXTURES}/{program}.cwasm"
+            ),
+            true,
+        )?;
+        let log = job.wait_stderr("Serving HTTP on http://")?;
+        let addr = address(&log, "Serving HTTP on http://")?;
+        let pid = runtime_pid(&job)?;
+        drain_request(addr, None, &vec![0x63; 256 * 1024], &mut job)?;
+        suite.wait(&mut job, 0)?;
+        if process_active(pid)? {
+            return Err(format!("{program}: runtime survived active Ctrl-C").into());
+        }
     }
     Ok(())
 }
@@ -156,26 +188,20 @@ fn connect(addr: SocketAddr) -> Result<TcpStream> {
 
 /// Keep a response in flight across shutdown, then finish its body. Receiving
 /// its headers proves the handler has started before asking the server to drain.
-fn drain_request(addr: SocketAddr, shutdown: SocketAddr, body: &[u8], job: &mut Job) -> Result<()> {
-    let mut socket = connect(addr)?;
-    write!(
-        socket,
-        "POST /echo HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
-        body.len()
-    )?;
-    socket.write_all(&body[..1024])?;
-    let mut response = Vec::new();
-    while !response.ends_with(b"\r\n\r\n") {
-        if response.len() == 8192 {
-            return Err("oversized HTTP headers during shutdown".into());
-        }
-        let mut byte = [0];
-        socket.read_exact(&mut byte)?;
-        response.push(byte[0]);
+fn drain_request(
+    addr: SocketAddr,
+    shutdown: Option<SocketAddr>,
+    body: &[u8],
+    job: &mut Job,
+) -> Result<()> {
+    let (socket, mut response) = begin_echo(addr, body.len(), &body[..1024])?;
+    if let Some(shutdown) = shutdown {
+        // A zero-transmit control connection may reset on Motor; accept is the
+        // shutdown protocol. No response is required from the control listener.
+        drop(connect(shutdown)?);
+    } else {
+        job.ctrl_c()?;
     }
-    // A zero-transmit control connection may reset on Motor; accept is the
-    // shutdown protocol. No response is required from the control listener.
-    drop(connect(shutdown)?);
     job.wait_stderr("Waiting for child tasks to exit")?;
     let mut writer = socket.try_clone()?;
     thread::scope(|scope| -> Result<()> {
@@ -187,6 +213,25 @@ fn drain_request(addr: SocketAddr, shutdown: SocketAddr, body: &[u8], job: &mut 
         }
         check_response(&response, body)
     })
+}
+
+fn begin_echo(addr: SocketAddr, length: usize, prefix: &[u8]) -> Result<(TcpStream, Vec<u8>)> {
+    let mut socket = connect(addr)?;
+    write!(
+        socket,
+        "POST /echo HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nContent-Length: {length}\r\n\r\n"
+    )?;
+    socket.write_all(prefix)?;
+    let mut response = Vec::new();
+    while !response.ends_with(b"\r\n\r\n") {
+        if response.len() == 8192 {
+            return Err("oversized HTTP headers".into());
+        }
+        let mut byte = [0];
+        socket.read_exact(&mut byte)?;
+        response.push(byte[0]);
+    }
+    Ok((socket, response))
 }
 
 // Only the HTTP/1.1 framing emitted by these fixtures is needed. Check framing
