@@ -407,12 +407,14 @@ Motor OS VM, and open it from the host.</p>
 <code>run-qemu.sh</code>; see <a href="build.html">Building Motor OS</a> and
 <a href="running.html">Running Motor OS</a>.</p>
 
+<p>To build the program inside a VM instead, on the developer image, see
+<a href="hello-native.html">Hello Motor OS, natively</a>.</p>
+
 <h2>The program</h2>
-<p>Create the project inside the Motor OS checkout, so that the repository's
-<code>rust-toolchain.toml</code> selects the Motor OS toolchain for it (<code>build/</code> is
-ignored by git):</p>
-<pre><code>cd "$MOTORH/motor-os"
-mkdir -p build/examples
+<p>On the host, start from the Motor OS checkout. Create the project inside it, so that
+the repository's <code>rust-toolchain.toml</code> selects the Motor OS toolchain for it
+(<code>build/</code> is ignored by git):</p>
+<pre><code>mkdir -p build/examples
 cargo new build/examples/hello
 cd build/examples/hello</code></pre>
 <p>Replace <code>src/main.rs</code> with this:</p>
@@ -599,19 +601,22 @@ the checkout, copy that file next to its <code>Cargo.toml</code>. See
 The result is <code>target/x86_64-unknown-motor/release/hello</code>.</p>
 
 <h2>Copy it into the VM</h2>
-<p>With the VM running, use SFTP through the SSH server. <code>/user/bin</code> is where
-an interactive session may install programs, and <code>/user/tmp</code> is scratch space;
+<p>In another host terminal, start from the Motor OS checkout. With the VM running, use
+SFTP through the SSH server. <code>/user/bin</code> is where an interactive session may
+install programs, and <code>/user/tmp</code> is scratch space;
 the server reads its two pages from the current directory, so give it a directory of its
 own:</p>
-<pre><code>KEY="$MOTORH/motor-os/vm_images/release/test.key"
+<pre><code>KEY=vm_images/release/test.key
 ssh -p 2222 -o IdentitiesOnly=yes -i "$KEY" motor@192.168.4.2 /system/bin/mkdir /user/tmp/hello
 scp -P 2222 -o IdentitiesOnly=yes -i "$KEY" \
-    target/x86_64-unknown-motor/release/hello hello.html 404.html \
+    build/examples/hello/target/x86_64-unknown-motor/release/hello \
+    build/examples/hello/hello.html build/examples/hello/404.html \
     motor@192.168.4.2:/user/tmp/hello/
-ssh -p 2222 -o IdentitiesOnly=yes -i "$KEY" motor@192.168.4.2 /system/bin/chmod 755 /user/tmp/hello/hello</code></pre>
+ssh -p 2222 -o IdentitiesOnly=yes -i "$KEY" motor@192.168.4.2 /system/bin/chmod rwxr-xr-x /user/tmp/hello/hello</code></pre>
 <p><code>test.key</code> is in the image directory next to <code>run-qemu.sh</code>
 (<code>src/tests/test.key</code> is the same key). <code>scp</code> carries the executable
-bit over; the <code>chmod</code> makes sure of it.</p>
+bit over; the <code>chmod</code> makes sure of it. Motor OS <code>chmod</code> takes a
+nine-character mode such as <code>rwxr-xr-x</code>, not an octal number.</p>
 
 <h2>Run it</h2>
 <p>On the VM's console, or over <code>ssh-into-motor-os-vm.sh</code>:</p>
@@ -619,7 +624,9 @@ bit over; the <code>chmod</code> makes sure of it.</p>
 rush:/user/tmp/hello$ ./hello</code></pre>
 <p>Or start it from the host in one command:</p>
 <pre><code>ssh -p 2222 -o IdentitiesOnly=yes -i "$KEY" motor@192.168.4.2 \
-    /system/bin/rush -c 'cd /user/tmp/hello &amp;&amp; ./hello'</code></pre>
+    'cd /user/tmp/hello &amp;&amp; ./hello'</code></pre>
+<p>The SSH server runs the quoted line in <code>rush</code>, so the <code>cd</code>
+applies to <code>./hello</code>.</p>
 <p>On the host, open <a href="http://192.168.4.2:5542">http://192.168.4.2:5542</a>. You
 should see the <code>hello.html</code> page above, served from Motor OS. A request to
 <code>/sleep</code> is answered after five seconds. As in the book, the server accepts two
@@ -631,7 +638,7 @@ description in <code>src/imager/</code> (or to a directory under <code>img_files
 the description already includes) and rebuild the image.</p>
 <nav class="pager">
 <a class="pager-prev" href="gix.html"><span>Previous</span>gix: the Git client</a>
-<a class="pager-next" href="profiling.html"><span>Next</span>Profiling</a>
+<a class="pager-next" href="hello-native.html"><span>Next</span>Hello, world (native)</a>
 </nav>
 </article>
 </main>

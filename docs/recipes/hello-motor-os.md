@@ -6,11 +6,13 @@ from [Rust Book](https://doc.rust-lang.org/book/title-page.html) inside a Motor 
 
 First, make sure that you can [build and run Motor OS](https://github.com/moturus/motor-os/blob/main/docs/build.md).
 
-Create the example below the Motor OS checkout so the repository's exact
-toolchain selector applies:
+To build the program inside a VM instead, on the developer image, see
+[Hello Motor OS, natively](hello-motor-os-native.md).
+
+On the host, start from the Motor OS checkout. Create the example below it
+so the repository's exact toolchain selector applies:
 
 ```sh
-cd "$MOTORH/motor-os"
 mkdir -p build/examples
 cargo new build/examples/hello
 cd build/examples/hello
@@ -218,18 +220,19 @@ Filename: ```404.html```:
 </html>
 ```
 
-Boot the already-built standard image in one terminal:
+In a second host terminal, start from the Motor OS checkout and boot the
+already-built standard image:
 
 ```sh
-cd "$MOTORH/motor-os/vm_images/release"
+cd vm_images/release
 ./run-qemu.sh
 ```
 
-In another terminal, upload the executable and its data files:
+In another host terminal, start from the Motor OS checkout and upload the
+executable and its data files:
 
 ```sh
-cd "$MOTORH/motor-os"
-SSH_KEY=src/tests/test.key
+SSH_KEY=vm_images/release/test.key
 ssh -p 2222 -o IdentitiesOnly=yes -i "$SSH_KEY" \
   motor@192.168.4.2 /system/bin/mkdir /user/tmp/hello
 scp -P 2222 -o IdentitiesOnly=yes -i "$SSH_KEY" \
@@ -238,16 +241,22 @@ scp -P 2222 -o IdentitiesOnly=yes -i "$SSH_KEY" \
   build/examples/hello/404.html \
   motor@192.168.4.2:/user/tmp/hello/
 ssh -p 2222 -o IdentitiesOnly=yes -i "$SSH_KEY" \
-  motor@192.168.4.2 /system/bin/chmod 755 /user/tmp/hello/hello
+  motor@192.168.4.2 /system/bin/chmod rwxr-xr-x /user/tmp/hello/hello
 ```
+
+Motor OS `chmod` takes a nine-character mode such as `rwxr-xr-x`, not an
+octal number.
 
 Start the server through SSH or from a Motor OS shell:
 
 ```sh
 ssh -p 2222 -o IdentitiesOnly=yes -i "$SSH_KEY" \
   motor@192.168.4.2 \
-  /system/bin/rush -c 'cd /user/tmp/hello && ./hello'
+  'cd /user/tmp/hello && ./hello'
 ```
+
+The SSH server runs the quoted line in `rush`, so the `cd` applies to
+`./hello`.
 
 On the host, open `http://192.168.4.2:5542/`. The server accepts two requests
 and then exits, as specified by the example's `.take(2)` loop.
