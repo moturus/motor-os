@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use wasm_smoke_suite::{Job, Result, Suite, process_active, used_memory};
 
-use super::{FIXTURES, RUNTIME, runtime_pid};
+use super::{COMPILER, FIXTURES, RUNTIME, runtime_pid};
 
 mod deadline;
 mod grants;
@@ -25,33 +25,34 @@ pub(super) fn services() -> Result<()> {
 pub(super) fn run(suite: &mut Suite) -> Result<()> {
     grants::run(suite)?;
     suite.refusal(
-        "p3-default-disabled",
+        "p3-explicit-disabled",
         &format!(
             "MOTOR_OS_CAPS=0x100 {RUNTIME} serve --allow-precompiled \
-             -W component-model-async -S cli --addr 127.0.0.1:0 \
+             -S p3=n,cli --addr 127.0.0.1:0 \
              {FIXTURES}/p3_cli_serve_hello_world.cwasm"
         ),
         "a matching implementation was not found in the linker",
     )?;
-    for (program, p3, echo) in [
+    for (program, raw, echo) in [
         ("p2_cli_serve_hello_world", false, false),
         ("p2_api_proxy_streaming", false, true),
-        ("p3_cli_serve_hello_world", true, false),
-        ("p3_http_echo", true, true),
+        ("p3_cli_serve_hello_world", false, false),
+        ("p3_http_echo", false, true),
+        ("p2_cli_serve_hello_world", true, false),
     ] {
-        let options = if p3 {
-            "-W component-model-async -S p3,cli"
+        let (tool, extension, label) = if raw {
+            (COMPILER, "wasm", "native-raw-serve")
         } else {
-            "-S cli"
+            (RUNTIME, "cwasm", program)
         };
         // Echo runs without a terminal, so its shutdown cannot depend on Ctrl-C.
         let mut job = suite.start(
-            program,
+            label,
             &format!(
-                "MOTOR_OS_CAPS=0x100 {RUNTIME} serve --allow-precompiled {options} \
+                "MOTOR_OS_CAPS=0x100 {tool} serve --allow-precompiled -S cli \
                  --addr 127.0.0.1:0 --shutdown-addr 127.0.0.1:0 \
                  --max-concurrent-requests {CONCURRENCY} --max-concurrent-connections 8 \
-                 {FIXTURES}/{program}.cwasm"
+                 {FIXTURES}/{program}.{extension}"
             ),
             !echo,
         )?;
@@ -117,7 +118,7 @@ pub(super) fn run(suite: &mut Suite) -> Result<()> {
             return Err(format!("{program}: runtime survived shutdown").into());
         }
         println!(
-            "PASS {program}: requests={} concurrency={CONCURRENCY} \
+            "PASS {label}: requests={} concurrency={CONCURRENCY} \
              sampled_vm_peak_bytes={peak} max_gap_us={}",
             rounds * CONCURRENCY,
             gap.as_micros()
