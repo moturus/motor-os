@@ -426,8 +426,10 @@ The smaller <code>wasm.img</code> also includes the four tools and their data
 directories. The test inputs (the TypeScript workload, the Linux identity
 digests, two custom Javy plugins and the precompiled Wasmtime fixtures) are not
 installed; <code>src/tests/test-wasm.sh</code> uploads them to
-<code>/none/wasm-tests</code> on every VM boot during tests. The example and
-HTML documentation are part of <code>dev.img</code>.</p>
+<code>/none/wasm-tests</code> on every VM boot during tests. The low-RAM
+qualification keeps these fixtures and retained outputs on disk; the tools'
+None-role <code>TMPDIR</code> still uses memfs at <code>/none/tmp</code>.
+The example and HTML documentation are part of <code>dev.img</code>.</p>
 
 <h2>Running Wasmtime</h2>
 <p>Both Wasmtime CLIs run as role None (<code>MOTOR_OS_CAPS=0</code>,
@@ -540,9 +542,12 @@ embedded, and the example runs offline. Edit <code>hello.js</code> and repeat th
 commands to try changes.</p>
 <p>See <a href="build.html">Building Motor OS</a> for image construction and the
 focused installed-tool checks, and <a href="capabilities.html">Capabilities</a>
-for the masks. The host-side <code>src/tests/test-wasm.sh</code> checks the
-installed tools; <code>src/tests/full-test-dev.sh --release</code> includes those
-checks.</p>
+for the masks.</p>
+<p>The host-side <code>src/tests/test-wasm.sh</code> checks the installed tools.
+<code>src/tests/full-test-dev.sh --release</code> runs these checks on the wasm
+image at 224 MiB and the developer image at 256 MiB. Javy's Linux byte-identity
+checks run on the first VM only; Wasmtime service-mask checks run on both
+images. Debug runs skip these Wasm checks.</p>
 <nav class="pager">
 <a class="pager-prev" href="c-cpp.html"><span>Previous</span>C/C++ on Motor OS</a>
 <a class="pager-next" href="lorry.html"><span>Next</span>Lorry: the package manager</a>

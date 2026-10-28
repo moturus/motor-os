@@ -154,3 +154,9 @@ example runs offline. Edit `hello.js` and repeat the commands to try changes.
 
 See [Building Motor OS](build.md) for image construction and the focused
 installed-tool checks, and [capabilities](caps.md) for the masks.
+
+The host-side `src/tests/test-wasm.sh` checks the installed tools.
+`src/tests/full-test-dev.sh --release` runs these checks on the wasm image at
+224 MiB and the developer image at 256 MiB. Javy's Linux byte-identity checks
+run on the first VM only; Wasmtime service-mask checks run on both images.
+Debug runs skip these Wasm checks.
