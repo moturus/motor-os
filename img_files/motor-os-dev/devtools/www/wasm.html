@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Javy and Wasmi on the Motor OS developer image: installed files and a JavaScript-to-WebAssembly example.">
+<meta name="description" content="Javy, Wasmi and Wasmtime on the Motor OS developer image: installed files, native WebAssembly execution, and a JavaScript-to-WebAssembly example.">
 <meta name="theme-color" content="#0a0a0a">
 <title>WebAssembly on Motor OS | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
@@ -397,10 +397,14 @@ a.card h3 { color: var(--accent); }
 <article class="content">
 <div class="eyebrow">Developing</div>
 <h1>WebAssembly on Motor OS</h1>
-<p class="lead">The developer image includes Javy 9.1.0 and Wasmi 1.1.0. Compile
-JavaScript into WebAssembly and run it inside the VM, with no downloads.</p>
-<p>Javy produces a WebAssembly module containing the QuickJS runtime. Wasmi
-interprets that module using the Motor OS port's WASI Preview 1 support.</p>
+<p class="lead">The developer image includes Javy 9.1.0, Wasmi 1.1.0 and full and
+runtime-only Wasmtime 50.0.0. Compile JavaScript into WebAssembly and run it
+interpreted or as native code inside the VM, with no downloads.</p>
+<p>Javy compiles JavaScript into a WebAssembly module containing the QuickJS
+runtime, and uses v50 Wizer through its Wasmi backend. Wasmi interprets that
+module using the Motor OS port's WASI Preview 1 support. Wasmtime compiles and
+executes native code in the same process. Its runtime-only build loads
+compatible precompiled artifacts without linking a compiler.</p>
 
 <h2>Installed files</h2>
 <div class="table-wrap">
@@ -410,19 +414,122 @@ interprets that module using the Motor OS port's WASI Preview 1 support.</p>
   <tr><td><code>/devtools/bin/wasmi</code></td><td>WebAssembly interpreter and command runner.</td></tr>
   <tr><td><code>/devtools/javy/plugins/default.wasm</code></td><td>Default QuickJS plugin for explicit plugin selection and dynamic modules; also embedded in Javy.</td></tr>
   <tr><td><code>/devtools/javy/sources.txt</code>, <code>SHA256SUMS</code></td><td>Build provenance, source revisions, and staged-file checksums.</td></tr>
+  <tr><td><code>/devtools/bin/wasmtime</code></td><td>Native Wasmtime <code>run</code>, <code>serve</code> and <code>compile</code> commands with Cranelift.</td></tr>
+  <tr><td><code>/devtools/bin/wasmtime-rt</code></td><td>Runtime-only Wasmtime: precompiled native execution with WASI.</td></tr>
+  <tr><td><code>/devtools/wasmtime/sources.txt</code>, <code>SHA256SUMS</code></td><td>Wasmtime build provenance and checksums.</td></tr>
   <tr><td><code>/devtools/src/wasm/</code></td><td><code>hello.js</code> and a README with compile/run instructions.</td></tr>
   <tr><td><code>/devtools/www/wasm.html</code></td><td>This guide.</td></tr>
 </table>
 </div>
 <p><code>make dev.img BUILD=release</code> produces <code>motor-os-dev.qcow2</code>.
-The smaller <code>wasm.img</code> also includes the tools and their data
-directories. The example and HTML documentation are part of <code>dev.img</code>.</p>
+The smaller <code>wasm.img</code> also includes the four tools and their data
+directories. The test inputs (the TypeScript workload, the Linux identity
+digests, two custom Javy plugins and the precompiled Wasmtime fixtures) are not
+installed; <code>src/tests/test-wasm.sh</code> uploads them to
+<code>/none/wasm-tests</code> on every VM boot during tests. The example and
+HTML documentation are part of <code>dev.img</code>.</p>
+
+<h2>Running Wasmtime</h2>
+<p>Both Wasmtime CLIs run as role None (<code>MOTOR_OS_CAPS=0</code>,
+<code>0x100</code>, <code>0x200</code> or <code>0x300</code>). Raw <code>run</code>
+needs no filesystem-write capability. <code>compile</code> needs <code>0x200</code>
+to write its output. Loading a compiled artifact needs
+<code>--allow-precompiled</code>; only load trusted artifacts from a matching
+build and configuration. Native Motor artifacts are specific to Motor, and are
+not interchangeable with Linux artifacts. Explicit <code>--target pulley64</code>
+selects Pulley in either CLI.</p>
+<p>Wasmtime and Wasmi use sparse lazy mappings for linear memory: only the pages
+a guest touches use RAM. Wasmtime reserves the declared maximum up to the
+addressable range: 4 GiB for memory32 and the kernel's 1 TiB allocation limit
+for memory64. Growth within that reservation does not move or copy memory.
+Wasmi retains its 4 GiB per-memory capacity. When RAM runs out, Motor OS kills
+whichever process has a page fault refused (there is no OOM killer, see
+<a href="memory.html">Memory</a>): the guest's runtime or another process.
+<code>-W max-memory-size</code> and <code>-W max-memories</code> bound a Wasmtime
+guest as upstream. Store limits use upstream defaults and explicit
+<code>-W max-instances</code>, <code>-W max-tables</code> and
+<code>-W max-table-elements</code> overrides, with no Motor-only caps.
+<code>-W timeout=DURATION</code> interrupts a guest compiled with epoch
+interruption.</p>
+<p>Both Wasmtime CLIs run asynchronous calls, such as each <code>serve</code>
+request, on fiber stacks that are lazy guarded mappings: a stack uses RAM only
+for the pages it touches, and, as on Linux, their number is not limited.
+<code>serve</code> behaves as upstream: up to 1,000 concurrent requests and
+connections by default (<code>--max-concurrent-requests</code>,
+<code>--max-concurrent-connections</code>), no default request deadline, no
+header-read or idle timeout, and exit on any accept error. A request deadline
+needs <code>-W timeout</code> and an artifact compiled with epoch interruption:
+a server with a timeout refuses artifacts compiled without epochs, and a server
+without one refuses artifacts compiled with them.</p>
+<p>Outgoing HTTP and guest sockets use independent WASI grants.
+<code>run -S http</code> enables HTTP imports; <code>serve</code> enables them
+automatically, including outgoing requests. <code>-S inherit-network</code>,
+<code>tcp</code>, <code>udp</code> and <code>allow-ip-name-lookup</code> control
+guest socket access. Turning those socket options off leaves outgoing HTTP
+available when HTTP is enabled. Both paths require the process's
+<code>CAP_NET</code> (<code>MOTOR_OS_CAPS=0x100</code>, optionally combined with
+filesystem write access).</p>
+<p>WASI p3 remains experimental and is enabled by the build's
+<code>component-model-async</code> feature, as upstream. <code>-S p3=n</code>
+disables its imports.</p>
+
+<h2>Differences from Wasmtime on Linux</h2>
+<p>The tools are built from Motor OS branches of their upstream repositories:
+<code>moturus/wasmtime</code> branch <code>motor-50.0.0</code>,
+<code>moturus/javy</code> branch <code>motor-9.1.0</code> and
+<code>moturus/wasmi</code> branch <code>motor-1.1.0</code>. The main tree pins the
+Javy and Wasmtime revisions in <code>src/build-scripts/external-sources.sh</code>;
+each fork's <code>MOTOR.md</code> describes its port. The ports keep upstream
+behavior and defaults wherever Motor's APIs allow: store limits, p3 enablement,
+HTTP concurrency and deadlines, the TCP write budget and artifact versioning
+are all upstream's. What differs is forced by the platform:</p>
+<ul>
+  <li>Native code lives in executable mappings the runtime owns. The kernel maps
+  fresh pages twice into the calling process, once read-execute and once
+  read-write; Wasmtime copies the compiled code through the writable alias,
+  unmaps it, and keeps the executable alias until the module is dropped. No
+  mapping is ever writable and executable at once, and there is no in-place
+  protection change, so Wasmtime's code-editing hook (<code>unpublish</code>)
+  reports an error; the installed CLIs do not use it. Freshly compiled and
+  deserialized code take the same path.</li>
+  <li>Traps are explicit checks compiled into the native code, since Motor OS
+  has no signal handlers. Module data is copied into linear memory at
+  instantiation, with dense data segments coalesced at compile time, instead
+  of mapping a copy-on-write image of the module.</li>
+  <li>Linear memories and fiber stacks are the lazy mappings described above. A
+  reservation never moves, so growth stays within the declared maximum or the
+  address limit.</li>
+  <li>WASI directory handles name paths below a preopen rather than open
+  directory objects: a renamed directory is not followed, and a replacement
+  under the same name is reached. Open files keep their native object. There
+  are no symlinks, hard links or settable timestamps, and a guest writing to a
+  standard output whose reader has gone does not see <code>EPIPE</code>.</li>
+  <li>Sockets use sys-io directly. TCP keepalive is always on, with fixed 20 s
+  probes and 15 retries: disabling it is reported as unsupported, and timing
+  changes are accepted but read back as the fixed values. A TCP socket cannot
+  bind a wildcard address to an ephemeral port or connect after an explicit
+  bind, a wildcard UDP bind selects one local address, UDP has no buffer-size
+  options, sending to a closed UDP receiver reports no error, and an accepted
+  socket may report a larger buffer than its listener requested because sys-io
+  rings only grow.</li>
+  <li>Outgoing TLS trusts the system bundle
+  <code>/system/cfg/ssl/ca-certificates.crt</code> instead of roots compiled
+  into the binary. Clocks and randomness use Motor APIs.</li>
+</ul>
 
 <h2>Run the example</h2>
 <p>In the developer VM's shell:</p>
 <pre><code>cd /devtools/src/wasm
 MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -o /none/tmp/hello.wasm
 MOTOR_OS_CAPS=0 /devtools/bin/wasmi /none/tmp/hello.wasm</code></pre>
+<p>The same Wasm can run directly with Wasmtime, or be compiled once and loaded
+by either Wasmtime CLI:</p>
+<pre><code>MOTOR_OS_CAPS=0 /devtools/bin/wasmtime run /none/tmp/hello.wasm
+MOTOR_OS_CAPS=0x200 /devtools/bin/wasmtime compile /none/tmp/hello.wasm -o /none/tmp/hello.cwasm
+MOTOR_OS_CAPS=0 /devtools/bin/wasmtime-rt run --allow-precompiled /none/tmp/hello.cwasm</code></pre>
+<p><code>wasmtime serve handler.wasm</code> likewise compiles a WASI HTTP component
+and serves it directly. There is no packaging step or separate runtime
+executable to generate.</p>
 <p>Expected output:</p>
 <pre><code>Hello from WebAssembly on Motor OS!
 {"squares":[1,4,9,16],"total":30}</code></pre>
@@ -431,15 +538,17 @@ filesystem write access for its output, while Wasmi needs no capabilities for th
 example. <code>/none/tmp</code> is writable by role None. The default plugin is
 embedded, and the example runs offline. Edit <code>hello.js</code> and repeat the
 commands to try changes.</p>
-<p>See <a href="build.html">Building Motor OS</a> for image construction and
-<a href="capabilities.html">Capabilities</a> for the masks. The host-side
-<code>src/tests/test-wasm.sh</code> checks the installed tools;
-<code>src/tests/full-test-dev.sh --release</code> includes those checks.</p>
+<p>See <a href="build.html">Building Motor OS</a> for image construction and the
+focused installed-tool checks, and <a href="capabilities.html">Capabilities</a>
+for the masks. The host-side <code>src/tests/test-wasm.sh</code> checks the
+installed tools; <code>src/tests/full-test-dev.sh --release</code> includes those
+checks.</p>
 <nav class="pager">
 <a class="pager-prev" href="c-cpp.html"><span>Previous</span>C/C++ on Motor OS</a>
 <a class="pager-next" href="lorry.html"><span>Next</span>Lorry: the package manager</a>
 </nav>
 </article>
+
 </main>
 <footer class="foot">
   <div class="wrap">

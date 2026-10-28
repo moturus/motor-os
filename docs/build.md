@@ -163,14 +163,16 @@ workspace and compile its dependencies: about 10 seconds for a release image
 and 4 minutes for a debug one. So it needs the `moto-tap` network below and no
 other running VM.
 
-The wasm image has a 1 GiB data partition and does not include the native
-development toolchain. The full Wasmtime compiler follows in a later milestone.
+The wasm image has a 1 GiB data partition and installs the same four wasm
+tools, including the full Wasmtime compiler, but not the native development
+toolchain.
 
 On Motor OS, compile into a writable directory and execute with explicit masks:
 
 ```sh
 MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -o /none/tmp/hello.wasm
 MOTOR_OS_CAPS=0 /devtools/bin/wasmi /none/tmp/hello.wasm
+MOTOR_OS_CAPS=0 /devtools/bin/wasmtime run /none/tmp/hello.wasm
 ```
 
 Javy and Wasmtime follow published `moturus` branches and record resolved

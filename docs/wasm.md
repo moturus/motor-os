@@ -74,6 +74,49 @@ available when HTTP is enabled. Both paths require the process's `CAP_NET`
 WASI p3 remains experimental and is enabled by the build's
 `component-model-async` feature, as upstream. `-S p3=n` disables its imports.
 
+## Differences from Wasmtime on Linux
+
+The tools are built from Motor OS branches of their upstream repositories:
+`moturus/wasmtime` branch `motor-50.0.0`, `moturus/javy` branch `motor-9.1.0`
+and `moturus/wasmi` branch `motor-1.1.0`. The main tree pins the Javy and
+Wasmtime revisions in `src/build-scripts/external-sources.sh`; each fork's
+`MOTOR.md` describes its port. The ports keep upstream behavior and defaults
+wherever Motor's APIs allow: store limits, p3 enablement, HTTP concurrency and
+deadlines, the TCP write budget and artifact versioning are all upstream's.
+What differs is forced by the platform:
+
+- Native code lives in executable mappings the runtime owns. The kernel maps
+  fresh pages twice into the calling process, once read-execute and once
+  read-write; Wasmtime copies the compiled code through the writable alias,
+  unmaps it, and keeps the executable alias until the module is dropped. No
+  mapping is ever writable and executable at once, and there is no in-place
+  protection change, so Wasmtime's code-editing hook (`unpublish`) reports an
+  error; the installed CLIs do not use it. Freshly compiled and deserialized
+  code take the same path.
+- Traps are explicit checks compiled into the native code, since Motor OS has
+  no signal handlers. Module data is copied into linear memory at
+  instantiation, with dense data segments coalesced at compile time, instead of
+  mapping a copy-on-write image of the module.
+- Linear memories and fiber stacks are the lazy mappings described above. A
+  reservation never moves, so growth stays within the declared maximum or the
+  address limit.
+- WASI directory handles name paths below a preopen rather than open directory
+  objects: a renamed directory is not followed, and a replacement under the
+  same name is reached. Open files keep their native object. There are no
+  symlinks, hard links or settable timestamps, and a guest writing to a
+  standard output whose reader has gone does not see `EPIPE`.
+- Sockets use sys-io directly. TCP keepalive is always on, with fixed 20 s
+  probes and 15 retries: disabling it is reported as unsupported, and timing
+  changes are accepted but read back as the fixed values. A TCP socket cannot
+  bind a wildcard address to an ephemeral port or connect after an explicit
+  bind, a wildcard UDP bind selects one local address, UDP has no buffer-size
+  options, sending to a closed UDP receiver reports no error, and an accepted
+  socket may report a larger buffer than its listener requested because sys-io
+  rings only grow.
+- Outgoing TLS trusts the system bundle `/system/cfg/ssl/ca-certificates.crt`
+  instead of roots compiled into the binary. Clocks and randomness use Motor
+  APIs.
+
 ## Run the example
 
 In the developer VM's shell:
