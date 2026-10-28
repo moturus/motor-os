@@ -15,6 +15,11 @@ git history; `2cf4ecdc` contains the previous plan and evidence record.
 
 ## Status and resume point (2026-10-27)
 
+The follow-up [fork audit and proposed v50 port](wasmtime-fork-audit.md)
+classifies the remaining Motor patches and proposes a smaller v50 branch.
+That proposal awaits review; the v48 implementation and evidence below remain
+the current qualified baseline.
+
 | Area | Current state |
 | --- | --- |
 | Javy/Wasmi | Delivered in the developer and small wasm images. Static/dynamic compilation, TypeScript, plugins, byte identity, memory backing and runner regressions are maintained. |
