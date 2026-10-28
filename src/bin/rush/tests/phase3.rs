@@ -392,6 +392,35 @@ fn file_redirections_round_trip() {
 
 #[test]
 fn stderr_redirection_and_dup() {
+    // Inherited descriptors retain their identity for builtins and children.
+    for (script, stdout, stderr) in [
+        ("printf out; printf err >&2".to_string(), "out", "err"),
+        (
+            "{ printf out; printf err >&2; } 2>&1".to_string(),
+            "outerr",
+            "",
+        ),
+        (
+            "{ printf out; printf err >&2; } 1>&2".to_string(),
+            "",
+            "outerr",
+        ),
+        (
+            format!("{RUSH:?} -c 'printf out; printf err >&2' 2>&1"),
+            "outerr",
+            "",
+        ),
+        (
+            format!("{RUSH:?} -c 'printf out; printf err >&2' 1>&2"),
+            "",
+            "outerr",
+        ),
+    ] {
+        let output = Command::new(RUSH).args(["-c", &script]).output().unwrap();
+        assert!(output.status.success(), "{script}: {output:?}");
+        assert_eq!(output.stdout, stdout.as_bytes(), "{script}");
+        assert_eq!(output.stderr, stderr.as_bytes(), "{script}");
+    }
     let path = tmp("err");
     let _ = std::fs::remove_file(&path);
     // 2> sends only stderr to the file; stdout stays empty.

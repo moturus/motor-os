@@ -113,6 +113,8 @@ pub enum ChildIn {
 /// pipeline stage's output is a temp file, so it is `File` too).
 pub enum ChildOut {
     Inherit,
+    ParentStdout,
+    ParentStderr,
     DirectFile(Arc<File>),
     File(Arc<File>),
 }
@@ -171,12 +173,12 @@ pub fn spawn(
         ChildIn::File(f) => Some(read_all(f)),
     };
     let out_file = match &stdout {
-        ChildOut::Inherit => None,
+        ChildOut::Inherit | ChildOut::ParentStdout | ChildOut::ParentStderr => None,
         ChildOut::DirectFile(_) => None,
         ChildOut::File(f) => Some(f.clone()),
     };
     let err_file = match &stderr {
-        ChildOut::Inherit => None,
+        ChildOut::Inherit | ChildOut::ParentStdout | ChildOut::ParentStderr => None,
         ChildOut::DirectFile(_) => None,
         ChildOut::File(f) => Some(f.clone()),
     };
@@ -191,11 +193,15 @@ pub fn spawn(
         ChildOut::DirectFile(file) => Stdio::from(file.try_clone()?),
         ChildOut::File(_) => Stdio::piped(),
         ChildOut::Inherit => Stdio::inherit(),
+        ChildOut::ParentStdout => Stdio::from(std::io::stdout()),
+        ChildOut::ParentStderr => Stdio::from(std::io::stderr()),
     });
     cmd.stderr(match &stderr {
         ChildOut::DirectFile(file) => Stdio::from(file.try_clone()?),
         ChildOut::File(_) => Stdio::piped(),
         ChildOut::Inherit => Stdio::inherit(),
+        ChildOut::ParentStdout => Stdio::from(std::io::stdout()),
+        ChildOut::ParentStderr => Stdio::from(std::io::stderr()),
     });
 
     let mut child = cmd.spawn()?;

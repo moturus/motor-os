@@ -102,18 +102,19 @@ pub fn run_list(list: &List, shell: &mut Shell) -> i32 {
 /// `try_clone`), so the same target can be handed to several children.
 #[derive(Clone)]
 enum FdSource {
-    Inherit,
+    // Keep the original descriptor when a redirection copies this source.
+    Inherit(u8),
     File(Arc<File>),
     /// stdin fed from a here-document body via a pipe (written after spawn).
     Heredoc(Arc<String>),
 }
 
 impl FdSource {
-    /// A writer for this fd used as *standard output*: `Inherit` → the process's
-    /// stdout. Backs builtin output so `echo hi > f` and `pwd` honor redirects.
+    /// A writer for builtin output, following inherited stream duplication.
     fn out_writer(&self) -> Box<dyn Write> {
         match self {
-            FdSource::Inherit => Box::new(std::io::stdout()),
+            FdSource::Inherit(2) => Box::new(std::io::stderr()),
+            FdSource::Inherit(_) => Box::new(std::io::stdout()),
             FdSource::File(f) => f
                 .try_clone()
                 .map(|x| Box::new(x) as Box<dyn Write>)
@@ -122,10 +123,11 @@ impl FdSource {
         }
     }
 
-    /// A writer for this fd used as *standard error*: `Inherit` → stderr.
+    /// A writer for diagnostics, following inherited stream duplication.
     fn err_writer(&self) -> Box<dyn Write> {
         match self {
-            FdSource::Inherit => Box::new(std::io::stderr()),
+            FdSource::Inherit(1) => Box::new(std::io::stdout()),
+            FdSource::Inherit(_) => Box::new(std::io::stderr()),
             FdSource::File(f) => f
                 .try_clone()
                 .map(|x| Box::new(x) as Box<dyn Write>)
@@ -139,7 +141,7 @@ impl FdSource {
     /// the next command; a file → the file; a here-document → its body.
     fn reader(&self) -> Box<dyn Read> {
         match self {
-            FdSource::Inherit => Box::new(crate::sys::RawStdin::default()),
+            FdSource::Inherit(_) => Box::new(crate::sys::RawStdin::default()),
             FdSource::File(f) => f
                 .try_clone()
                 .map(|x| Box::new(x) as Box<dyn Read>)
@@ -156,7 +158,11 @@ struct IoEnv {
 impl IoEnv {
     fn inherit() -> Self {
         Self {
-            fds: [FdSource::Inherit, FdSource::Inherit, FdSource::Inherit],
+            fds: [
+                FdSource::Inherit(0),
+                FdSource::Inherit(1),
+                FdSource::Inherit(2),
+            ],
         }
     }
 }
@@ -601,8 +607,8 @@ fn spawn_background(
         &argv[1..],
         &env,
         child_in(&fds[0], true, sole_use[0]),
-        child_out(&fds[1], sole_use[1]),
-        child_out(&fds[2], sole_use[2]),
+        child_out(&fds[1], sole_use[1], 1),
+        child_out(&fds[2], sole_use[2], 2),
     ) {
         Ok(child) => shell.jobs.add(cmd, Some(child), JobState::Running),
         // dash forks before it discovers the command is missing, so `$!` is set
@@ -1317,8 +1323,8 @@ fn spawn_child(
         args,
         env,
         child_in(&fds[0], false, sole_use[0]),
-        child_out(&fds[1], sole_use[1]),
-        child_out(&fds[2], sole_use[2]),
+        child_out(&fds[1], sole_use[1], 1),
+        child_out(&fds[2], sole_use[2], 2),
     ) {
         Ok(child) => child,
         Err(e) => return report_spawn_error(name, e, &fds[2]),
@@ -1368,17 +1374,20 @@ fn report_spawn_error(program: &str, e: std::io::Error, err_fd: &FdSource) -> i3
 /// than competing with the shell for the terminal (POSIX §2.9.3).
 fn child_in(fd: &FdSource, background: bool, sole_use: bool) -> ChildIn {
     match fd {
-        FdSource::Inherit if background => ChildIn::Null,
-        FdSource::Inherit => ChildIn::Inherit,
+        FdSource::Inherit(_) if background => ChildIn::Null,
+        FdSource::Inherit(_) => ChildIn::Inherit,
         FdSource::File(f) if sole_use => ChildIn::DirectFile(f.clone()),
         FdSource::File(f) => ChildIn::File(f.clone()),
         FdSource::Heredoc(b) => ChildIn::Heredoc(b.clone()),
     }
 }
 
-fn child_out(fd: &FdSource, sole_use: bool) -> ChildOut {
+fn child_out(fd: &FdSource, sole_use: bool, destination: u8) -> ChildOut {
     match fd {
-        FdSource::Inherit => ChildOut::Inherit,
+        FdSource::Inherit(source) if *source == destination => ChildOut::Inherit,
+        FdSource::Inherit(1) => ChildOut::ParentStdout,
+        FdSource::Inherit(2) => ChildOut::ParentStderr,
+        FdSource::Inherit(_) => ChildOut::Inherit,
         FdSource::File(f) if sole_use => ChildOut::DirectFile(f.clone()),
         FdSource::File(f) => ChildOut::File(f.clone()),
         // A here-document as *output* is meaningless; behave like inherit.
@@ -2007,7 +2016,7 @@ fn capture(src: &str, shell: &mut Shell) -> std::io::Result<String> {
 
     let file = TempFile::new("cmdsub")?;
     let io = IoEnv {
-        fds: [FdSource::Inherit, file.fd(), FdSource::Inherit],
+        fds: [FdSource::Inherit(0), file.fd(), FdSource::Inherit(2)],
     };
     exec_list(&list, shell, &io);
     fire_subshell_exit_trap(shell, &io);
