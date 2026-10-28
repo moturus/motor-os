@@ -8,42 +8,42 @@ defaults. Add executable-memory support, then run native code directly inside
 Wasmtime. The former Pulley-first delivery and Motor-specific ELF packaging
 design are superseded.
 
-The OS prerequisite and native Wasmtime fork changes are committed. The
-committed main-tree pin still selects the earlier Pulley runtime; prepared
-local images contain the native implementation. Historical qualification details remain in
-git history; `2cf4ecdc` contains the previous plan and evidence record.
+Milestone 4 is complete. The OS prerequisite, native Wasmtime v50 integration
+and Javy's v50 dependencies are committed. The main tree pins the published
+fork revisions used by the qualified release images. Historical qualification
+details remain in git history; `2cf4ecdc` contains the previous plan and evidence
+record.
 
 ## Status and resume point (2026-10-27)
 
 The owner approved the follow-up [fork audit and v50 port](wasmtime-fork-audit.md),
 including upgrading Javy's Wasmtime/WASI/Wizer dependencies to v50. Javy retains
 its Wasmi backend; keeping Wizer on v48 was a scope choice, not a requirement.
-The v50 implementation is committed locally on `motor-50.0.0` and qualified.
+The v50 implementation is published on `motor-50.0.0` and qualified.
 Wasmtime passes 143 commands on each image at 224 and 256 MiB, plus the existing
 p2/p3 service gate. Javy passes on `wasm:224` and `dev:256`, including all four
-Linux byte-identity cases on the first VM. Publication and dependent main-tree
-commits remain. The v48 branch and evidence below remain a fallback.
+Linux byte-identity cases on the first VM. Main-tree commits `5ea18cfd` and
+`8e86a569` complete the image integration and installed checks. The v48 branch
+and evidence below remain a fallback.
 
 | Area | Current state |
 | --- | --- |
 | Javy/Wasmi | Javy's Wasmtime/WASI/Wizer dependencies now use v50, retaining Wasmi. Static/dynamic compilation, TypeScript, plugins, byte identity, memory backing and runner regressions pass in the prepared images. |
-| Runtime-only Wasmtime | The committed main-tree pin selects the earlier Pulley runtime. The local fork and prepared images load native command/HTTP artifacts directly, with no template or compiler in the runtime-only binary. |
+| Runtime-only Wasmtime | The committed v50 pin loads native command/HTTP artifacts directly, with no template or compiler in the runtime-only binary. |
 | HTTP, sockets and filesystem | Native adapters and shared WASI hosts are delivered. Existing lifecycle, timeout, grant, service-mask and p3 regressions pass. System CA loading is delivered. |
 | Full CLI foundation | Both v50 CLIs use the upstream package with separate feature selections, sharing authority checks, native network checks, lazy memories and guarded fibers. The runtime wrapper workspace is removed. |
-| Full CLI image integration | Native integration is prepared locally: separate full/runtime builds, both required image binaries, normal host cross-compilation, and updated existing smoke checks. Publication and the main-tree pin remain pending. |
+| Full CLI image integration | Delivered: separate full/runtime builds, both required image binaries, normal host cross-compilation, and updated existing smoke checks, using published fork pins. |
 | Default policy | v50 uses the native target, upstream p3/store defaults, the upstream TCP write budget and normal artifact versioning. There is no Motor-only 4 GiB memory64 cap or ELF packaging path. |
 | Executable memory | Delivered in main-tree commit `9b97640d`, with kernel-only implementation and in-VM systests. No moto-sys, moto-rt or stdlib change was needed. |
 | Native workflow | v50 retains owned executable code mappings in both CLIs. Native run/serve/compile, direct loading, traps, TypeScript, p3, limits and memory64 growth pass on both images at 224 and 256 MiB. See the follow-up plan for v50 measurements and failure diagnosis. |
 
-The committed main tree remains pinned to Javy
-`12a6c52d7dbd62056ead74d8ddea3f8a235f278f` and Wasmtime
-`633e7de368b913a696e7e15d4f546c55fc2eadaf` in
-`src/build-scripts/external-sources.sh`. The prepared pins now select Wasmtime v50
-`b5581cade5626f050e6f9002f522b76187b6cf56` and Javy
-`e307323d448470f9925f5a05e8ae4e160074c059` under `external-sources/`.
-They are not published main-tree prerequisites yet. The owner publishes fork
-commits before the main-tree pin
-and dependent integration are committed.
+The main tree pins Wasmtime v50 `b5581cade5626f050e6f9002f522b76187b6cf56`
+and Javy `e307323d448470f9925f5a05e8ae4e160074c059` in
+`src/build-scripts/external-sources.sh`, with checkouts under `external-sources/`.
+Both revisions were verified on GitHub before the dependent main-tree commits.
+The normal producer passes without a local-source override; evidence is in
+`build/wasm-v50/producer-published.log`. No implementation or delivery step
+remains in this plan.
 
 Completed HTTP regression work is retained: commits `c8a8dce3`, `50dfb4a7`,
 `cba80ac4`, `7154e47b`, `17784888` and `b674858e` cover serving, lifecycle,
@@ -60,8 +60,8 @@ there with their diagnoses. They are not prerequisites to repeat this work.
 The earlier fragmented-request reset still lacks its original reproducing
 binary/log; later passing runs do not diagnose it. It does not block this
 work under the owner's existing direction. A historical native invalid-opcode
-report was not reproduced in the maintained Pulley runtime; native trap
-handling must be checked when direct native execution is introduced.
+report was not reproduced in the maintained Pulley runtime. The current native
+path passes unreachable and bounds-trap checks on both images at both sizes.
 
 ## Target behavior
 
@@ -121,8 +121,8 @@ committed separately as `5e7201ff` before this work resumed.
 
 ### 4b — Wasmtime code-memory adapter and native defaults
 
-Implemented locally in `21c1436ca8` and `3fb032396e`; image qualification and
-publication follow below. The retained platform differences are:
+Implemented initially in `21c1436ca8` and `3fb032396e`, then carried forward
+into the published and qualified v50 fork. The retained platform differences are:
 
 - `CodeMemory` copies position-independent machine code into an owned RX
   mapping, unmaps its RW alias, and retains the serialized image for metadata
@@ -200,19 +200,16 @@ the shared host, with Pulley available explicitly and no ELF packaging path.
 
 ### 4c — reproducible image integration
 
-The v48 baseline was validated locally at `3fb032396ea3898de562786e9a4060783e83e286`.
-The normal `src/build-motor-os.sh --wasmtime-only` pipeline built both CLIs
-with a local revision override, and `test-wasm.sh --prepare` built both images.
-The main-tree integration requires and checksums both
-binaries, and uses the normal host CLI to compile native test artifacts. No
-manually installed binary or old prototype compiler is a build prerequisite.
-The approved v50 migration now replaces that revision; its matching Javy update,
-release qualification and publication status are tracked in the follow-up plan.
+Completed in `5ea18cfd` and `8e86a569`. The normal
+`src/build-motor-os.sh --javy-only --wasmtime-only` pipeline passes using the
+published GitHub pins, and `test-wasm.sh --prepare` builds both release images.
+The integration requires and checksums both Wasmtime binaries and uses the
+normal host CLI to compile native test artifacts. The matching Javy v50 update
+and qualification are recorded in the follow-up plan.
 
-After the fork changes are qualified and published, pin the exact revision in
-`src/build-scripts/external-sources.sh`. Build the Cranelift-capable CLI and
-runtime-only CLI in separate Cargo output directories and stage both binaries
-with provenance and checksums. Both image manifests must require them.
+The Cranelift-capable CLI and runtime-only CLI use separate Cargo output
+directories. Both binaries are staged with provenance and checksums and required
+by both image manifests.
 
 Use the current build layout:
 
@@ -239,6 +236,10 @@ Output: all four tools installed by the normal release build in both images,
 with documentation matching their actual native behavior.
 
 ### 4d — focused native validation and resource check
+
+Completed for v50; see the [fork audit](wasmtime-fork-audit.md#implementation-and-qualification)
+for its installed matrix, Javy identity and service results, measurements and
+failure diagnoses. The v48 results below record the retained fallback.
 
 Qualified v48 baseline: `src/tests/test-wasm.sh --suite wasmtime --release`, 143 commands each
 on `wasm:224`, `wasm:256`, `dev:224` and `dev:256`, with zero memory-admission

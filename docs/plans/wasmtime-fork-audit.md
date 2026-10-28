@@ -1,7 +1,7 @@
 # Wasmtime fork audit and v50 port
 
-2026-10-27. Status: implemented and qualified locally, including Javy's v50
-dependency update. Fork publication and dependent main-tree commits remain.
+2026-10-27. Status: complete. The v50 forks, including Javy's dependency update,
+are published, qualified and integrated into the main tree.
 This supplements [javy-wasmtime.md](javy-wasmtime.md), whose Linux-parity target
 and retained integration contracts still apply.
 
@@ -49,8 +49,9 @@ its qualification are recorded at the end of this document.
 
 ## What executable mappings make obsolete
 
-These changes are already present locally in `21c1436ca8` and `3fb032396e`,
-but are not yet published through the main-tree pin:
+At audit time these changes were present locally in `21c1436ca8` and
+`3fb032396e`, before publication through the main-tree pin. They are retained
+in the delivered v50 port:
 
 - Native code now uses owned executable mappings, without an ELF template,
   native `package` utility, custom linker layout or separate packaged loader.
@@ -186,7 +187,7 @@ This is a source port, not a Cargo version substitution:
   regenerate its lockfiles. Verify its existing Wasmi backend and output
   identity; there is no structural reason to retain v48.
 
-## Proposed implementation sequence
+## Approved implementation sequence
 
 1. Create `motor-50.0.0` from the inspected upstream tag in the Wasmtime fork
    under `external-sources/wasmtime/`, retaining the current v48 branch. Port
@@ -233,7 +234,7 @@ needed for this agreed dependency update.
 
 ## Implementation and qualification
 
-The implementation is committed locally in both external forks:
+The implementation is published in both external forks:
 
 | Fork | Branch and revision |
 | --- | --- |
@@ -296,8 +297,9 @@ failure), `javy-dev-evidence/` and `service-evidence/`.
 Existing source-builder/fetch and test-selection checks, shell syntax and
 main-tree formatting checks pass. No new main-tree compiler warnings were
 introduced; the external Wasmtime fork retains five non-VM configuration
-warnings. Steps 1–5 are complete and the incremental fork patches are committed.
-Step 6 still needs owner publication and the dependent main-tree commits.
+warnings. All six steps are complete. After verifying both published fork tips,
+main-tree commits `5ea18cfd` and `8e86a569` integrated the producer, image
+contents, source pins, documentation and installed checks.
 
 Sampled whole-VM memory peaks (MiB; sampling can miss short peaks):
 
@@ -330,7 +332,10 @@ after all assertions completed. All temporary diagnostics were removed before
 commit `b5581cade5` and final qualification.
 
 The normal producer first stopped because the new remote `motor-50.0.0` branch
-does not exist yet (`producer.log`). Qualification uses a per-command Git URL
-override to the committed local fork, without persistent configuration or path
-dependencies. The owner must publish both fork tips before the dependent
-main-tree integration is committed.
+did not yet exist (`producer.log`). Initial qualification used a per-command
+Git URL override to the committed local fork, without persistent configuration
+or path dependencies. The owner then published both fork tips. GitHub now
+contains both pinned revisions and Javy's locked Wizer ancestor, and the normal
+`src/build-motor-os.sh --javy-only --wasmtime-only` producer passes without any
+source override (`producer-published.log`). No implementation, publication or
+main-tree integration step remains.
