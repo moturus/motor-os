@@ -15,28 +15,33 @@ git history; `2cf4ecdc` contains the previous plan and evidence record.
 
 ## Status and resume point (2026-10-27)
 
-The follow-up [fork audit and proposed v50 port](wasmtime-fork-audit.md)
-classifies the remaining Motor patches and proposes a smaller v50 branch.
-That proposal awaits review; the v48 implementation and evidence below remain
-the current qualified baseline.
+The owner approved the follow-up [fork audit and v50 port](wasmtime-fork-audit.md),
+including upgrading Javy's Wasmtime/WASI/Wizer dependencies to v50. Javy retains
+its Wasmi backend; keeping Wizer on v48 was a scope choice, not a requirement.
+The v50 implementation is committed locally on `motor-50.0.0` and qualified.
+Wasmtime passes 143 commands on each image at 224 and 256 MiB, plus the existing
+p2/p3 service gate. Javy passes on `wasm:224` and `dev:256`, including all four
+Linux byte-identity cases on the first VM. Publication and dependent main-tree
+commits remain. The v48 branch and evidence below remain a fallback.
 
 | Area | Current state |
 | --- | --- |
-| Javy/Wasmi | Delivered in the developer and small wasm images. Static/dynamic compilation, TypeScript, plugins, byte identity, memory backing and runner regressions are maintained. |
+| Javy/Wasmi | Javy's Wasmtime/WASI/Wizer dependencies now use v50, retaining Wasmi. Static/dynamic compilation, TypeScript, plugins, byte identity, memory backing and runner regressions pass in the prepared images. |
 | Runtime-only Wasmtime | The committed main-tree pin selects the earlier Pulley runtime. The local fork and prepared images load native command/HTTP artifacts directly, with no template or compiler in the runtime-only binary. |
 | HTTP, sockets and filesystem | Native adapters and shared WASI hosts are delivered. Existing lifecycle, timeout, grant, service-mask and p3 regressions pass. System CA loading is delivered. |
-| Full CLI foundation | Local Wasmtime commit `4eede7f3e23371317b2da19514b117ab17447381` shares authority checks, native network checks, lazy memories and guarded fibers between both CLIs, and enables CLI help and Wasm text parsing. Retain this work. |
+| Full CLI foundation | Both v50 CLIs use the upstream package with separate feature selections, sharing authority checks, native network checks, lazy memories and guarded fibers. The runtime wrapper workspace is removed. |
 | Full CLI image integration | Native integration is prepared locally: separate full/runtime builds, both required image binaries, normal host cross-compilation, and updated existing smoke checks. Publication and the main-tree pin remain pending. |
-| Default policy | Local fork `3fb032396e` restores the native target, upstream p3 and store defaults, and normal artifact versioning. It removes the 4 GiB memory64 cap and the prototype ELF packaging path. |
+| Default policy | v50 uses the native target, upstream p3/store defaults, the upstream TCP write budget and normal artifact versioning. There is no Motor-only 4 GiB memory64 cap or ELF packaging path. |
 | Executable memory | Delivered in main-tree commit `9b97640d`, with kernel-only implementation and in-VM systests. No moto-sys, moto-rt or stdlib change was needed. |
-| Native workflow | Local fork `21c1436ca8` owns executable code mappings in both CLIs. Native run/serve/compile, direct loading, traps, TypeScript, p3, limits and memory64 growth passed the installed suite on both images at 224 and 256 MiB. |
+| Native workflow | v50 retains owned executable code mappings in both CLIs. Native run/serve/compile, direct loading, traps, TypeScript, p3, limits and memory64 growth pass on both images at 224 and 256 MiB. See the follow-up plan for v50 measurements and failure diagnosis. |
 
 The committed main tree remains pinned to Javy
 `12a6c52d7dbd62056ead74d8ddea3f8a235f278f` and Wasmtime
 `633e7de368b913a696e7e15d4f546c55fc2eadaf` in
-`src/build-scripts/external-sources.sh`. The prepared pin update and local Wasmtime branch select
-`3fb032396ea3898de562786e9a4060783e83e286` in `external-sources/wasmtime/`;
-it is not a published main-tree prerequisite yet. The owner publishes fork
+`src/build-scripts/external-sources.sh`. The prepared pins now select Wasmtime v50
+`b5581cade5626f050e6f9002f522b76187b6cf56` and Javy
+`e307323d448470f9925f5a05e8ae4e160074c059` under `external-sources/`.
+They are not published main-tree prerequisites yet. The owner publishes fork
 commits before the main-tree pin
 and dependent integration are committed.
 
@@ -195,13 +200,14 @@ the shared host, with Pulley available explicitly and no ELF packaging path.
 
 ### 4c — reproducible image integration
 
-Prepared and validated locally at `3fb032396ea3898de562786e9a4060783e83e286`.
+The v48 baseline was validated locally at `3fb032396ea3898de562786e9a4060783e83e286`.
 The normal `src/build-motor-os.sh --wasmtime-only` pipeline built both CLIs
 with a local revision override, and `test-wasm.sh --prepare` built both images.
-The pending main-tree patch pins that revision, requires and checksums both
+The main-tree integration requires and checksums both
 binaries, and uses the normal host CLI to compile native test artifacts. No
 manually installed binary or old prototype compiler is a build prerequisite.
-Only owner publication and the dependent main-tree commits remain.
+The approved v50 migration now replaces that revision; its matching Javy update,
+release qualification and publication status are tracked in the follow-up plan.
 
 After the fork changes are qualified and published, pin the exact revision in
 `src/build-scripts/external-sources.sh`. Build the Cranelift-capable CLI and
@@ -234,7 +240,7 @@ with documentation matching their actual native behavior.
 
 ### 4d — focused native validation and resource check
 
-Passed: `src/tests/test-wasm.sh --suite wasmtime --release`, 143 commands each
+Qualified v48 baseline: `src/tests/test-wasm.sh --suite wasmtime --release`, 143 commands each
 on `wasm:224`, `wasm:256`, `dev:224` and `dev:256`, with zero memory-admission
 refusals. The existing `--services --suite wasmtime --vm wasm:224 --vm dev:256`
 gate also passed for native p2/p3 services started by sys-init as role None
@@ -296,7 +302,7 @@ resource use and no mandatory packaging or expanded qualification backlog.
 Javy still uses Wasmi for plugins and Wizer, preserving upstream static/dynamic
 outputs, deterministic initialization, source embedding and optimization. Its
 Linux/Motor byte-identity contract and existing runner regressions remain.
-This execution redesign does not reopen completed Javy work.
+The v50 dependency update preserves those completed Javy contracts.
 
 Use the native filesystem/socket/clock/entropy adapters and the published
 Tokio/Mio/Ring dependency graph. Keep the system CA bundle, lazy memory backing,

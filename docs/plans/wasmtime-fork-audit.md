@@ -1,7 +1,7 @@
-# Wasmtime fork audit and proposed v50 port
+# Wasmtime fork audit and v50 port
 
-2026-10-27. Status: approved; implementation in progress, including Javy's v50
-dependency update as requested by the owner.
+2026-10-27. Status: implemented and qualified locally, including Javy's v50
+dependency update. Fork publication and dependent main-tree commits remain.
 This supplements [javy-wasmtime.md](javy-wasmtime.md), whose Linux-parity target
 and retained integration contracts still apply.
 
@@ -41,10 +41,11 @@ The v48 delta is 9,307 insertions and 154 deletions. Four lockfiles account for
 insertions and 138 deletions. The size is not evidence of thousands of lines
 of JIT workarounds.
 
-Existing native v48 qualification is recorded in the parent plan. This audit
-did not build or run v50. It inspected upstream source and compared the two
+Existing native v48 qualification is recorded in the parent plan. The initial
+audit did not build or run v50. It inspected upstream source and compared the two
 v48 runtime dependency graphs with offline, locked `cargo tree` commands.
-No implementation source was changed during the audit.
+No implementation source was changed during that audit. The approved port and
+its qualification are recorded at the end of this document.
 
 ## What executable mappings make obsolete
 
@@ -229,3 +230,107 @@ bring the concrete decision back for review.
 The owner approved this plan with Javy included in the v50 migration. The
 v48 branches remain available as fallbacks; no second planning approval is
 needed for this agreed dependency update.
+
+## Implementation and qualification
+
+The implementation is committed locally in both external forks:
+
+| Fork | Branch and revision |
+| --- | --- |
+| Wasmtime | `motor-50.0.0` at `b5581cade5626f050e6f9002f522b76187b6cf56` |
+| Javy | `motor-9.1.0` at `e307323d448470f9925f5a05e8ae4e160074c059` |
+
+Javy's two lockfiles select Wizer v50 at
+`0cf93defdabc57b860d57f6ec510d1fd38f0c6ad`, the first commit on the new Wasmtime
+branch. Its Wasmi backend needed no source changes. The Linux host-test
+Wasmtime/WASI dependencies also select v50.
+
+The v50 port uses the upstream CLI package for both binaries and its internal
+filesystem primitive boundary. It removes the old compatibility types, runtime
+wrapper, manual host/runtime test workspaces, unused compiler helper and
+Motor-only TCP write budget. The existing shutdown/backpressure test now fills
+the connection using actual socket capacities. Required native adapters and
+maintained regressions remain. The final upstream delta is 87 files, with
+2,806 insertions and 150 deletions outside lockfiles, compared with 3,413 and
+138 in the v48 audit. The larger filesystem patch keeps its 492-line adapter
+together; other handwritten patches remain small.
+
+One additional v50 integration change was required: the new HTTP
+address-family error helper used Rustix, which pulled Unix `errno` code into
+the Motor build. Rustix is now conditional on non-Motor targets; Motor retains
+its native error classification. Upstream's locked Rustls version is preserved.
+No kernel, runtime-library, stdlib or unrelated fork change was needed.
+
+Upstream also migrated fourteen installed filesystem programs from p1 to p2
+and moved other p1 coverage into its separate wasi-testsuite dependency. The
+producer and smoke runner now use the migrated programs. Six short programs
+without equivalent standalone replacements remain unchanged from v48:
+directory seeking, file allocation, overwriting a preopen, nonblocking open,
+file isatty and directory rename with trailing slashes. This preserves the
+existing installed gate without adding another test workspace or dropping its
+assertions. The existing version check accepts upstream's Git commit/date
+suffix while still requiring version 50.0.0.
+
+Motor Wizer, the full CLI and engine regressions pass compile checks. Javy/Wasmi
+and both Wasmtime CLIs build in release mode; Javy's Linux test targets also
+compile with v50. The existing compiler/initializer regressions pass on Linux.
+A Linux v50 CLI with matching features passes native run/compile/load, default
+store limits, memory64 growth, the updated TCP shutdown/backpressure program,
+p3 defaults/disablement and resource limits, and raw p3 HTTP serving/shutdown.
+For HTTP comparison, `-O pooling-allocator=n` explicitly selects the available
+allocator: upstream's Linux address-space probe otherwise selects pooling,
+which is excluded from these builds. The shutdown listener accepts a TCP
+connection; it does not return an HTTP response.
+The normal producer and final release image preparation pass. The installed
+Wasmtime suite passes all 143 commands on each of `wasm:224`, `wasm:256`,
+`dev:224` and `dev:256`, with zero memory-admission refusals. Evidence is in
+`build/wasm-v50/wasmtime-evidence/` and `wasmtime-matrix.log`. Javy passes
+74 commands on `wasm:224`, including all four Linux byte-identity cases, and
+70 commands on `dev:256`; the difference is the identity checks run once.
+Its explicit refused-fault test observes the expected refusal, with no
+unexpected admission refusals. The existing p2/p3 service-startup gate passes
+on `wasm:224` and `dev:256` as role None with capability mask 256. Evidence
+is in `installed-failure-1/` (the successful Javy run before the original TCP
+failure), `javy-dev-evidence/` and `service-evidence/`.
+
+Existing source-builder/fetch and test-selection checks, shell syntax and
+main-tree formatting checks pass. No new main-tree compiler warnings were
+introduced; the external Wasmtime fork retains five non-VM configuration
+warnings. Steps 1–5 are complete and the incremental fork patches are committed.
+Step 6 still needs owner publication and the dependent main-tree commits.
+
+Sampled whole-VM memory peaks (MiB; sampling can miss short peaks):
+
+| VM | Native lifecycle compilation | Raw TypeScript compile + run | Precompiled TypeScript runtime |
+| --- | ---: | ---: | ---: |
+| wasm:224 | 45.4 | 152.4 | 78.5 |
+| wasm:256 | 55.9 | 165.2 | 87.9 |
+| dev:224 | 45.7 | 152.4 | 78.4 |
+| dev:256 | 56.0 | 168.1 | 87.9 |
+
+The full CLI is 22,295,168 bytes and runtime-only is 11,905,344 bytes. The
+small wasm image occupies 83.4 MiB on the host and retains its 1 GiB data
+partition. Its installed inputs include both tools; regression fixtures stay
+outside the image and are uploaded by the existing gate. All build and
+qualification logs are in `build/wasm-v50/`.
+
+The first 224 MiB installed run passed Javy's 74 commands, including all four
+Linux byte-identity cases, then exposed a new upstream TCP-test assumption:
+300 one-byte writes were expected never to block. Motor exhausted shared IPC
+pages after 33 writes. Native `write_nonblocking` legitimately returns
+`E_NOT_READY` under that pressure. Temporary diagnostics demonstrated repeated
+readiness wakeups restoring the 64 KiB permit and all TCP assertions passing
+for IPv4 and IPv6. The test now waits on its pollable when Motor reports this
+backpressure; it still requires a positive permit after readiness and delivery
+of all 300 bytes. The separate 1,000-call idle-readiness check is unchanged.
+No production queue or OS code changed. The original failure is preserved in
+`installed-matrix.log` and `installed-failure-1/`; `tcp-diagnostic.log` records
+the diagnostic run, whose final deliberate panic exposed the captured trace
+after all assertions completed. All temporary diagnostics were removed before
+commit `b5581cade5` and final qualification.
+
+The normal producer first stopped because the new remote `motor-50.0.0` branch
+does not exist yet (`producer.log`). Qualification uses a per-command Git URL
+override to the committed local fork, without persistent configuration or path
+dependencies. The owner must publish both fork tips before the dependent
+main-tree integration is committed.
