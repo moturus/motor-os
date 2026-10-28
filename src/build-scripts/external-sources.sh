@@ -11,9 +11,9 @@
 # is pinned by the forks' lockfiles; external-sources/ keeps no checkout of
 # them.
 MOTOR_JAVY_BRANCH=motor-9.1.0
-MOTOR_JAVY_REV="${MOTOR_JAVY_REV:-12a6c52d7dbd62056ead74d8ddea3f8a235f278f}"
-MOTOR_WASMTIME_BRANCH=motor-48.0.1
-MOTOR_WASMTIME_REV="${MOTOR_WASMTIME_REV:-633e7de368b913a696e7e15d4f546c55fc2eadaf}"
+MOTOR_JAVY_REV="${MOTOR_JAVY_REV:-e307323d448470f9925f5a05e8ae4e160074c059}"
+MOTOR_WASMTIME_BRANCH=motor-50.0.0
+MOTOR_WASMTIME_REV="${MOTOR_WASMTIME_REV:-b5581cade5626f050e6f9002f522b76187b6cf56}"
 
 # "repo:branch" follows the branch head; "repo:branch:revision" builds that
 # revision of the branch.
@@ -37,8 +37,8 @@ select_external_sources() {
 	fi
 	if [ "$selection" != javy ]; then
 		EXTERNAL_REPOS+=("${WASMTIME_SOURCES[@]}")
-		EXTERNAL_WORKSPACES+=("$EXTERNAL_SOURCES/wasmtime" "$EXTERNAL_SOURCES/wasmtime/motor-runtime"
-			"$EXTERNAL_SOURCES/wasmtime/motor-tests" "$EXTERNAL_SOURCES/wasmtime/motor-host-tests"
+		EXTERNAL_WORKSPACES+=("$EXTERNAL_SOURCES/wasmtime"
+			"$EXTERNAL_SOURCES/wasmtime/motor-tests"
 			"$MOTOR/src/tests/wasmtime-smoke")
 	fi
 	local repos=("${EXTERNAL_REPOS[@]}")

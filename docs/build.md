@@ -136,8 +136,9 @@ src/build-motor-os.sh --javy-only --wasmtime-only
 make dev.img wasm.img BUILD=release -j"$(nproc)"
 ```
 
-Both images install `/devtools/bin/javy`, `/devtools/bin/wasmi` and the
-runtime-only `/devtools/bin/wasmtime-rt`, with Javy's default plugin at
+Both images install `/devtools/bin/javy`, `/devtools/bin/wasmi`, the full
+`/devtools/bin/wasmtime` and runtime-only `/devtools/bin/wasmtime-rt`, with Javy's
+default plugin at
 `/devtools/javy/plugins/default.wasm` and build provenance under
 `/devtools/javy` and `/devtools/wasmtime`. See
 [WebAssembly on Motor OS](wasm.md) for the installed files and the developer
@@ -192,14 +193,16 @@ By default these Rust checks run both release images at 256 and 224 MiB
 checks on the first VM only: Javy static and
 dynamic compilation, TypeScript, default and custom plugins, Wasmi execution,
 memory limits and a deliberately refused page fault, errors, fuel and
-permission refusals, and `wasmtime-rt` lifecycle, limits, artifact
+permission refusals, and Wasmtime native compilation, raw execution/serving,
+native loading in both CLIs, explicit Pulley, lifecycle, limits, artifact
 refusals, TypeScript, WASI p2 sockets/filesystem, and p2/p3 HTTP hello/echo.
-HTTP checks include fragmented headers, bounded concurrency, p3 opt-in and
+HTTP checks include fragmented headers, bounded concurrency, p3 defaults and
 instance turnover, foreground Ctrl-C and shutdown during an active response.
 `src/tests/full-test-dev.sh --release`
 runs them on the wasm image at 224 MiB and the developer image at 256 MiB, and
 the Linux identity checks once; debug suites skip them.
-Engine regressions remain in the owning forks. Upstream Brotli is used; the
+Engine regressions remain in the owning forks; Wasmtime's suite also runs its
+existing engine checks natively in the VM. Upstream Brotli is used; the
 Linux identity checks require equal output bytes, including compressed source,
 with the same inputs and plugin.
 

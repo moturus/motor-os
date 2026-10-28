@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The runtime-only Wasmtime external source and its precompiled test fixtures,
+# The full and runtime-only Wasmtime tools and their test inputs,
 # sourced by build-motor-os.sh after toolchain selection and after
 # build-javy.sh, whose helpers and inputs it shares.
 
@@ -11,16 +11,16 @@ WASMTIME_GUEST_PROGRAMS=(p2_tcp_bind p2_tcp_bind_listen_order p2_tcp_connect
 # Upstream filesystem and stdio programs within Motor's semantics: no symlinks,
 # hard links or settable times, no read-only preopens through the CLI, and no
 # EPIPE for a writer whose reader is gone.
-WASMTIME_FILESYSTEM_PROGRAMS=(p1_close_preopen p1_dangling_fd p1_dir_fd_op_failures
-	p1_directory_seek p1_fd_advise p1_fd_filestat_get p1_fd_flags_set p1_fd_readdir
+WASMTIME_FILESYSTEM_PROGRAMS=(p2_close_preopen p2_dangling_fd p2_dir_fd_op_failures
+	p1_directory_seek p2_fd_advise p1_fd_filestat_get p1_fd_flags_set p1_fd_readdir
 	p1_file_allocate p1_file_pread_pwrite p1_file_read_write p1_file_rename_across_perms
 	p1_file_seek_tell p1_file_truncation p1_file_truncation_readonly
-	p1_file_unbuffered_write p1_file_write p1_interesting_paths p1_overwrite_preopen
-	p1_path_open_create_existing p1_path_open_dirfd_not_dir p1_path_open_lots
-	p1_path_open_missing p1_path_open_nonblock p1_path_open_preopen p1_path_open_read_write
-	p1_path_rename p1_path_rename_dir_trailing_slashes p1_poll_oneoff_files
-	p1_regular_file_isatty p1_remove_directory p1_remove_nonempty_directory p1_renumber
-	p1_unlink_file_trailing_slashes p2_cli_file_read p2_cli_file_append p2_cli_file_dir_sync
+	p1_file_unbuffered_write p1_file_write p2_interesting_paths p1_overwrite_preopen
+	p2_path_open_create_existing p2_path_open_dirfd_not_dir p1_path_open_lots
+	p2_path_open_missing p1_path_open_nonblock p2_path_open_preopen p2_path_open_read_write
+	p2_path_rename p1_path_rename_dir_trailing_slashes p1_poll_oneoff_files
+	p1_regular_file_isatty p2_remove_directory p2_remove_nonempty_directory p1_renumber
+	p2_unlink_file_trailing_slashes p2_cli_file_read p2_cli_file_append p2_cli_file_dir_sync
 	p2_cli_directory_list p2_cli_multiple_preopens p2_cli_initial_cwd p2_cli_stdin
 	p2_cli_stdin_empty p2_cli_splice_stdin p2_cli_much_stdout p2_file_read_write
 	p2_file_truncation_readonly p2_file_rename_across_perms p2_adapter_badfd)
@@ -50,8 +50,11 @@ build_wasmtime_fixtures() {
 	(
 		cd "$root"
 		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$build/host" cargo build --locked --release \
-			--manifest-path motor-runtime/Cargo.toml --features compile --bin compile \
+			--bin wasmtime --no-default-features \
+			--features compile,cranelift,pulley,component-model-async,gc,gc-drc,disable-logging,clap/default,wat \
 			-j "$(wasm_build_jobs)"
+		CARGO_NET_OFFLINE=true MOTOR_BUILD_DIR="$build" MOTOR_SYSROOT="$SYSROOT" \
+			JOBS="$(wasm_build_jobs)" ./motor-build.sh tests
 		export RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN"
 		cargo fetch --locked
 		local bins=() program
@@ -62,28 +65,36 @@ build_wasmtime_fixtures() {
 		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$build/guests" cargo build --locked --release \
 			--target wasm32-wasip2 -p test-programs --features motor "${bins[@]}"
 	)
-	local compile="$build/host/release/compile" name
+	local compile="$build/host/release/wasmtime" name
 	rm -f "$out"/*.cwasm "$build/typescript.wasm"
 	for name in "${WASMTIME_CORE_FIXTURES[@]}"; do
-		"$compile" pulley64 core "$root/motor-runtime/fixtures/$name.wat" "$out/$name.cwasm"
+		"$compile" compile --target x86_64-unknown-motor \
+			"$root/motor-runtime/fixtures/$name.wat" -o "$out/$name.cwasm"
 	done
-	"$compile" pulley64 core "$root/motor-runtime/fixtures/lifecycle.wat" \
-		"$out/lifecycle-epoch.cwasm" --epoch
-	# Native code for a Pulley runtime: the runtime must refuse it.
-	"$compile" x86_64-unknown-motor core "$root/motor-runtime/fixtures/lifecycle.wat" \
-		"$out/lifecycle-native.cwasm"
+	"$compile" compile --target x86_64-unknown-motor -W epoch-interruption \
+		"$root/motor-runtime/fixtures/lifecycle.wat" -o "$out/lifecycle-epoch.cwasm"
+	# Explicit Pulley remains available with Motor's no-CoW memory configuration.
+	"$compile" compile --target pulley64 \
+		-O memory-init-cow=n,memory-reservation=0,memory-reservation-for-growth=0,memory-guard-size=0 \
+		"$root/motor-runtime/fixtures/lifecycle.wat" -o "$out/lifecycle-pulley.cwasm"
 	for name in "${WASMTIME_GUEST_PROGRAMS[@]}" "${WASMTIME_FILESYSTEM_PROGRAMS[@]}" \
 		"${WASMTIME_HTTP_PROGRAMS[@]}" "${WASMTIME_P3_PROGRAMS[@]}"; do
-		"$compile" pulley64 component "$build/guests/wasm32-wasip2/release/$name.wasm" \
-			"$out/$name.cwasm"
+		"$compile" compile --target x86_64-unknown-motor \
+			"$build/guests/wasm32-wasip2/release/$name.wasm" -o "$out/$name.cwasm"
 	done
 	for name in p2_cli_serve_sleep p3_cli_serve_sleep; do
-		"$compile" pulley64 component "$build/guests/wasm32-wasip2/release/$name.wasm" \
-			"$out/$name-epoch.cwasm" --epoch
+		"$compile" compile --target x86_64-unknown-motor -W epoch-interruption \
+			"$build/guests/wasm32-wasip2/release/$name.wasm" -o "$out/$name-epoch.cwasm"
 	done
 	"$javy_linux" build "$typescript" -C plugin="$plugin" -C deterministic \
 		-o "$build/typescript.wasm"
-	"$compile" pulley64 core "$build/typescript.wasm" "$out/typescript.cwasm"
+	"$compile" compile --target x86_64-unknown-motor "$build/typescript.wasm" -o "$out/typescript.cwasm"
+	cp "$root/motor-runtime/fixtures/lifecycle.wat" "$build/typescript.wasm" "$out/"
+	for name in p3_cli_hello_stdout p2_cli_serve_hello_world; do
+		cp "$build/guests/wasm32-wasip2/release/$name.wasm" "$out/"
+	done
+	install -m 755 "$build/full/x86_64-unknown-motor/release/motor-compiler-policy-tests" \
+		"$out/engine-tests"
 }
 
 wasmtime_source_manifest() {
@@ -97,24 +108,25 @@ build_wasmtime() {
 	local manifest
 	manifest="$(wasmtime_source_manifest)"
 	(
-		cd "$EXTERNAL_SOURCES/wasmtime/motor-runtime"
+		cd "$EXTERNAL_SOURCES/wasmtime"
 		# Separate target-filtered fetches miss host dependencies below a
 		# Motor-only edge; Cargo's offline build still needs those packages.
 		cargo fetch --locked
-		cd ..
 		CARGO_NET_OFFLINE=true MOTOR_BUILD_DIR="$ASSEMBLY_BUILD_ROOT/wasmtime" \
-			MOTOR_SYSROOT="$SYSROOT" JOBS="$(wasm_build_jobs)" ./motor-build.sh runtime
+			MOTOR_SYSROOT="$SYSROOT" JOBS="$(wasm_build_jobs)" ./motor-build.sh all
 	)
 	local data="$WASMTIME_IMG/devtools/wasmtime"
 	mkdir -p "$WASMTIME_IMG/devtools/bin" "$data"
+	install -m 755 "$ASSEMBLY_BUILD_ROOT/wasmtime/full/x86_64-unknown-motor/release/wasmtime" \
+		"$WASMTIME_IMG/devtools/bin/wasmtime"
 	install -m 755 "$ASSEMBLY_BUILD_ROOT/wasmtime/runtime/x86_64-unknown-motor/release/wasmtime-rt" \
 		"$WASMTIME_IMG/devtools/bin/wasmtime-rt"
 	printf '%s\n' "$manifest" > "$data/sources.txt"
-	(cd "$WASMTIME_IMG" && sha256sum devtools/bin/wasmtime-rt devtools/wasmtime/sources.txt \
+	(cd "$WASMTIME_IMG" && sha256sum devtools/bin/wasmtime devtools/bin/wasmtime-rt devtools/wasmtime/sources.txt \
 		> "$data/SHA256SUMS")
 	# Test fixtures stay out of the images; test-wasm.sh uploads them.
 	rm -rf "$WASMTIME_TESTS"
 	mkdir -p "$WASMTIME_TESTS"
 	build_wasmtime_fixtures
-	(cd "$WASMTIME_TESTS" && sha256sum *.cwasm > SHA256SUMS)
+	(cd "$WASMTIME_TESTS" && sha256sum *.cwasm *.wasm *.wat engine-tests > SHA256SUMS)
 }

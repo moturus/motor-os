@@ -41,14 +41,15 @@ native archive must be $MOTORH/motor-toolchain-<version>.tar.zst:
   - uutils sed as /devtools/bin/sed in the development image;
   - Lua as /devtools/bin/lua in the development image;
   - Javy and Wasmi in the development and small wasm images;
-  - runtime-only Wasmtime as /devtools/bin/wasmtime-rt in both of those images;
+  - full and runtime-only Wasmtime as /devtools/bin/wasmtime and wasmtime-rt
+    in both of those images;
   - the crates.io dependencies of the Motor OS library sources the development
     image stages for native tests, as Lorry repository objects;
   - all standard and dev-image Motor OS binaries;
   - base, standard, dev, and wasm images under vm_images/release.
 
---javy-only and --wasmtime-only build only Javy/Wasmi and the runtime-only
-Wasmtime; they skip host provisioning and image construction.
+--javy-only and --wasmtime-only build only Javy/Wasmi and both Wasmtime CLIs;
+they skip host provisioning and image construction.
 --sys-lib-deps-only likewise fetches only the dependencies of the development
 image's library sources.
 
@@ -523,6 +524,7 @@ main() {
 		"$MOTOR/vm_images/release/motor-os-wasm.qcow2"
 		"$JAVY_IMG/devtools/bin/javy"
 		"$JAVY_IMG/devtools/bin/wasmi"
+		"$WASMTIME_IMG/devtools/bin/wasmtime"
 		"$WASMTIME_IMG/devtools/bin/wasmtime-rt"
 	)
 	local output

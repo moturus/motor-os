@@ -17,7 +17,7 @@ WASMTIME_IMG="$temporary/image"
 WASMTIME_TESTS="$temporary/tests"
 wasmtime_source_manifest() { echo fixture; }
 registry="$temporary/registry"
-runtime="$EXTERNAL_SOURCES/wasmtime/motor-runtime"
+runtime="$EXTERNAL_SOURCES/wasmtime"
 mkdir -p "$registry/fe/tc" "$temporary/downloads" "$CARGO_HOME" \
 	"$runtime/src" "$EXTERNAL_SOURCES/bridge/src" "$temporary/fetch-leaf-1.0.0/src"
 cat > "$temporary/fetch-leaf-1.0.0/Cargo.toml" <<'EOF'
@@ -48,7 +48,7 @@ version = "1.0.0"
 edition = "2024"
 [workspace]
 [target.'cfg(target_os = "motor")'.dependencies]
-fetch-bridge = { path = "../../bridge" }
+fetch-bridge = { path = "../bridge" }
 EOF
 cat > "$EXTERNAL_SOURCES/bridge/Cargo.toml" <<'EOF'
 [package]
@@ -65,7 +65,7 @@ cat > "$EXTERNAL_SOURCES/wasmtime/motor-build.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 [ "$CARGO_NET_OFFLINE" = true ]
-cargo build --locked --manifest-path motor-runtime/Cargo.toml --target x86_64-unknown-motor --lib
+cargo build --locked --manifest-path Cargo.toml --target x86_64-unknown-motor --lib
 EOF
 chmod +x "$EXTERNAL_SOURCES/wasmtime/motor-build.sh"
 (

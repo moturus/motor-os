@@ -49,6 +49,7 @@ assembly_required_executables:
   - "rg/system/bin/rg"
   - "javy/devtools/bin/javy"
   - "javy/devtools/bin/wasmi"
+  - "wasmtime/devtools/bin/wasmtime"
   - "wasmtime/devtools/bin/wasmtime-rt"
 ca_bundle: "/etc/ssl/certs/ca-certificates.crt"
 filesystem: "motor-fs"
