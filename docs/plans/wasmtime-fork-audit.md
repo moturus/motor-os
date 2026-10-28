@@ -1,14 +1,18 @@
 # Wasmtime fork audit and proposed v50 port
 
-2026-10-27. Status: audit complete; implementation proposal awaiting review.
+2026-10-27. Status: approved; implementation in progress, including Javy's v50
+dependency update as requested by the owner.
 This supplements [javy-wasmtime.md](javy-wasmtime.md), whose Linux-parity target
 and retained integration contracts still apply.
 
 ## Recommendation
 
 Start a `motor-50.0.0` branch from upstream v50.0.0 and port the necessary
-adapters as small patches. Preserve `motor-48.0.1` as the qualified fallback
-and Javy's dependency. Do not replay the whole Motor commit series: it contains
+adapters as small patches. Preserve `motor-48.0.1` as the qualified fallback.
+Move Javy's Wasmtime/WASI/Wizer dependencies to v50 as well, retaining its Wasmi
+backend and checking the existing Linux/Motor byte-identity contract. Keeping
+Javy on v48 was a scope choice, not a platform requirement. Do not replay the
+whole Motor commit series: it contains
 superseded ELF packaging, resource limits, dependency paths and test utilities.
 
 Executable mappings remove the reason for the old native ELF template and
@@ -96,7 +100,7 @@ entire final delta; some files participate in more than one behavior.
 | `crates/wasi-http/src/default_send_request.rs` | **Keep as an explicit retained policy.** The Motor system CA bundle differs from upstream's compiled-in webpki roots, but the approved plan specifically retains it. This is neither necessary for executable mappings nor an obsolete workaround. |
 | Root `Cargo.toml`, `Cargo.lock` | **Keep required dependency patches; regenerate the lock against v50.** Tokio, Mio, target-lexicon and Ring supply Motor support. Scope release profile overrides to Motor build invocations while retaining delivered binary settings. Do not port v48 lockfile edits mechanically. |
 | `motor-build.sh`, `motor-runtime/Cargo.toml`, `motor-runtime/Cargo.lock` | **Replace the runtime wrapper with upstream CLI feature selection.** It compiles the very same `src/bin/wasmtime.rs`. Offline graph comparison proves the root package can supply identical runtime dependency features without Cranelift. Keep separate output directories and install the second binary as `wasmtime-rt`. |
-| `crates/wizer/{Cargo.toml,src/lib.rs,src/parse.rs}` | **Retain for Javy on v48; omit from the new CLI-only v50 branch.** Javy still consumes runtime-independent Wizer using Wasmi. Its Cargo.lock pins `fda311d08cf93052a1af34f50f96271d1ad1b556` on `motor-48.0.1`. A CLI upgrade need not update that dependency or reopen Javy's byte-identity contract. |
+| `crates/wizer/{Cargo.toml,src/lib.rs,src/parse.rs}` | **Port to v50 for Javy.** Javy consumes runtime-independent Wizer using Wasmi. Its starting Cargo.lock pins `fda311d08cf93052a1af34f50f96271d1ad1b556` on `motor-48.0.1`; update the dependency to the new branch and preserve the existing byte-identity checks. The core instrumentation/snapshot interface is unchanged between upstream v48 and v50. |
 | `motor-tests/src/bin/compile.rs` | **Remove.** This second custom compiler helper survived removal of the packaging workspace's compiler. The prepared main builder uses the normal host CLI; there is no maintained caller. |
 | `motor-tests/{Cargo.toml,Cargo.lock,src/main.rs,fixtures/*}`, `motor-test.sh` | **Keep maintained engine regressions.** The main builder installs this binary as `engine-tests`; it checks initializer semantics, bounds traps, target defaults, cache separation and direct native loading. The seven fixtures still have callers. |
 | `motor-runtime/fixtures/{lifecycle,limits-elements,limits-memories,limits-tables,memory-grow,memory-too-large,memory64-grow}.wat` | **Keep.** The installed suite uses these through normal CLI compilation. They do not require the runtime wrapper workspace. Old names referring to limits do not mean old default limits remain. |
@@ -176,8 +180,10 @@ This is a source port, not a Cargo version substitution:
 - Existing Tokio 1.51.1 and target-lexicon 0.13.5 fork versions match v50's
   declared requirements. Re-resolve the graph and verify it; this audit does
   not establish that every transitive dependency builds on Motor unchanged.
-- Wizer is still coupled to Wasmtime in upstream v50. Leaving Javy's existing
-  v48 dependency untouched avoids making this CLI migration a Javy port.
+- Wizer is still coupled to Wasmtime in upstream v50. Port the small optional
+  runtime patch, update Javy's Wasmtime/WASI/Wizer dependencies together and
+  regenerate its lockfiles. Verify its existing Wasmi backend and output
+  identity; there is no structural reason to retain v48.
 
 ## Proposed implementation sequence
 
@@ -192,7 +198,10 @@ This is a source port, not a Cargo version substitution:
    output directories. Remove obsolete helpers/manual workspaces, retain
    fixtures used by installed tests, restore the upstream TCP write budget,
    and rewrite `MOTOR.md`. Keep meaningful existing engine regressions.
-4. Update the main-tree Wasmtime source revision, producer, artifact staging
+4. Update Javy under `external-sources/javy/` to use v50 Wizer and its v50 host
+   test dependencies. Build Javy/Wasmi and run the existing plugin, deterministic
+   output and Linux/Motor identity checks. Update the main-tree source revisions,
+   producer, artifact staging
    and existing tests/docs. The current uncommitted v48 integration is useful
    input but is not a completed v50 integration. In particular,
    `test-external-sources.sh` still asserts the former runtime-only build and
@@ -209,16 +218,14 @@ This is a source port, not a Cargo version substitution:
    remain release-only.
 6. Commit incremental fork patches with one-line messages. The owner publishes
    the fork before the dependent main-tree pin/integration is committed. Do
-   not rewrite Javy's pinned v48 history or publish anything upstream.
+   not rewrite the old v48 history or publish anything upstream.
 
-Implementation changes would be in the external Wasmtime fork and the
+Implementation changes are in the external Wasmtime and Javy forks and the
 wasm-related main-tree build/test/docs files. No changes to moto-sys, moto-rt,
 stdlib, kernel, unrelated external forks or boot-time work are proposed.
 If the port reveals a requirement outside that boundary, diagnose it and
 bring the concrete decision back for review.
 
-Approval requested: use this reduced patch set for v50.0.0, retaining v48 for
-Javy and as the fallback. The planning review is required by
-[AGENTS.md](../../AGENTS.md): “On larger tasks, first create a plan in an *.md
-file in docs/plans/, ask for review, then proceed in incremental steps. Do not
-change any code during the planning step.”
+The owner approved this plan with Javy included in the v50 migration. The
+v48 branches remain available as fallbacks; no second planning approval is
+needed for this agreed dependency update.
