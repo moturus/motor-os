@@ -112,6 +112,9 @@ build_wasmtime() {
 		# Separate target-filtered fetches miss host dependencies below a
 		# Motor-only edge; Cargo's offline build still needs those packages.
 		cargo fetch --locked
+		# The compiler policy tests have their own workspace and lockfile;
+		# fetching the root does not cache the versions they select.
+		cargo fetch --locked --manifest-path motor-tests/Cargo.toml
 		CARGO_NET_OFFLINE=true MOTOR_BUILD_DIR="$ASSEMBLY_BUILD_ROOT/wasmtime" \
 			MOTOR_SYSROOT="$SYSROOT" JOBS="$(wasm_build_jobs)" ./motor-build.sh all
 	)

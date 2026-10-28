@@ -97,6 +97,8 @@ dependency graphs. Target-filtered fetches can miss host dependencies reached
 through Motor OS-only dependency edges, even when Motor OS and Linux are fetched
 separately. Fetching without a target filter also makes cold-cache builds
 independent of packages left over from earlier builds.
+Wasmtime's independent `motor-tests` workspace is fetched separately using
+its own lockfile before offline compilation.
 
 To validate an existing set of checkouts without fetching or compiling:
 

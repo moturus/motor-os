@@ -278,6 +278,7 @@ expected=""
 for selection in first-probe second-probe; do
 	expected+="cargo $selection javy fetch --locked"$'\n'"build $selection "$'\n'
 	expected+="cargo $selection wasmtime fetch --locked"$'\n'
+	expected+="cargo $selection wasmtime fetch --locked --manifest-path motor-tests/Cargo.toml"$'\n'
 	expected+="build $selection all"$'\n'"fixtures $selection"$'\n'
 done
 [ "$(cat "$javy_log")"$'\n' = "$expected" ] ||
