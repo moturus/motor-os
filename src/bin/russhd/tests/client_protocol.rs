@@ -223,7 +223,11 @@ fn start_output_only_server() -> (std::thread::JoinHandle<()>, u16) {
 }
 
 fn run_full_duplex(args: &[String], input: Vec<u8>) -> Output {
-    let mut child = Command::new(SSH)
+    run_full_duplex_with(SSH, args, input)
+}
+
+fn run_full_duplex_with(program: &str, args: &[String], input: Vec<u8>) -> Output {
+    let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -591,4 +595,207 @@ fn pty_output_survives_client_eof_before_terminal_controls() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(output.stdout, b"visible\n\r");
+}
+
+#[test]
+fn pty_input_keeps_flowing_while_the_child_queries_its_terminal() {
+    // rush asks for the text area with every prompt, and russhd answers through
+    // the task that writes the child's stdin. A paste larger than the stdin pipe
+    // must not hold those questions up: the output behind them stops, and then
+    // the child that would have read the rest of the paste stops too.
+    let fixture = Fixture::start();
+    let mut ssh = fixture.ssh_args();
+    ssh.extend([
+        "-tt".to_owned(),
+        "motor@127.0.0.1".to_owned(),
+        r#"while IFS= read -r line && [ "$line" != end ]; do printf '\033[18t\033[18t\033[18t\033[18t%s\n' "$line"; done"#
+            .to_owned(),
+    ]);
+    let lines = (0..20_000)
+        .map(|i| format!("line {i}\n"))
+        .collect::<String>();
+    let output = run_full_duplex_with("ssh", &ssh, format!("{lines}end\n").into_bytes());
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        lines.replace('\n', "\n\r")
+    );
+}
+
+/// Accepts the host key of the russhd that the test itself started.
+struct TestClient;
+
+impl russh::client::Handler for TestClient {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        _key: &russh::keys::PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
+}
+
+type PtySession = (
+    russh::client::Handle<TestClient>,
+    russh::ChannelReadHalf,
+    russh::ChannelWriteHalf<russh::client::Msg>,
+);
+
+impl Fixture {
+    /// A pty session of `cols` x `rows` running `command`. OpenSSH with a piped
+    /// stdin sends a zero size, which leaves russhd nothing to answer with.
+    async fn pty_session(&self, cols: u32, rows: u32, command: &str) -> PtySession {
+        let mut session = russh::client::connect(
+            std::sync::Arc::new(russh::client::Config::default()),
+            ("127.0.0.1", self.port),
+            TestClient,
+        )
+        .await
+        .unwrap();
+        let key = russh::keys::load_secret_key(&self.identity, None).unwrap();
+        let auth = session
+            .authenticate_publickey(
+                "motor",
+                russh::keys::PrivateKeyWithHashAlg::new(std::sync::Arc::new(key), None),
+            )
+            .await
+            .unwrap();
+        assert!(auth.success());
+        let channel = session.channel_open_session().await.unwrap();
+        channel
+            .request_pty(true, "xterm", cols, rows, 0, 0, &[])
+            .await
+            .unwrap();
+        channel.exec(true, command).await.unwrap();
+        let (reader, writer) = channel.split();
+        (session, reader, writer)
+    }
+}
+
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), future)
+                .await
+                .expect("the pty session did not finish")
+        })
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+/// Appends the session's output to `out` until `done(out)`, or until the
+/// channel closes, which returns false.
+async fn read_until(
+    reader: &mut russh::ChannelReadHalf,
+    out: &mut Vec<u8>,
+    done: impl Fn(&[u8]) -> bool,
+) -> bool {
+    while !done(out) {
+        match reader.wait().await {
+            Some(russh::ChannelMsg::Data { data }) => out.extend_from_slice(&data),
+            Some(russh::ChannelMsg::Close) | None => return false,
+            Some(_) => {}
+        }
+    }
+    true
+}
+
+#[test]
+fn pty_answers_reach_the_child_whole_and_behind_client_input() {
+    // The child echoes what it reads, so the answers russhd queued behind each
+    // chunk of the paste come back inside the lines.
+    let fixture = Fixture::start();
+    let lines = (0..20_000)
+        .map(|i| format!("line {i}\n"))
+        .collect::<String>();
+    let input = format!("{lines}end\n");
+    let output = block_on(async {
+        let (_session, mut reader, writer) = fixture
+            .pty_session(
+                100,
+                30,
+                r#"while IFS= read -r line; do printf '\033[18t\033[18t%s\n' "$line"; case $line in *end) break ;; esac; done"#,
+            )
+            .await;
+        let bytes = input.clone().into_bytes();
+        tokio::spawn(async move { writer.data_bytes(bytes).await });
+        let mut out = Vec::new();
+        read_until(&mut reader, &mut out, |_| false).await;
+        out
+    });
+
+    let output = String::from_utf8(output).unwrap().replace("\n\r", "\n");
+    let answer = "\x1b[8;30;100t";
+    assert!(output.contains(answer), "the child got no answers");
+    assert_eq!(output.replace(answer, ""), input);
+}
+
+#[test]
+fn pty_size_reports_survive_a_child_that_floods_questions() {
+    // The child subscribes to size reports, asks for its text area far more
+    // often than russhd keeps answers for, and reads nothing until the client
+    // has resized it. Answers past the limit are dropped; the new size is not.
+    let fixture = Fixture::start();
+    let questions = 60_000;
+    let old_report = b"\x1b[48;30;100;0;0t";
+    let new_report = b"\x1b[48;40;120;0;0t";
+    let answer = b"\x1b[8;30;100t";
+    let resized = fixture.root.join("resized");
+    let read = fixture.root.join("read");
+    // The child waits for a file before each step. After `resized`, its extra
+    // questions outnumber russhd's control channel, so `synced` is output only
+    // once the resize queued before them has been handled.
+    let command = format!(
+        r#"printf '\033[?2048h'; printf '\033[18t%.0s' $(seq {questions}); printf 'flooded\n'
+        while [ ! -e '{resized}' ]; do sleep 0.01; done
+        printf '\033[18t%.0s' $(seq 32); printf 'synced\n'
+        while [ ! -e '{read}' ]; do sleep 0.01; done
+        cat"#,
+        resized = resized.display(),
+        read = read.display(),
+    );
+    let echoed = block_on(async {
+        let (session, mut reader, writer) = fixture.pty_session(100, 30, &command).await;
+        let mut out = Vec::new();
+        let flooded = b"flooded\n\r";
+        assert!(read_until(&mut reader, &mut out, |out| find(out, flooded).is_some()).await);
+        writer.window_change(120, 40, 0, 0).await.unwrap();
+        // russhd answers the ping after it has queued the window change.
+        session.send_ping().await.unwrap();
+        std::fs::write(&resized, b"").unwrap();
+        let synced = b"synced\n\r";
+        assert!(read_until(&mut reader, &mut out, |out| find(out, synced).is_some()).await);
+        std::fs::write(&read, b"").unwrap();
+        let start = find(&out, synced).unwrap() + synced.len();
+        assert!(
+            read_until(&mut reader, &mut out, |out| out.ends_with(new_report)).await,
+            "the new size never reached the child"
+        );
+        writer.eof().await.unwrap();
+        out.split_off(start)
+    });
+
+    let answers = echoed
+        .strip_prefix(old_report)
+        .and_then(|rest| rest.strip_suffix(new_report))
+        .expect("the child read something other than its size reports and answers");
+    assert!(answers.chunks(answer.len()).all(|chunk| chunk == answer));
+    let count = answers.len() / answer.len();
+    assert!(
+        count > 0 && count < questions,
+        "{count} of {questions} questions were answered"
+    );
 }
