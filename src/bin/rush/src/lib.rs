@@ -314,7 +314,8 @@ fn source_startup_files(sh: &mut Shell) {
 }
 
 fn source_if_present(raw: &str, sh: &mut Shell) {
-    let path = expand::expand_prompt(raw, sh); // parameter expansion, per POSIX
+    // Parameter expansion, per POSIX.
+    let path = expand::expand_prompt(raw, sh, &exec::IoEnv::inherit());
     if path.is_empty() || !std::path::Path::new(&path).is_file() {
         return;
     }
@@ -483,5 +484,5 @@ fn prompt_string(name: &str, sh: &mut Shell) -> String {
     let raw = sh
         .get(name)
         .unwrap_or_else(|| shell::default_prompt(name).to_string());
-    expand::expand_prompt(&raw, sh)
+    expand::expand_prompt(&raw, sh, &exec::IoEnv::inherit())
 }

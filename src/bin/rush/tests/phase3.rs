@@ -449,6 +449,59 @@ fn stderr_redirection_and_dup() {
     let _ = std::fs::remove_file(&both);
 }
 
+#[test]
+fn command_substitution_runs_in_the_enclosing_io() {
+    // A substitution's stdin and stderr are the enclosing command's, as in
+    // dash; only its stdout is captured.
+    let err = tmp("cmdsub_err");
+    let _ = std::fs::remove_file(&err);
+    let script = format!(
+        "{{ x=$(ls /no_such_rush_dir); }} 2>{p}; printf '[%s]' \"$x\"",
+        p = err.display()
+    );
+    let out = Command::new(RUSH).args(["-c", &script]).output().unwrap();
+    assert_eq!(out.stdout, b"[]");
+    assert_eq!(out.stderr, b"");
+    assert!(
+        std::fs::read_to_string(&err)
+            .unwrap()
+            .contains("no_such_rush_dir")
+    );
+    let _ = std::fs::remove_file(&err);
+
+    for (script, stdout) in [
+        // A group's here-document feeds a substitution inside it.
+        (
+            "{ x=$(cat); } <<EOF\nbody\nEOF\nprintf '[%s]' \"$x\"",
+            "[body]",
+        ),
+        // `for` and `case` words expand under the compound command's redirects.
+        (
+            "for f in $(ls /no_such_rush_dir); do :; done 2>/dev/null; printf ok",
+            "ok",
+        ),
+        (
+            "case $(ls /no_such_rush_dir) in x) ;; esac 2>/dev/null; printf ok",
+            "ok",
+        ),
+    ] {
+        let out = Command::new(RUSH).args(["-c", script]).output().unwrap();
+        assert_eq!(out.stdout, stdout.as_bytes(), "{script}");
+        assert_eq!(out.stderr, b"", "{script}");
+    }
+
+    // A redirection inside the substitution still takes precedence.
+    let out = Command::new(RUSH)
+        .args([
+            "-c",
+            "{ x=$(ls /no_such_rush_dir 2>&1); } 2>/dev/null; printf '%s' \"$x\"",
+        ])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("no_such_rush_dir"));
+    assert_eq!(out.stderr, b"");
+}
+
 // ---- here-documents --------------------------------------------------------
 
 #[test]

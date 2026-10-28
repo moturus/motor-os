@@ -151,12 +151,12 @@ impl FdSource {
     }
 }
 
-struct IoEnv {
+pub struct IoEnv {
     fds: [FdSource; 3],
 }
 
 impl IoEnv {
-    fn inherit() -> Self {
+    pub fn inherit() -> Self {
         Self {
             fds: [
                 FdSource::Inherit(0),
@@ -462,12 +462,12 @@ fn exec_simple(
     let assigns: Vec<(String, String)> = simple
         .assigns
         .iter()
-        .map(|a| (a.name.clone(), expand::to_string(&a.value, shell)))
+        .map(|a| (a.name.clone(), expand::to_string(&a.value, shell, io)))
         .collect();
 
     let mut argv = Vec::new();
     for word in &simple.words {
-        argv.extend(expand::to_fields(word, shell));
+        argv.extend(expand::to_fields(word, shell, io));
     }
 
     // An expansion error (`set -u`, `${x?}`) aborts the command before it runs.
@@ -481,7 +481,7 @@ fn exec_simple(
             return 126;
         }
         let mut status = shell.cmdsub_status().unwrap_or(0);
-        trace(shell, &assigns, &[]);
+        trace(shell, io, &assigns, &[]);
         // Assignment-only command: assignments persist in the shell.
         for (k, v) in &assigns {
             if let Err(e) = shell.set(k, v.clone()) {
@@ -501,7 +501,7 @@ fn exec_simple(
         return status;
     }
 
-    trace(shell, &assigns, &argv);
+    trace(shell, io, &assigns, &argv);
 
     // Alias expansion in command position (a documented-limits approximation:
     // the value is whitespace-split into words, without re-quoting or `$`
@@ -625,12 +625,12 @@ fn spawn_background(
 /// `PS4` (default `+ `). Like dash, the words are printed unquoted and only
 /// *simple* commands are traced — which covers loop and `if` bodies, since those
 /// are made of simple commands.
-fn trace(shell: &mut Shell, assigns: &[(String, String)], argv: &[String]) {
+fn trace(shell: &mut Shell, io: &IoEnv, assigns: &[(String, String)], argv: &[String]) {
     if !shell.opts.get(Opt::XTrace) {
         return;
     }
     let ps4 = match shell.get("PS4") {
-        Some(raw) => expand::expand_prompt(&raw, shell),
+        Some(raw) => expand::expand_prompt(&raw, shell, io),
         None => "+ ".to_string(),
     };
     let words: Vec<String> = assigns
@@ -1420,7 +1420,7 @@ fn build_fds_for_simple(
                 }
                 match op {
                     RedirOp::DupRead | RedirOp::DupWrite => {
-                        let t = expand::to_string(target, shell);
+                        let t = expand::to_string(target, shell, io);
                         if t == "-" {
                             // Close: approximated by /dev/null. `Stdio::null` is
                             // the closest portable stand-in for closing an fd.
@@ -1441,7 +1441,7 @@ fn build_fds_for_simple(
                         }
                     }
                     _ => {
-                        let path = expand::to_string(target, shell);
+                        let path = expand::to_string(target, shell, io);
                         let file = open_for(*op, &path, shell)?;
                         sole_use[fd_num] = file.metadata().is_ok_and(|metadata| metadata.is_file());
                         fds[fd_num] = FdSource::File(Arc::new(file));
@@ -1457,7 +1457,7 @@ fn build_fds_for_simple(
                 let body = if doc.quoted {
                     doc.body.clone()
                 } else {
-                    expand::expand_heredoc_body(&doc.body, shell)
+                    expand::expand_heredoc_body(&doc.body, shell, io)
                 };
                 fds[fd_num] = FdSource::Heredoc(Arc::new(body));
                 sole_use[fd_num] = false;
@@ -1549,14 +1549,14 @@ fn run_pipeline(cmds: &[AstCommand], shell: &mut Shell, io: &IoEnv) -> i32 {
                 let assigns: Vec<(String, String)> = simple
                     .assigns
                     .iter()
-                    .map(|a| (a.name.clone(), expand::to_string(&a.value, shell)))
+                    .map(|a| (a.name.clone(), expand::to_string(&a.value, shell, io)))
                     .collect();
                 let mut argv = Vec::new();
                 for word in &simple.words {
-                    argv.extend(expand::to_fields(word, shell));
+                    argv.extend(expand::to_fields(word, shell, io));
                 }
                 expand_aliases(&mut argv, shell);
-                trace(shell, &assigns, &argv);
+                trace(shell, io, &assigns, &argv);
 
                 let external = !argv.is_empty()
                     && builtins::lookup(&argv[0]).is_none()
@@ -1862,7 +1862,7 @@ fn exec_for(clause: &ForClause, shell: &mut Shell, io: &IoEnv) -> i32 {
         Some(words) => {
             let mut v = Vec::new();
             for w in words {
-                v.extend(expand::to_fields(w, shell));
+                v.extend(expand::to_fields(w, shell, io));
             }
             v
         }
@@ -1917,10 +1917,10 @@ fn exec_condition(list: &List, shell: &mut Shell, io: &IoEnv) -> i32 {
 }
 
 fn exec_case(clause: &CaseClause, shell: &mut Shell, io: &IoEnv) -> i32 {
-    let subject = expand::to_string(&clause.word, shell);
+    let subject = expand::to_string(&clause.word, shell, io);
     for item in &clause.items {
         for pat in &item.patterns {
-            let pattern = expand::to_pattern(pat, shell);
+            let pattern = expand::to_pattern(pat, shell, io);
             if crate::glob::fnmatch(&pattern, &subject) {
                 return exec_list(&item.body, shell, io);
             }
@@ -1964,11 +1964,13 @@ fn loop_should_break(shell: &mut Shell) -> bool {
 /// Run `src` as a subshell and capture its standard output, with trailing
 /// newlines stripped (POSIX §2.6.3). Variable and working-directory mutations
 /// are rolled back so the substitution does not affect the parent.
-pub fn command_substitution(src: &str, shell: &mut Shell) -> String {
+/// The substitution shares stdin and stderr with the enclosing command (`io`);
+/// only its stdout is captured, so `{ x=$(cmd); } 2>/dev/null` silences `cmd`.
+pub fn command_substitution(src: &str, shell: &mut Shell, io: &IoEnv) -> String {
     let snapshot = shell.snapshot();
     let saved_flow = shell.flow();
     shell.enter_subshell();
-    let output = capture(src, shell);
+    let output = capture(src, shell, io);
     let interrupted = shell.flow() == Flow::Interrupt;
     if let Flow::Exit(code) = shell.flow() {
         // `x=$(exit 7)`: the substitution's shell exited, and its status is what
@@ -1976,7 +1978,7 @@ pub fn command_substitution(src: &str, shell: &mut Shell) -> String {
         shell.set_status(code);
     }
     let output = output.unwrap_or_else(|err| {
-        eprintln!("rush: command substitution: {err}");
+        let _ = writeln!(io.fds[2].err_writer(), "rush: command substitution: {err}");
         shell.set_status(2);
         String::new()
     });
@@ -1995,7 +1997,8 @@ pub fn command_substitution(src: &str, shell: &mut Shell) -> String {
     trimmed.to_string()
 }
 
-fn capture(src: &str, shell: &mut Shell) -> std::io::Result<String> {
+/// Run `src` with its stdout captured in a temp file and its stdin and stderr from `io`.
+fn capture(src: &str, shell: &mut Shell, io: &IoEnv) -> std::io::Result<String> {
     let list = match parser::parse_source(src) {
         Parsed::Complete(list) => list,
         Parsed::Empty => {
@@ -2003,23 +2006,26 @@ fn capture(src: &str, shell: &mut Shell) -> std::io::Result<String> {
             return Ok(String::new());
         }
         Parsed::Incomplete => {
-            eprintln!("rush: command substitution: unexpected end of input");
+            let _ = writeln!(
+                io.fds[2].err_writer(),
+                "rush: command substitution: unexpected end of input"
+            );
             shell.set_status(2);
             return Ok(String::new());
         }
         Parsed::Error(msg) => {
-            eprintln!("rush: {msg}");
+            let _ = writeln!(io.fds[2].err_writer(), "rush: {msg}");
             shell.set_status(2);
             return Ok(String::new());
         }
     };
 
     let file = TempFile::new("cmdsub")?;
-    let io = IoEnv {
-        fds: [FdSource::Inherit(0), file.fd(), FdSource::Inherit(2)],
+    let sub = IoEnv {
+        fds: [io.fds[0].clone(), file.fd(), io.fds[2].clone()],
     };
-    exec_list(&list, shell, &io);
-    fire_subshell_exit_trap(shell, &io);
+    exec_list(&list, shell, &sub);
+    fire_subshell_exit_trap(shell, &sub);
     // All stages have exited; re-read the captured output from the start.
     std::fs::read_to_string(&file.path)
 }

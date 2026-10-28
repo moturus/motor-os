@@ -17,6 +17,7 @@
 //! patterns — steps 1–4 and quote removal, no splitting or globbing).
 
 use crate::arith;
+use crate::exec::IoEnv;
 use crate::glob;
 use crate::lexer;
 use crate::options::Opt;
@@ -46,8 +47,8 @@ enum Elem {
 
 /// Expand a command word/argument through all seven steps into zero or more
 /// fields.
-pub fn to_fields(word: &Word, shell: &mut Shell) -> Vec<String> {
-    let elems = build(word, shell, true);
+pub fn to_fields(word: &Word, shell: &mut Shell, io: &IoEnv) -> Vec<String> {
+    let elems = build(word, shell, io, true);
     let ifs = shell.ifs();
     let fields = split_fields(&elems, &ifs);
     let noglob = shell.opts.get(Opt::NoGlob);
@@ -72,8 +73,8 @@ pub fn to_fields(word: &Word, shell: &mut Shell) -> Vec<String> {
 /// Expand a word to a single string (assignment RHS, redirection target, `case`
 /// subject word): steps 1–4 and quote removal, without field splitting or
 /// globbing.
-pub fn to_string(word: &Word, shell: &mut Shell) -> String {
-    let elems = build(word, shell, false);
+pub fn to_string(word: &Word, shell: &mut Shell, io: &IoEnv) -> String {
+    let elems = build(word, shell, io, false);
     let mut s = String::new();
     for e in elems {
         if let Elem::Ch(c, _) = e {
@@ -86,8 +87,8 @@ pub fn to_string(word: &Word, shell: &mut Shell) -> String {
 /// Expand a word into an [`crate::glob::fnmatch`] pattern (a `case` pattern):
 /// steps 1–4 with no field splitting or pathname expansion, but with quoting
 /// preserved as `\`-escapes so only *unquoted* `*?[` stay pattern-magic.
-pub fn to_pattern(word: &Word, shell: &mut Shell) -> String {
-    let elems = build(word, shell, false);
+pub fn to_pattern(word: &Word, shell: &mut Shell, io: &IoEnv) -> String {
+    let elems = build(word, shell, io, false);
     let mut p = String::new();
     for e in elems {
         if let Elem::Ch(c, tag) = e {
@@ -102,7 +103,7 @@ pub fn to_pattern(word: &Word, shell: &mut Shell) -> String {
 
 // ---- prefield construction (steps 1–4) -------------------------------------
 
-fn build(word: &Word, shell: &mut Shell, splitting: bool) -> Vec<Elem> {
+fn build(word: &Word, shell: &mut Shell, io: &IoEnv, splitting: bool) -> Vec<Elem> {
     // Every level of nested expansion comes back through here — a `${x:-…}`
     // default, a `$(…)`, the words inside them — so this is where the recursion
     // is bounded. Past the limit the word expands to nothing and the shell is
@@ -110,12 +111,12 @@ fn build(word: &Word, shell: &mut Shell, splitting: bool) -> Vec<Elem> {
     if !shell.enter_expansion() {
         return Vec::new();
     }
-    let out = build_inner(word, shell, splitting);
+    let out = build_inner(word, shell, io, splitting);
     shell.exit_expansion();
     out
 }
 
-fn build_inner(word: &Word, shell: &mut Shell, splitting: bool) -> Vec<Elem> {
+fn build_inner(word: &Word, shell: &mut Shell, io: &IoEnv, splitting: bool) -> Vec<Elem> {
     let mut out = Vec::new();
     for (i, part) in word.0.iter().enumerate() {
         match part {
@@ -135,16 +136,16 @@ fn build_inner(word: &Word, shell: &mut Shell, splitting: bool) -> Vec<Elem> {
                 }
             }
             WordPart::Expansion { kind, raw, quoted } => match kind {
-                crate::token::ExpansionKind::Parameter => match param_eval(raw, shell) {
+                crate::token::ExpansionKind::Parameter => match param_eval(raw, shell, io) {
                     PVal::Scalar(s) => push_scalar(&mut out, &s, *quoted, splitting),
                     PVal::Fields(list) => push_fields(&mut out, &list, *quoted, splitting),
                 },
                 crate::token::ExpansionKind::Command => {
-                    let s = crate::exec::command_substitution(raw, shell);
+                    let s = crate::exec::command_substitution(raw, shell, io);
                     push_scalar(&mut out, &s, *quoted, splitting);
                 }
                 crate::token::ExpansionKind::Arithmetic => {
-                    let s = eval_arith(raw, shell);
+                    let s = eval_arith(raw, shell, io);
                     push_scalar(&mut out, &s, *quoted, splitting);
                 }
             },
@@ -306,7 +307,7 @@ enum PVal {
 
 /// Evaluate a parameter expansion body (the text between `${` and `}`, or the
 /// name after `$`) to a scalar or, for `$@`, a list of fields.
-fn param_eval(raw: &str, shell: &mut Shell) -> PVal {
+fn param_eval(raw: &str, shell: &mut Shell, io: &IoEnv) -> PVal {
     // ${#…} length / $# count.
     if raw == "#" {
         return PVal::Scalar(shell.param_count().to_string());
@@ -351,7 +352,7 @@ fn param_eval(raw: &str, shell: &mut Shell) -> PVal {
     ) {
         check_nounset(head, &value, shell);
     }
-    PVal::Scalar(apply_modifier(head, value, modifier, shell))
+    PVal::Scalar(apply_modifier(head, value, modifier, shell, io))
 }
 
 /// Under `set -u`, expanding an unset parameter is an error that terminates a
@@ -468,6 +469,7 @@ fn apply_modifier(
     value: Option<String>,
     modifier: Option<(ModKind, bool, String)>,
     shell: &mut Shell,
+    io: &IoEnv,
 ) -> String {
     let Some((kind, colon, word)) = modifier else {
         return value.unwrap_or_default();
@@ -480,7 +482,7 @@ fn apply_modifier(
     match kind {
         ModKind::UseDefault => {
             if trigger {
-                expand_raw_to_string(&word, shell)
+                expand_raw_to_string(&word, shell, io)
             } else {
                 value.unwrap_or_default()
             }
@@ -489,12 +491,12 @@ fn apply_modifier(
             if trigger {
                 String::new()
             } else {
-                expand_raw_to_string(&word, shell)
+                expand_raw_to_string(&word, shell, io)
             }
         }
         ModKind::AssignDefault => {
             if trigger {
-                let v = expand_raw_to_string(&word, shell);
+                let v = expand_raw_to_string(&word, shell, io);
                 if is_assignable_name(head) {
                     let _ = shell.set(head, v.clone());
                 } else {
@@ -515,7 +517,7 @@ fn apply_modifier(
                         "parameter not set".to_string()
                     }
                 } else {
-                    expand_raw_to_string(&word, shell)
+                    expand_raw_to_string(&word, shell, io)
                 };
                 eprintln!("rush: {head}: {msg}");
                 // POSIX: a non-interactive shell exits here. Phase 6 wires this
@@ -531,7 +533,7 @@ fn apply_modifier(
         | ModKind::RemoveSmallestSuffix
         | ModKind::RemoveLargestSuffix => {
             let subject = value.unwrap_or_default();
-            let pattern = expand_raw_to_string(&word, shell);
+            let pattern = expand_raw_to_string(&word, shell, io);
             trim(&subject, &pattern, kind)
         }
     }
@@ -579,13 +581,13 @@ fn trim(subject: &str, pattern: &str, kind: ModKind) -> String {
 
 /// Expand a raw substring (a modifier word or pattern) to a string: lex it and
 /// concatenate the expansion of each resulting word with single spaces.
-fn expand_raw_to_string(raw: &str, shell: &mut Shell) -> String {
+fn expand_raw_to_string(raw: &str, shell: &mut Shell, io: &IoEnv) -> String {
     match lexer::tokenize(raw, lexer::AtEof::Yes) {
         Ok(tokens) => {
             let mut parts = Vec::new();
             for t in tokens {
                 if let Token::Word(w) = t {
-                    parts.push(to_string(&w, shell));
+                    parts.push(to_string(&w, shell, io));
                 }
             }
             parts.join(" ")
@@ -598,8 +600,8 @@ fn expand_raw_to_string(raw: &str, shell: &mut Shell) -> String {
 /// expression is first expanded as if double-quoted (parameter expansion,
 /// command substitution, nested arithmetic) — so `$1`, `$x`, `$(cmd)` work
 /// inside it — then evaluated by [`crate::arith`].
-pub fn eval_arith(raw: &str, shell: &mut Shell) -> String {
-    let expr = expand_double_quoted(raw, shell);
+pub fn eval_arith(raw: &str, shell: &mut Shell, io: &IoEnv) -> String {
+    let expr = expand_double_quoted(raw, shell, io);
     match arith::eval(&expr, shell) {
         Ok(n) => n.to_string(),
         Err(e) => {
@@ -618,21 +620,21 @@ pub fn eval_arith(raw: &str, shell: &mut Shell) -> String {
 /// Expand a here-document body: double-quote rules (parameter/command/
 /// arithmetic expansion, backslash special only before `$` `` ` `` `\`), no
 /// field splitting or globbing.
-pub fn expand_heredoc_body(body: &str, shell: &mut Shell) -> String {
-    expand_double_quoted(body, shell)
+pub fn expand_heredoc_body(body: &str, shell: &mut Shell, io: &IoEnv) -> String {
+    expand_double_quoted(body, shell, io)
 }
 
 /// Expand a prompt string (`PS1`, `PS2`, `PS4`). POSIX §2.5.3 says these undergo
 /// parameter expansion, which is what the double-quote rules give — so a `PS1`
 /// of `$PWD$ ` tracks the working directory. bash's `\w`/`\h` backslash escapes
 /// are not POSIX and are not interpreted (dash does not either).
-pub fn expand_prompt(raw: &str, shell: &mut Shell) -> String {
-    expand_double_quoted(raw, shell)
+pub fn expand_prompt(raw: &str, shell: &mut Shell, io: &IoEnv) -> String {
+    expand_double_quoted(raw, shell, io)
 }
 
 /// The shared double-quote-context expander used by here-documents and by
 /// arithmetic-expression pre-expansion.
-fn expand_double_quoted(body: &str, shell: &mut Shell) -> String {
+fn expand_double_quoted(body: &str, shell: &mut Shell, io: &IoEnv) -> String {
     let chars: Vec<char> = body.chars().collect();
     let mut i = 0;
     let mut out = String::new();
@@ -643,13 +645,13 @@ fn expand_double_quoted(body: &str, shell: &mut Shell) -> String {
                 i += 2;
             }
             '$' => {
-                let (val, next) = scan_dollar(&chars, i, shell);
+                let (val, next) = scan_dollar(&chars, i, shell, io);
                 out.push_str(&val);
                 i = next;
             }
             '`' => {
                 let (inner, next) = scan_backtick(&chars, i);
-                out.push_str(&crate::exec::command_substitution(&inner, shell));
+                out.push_str(&crate::exec::command_substitution(&inner, shell, io));
                 i = next;
             }
             c => {
@@ -663,7 +665,7 @@ fn expand_double_quoted(body: &str, shell: &mut Shell) -> String {
 
 /// Scan a `$…` at `chars[i]` (`chars[i] == '$'`) and return its expanded value
 /// and the index past it.
-fn scan_dollar(chars: &[char], i: usize, shell: &mut Shell) -> (String, usize) {
+fn scan_dollar(chars: &[char], i: usize, shell: &mut Shell, io: &IoEnv) -> (String, usize) {
     let mut j = i + 1;
     if j >= chars.len() {
         return ("$".to_string(), j);
@@ -671,15 +673,15 @@ fn scan_dollar(chars: &[char], i: usize, shell: &mut Shell) -> (String, usize) {
     match chars[j] {
         '{' => {
             let (inner, next) = scan_balanced(chars, j + 1, '{', '}');
-            (param_to_string(&inner, shell), next)
+            (param_to_string(&inner, shell, io), next)
         }
         '(' if chars.get(j + 1) == Some(&'(') => {
             let (inner, next) = scan_balanced_arith(chars, j + 2);
-            (eval_arith(&inner, shell), next)
+            (eval_arith(&inner, shell, io), next)
         }
         '(' => {
             let (inner, next) = scan_balanced(chars, j + 1, '(', ')');
-            (crate::exec::command_substitution(&inner, shell), next)
+            (crate::exec::command_substitution(&inner, shell, io), next)
         }
         c if c.is_ascii_alphabetic() || c == '_' => {
             let start = j;
@@ -687,19 +689,19 @@ fn scan_dollar(chars: &[char], i: usize, shell: &mut Shell) -> (String, usize) {
                 j += 1;
             }
             let name: String = chars[start..j].iter().collect();
-            (param_to_string(&name, shell), j)
+            (param_to_string(&name, shell, io), j)
         }
         c if c.is_ascii_digit() || matches!(c, '@' | '*' | '#' | '?' | '$' | '!' | '-') => {
             let name = c.to_string();
-            (param_to_string(&name, shell), j + 1)
+            (param_to_string(&name, shell, io), j + 1)
         }
         _ => ("$".to_string(), j),
     }
 }
 
 /// Evaluate a parameter body to a plain string (`$@`/`$*` join with a space).
-fn param_to_string(raw: &str, shell: &mut Shell) -> String {
-    match param_eval(raw, shell) {
+fn param_to_string(raw: &str, shell: &mut Shell, io: &IoEnv) -> String {
+    match param_eval(raw, shell, io) {
         PVal::Scalar(s) => s,
         PVal::Fields(list) => list.join(" "),
     }
@@ -762,7 +764,7 @@ fn scan_balanced_arith(chars: &[char], start: usize) -> (String, usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{to_fields, to_string};
+    use super::{IoEnv, to_fields, to_string};
     use crate::lexer;
     use crate::shell::Shell;
     use crate::token::{Token, Word};
@@ -779,7 +781,7 @@ mod tests {
     }
 
     fn fields(src: &str, shell: &mut Shell) -> Vec<String> {
-        to_fields(&word(src), shell)
+        to_fields(&word(src), shell, &IoEnv::inherit())
     }
 
     #[test]
@@ -863,7 +865,10 @@ mod tests {
         let mut sh = Shell::new();
         sh.set("n", "6".into()).unwrap();
         assert_eq!(fields("$((n * 7))", &mut sh), vec!["42"]);
-        assert_eq!(to_string(&word("$((1 + 2 * 3))"), &mut sh), "7");
+        assert_eq!(
+            to_string(&word("$((1 + 2 * 3))"), &mut sh, &IoEnv::inherit()),
+            "7"
+        );
     }
 
     #[test]
