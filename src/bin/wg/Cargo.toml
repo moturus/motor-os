@@ -9,6 +9,10 @@ edition = "2024"
 native-tests = ["moto-sdk/test-support"]
 
 [[bin]]
+name = "wg-tool"
+path = "src/tool_main.rs"
+
+[[bin]]
 name = "wg-self-test"
 path = "src/native_main.rs"
 required-features = ["native-tests"]

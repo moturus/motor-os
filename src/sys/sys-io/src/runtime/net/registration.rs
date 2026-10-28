@@ -8,6 +8,7 @@ use moto_sdk::{
 };
 
 const MAX_DEVICES: usize = 4;
+const _: () = assert!(MAX_DEVICES <= moto_sdk::sys_io::stats::MAX_EXTERNAL_NET_DEVICE_PIDS);
 
 impl NetRuntime {
     pub(super) async fn serve_packet_provider(
@@ -19,9 +20,8 @@ impl NetRuntime {
         let role = moto_sys::caps::ProcessRole::from_caps(
             self.inner.borrow().clients[&sender.remote_handle()].capabilities,
         );
-        if role == moto_sys::caps::ProcessRole::None
-            || self.connection_pid(sender.remote_handle()) == 0
-        {
+        let pid = self.connection_pid(sender.remote_handle());
+        if role == moto_sys::caps::ProcessRole::None || pid == 0 {
             let _ = sender.send(reply(&first, moto_rt::E_NOT_ALLOWED)).await;
             return;
         }
@@ -62,6 +62,7 @@ impl NetRuntime {
                 return;
             }
         };
+        self.inner.borrow_mut().devices[index].provider_pid = Some(pid);
         let terminal = if sender.send(reply(&first, moto_rt::E_OK)).await.is_ok() {
             // Both directions keep progressing when the other's ring or page
             // pool fills. Leaving this scope drops in-flight page guards first.

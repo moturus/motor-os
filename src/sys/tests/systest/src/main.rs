@@ -17,6 +17,7 @@ mod ctrl_c;
 mod descriptor_attr;
 mod diagnostics;
 mod environment;
+mod executable_memory;
 mod execute_permissions;
 mod file_append;
 mod file_locking;
@@ -809,18 +810,6 @@ fn test_invalid_memory_map_options() {
         );
     }
 
-    assert_eq!(
-        SysMem::map2(
-            SysHandle::SELF,
-            SysMem::F_SHARE_SELF | SysMem::F_READABLE | SysMem::F_EXECUTABLE,
-            u64::MAX,
-            u64::MAX,
-            sys_mem::PAGE_SIZE_SMALL,
-            1,
-        ),
-        Err(moto_rt::E_NOT_ALLOWED)
-    );
-
     // Zero pages are refused at the entry, before any path can build an
     // empty segment, which was a kernel panic. The wrapper asserts a
     // non-zero count, so these go through the raw syscall.
@@ -1414,6 +1403,10 @@ fn main() {
         process_permissions::run_child(&args);
         return;
     }
+    if args.len() == 3 && args[1] == "executable-memory-child" {
+        executable_memory::run_child(&args[2]);
+        return;
+    }
     if args.len() == 2 && args[1] == "pid-kill-permissions" {
         process_permissions::test_pid_kill_permissions();
         return;
@@ -1615,7 +1608,7 @@ fn main() {
         wireguard::exchange(&args[2], &args[3]);
         return;
     }
-    if args.len() == 4 && args[1] == "wireguard-permissions" {
+    if args.len() == 3 && args[1] == "wireguard-permissions" {
         wireguard::permissions(&args[2..]);
         return;
     }
@@ -1623,7 +1616,7 @@ fn main() {
         wireguard::cleanup();
         return;
     }
-    if args.len() == 4 && args[1] == "wireguard-readable-secrets" {
+    if args.len() == 3 && args[1] == "wireguard-readable-secrets" {
         wireguard::reject_readable_secrets(&args[2..]);
         return;
     }
@@ -1965,6 +1958,7 @@ fn main() {
     mem_blocks::run_all_tests();
     pressure::run_all_tests();
     test_invalid_memory_map_options();
+    executable_memory::run_all_tests();
     test_fixed_memory_map_overlap();
     test_pager_ops_need_sys_io();
     checked_copy_in::run_all_tests();

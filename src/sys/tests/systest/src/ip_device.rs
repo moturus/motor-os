@@ -2,6 +2,8 @@ use moto_sdk::sys_io::api_ip_device::{Cidr, MAX_ADDRESSES, MAX_ROUTES, Registrat
 
 pub fn run_all_tests() {
     test_registration_codec();
+    test_discovery();
+    test_discovery_protocol();
     crate::ip_device_admission::test_admission_and_terminal_channel();
     crate::ip_device_live::test_reflected_transport_and_removal();
     crate::ip_device_live::test_provider_death_wakes_pending_ops();
@@ -9,6 +11,85 @@ pub fn run_all_tests() {
     crate::ip_device_live::test_removal_wakes_stream_and_datagram_writers();
     crate::ip_device_queues::test_full_queues_recover();
     crate::ip_device_udp::test_physical_bindings_and_ports();
+}
+
+pub(super) fn provider_pids() -> Vec<u64> {
+    moto_sdk::sys_io::stats::IoStatsService::connect()
+        .unwrap()
+        .list_external_net_device_pids(Some(
+            moto_rt::time::Instant::now() + std::time::Duration::from_secs(2),
+        ))
+        .unwrap()
+}
+
+fn test_discovery() {
+    use moto_sdk::io::ip_device::IpDevice;
+    // The VM has physical/loopback devices, but no external providers yet.
+    assert!(provider_pids().is_empty());
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+        let config = crate::ip_device_live::config(12);
+        let first = IpDevice::register(&config).await.unwrap();
+        assert_eq!(provider_pids(), vec![moto_sys::current_pid()]);
+        assert!(IpDevice::register(&config).await.is_err());
+        let second = IpDevice::register(&crate::ip_device_live::config(13))
+            .await
+            .unwrap();
+        assert_eq!(provider_pids(), vec![moto_sys::current_pid()]);
+        first.unregister().await.unwrap();
+        assert_eq!(provider_pids(), vec![moto_sys::current_pid()]);
+        second.unregister().await.unwrap();
+        assert!(provider_pids().is_empty());
+    });
+    println!("ip_device::test_discovery PASS");
+}
+
+fn test_discovery_protocol() {
+    use moto_sdk::ipc::sync::{ChannelSize, ClientConnection, RequestHeader};
+    use moto_sdk::sys_io::stats::{
+        CMD_LIST_EXTERNAL_NET_DEVICE_PIDS, ListExternalNetDevicePidsResponse,
+        MAX_EXTERNAL_NET_DEVICE_PIDS, URL_IO_STATS,
+    };
+    let mut conn = ClientConnection::new(ChannelSize::Small).unwrap();
+    conn.connect(URL_IO_STATS).unwrap();
+    for (version, flags, expected) in [
+        (1, 0, moto_rt::E_INVALID_ARGUMENT),
+        (0, 1, moto_rt::E_INVALID_ARGUMENT),
+        (0, 0, moto_rt::E_OK),
+    ] {
+        conn.req::<ListExternalNetDevicePidsResponse>()
+            .pids
+            .fill(u64::MAX);
+        let req = conn.req::<RequestHeader>();
+        req.cmd = CMD_LIST_EXTERNAL_NET_DEVICE_PIDS;
+        req.ver = version;
+        req.flags = flags;
+        conn.do_rpc(Some(
+            moto_rt::time::Instant::now() + std::time::Duration::from_secs(2),
+        ))
+        .unwrap();
+        let response = conn.resp::<ListExternalNetDevicePidsResponse>();
+        assert_eq!(response.header.result, expected);
+        assert_eq!(response.header.ver, 0);
+        assert_eq!(response.num_results, 0);
+        assert!(response.pids.iter().all(|pid| *pid == 0));
+        assert_eq!(conn.resp::<RequestHeader>().flags, 0);
+    }
+    // All fields, including the atomic sequence word, permit zero initialization.
+    let mut response: ListExternalNetDevicePidsResponse = unsafe { std::mem::zeroed() };
+    response.num_results = MAX_EXTERNAL_NET_DEVICE_PIDS as u64;
+    assert_eq!(response.pids().unwrap().len(), MAX_EXTERNAL_NET_DEVICE_PIDS);
+    for count in [MAX_EXTERNAL_NET_DEVICE_PIDS as u64 + 1, u64::MAX] {
+        response.num_results = count;
+        assert_eq!(response.pids(), Err(moto_rt::E_INVALID_ARGUMENT));
+    }
+    response.num_results = 0;
+    response.header.ver = 1;
+    assert_eq!(response.pids(), Err(moto_rt::E_INVALID_ARGUMENT));
+    response.header.ver = 0;
+    assert!(response.pids().unwrap().is_empty());
+    response.header.result = moto_rt::E_NOT_READY;
+    assert_eq!(response.pids(), Err(moto_rt::E_NOT_READY));
+    println!("ip_device::test_discovery_protocol PASS");
 }
 
 pub fn test_registration_codec() {

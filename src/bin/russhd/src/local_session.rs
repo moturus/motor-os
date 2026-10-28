@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -144,6 +145,95 @@ impl SessionState {
     }
 }
 
+/// The bytes waiting for a session's child stdin, in the order they arrived:
+/// what is left of one client chunk, then answers to terminal controls.
+///
+/// Client input is taken only when nothing waits, so the client is held back by
+/// its SSH window rather than here. Answers queue behind it, as a terminal's
+/// answers queue behind keys that were already typed.
+#[derive(Debug, Default)]
+struct StdinQueue {
+    bytes: VecDeque<u8>,
+    /// How many of the first `bytes` are client input.
+    input: usize,
+    /// The latest size report that did not fit, for when there is room.
+    report: Option<Vec<u8>>,
+}
+
+impl StdinQueue {
+    /// A child that asks this much without reading its stdin gets no more
+    /// answers until it reads, and only its latest size report is kept.
+    const MAX_ANSWERS: usize = 256 * 1024;
+
+    fn wants_input(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    fn push_input(&mut self, input: &[u8]) {
+        debug_assert!(self.wants_input());
+        self.bytes.extend(input);
+        self.input = input.len();
+    }
+
+    /// Queues the answer to a question, or returns false if the queue is full.
+    fn push_answer(&mut self, answer: &[u8]) -> bool {
+        if self.bytes.len() - self.input + answer.len() > Self::MAX_ANSWERS {
+            return false;
+        }
+        self.bytes.extend(answer);
+        true
+    }
+
+    /// Queues what the child is owed for `message`, or returns false if an
+    /// answer had to be dropped.
+    fn push_message(&mut self, state: &mut SessionState, message: SessionMessage) -> bool {
+        let report = match &message {
+            SessionMessage::Resized(_) | SessionMessage::Control(mode2048::Command::Enable) => true,
+            SessionMessage::Control(mode2048::Command::Disable) => {
+                // Nothing replaces a waiting report once the child stops
+                // listening, so a newer answer could overtake it.
+                self.report = None;
+                false
+            }
+            SessionMessage::Control(_) => false,
+        };
+        match state.handle(message) {
+            Some(bytes) if report => {
+                self.push_report(&bytes);
+                true
+            }
+            Some(bytes) => self.push_answer(&bytes),
+            None => true,
+        }
+    }
+
+    /// Queues a size report. It cannot be dropped like an answer, because it
+    /// is the only news of the size; one that waits for room is replaced by
+    /// the next, so a stale size never follows a newer one.
+    fn push_report(&mut self, report: &[u8]) {
+        if self.report.is_some() || !self.push_answer(report) {
+            self.report = Some(report.to_vec());
+        }
+    }
+
+    fn pending(&self) -> &[u8] {
+        let (front, back) = self.bytes.as_slices();
+        if front.is_empty() { back } else { front }
+    }
+
+    /// Takes `written` bytes off `pending()`, and returns the SSH window credit
+    /// for the client input among them.
+    fn consume(&mut self, written: usize) -> u32 {
+        self.bytes.drain(..written);
+        let credit = written.min(self.input);
+        self.input -= credit;
+        if let Some(report) = self.report.take() {
+            self.push_report(&report);
+        }
+        u32::try_from(credit).unwrap()
+    }
+}
+
 /// What to run for a client, and how to wire up its output.
 pub struct Command {
     /// The program and its arguments; `argv[0]` is the program to run.
@@ -251,7 +341,10 @@ pub async fn spawn(
     // The one owner of the child's stdin serializes client input, answers to
     // terminal controls, and resize reports. Keep client input in russh's
     // bounded channel: its connection task can still send child output while
-    // this task is blocked on a child that does not read stdin.
+    // this task is blocked on a child that does not read stdin. Keep taking
+    // controls while a write is blocked, too: the output pump waits for this
+    // task to take them, and the child waits for its output to be taken before
+    // it reads more of a large paste.
     let mut stdin = child.stdin.take().unwrap();
     let (coordinator_tx, mut coordinator_rx) = tokio::sync::mpsc::channel::<SessionMessage>(8);
 
@@ -262,34 +355,42 @@ pub async fn spawn(
     tokio::spawn(async move {
         let mut input_rx = channel.make_reader();
         let mut input = [0_u8; 32 * 1024];
+        let mut queue = StdinQueue::default();
         let mut coordinator_open = true;
         loop {
-            let (bytes, window_credit) = tokio::select! {
-                result = tokio::io::AsyncReadExt::read(&mut input_rx, &mut input) => {
-                    let read = match result {
+            tokio::select! {
+                result = tokio::io::AsyncReadExt::read(&mut input_rx, &mut input), if queue.wants_input() => {
+                    match result {
                         Ok(0) => break,
-                        Ok(read) => read,
+                        Ok(read) => queue.push_input(&input[..read]),
                         Err(err) => {
                             log::debug!("input.read() failed with error '{err:?}'");
                             break;
                         }
-                    };
-                    (input[..read].to_vec(), u32::try_from(read).unwrap())
+                    }
                 }
                 message = coordinator_rx.recv(), if coordinator_open => {
                     let Some(message) = message else {
                         coordinator_open = false;
                         continue;
                     };
-                    let Some(bytes) = state.handle(message) else { continue };
-                    (bytes, 0)
+                    if !queue.push_message(&mut state, message) {
+                        log::debug!("dropped a terminal answer: the child is not reading stdin.");
+                    }
                 }
-            };
-            if let Err(err) = stdin.write_all(&bytes).await {
-                log::debug!("stdin.write_all() failed with error '{err:?}'");
-                break;
+                // `write` is cancel-safe: a write that loses the race wrote nothing.
+                result = stdin.write(queue.pending()), if !queue.pending().is_empty() => {
+                    match result {
+                        Ok(written) if written > 0 => {
+                            receive_credit.consumed(queue.consume(written));
+                        }
+                        result => {
+                            log::debug!("stdin.write() failed: {result:?}");
+                            break;
+                        }
+                    }
+                }
             }
-            receive_credit.consumed(window_credit);
         }
     });
 
@@ -665,6 +766,98 @@ mod tests {
         );
         assert_eq!(to_client, head);
         assert_eq!(from_stderr, tail);
+    }
+
+    #[test]
+    fn answers_wait_behind_client_input_and_input_waits_behind_answers() {
+        let mut queue = StdinQueue::default();
+        queue.push_input(b"paste");
+        assert!(queue.push_answer(b"!?"));
+        assert!(!queue.wants_input());
+        assert_eq!(queue.pending(), b"paste!?");
+
+        // Window credit is for the client's bytes the child was given.
+        assert_eq!(queue.consume(3), 3);
+        assert_eq!(queue.consume(3), 2);
+        assert_eq!(queue.pending(), b"?");
+        assert!(!queue.wants_input());
+        assert_eq!(queue.consume(1), 0);
+        assert!(queue.wants_input());
+    }
+
+    #[test]
+    fn a_child_that_never_reads_gets_bounded_answers() {
+        let mut queue = StdinQueue::default();
+        queue.push_input(&[b'i'; 100]);
+        let answer = [b'x'; 1024];
+        for _ in 0..StdinQueue::MAX_ANSWERS / answer.len() {
+            assert!(queue.push_answer(&answer));
+        }
+        assert!(!queue.push_answer(b"x"));
+        assert_eq!(queue.bytes.len(), 100 + StdinQueue::MAX_ANSWERS);
+    }
+
+    #[test]
+    fn the_latest_size_report_waits_for_room() {
+        let old = b"\x1b[48;30;100;0;0t";
+        let new = b"\x1b[48;40;120;0;0t";
+        let mut queue = StdinQueue::default();
+        assert!(queue.push_answer(&[b'x'; StdinQueue::MAX_ANSWERS - 10]));
+
+        queue.push_report(old);
+        queue.push_report(new);
+        assert_eq!(queue.bytes.len(), StdinQueue::MAX_ANSWERS - 10);
+        assert!(!queue.push_answer(b"\x1b[8;40;120t"));
+
+        queue.consume(100);
+        let rest = queue.bytes.iter().copied().collect::<Vec<_>>();
+        assert!(rest.ends_with(new));
+        assert_eq!(rest.len(), StdinQueue::MAX_ANSWERS - 110 + new.len());
+        assert!(queue.report.is_none());
+    }
+
+    /// Everything the child would read from `queue`, in order.
+    fn drain(queue: &mut StdinQueue) -> Vec<u8> {
+        let mut out = Vec::new();
+        while !queue.pending().is_empty() {
+            let pending = queue.pending().to_vec();
+            queue.consume(pending.len());
+            out.extend(pending);
+        }
+        out
+    }
+
+    #[test]
+    fn a_child_that_unsubscribes_is_not_sent_a_waiting_size() {
+        let mut state = session(pty(80, 24, 0, 0));
+        let mut queue = StdinQueue::default();
+        assert!(queue.push_message(
+            &mut state,
+            SessionMessage::Control(mode2048::Command::Enable)
+        ));
+        // Room for an answer, not for a report.
+        let filler = StdinQueue::MAX_ANSWERS - queue.bytes.len() - 12;
+        assert!(queue.push_answer(&vec![b'x'; filler]));
+
+        // The 100x30 report does not fit, and waits. Then the child stops
+        // listening, the size changes again, and the child asks for it.
+        let resized = |cols, rows| SessionMessage::Resized(pty(cols, rows, 0, 0));
+        assert!(queue.push_message(&mut state, resized(100, 30)));
+        assert!(queue.push_message(
+            &mut state,
+            SessionMessage::Control(mode2048::Command::Disable)
+        ));
+        assert!(queue.push_message(&mut state, resized(120, 40)));
+        assert!(queue.push_message(
+            &mut state,
+            SessionMessage::Control(mode2048::Command::TextArea)
+        ));
+
+        let out = drain(&mut queue);
+        let (head, tail) = out.split_at(out.len() - b"\x1b[8;40;120t".len());
+        assert_eq!(tail, b"\x1b[8;40;120t", "the last word is the latest size");
+        assert!(head.starts_with(b"\x1b[48;24;80;0;0t"));
+        assert_eq!(head.len(), b"\x1b[48;24;80;0;0t".len() + filler);
     }
 
     #[test]

@@ -242,7 +242,7 @@ case "$(declare -f build_external_sources)" in
 esac
 javy_root="$temporary/javy"
 javy_log="$javy_root/toolchains.log"
-mkdir -p "$javy_root/external-sources/javy" "$javy_root/external-sources/wasmtime/motor-runtime"
+mkdir -p "$javy_root/external-sources/javy" "$javy_root/external-sources/wasmtime"
 for tool in javy wasmtime; do
 	cat > "$javy_root/external-sources/$tool/motor-build.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -277,15 +277,16 @@ done
 expected=""
 for selection in first-probe second-probe; do
 	expected+="cargo $selection javy fetch --locked"$'\n'"build $selection "$'\n'
-	expected+="cargo $selection motor-runtime fetch --locked"$'\n'
-	expected+="build $selection runtime"$'\n'"fixtures $selection"$'\n'
+	expected+="cargo $selection wasmtime fetch --locked"$'\n'
+	expected+="cargo $selection wasmtime fetch --locked --manifest-path motor-tests/Cargo.toml"$'\n'
+	expected+="build $selection all"$'\n'"fixtures $selection"$'\n'
 done
 [ "$(cat "$javy_log")"$'\n' = "$expected" ] ||
 	fail "Javy and Wasmtime did not fetch and build with the selected toolchain"
-# The host Pulley compiler uses the selected toolchain; guest programs use the
+# The normal host CLI compiler uses the selected toolchain; guest programs use the
 # pinned upstream one with wasm32 targets, which the Motor toolchain lacks.
 case "$(declare -f build_wasmtime_fixtures)" in
-	*'--features compile --bin compile'*'RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN"'*\
+	*'--bin wasmtime --no-default-features'*'--features compile,cranelift,'*'RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN"'*\
 *'--target wasm32-wasip2 -p test-programs --features motor'*) ;;
 	*) fail "the Wasmtime fixtures are not built with the expected toolchains" ;;
 esac

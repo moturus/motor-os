@@ -1,3 +1,12 @@
+#[cfg(target_os = "motor")]
+fn main() {
+    if let Err(error) = wg::launch::daemon(&std::env::args().skip(1).collect::<Vec<_>>()) {
+        eprintln!("wg: {error}");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(not(target_os = "motor"))]
 fn main() {
     let mut args = std::env::args_os().skip(1);
     let path = args.next();
@@ -9,11 +18,6 @@ fn main() {
         eprintln!("wg: {error}");
         std::process::exit(1);
     }
-}
-
-#[cfg(target_os = "motor")]
-fn start(config: wg::config::Config) -> wg::config::Result<()> {
-    wg::motor::run(&config)
 }
 
 #[cfg(not(target_os = "motor"))]

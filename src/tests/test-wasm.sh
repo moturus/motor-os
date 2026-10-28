@@ -6,7 +6,9 @@ ROOT_DIR="$(cd "$WD/../.." && pwd)"
 image=both
 memory=both
 vmm=qemu
+selection=both
 prepare=false
+services=false
 vms=()
 linux_identity=()
 while [ "$#" -gt 0 ]; do
@@ -18,8 +20,10 @@ while [ "$#" -gt 0 ]; do
     --vmm) vmm="${2:?missing vmm}"; shift 2 ;;
     --vmm=*) vmm="${1#--vmm=}"; shift ;;
     --prepare) prepare=true; shift ;;
+    --services) services=true; shift ;;
+    --suite) selection="${2:?missing suite}"; shift 2 ;;
     --linux-identity) linux_identity=(--linux-identity); shift ;;
-    *) echo "usage: $0 [--release] [--prepare] [--image wasm|dev|both] [--memory 224|256|both] [--vm IMAGE:MIB]... [--vmm qemu|chv] [--linux-identity]" >&2; exit 2 ;;
+    *) echo "usage: $0 [--release] [--prepare] [--services --suite wasmtime] [--suite javy|wasmtime|both] [--image wasm|dev|both] [--memory 224|256|both] [--vm IMAGE:MIB]... [--vmm qemu|chv] [--linux-identity]" >&2; exit 2 ;;
   esac
 done
 case "$image" in wasm) images=(wasm);; dev) images=(dev);; both) images=(wasm dev);; *) exit 2;; esac
@@ -35,7 +39,17 @@ case "$vmm" in qemu) vmm_label=QEMU;; chv) vmm_label="Cloud Hypervisor";; *) exi
 # rust-toolchain.toml names the toolchain, so build from the root whatever the
 # caller's directory is.
 cd "$ROOT_DIR"
-suites=(javy-smoke wasmtime-smoke)
+case "$selection" in
+  javy) suites=(javy-smoke);;
+  wasmtime) suites=(wasmtime-smoke);;
+  both) suites=(javy-smoke wasmtime-smoke);;
+  *) echo "test-wasm: unknown suite $selection" >&2; exit 2;;
+esac
+service_args=()
+if [ "$services" = true ]; then
+  [ "$selection" = wasmtime ] || { echo 'test-wasm: --services requires --suite wasmtime' >&2; exit 2; }
+  service_args=(--services)
+fi
 binary() { echo "$ROOT_DIR/build/obj/release/$1/x86_64-unknown-motor/release/$1"; }
 if [ "$prepare" = true ]; then
   targets=()
@@ -47,6 +61,12 @@ if [ "$prepare" = true ]; then
     CARGO_TARGET_DIR="$ROOT_DIR/build/obj/release/$suite" cargo build --locked --release \
       --target x86_64-unknown-motor --manifest-path "$WD/$suite/Cargo.toml"
   done
+  if [ "$services" = true ]; then
+    . "$WD/wasm-service-images.sh"
+    variants=()
+    for target in "${targets[@]}"; do variants+=("${target%.img}"); done
+    prepare_wasm_service_images "$ROOT_DIR" "${variants[@]}"
+  fi
   exit
 fi
 for suite in "${suites[@]}"; do
@@ -55,7 +75,7 @@ done
 if [ "${WASM_TEST_TIMED:-0}" != 1 ]; then
   vm_args=()
   for vm in "${vms[@]}"; do vm_args+=(--vm "$vm"); done
-  exec timeout 600s env WASM_TEST_TIMED=1 "$0" --vmm "$vmm" "${linux_identity[@]}" "${vm_args[@]}"
+  exec timeout 600s env WASM_TEST_TIMED=1 "$0" --suite "$selection" --vmm "$vmm" "${service_args[@]}" "${linux_identity[@]}" "${vm_args[@]}"
 fi
 . "$WD/vm-console-filter.sh"
 . "$WD/vm-test-boot.sh"
@@ -88,6 +108,7 @@ once=(--determinism "${linux_identity[@]}")
 for vm in "${vms[@]}"; do
   variant="${vm%:*}" size="${vm#*:}"
   image_file="motor-os-$variant.qcow2"
+  [ "$services" = false ] || image_file="motor-os-$variant-wasm-services.qcow2"
   sha256sum "$ROOT_DIR/vm_images/release/$image_file" > "$evidence/$variant-image.sha256"
   export MOTO_MEMORY_MIB="$size"
   label="$variant-$size"
@@ -106,7 +127,8 @@ for vm in "${vms[@]}"; do
     "$evidence/$label-console.log" "${runner_args[@]}"
   sftp_options=(-F /dev/null -o IdentitiesOnly=yes -o BatchMode=yes
     -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" -i "$WD/test.key" -P 2222)
-  installed=(javy/devtools/bin/javy javy/devtools/bin/wasmi wasmtime/devtools/bin/wasmtime-rt)
+  installed=(javy/devtools/bin/javy javy/devtools/bin/wasmi
+    wasmtime/devtools/bin/wasmtime wasmtime/devtools/bin/wasmtime-rt)
   {
     for suite in "${suites[@]}"; do printf 'put "%s" /user/tmp/%s\n' "$(binary "$suite")" "$suite"; done
     # Keep fixtures and retained outputs on disk for the low-RAM qualification.
@@ -124,7 +146,7 @@ for vm in "${vms[@]}"; do
   } | sftp "${sftp_options[@]}" -b - motor@192.168.4.2
   for tool in "${installed[@]}"; do cmp "$assembly/$tool" "$evidence/installed-${tool##*/}"; done
   for suite in "${suites[@]}"; do
-    args=()
+    args=("${service_args[@]}")
     if [ "$suite" = javy-smoke ]; then args=("${once[@]}"); once=(); fi
     vm_ssh "/user/tmp/$suite" "${args[@]}" 2>&1 | tee -a "$evidence/$label.log"
   done

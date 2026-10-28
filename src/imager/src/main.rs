@@ -1063,7 +1063,11 @@ mod tests {
                 "sys-lib-deps"
             ]
         );
-        assert_eq!(config.assembly_required_executables.len(), 18);
+        assert_eq!(config.assembly_required_executables.len(), 19);
+        assert!(config
+            .assembly_required_executables
+            .iter()
+            .any(|path| path == "wasmtime/devtools/bin/wasmtime"));
         assert!(config
             .assembly_required_executables
             .iter()
@@ -1175,6 +1179,7 @@ mod tests {
                 "rg/system/bin/rg",
                 "javy/devtools/bin/javy",
                 "javy/devtools/bin/wasmi",
+                "wasmtime/devtools/bin/wasmtime",
                 "wasmtime/devtools/bin/wasmtime-rt"
             ]
         );

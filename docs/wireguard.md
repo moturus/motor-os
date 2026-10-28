@@ -2,41 +2,76 @@
 
 ## Using WireGuard
 
-The standard Motor OS image includes `/system/bin/wg`. Run it from a System
-or Interactive process with `CAP_NET` and read access to its configuration
-and key. Each process provides one tunnel device. Startup is manual; the
-image contains no WireGuard keys or configurations.
-
-### Prepare the configuration and keys
-
-Create a WireGuard key pair for the Motor OS instance and obtain the other
-peer's public key. From the repository root on the Linux host, the included
-host helper can generate the pair:
+The standard image includes `/system/bin/wg-tool` and `/system/bin/wg`.
+Run the tool in an Interactive session. Each daemon provides one tunnel
+device; activation is explicit, and the image contains no keys or configs.
 
 ```sh
-cargo run --release --locked --manifest-path src/tests/wg-peer/Cargo.toml -- \
-  keygen wg0.key wg0.pub
+wg-tool new
+wg-tool add-peer /user/cfg/wireguard/wg0.toml
+wg-tool up /user/cfg/wireguard/wg0.toml
+wg-tool status
+wg-tool down wg0
 ```
 
-This creates new files without overwriting existing ones. `wg0.key` holds
-the private key; give only `wg0.pub` to the other peer. Keys are single
-base64 values encoding 32 bytes. Motor OS's `wg` command takes a TOML filename;
-key generation is provided by the host helper above.
+### Create a configuration and add peers
 
-Create `wg0.toml` alongside the key, replacing the example physical addresses
-and public key with your own:
+`new` prompts for the interface name, config filename, UDP port, tunnel CIDRs,
+and physical transport addresses. Enter accepts the value in brackets. The
+suggested name is the first unused `wgN`, considering saved configurations
+and running interfaces. The default directory is `/user/cfg/wireguard`, the
+port is `51820`, and the tunnel CIDR is `10.20.0.1/24`. Review these choices
+for your network. A custom filename does not change the interface's name.
+
+Name suggestions consider config names and filename stems in the default
+directory, plus running interfaces; inactive configs elsewhere are not scanned.
+An unreadable or invalid `.toml` there aborts `new` with the failing path in
+the diagnostic. Discovery errors also abort rather than suggesting a name
+whose availability is unknown. The physical-address suggestion comes from a
+local UDP bind, without sending traffic or consulting DNS; supply an assigned
+address if no suitable default is available.
+
+Lists accept comma-separated values with surrounding whitespace ignored.
+Invalid input explains the constraint and prompts for that field again.
+Backspace/Delete edits the current line; Ctrl+U clears it. Newline-delimited
+answers on stdin are also accepted. Creation and peer additions require an
+explicit `yes` or `y`; confirmation defaults to `no`, and EOF never confirms.
+
+After an explicit confirmation, the tool generates a key pair using the
+native random source and writes both keys inside TOML. It prints the public
+key to exchange with the other peer. Keep the config private: it contains
+the private key. No adjacent key file is created or read. Existing files
+are never overwritten by `new`.
+
+`add-peer [FILE]` prompts for an optional peer name, public key, numeric
+endpoint, allowed IPs, keepalive interval, and optional hidden preshared key.
+Without `FILE`, it prompts for the filename, defaulting to
+`/user/cfg/wireguard/wg0.toml`. Peer names are comments, such as
+`# Peer: office laptop`; identity still comes from the public key. Names
+may repeat and are limited to 128 UTF-8 bytes without control characters.
+The tool neither generates nor exchanges a PSK automatically. Existing
+comments and formatting survive additions, including handwritten inline
+peer arrays. Empty endpoint input waits to learn an authenticated endpoint;
+at least one side needs a reachable endpoint. Keepalive defaults to off;
+25 seconds is a common choice for maintaining a NAT mapping.
+
+The generated schema is:
 
 ```toml
-transport_addresses = ["192.0.2.2"]
-listen_port = 51820
 cidrs = ["10.20.0.2/32"]
+listen_port = 51820
+name = "wg0"
+private_key = "<generated base64 private key>"
+public_key = "<derived base64 public key>"
+transport_addresses = ["192.0.2.2"]
 
+# Peer: office laptop
 [[peers]]
-public_key = "<other peer's base64 public key>"
-endpoint = "192.0.2.1:51820"
 allowed_ips = ["10.20.0.0/24"]
+endpoint = "192.0.2.1:51820"
 # persistent_keepalive = 25
 # preshared_key = "<optional shared base64 32-byte key>"
+public_key = "<other peer's base64 public key>"
 ```
 
 `transport_addresses` must name an address already assigned to a physical
@@ -55,48 +90,64 @@ There may be one physical transport address per IP family. Endpoints must
 be numeric; DNS names and explicit IPv6 scope IDs are unsupported. Omit
 `endpoint` for a responder that learns it from authenticated peer traffic.
 
-### Install the files and restrict access
+`name` and `private_key` are required. `public_key` may be omitted in a
+handwritten file; if supplied, it must match the derived key. Names contain
+1–31 ASCII letters, digits, underscores or hyphens. Zero peers is valid:
+`new` omits the peer list, and `peers = []` is also accepted.
 
-Create `/user/cfg/wireguard/` in the guest if needed, then copy `wg0.toml`
-and `wg0.key` there, for example using SFTP. The filename stem supplies the
-device name, and the adjacent `.key` file is mandatory. Names contain up to
-31 ASCII letters, digits, underscores or hyphens.
+Files created by the tool use `rwxrw----`; its private directory uses
+`rwxrwx---`, in System/Interactive/None order. The native filesystem requires
+an Interactive creator to leave System permissions at `rwx`. None receives
+no access. The daemon and tool reject None-readable files and None-writable
+directory ancestry. See [filesystem permissions](fs-permissions.md).
 
-Keep **both files unreadable by None**, including configurations without a
-preshared key. For files uploaded by Interactive under `/user/cfg/`, these
-Motor OS shell commands retain System read/write access, give Interactive read
-access, and exclude None:
+`new` and `add-peer` require `CAP_FS_WRITE` as well as filesystem access.
+`new` also needs `CAP_NET` for discovery and the transport suggestion;
+`status` and `down` require `CAP_NET`.
 
-```sh
-cd /user/cfg/wireguard
-chmod rw-r----- wg0.toml wg0.key
-ls -l wg0.toml wg0.key
-```
-
-A System-only instance can use `r--------` on both files, set by System.
-Protect the parent directory as well when lower roles must not replace
-files. Motor OS's `chmod` uses the nine-character System/Interactive/None
-permission word. SFTP translates numeric modes into Motor OS permissions;
-`chmod 660` when uploading as Interactive also excludes None. See
-[filesystem permissions](fs-permissions.md) for the role and directory rules.
+Edits preserve permissions and publish through a private staging file. A
+read-only target or parent is an error. An existing file with more restrictive
+System permissions can be loaded, but `add-peer` refuses to replace it:
+Interactive cannot create a staging file preserving those permissions.
+Run at most one `wg-tool` at a time and do not manually edit a file while the
+tool is editing it; there is no coordination between writers.
 
 ### Start, check and stop the tunnel
 
-Run this in a Motor OS terminal:
+`up FILE` starts a detached Interactive daemon and waits for local activation.
+It remains running after the tool, terminal, and SSH session exit. The launcher
+needs `CAP_NET`, `CAP_SPAWN`, and `CAP_SPAWN_DETACHED`. The shipped Rush config
+grants detached-spawn authority to these programs:
 
-```sh
-wg /user/cfg/wireguard/wg0.toml
+```toml
+spawn-detached = ["rmux", "wg-tool"]
 ```
 
-The process stays in the foreground and prints `wg0: active (pid=...)`
-after registration. This confirms that addresses and routes are installed;
-it does not confirm a handshake. From a second Motor OS terminal, probe the
-other peer's configured inner address:
+This is the `spawn-detached` setting in `/user/cfg/rush.toml`. If a customized
+config lacks `wg-tool`, update it and start a new shell. Only the launcher
+needs spawn authority: the daemon receives `CAP_INTERACTIVE | CAP_NET`, with
+no spawn, detached-spawn, filesystem-write, or System capability.
+
+`wg0: up (pid=..., peers=...)` confirms local registration, not a handshake or
+reachability. A zero-peer interface owns its addresses and port but cannot
+exchange tunnel traffic. To probe a configured peer explicitly:
 
 ```sh
 ping -c 3 10.20.0.1
 stats providers
 ```
+
+`status` shows actual loaded settings, public keys, lifecycle state, uptime,
+snapshot age, and peer endpoints, handshake ages and tunnel byte counters.
+Snapshots refresh on the existing 250 ms tick. A missing session is shown
+as `none (no current session)`; it does not imply no handshake ever occurred.
+Status remains available after moving or deleting the original config.
+Interfaces are sorted by name. A peer's endpoint is its authenticated roaming
+address when learned, its configured address otherwise, or `not learned` if
+neither exists. If some daemons cannot be queried, status retains successful
+results, reports each failed PID, and exits 1. An empty successful discovery
+prints `No WireGuard interfaces are running.` and exits 0. Status sends no
+WireGuard traffic and is a human-readable format, not a versioned scripting API.
 
 Use `stats get PID` with the printed PID to read the `wg:PID` provider's
 authentication, ownership, drop and timer counters. Snapshots update on the
@@ -105,17 +156,39 @@ authentication, ownership, drop and timer counters. Snapshots update on the
 Incoming peer pings require `auto_icmp_echo_reply` in
 `/system/cfg/sys-net.toml`; registered interfaces inherit that setting.
 
-Press Ctrl+C in the foreground terminal to stop `wg`. Its routes and local
-addresses are removed, existing tunnel sockets fail, and new connections
-use remaining routes, including the physical default. A silent peer leaves
-the tunnel routes installed. Physical transport-address loss ends the
-process; restart after correcting the configuration. Changes to configuration
-or keys also require a restart.
+`down INTERFACE` waits for acknowledged retirement and release of physical
+UDP bindings. Routes and addresses are removed, existing tunnel sockets fail,
+and new connections use remaining routes, including the physical default.
+Repeating `down` for an absent interface succeeds. A timeout reports an
+unconfirmed outcome; use `status` to inspect it. There is no force-kill fallback.
+Discovery or candidate-query errors are failures, not evidence that an
+interface is absent. `down` matches the exact, case-sensitive interface name
+without rereading its config, and leaves the config and keys on disk.
 
-To run another device, prepare `wg1.toml` and `wg1.key` and launch another
-`wg` process. Device names, local addresses and identical route prefixes
-must not conflict. Use another listen port when sharing a physical address.
-sys-io admits up to four active or retiring packet devices.
+`add-peer` changes only the saved config. A running daemon keeps its loaded
+peers until an explicit `down`/`up`. Repeating `up` fails instead of reloading
+or replacing a running instance. Device names, addresses, identical route
+prefixes and physical listen ports must not conflict. Sys-io allows four
+active or retiring packet devices.
+
+For foreground diagnostics, `wg FILE` uses the same schema and control service
+and prints `NAME: active (pid=...)`. Stop it with Ctrl+C or `wg-tool down NAME`.
+Both tool and daemon require Interactive authority. A silent peer leaves
+routes installed; physical transport-address loss ends the daemon. Correct
+the config and start it again. There is no automatic restart or boot startup.
+
+Use `wg-tool --help` or `wg-tool COMMAND --help` for syntax. Operands beginning
+with `-` need `--` before them.
+Ctrl+C, a declined confirmation, or EOF exits 130; syntax errors exit 2 and
+operational errors exit 1. Prompts and errors go to stderr, results to stdout.
+Keys and PSKs are never included in errors.
+
+Relative config paths resolve against the caller's working directory; `~`
+and environment expansion belong to the calling shell. Files must have a
+`.toml` extension, with an absolute UTF-8 path of at most 1024 bytes and
+filename components of at most 255 bytes. The default private directory can
+be created after confirmation; a custom parent directory must already exist.
+Existing directory permissions are checked rather than silently changed.
 
 ### Routing and troubleshooting
 
@@ -126,12 +199,18 @@ address when needed. Existing sockets do not migrate between devices.
 WireGuard does not change DNS-server configuration. DNS queries follow the
 route to the configured server, so its address must be covered to tunnel DNS.
 
-If startup fails, check both file permissions, the paired filenames, physical
+If startup fails, check configuration permissions, launcher capabilities, physical
 address assignment, UDP port conflicts and device/address/route conflicts.
 Errors identify the operation without printing keys or TOML contents. If an
 active tunnel cannot reach its peer, check the endpoint, keys and reciprocal
 allowed prefixes, then inspect the authentication and drop counters. Ping
 also requires the peer to answer ICMP echo requests.
+
+Startup and control operations have five-second deadlines. If `up` reports
+an unconfirmed activation, run `wg-tool status` and look for the reported PID
+before trying another start. A rejected configuration or an observed daemon
+exit is a definite failure; uncertainty is reported for a deadline expiry or
+a lost startup connection after readiness. A timed-out stop can still finish.
 
 WireGuard uses MTU 1420. Each instance accepts at most 16 peers, 16 local
 addresses and 128 allowed prefixes in total, with each input file limited to
@@ -212,8 +291,9 @@ released.
 * `wg` retains boringtun's upstream `ring` backend. The separate `wg`
   workspace owns its crypto dependencies and C/assembly build requirements;
   they stay outside the core workspace.
-* Keys and configs live under `/user/cfg/wireguard/`. The binary ships as
-  `/system/bin/wg`.
+* Configs with inline keys default to `/user/cfg/wireguard/`; explicit paths
+  elsewhere are supported. The binaries ship as `/system/bin/wg` and
+  `/system/bin/wg-tool`.
 * `wg` is started by the user; starting it at boot is out of scope.
 * The boringtun fork supplies the clock fallback and verified-packet entry
   point described below; its protocol and crypto implementation are unchanged.
@@ -477,7 +557,7 @@ ordinary sys-io client-channel cleanup.
 ## WireGuard process and protocol
 
 `wg` has a separate `src/bin/wg` workspace and lockfile, using standard Rust
-and native Motor OS APIs. Each process loads one config/key pair and registers
+and native Motor OS APIs. Each process loads one inline-key config and registers
 one device; multiple processes provide independently managed devices.
 boringtun and its crypto dependencies stay outside the core sys workspace.
 
@@ -607,11 +687,11 @@ logs under floods.
 
 ## Configuration and secrets
 
-`wg` reads one explicit config/key pair once, using standard Rust/native
-filesystem APIs. The [usage section](#prepare-the-configuration-and-keys)
-shows the file layout and TOML format. Both files must be regular files.
-The filename stem supplies the registered device name, not a sys-io vector
-index. Private keys, peer public keys and optional preshared keys are
+`wg` reads one explicit inline-key configuration once, using native filesystem
+APIs. The [usage section](#create-a-configuration-and-add-peers) shows the TOML
+format. The config must be a regular file. Its `name` field supplies the
+registered interface name, independently of the filename. Private keys,
+peer public keys and optional preshared keys are
 base64 values decoding to exactly 32 bytes. Configuration or key changes
 require a restart.
 
@@ -628,29 +708,135 @@ disabled; otherwise it is a `u16` interval in seconds.
 
 `cidrs` assigns local tunnel addresses; peers' `allowed_ips` supply remote
 routes and peer ownership. Each allowed-IP family requires a local tunnel
-address. Unknown fields, malformed keys/CIDRs, duplicate peer public keys,
-duplicate exact prefix owners, missing file partners, unsupported families
+address. Local CIDRs retain their host addresses; allowed prefixes are
+normalized to network addresses. Nested prefixes use longest-prefix
+ownership. Unknown fields, malformed keys/CIDRs, duplicate peer public keys,
+duplicate exact prefix owners, missing identity fields, unsupported families
 and local address/device-name conflicts are rejected. Port reservations use
 the ordinary physical UDP admission rules; conflicts fail before activation.
 
 Each file read is bounded at 64 KiB, and each process allows at most 16 peers,
 16 local addresses and 128 allowed prefixes before allocating peer runtime
 state. Peer limits account for their internal queues; sys-io's device quota
-is separate from these process-local crypto limits. Both files are validated
+is separate from these process-local crypto limits. The config is validated
 and resources reserved before activation. Failures close any opened outer
 sockets and registration channel, releasing their reservations. The private key and
 any PSK-bearing TOML are secrets.
 
-`/user/cfg/` already has the imager policy `rwxrwx---` for directories and
-`rw-rw----` for files: System and Interactive can read them, None cannot,
-and all Interactive processes share that access. `wg` checks the actual
-permissions of both files when loading them and refuses either file if None
-can read it. This rule applies to every config, whether or not it contains a
-PSK. Imager policy does not establish the permissions of files uploaded or
-created later. `wg` does not change file permissions. Errors are sanitized;
-they never include keys, packet contents or TOML excerpts containing secrets.
+`wg-tool` creates files with `rwxrw----` and directories with `rwxrwx---`.
+All Interactive processes share this access; None has none. `wg` checks the
+actual entry's permissions and rejects None-readable configs and None-writable
+ancestry before reading secret bytes by that same entry ID. This applies to
+every config, including those without a PSK. `wg` does not change permissions.
+Errors are sanitized; they never include keys, packet contents or TOML
+excerpts containing secrets. Displayed paths escape control characters.
 sys-io has no WireGuard-specific loader or crypto state, although it remains
-the filesystem service through which config and key bytes are read.
+the filesystem service through which config bytes are read.
+
+The writer creates staging files with their final permissions before writing
+any secret bytes. It writes and flushes a private staging file in the destination
+directory, then publishes with a non-replacing move for `new` or a replacing
+move for `add-peer`, and flushes publication before reporting success.
+Peer edits insert only the new entry, using TOML source spans, and reparse the
+result before publication. Existing settings, keys, peer order, comments,
+formatting and LF/CRLF convention are preserved, including inline peer arrays.
+
+A failure before publication preserves the original; the tool removes its
+staging file or reports a cleanup failure. A crash may leave a private staging
+file, which is never loaded or automatically published. If the final flush
+fails after publication, the destination has been updated but durability is
+unconfirmed. The tool reports this without rolling back. It makes no automatic
+secret-bearing backups and does not coordinate concurrent editors.
+
+## Daemon management
+
+### Discovery and control
+
+`new`, `status` and `down` issue one
+[`IoStatsService::list_external_net_device_pids`](../src/sys/lib/moto-sdk/src/sys_io/stats.rs)
+request to `sys-io-stats-service`. This generic query requires `CAP_NET` and
+returns unique kernel-authenticated owners of active and still-retiring
+external IP devices. Physical NICs and loopback are excluded; non-WireGuard
+providers can be present. The complete response fits one 4 KiB IoBuf, with
+no paging or truncation. Query failure is distinct from a successful empty
+list, and ownership disappears when device retirement finishes.
+
+The tool closes the discovery connection, then contacts only returned PIDs
+at `wg-control-PID`, sequentially. `E_NOT_FOUND` skips a provider without a
+WireGuard endpoint or one that disappeared after discovery. Busy, denied,
+malformed or failed connections are errors. There is no process enumeration,
+PID-file lookup, statistics-provider fallback, or automatic retry. New
+registrations appear on the next invocation.
+
+Each daemon uses native synchronous IPC with
+`LocalServer::new(url, ChannelSize::Small, 1, 1)`: one listener, at most one
+connected client, and one request in flight. Both ends authenticate kernel
+PID and capability information. The client verifies the discovered PID;
+both peers must be Interactive with `CAP_NET`. A process with `CAP_SYS` is
+System even if `CAP_INTERACTIVE` is also set, and is rejected. The endpoint
+name or a caller-supplied identity does not establish authority.
+
+`GET_INTERFACE` captures one redacted snapshot and returns interface fields
+and the peer count. `GET_PEER(index)` reads peers from that snapshot on the
+same connection. `STOP` uses the connection that identified the interface,
+wakes the forwarding scheduler, and replies after device retirement and
+physical UDP cleanup. One control thread serves requests independently of
+packet forwarding; control-service failure ends the daemon. Disconnecting
+releases the query snapshot and allows the next invocation to connect.
+There are no subscriptions, concurrent requests or client-idle timers.
+
+The five-second control deadline covers discovery and all replies; the tool
+disconnects on completion or failure. Messages fit the 4 KiB channel. Shared
+input is copied before validating versions, flags, lengths, counts and
+indices, and response reserved fields are initialized. Only explicitly
+redacted interface and peer fields cross IPC. See
+[`control.rs`](../src/bin/wg/src/control.rs) for payloads and
+[`motor_ipc.rs`](../src/bin/wg/src/motor_ipc.rs) for framing and authentication.
+The existing statistics protocol remains separate.
+
+### Managed startup
+
+`up` resolves the config path and launches `/system/bin/wg` with null standard
+streams, an explicit detached request, and the reduced capability mask
+described above. The daemon reads its own config; argv, environment variables
+and startup IPC contain no keys or TOML. The launcher first creates a private
+synchronous endpoint with one listener and one connection, authenticated on
+both ends for that launcher and child.
+
+The daemon connects before loading its config, so load errors can be reported
+as bounded error codes. After physical bindings, the control service and
+interface registration are ready, it sends `READY`. Startup remains
+provisional until the launcher acknowledges that message. Earlier launcher
+exit, connection loss or deadline expiry releases provisional resources and
+ends the daemon. After acknowledgment, the daemon survives launcher exit;
+it sends `COMMITTED`, and a lost final receipt does not undo activation.
+The startup deadline is five seconds, and uncertain outcomes retain the PID
+for inspection with `status`. See [`launch.rs`](../src/bin/wg/src/launch.rs).
+
+## Validation
+
+The focused guest gate builds its image and native test binaries, then runs
+with a hermetic local host peer. With the repository's VM test networking
+configured, run either build mode from the repository root:
+
+```sh
+src/tests/test-wireguard.sh
+src/tests/test-wireguard.sh --release
+```
+
+This exercises configuration creation and edits, native permissions and
+capabilities, discovery and malformed IPC, startup/stop failure paths,
+detached lifetime, and IPv4/IPv6 traffic with the independent upstream peer.
+`src/tests/test-system-tty.sh` (also accepting `--release`) covers System-role
+rejection, including a System caller that also has `CAP_INTERACTIVE`.
+
+Host parser, prompt, editor, redacted-protocol and interoperability tests run
+with `cargo test --manifest-path src/bin/wg/Cargo.toml --locked`; add
+`--release` for the release build. These checks and the native discovery
+API tests are reached through `src/tests/full-test.sh` in the selected build
+mode. WireGuard tests use local peers and do not require Internet access.
+Use the existing [benchmark procedure](wireguard-measurements.md) when changing
+forwarding or statistics publication.
 
 ## Tradeoffs and reuse
 

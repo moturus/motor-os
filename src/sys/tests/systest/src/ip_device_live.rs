@@ -101,6 +101,10 @@ impl Provider {
             }
         });
         assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(), 0);
+        assert_eq!(
+            super::ip_device::provider_pids(),
+            vec![u64::from(child.id())]
+        );
         Self {
             shutdown: Box::new(move |orderly| {
                 assert!(!orderly);
@@ -325,6 +329,8 @@ pub fn test_provider_death_wakes_pending_ops() {
             Some(moto_rt::Error::NotConnected)
         );
         crate::tcp::wait_for_sys_io_metric("net.num_devices", |n| n == baseline);
+        crate::tcp::wait_for_sys_io_metric("net.ip_device.devices", |n| n == 0);
+        assert!(super::ip_device::provider_pids().is_empty());
     }
     println!("ip_device::test_provider_death_wakes_pending_ops PASS");
 }

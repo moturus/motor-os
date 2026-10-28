@@ -1,13 +1,16 @@
-//! Installed `wasmtime-rt` checks with the precompiled fixtures that the
-//! Wasmtime build makes from the runtime's own sources.
+//! Installed Wasmtime tools with fixtures from the same fork and configuration.
 use std::fs;
 use std::time::{Duration, Instant};
 
 use wasm_smoke_suite::{Job, Result, Suite, process_active};
 
+mod compiler;
 mod filesystem;
+mod http;
+mod p3;
 
 const RUNTIME: &str = "/devtools/bin/wasmtime-rt";
+const COMPILER: &str = "/devtools/bin/wasmtime";
 /// Precompiled fixtures that test-wasm.sh uploads; they are not part of the images.
 const FIXTURES: &str = "/none/wasm-tests/wasmtime-tests";
 /// Upstream p2 socket programs carrying Motor's accepted socket semantics.
@@ -48,7 +51,18 @@ pub fn run_suite(suite: &mut Suite) -> Result<()> {
         &format!("MOTOR_OS_CAPS=0 {RUNTIME} --version"),
         0,
     )?;
-    expect("version", version.trim(), "wasmtime 48.0.1")?;
+    // The upstream CLI appends commit/date metadata when built from Git.
+    let version = version
+        .trim()
+        .split_once(" (")
+        .map_or(version.trim(), |v| v.0);
+    expect("version", version, "wasmtime 50.0.0")?;
+    compiler::run(suite)?;
+    suite.command(
+        "engine-tests",
+        &format!("MOTOR_OS_CAPS=0x200 {FIXTURES}/engine-tests"),
+        0,
+    )?;
     suite.refusal(
         "role-refusal",
         &format!("{RUNTIME} run --allow-precompiled {FIXTURES}/lifecycle.cwasm"),
@@ -72,6 +86,14 @@ pub fn run_suite(suite: &mut Suite) -> Result<()> {
     let (_, stderr) = suite.command("trap", &invocation("0", "--invoke trap", "lifecycle"), -1)?;
     if !stderr.contains("unreachable") {
         return Err(format!("trap: missing trap diagnostic: {stderr}").into());
+    }
+    let (_, stderr) = suite.command(
+        "bounds-trap",
+        &(invocation("0", "--invoke load", "memory-grow") + " 65536"),
+        -1,
+    )?;
+    if !stderr.contains("out of bounds memory access") {
+        return Err(format!("bounds-trap: missing trap diagnostic: {stderr}").into());
     }
     let (_, stderr) = suite.command(
         "timeout",
@@ -98,9 +120,14 @@ pub fn run_suite(suite: &mut Suite) -> Result<()> {
         "epoch interruption",
     )?;
     suite.refusal(
-        "native-artifact",
-        &invocation("0", "", "lifecycle-native"),
-        "lifecycle-native.cwasm",
+        "pulley-needs-target",
+        &invocation("0", "", "lifecycle-pulley"),
+        "compiled for architecture 'pulley64'",
+    )?;
+    suite.command(
+        "explicit-pulley",
+        &invocation("0", "--target pulley64", "lifecycle-pulley"),
+        0,
     )?;
     let artifact = fs::read(format!("{FIXTURES}/lifecycle.cwasm"))?;
     fs::write(
@@ -116,10 +143,11 @@ pub fn run_suite(suite: &mut Suite) -> Result<()> {
         )?;
     }
 
-    // Store defaults, their overrides, and the fixed memory reservations.
+    // Upstream store defaults, explicit limits, and lazy memory growth.
+    suite.command("tables-default", &invocation("0", "", "limits-tables"), 0)?;
     suite.refusal(
-        "tables-default",
-        &invocation("0", "", "limits-tables"),
+        "tables-limited",
+        &invocation("0", "-W max-tables=16", "limits-tables"),
         "table count too high",
     )?;
     suite.command(
@@ -127,9 +155,14 @@ pub fn run_suite(suite: &mut Suite) -> Result<()> {
         &invocation("0", "-W max-tables=17", "limits-tables"),
         0,
     )?;
-    suite.refusal(
+    suite.command(
         "elements-default",
         &invocation("0", "", "limits-elements"),
+        0,
+    )?;
+    suite.refusal(
+        "elements-limited",
+        &invocation("0", "-W max-table-elements=32768", "limits-elements"),
         "exceeds table limits",
     )?;
     suite.command(
@@ -137,7 +170,7 @@ pub fn run_suite(suite: &mut Suite) -> Result<()> {
         &invocation("0", "-W max-table-elements=40000", "limits-elements"),
         0,
     )?;
-    // Memories: no process-wide count or total, 4 GiB each.
+    // Memory64 may exceed 4 GiB; limits must be requested explicitly.
     suite.command(
         "memories-default",
         &invocation("0", "", "limits-memories"),
@@ -153,9 +186,14 @@ pub fn run_suite(suite: &mut Suite) -> Result<()> {
         &invocation("0", "-W max-memories=5", "limits-memories"),
         0,
     )?;
-    suite.refusal(
-        "memory-too-large",
+    suite.command(
+        "memory64-large-initial",
         &invocation("0", "", "memory-too-large"),
+        0,
+    )?;
+    suite.refusal(
+        "memory-size-limited",
+        &invocation("0", "-W max-memory-size=4294967296", "memory-too-large"),
         "exceeds",
     )?;
     // Growing to 4 GiB touches no page, or the VM could not hold it.
@@ -176,17 +214,17 @@ pub fn run_suite(suite: &mut Suite) -> Result<()> {
     )?;
     expect("memory-size-override", stdout.trim(), "-1")?;
     let (stdout, _) = suite.command(
-        "memory64-to-limit",
+        "memory64-to-4gib",
         &(invocation("0", "--invoke grow", "memory64-grow") + " 65535"),
         0,
     )?;
-    expect("memory64-to-limit", stdout.trim(), "1")?;
+    expect("memory64-to-4gib", stdout.trim(), "1")?;
     let (stdout, _) = suite.command(
-        "memory64-beyond-limit",
+        "memory64-beyond-4gib",
         &(invocation("0", "--invoke grow", "memory64-grow") + " 65536"),
         0,
     )?;
-    expect("memory64-beyond-limit", stdout.trim(), "-1")?;
+    expect("memory64-beyond-4gib", stdout.trim(), "1")?;
 
     // The mandatory TypeScript workload, compiled by Javy and precompiled.
     let (stdout, _) = suite.command("typescript", &invocation("0", "", "typescript"), 0)?;
@@ -210,7 +248,9 @@ pub fn run_suite(suite: &mut Suite) -> Result<()> {
     }
 
     // WASI p2 filesystem and stdio.
-    filesystem::run(suite)
+    filesystem::run(suite)?;
+    p3::run(suite)?;
+    http::run(suite)
 }
 
 /// Ctrl+C on the terminal ends a foreground `run` spinning in Pulley with
@@ -247,13 +287,18 @@ fn interruption(suite: &mut Suite) -> Result<()> {
 
 fn runtime_pid(job: &Job) -> Result<u64> {
     match job.children()?.as_slice() {
-        [(pid, name)] if name.contains("wasmtime-rt") => Ok(*pid),
-        other => Err(format!("expected one wasmtime-rt child, found {other:?}").into()),
+        [(pid, name)] if name.contains("wasmtime") => Ok(*pid),
+        other => Err(format!("expected one Wasmtime child, found {other:?}").into()),
     }
 }
 
 pub fn run() -> Result<()> {
     let mut suite = Suite::new("wasmtime-smoke", "/devtools/wasmtime/sources.txt")?;
-    run_suite(&mut suite)?;
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    match args.as_slice() {
+        [] => run_suite(&mut suite)?,
+        [arg] if arg == "--services" => http::services()?,
+        _ => return Err("usage: wasmtime-smoke [--services]".into()),
+    }
     suite.finish()
 }

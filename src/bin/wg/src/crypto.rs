@@ -95,6 +95,11 @@ impl Crypto {
         self.peers[peer].endpoint
     }
 
+    pub fn peer_stats(&self, peer: usize) -> (Option<std::time::Duration>, u64, u64) {
+        let (handshake, sent, received, _, _) = self.peers[peer].tunnel.stats();
+        (handshake, sent as u64, received as u64)
+    }
+
     fn owner(&self, address: IpAddr) -> Option<usize> {
         self.owners
             .iter()

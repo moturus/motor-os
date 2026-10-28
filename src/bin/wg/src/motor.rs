@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
+#[path = "motor_control.rs"]
+mod control;
 #[path = "motor_queue.rs"]
 mod queue;
 #[path = "motor_stats.rs"]
@@ -26,11 +28,29 @@ mod stats;
 pub mod native_tests;
 
 #[derive(Default)]
-struct Ready(Mutex<Option<Waker>>);
+struct Ready(Mutex<Signal>);
+
+#[derive(Default)]
+struct Signal {
+    waker: Option<Waker>,
+    stop: bool,
+    failed: bool,
+}
+
+impl Ready {
+    fn stop(&self, failed: bool) {
+        let mut signal = self.0.lock().unwrap();
+        signal.stop = true;
+        signal.failed |= failed;
+        if let Some(waker) = &signal.waker {
+            waker.wake_by_ref();
+        }
+    }
+}
 
 impl NetEventListener for Ready {
     fn on_readiness(&self, _: Readiness) {
-        let waker = self.0.lock().unwrap().clone();
+        let waker = self.0.lock().unwrap().waker.clone();
         if let Some(waker) = waker {
             waker.wake();
         }
@@ -97,23 +117,62 @@ impl Io for MotorIo<'_> {
     }
 }
 
-pub fn run(config: &Config) -> Result<()> {
+pub fn run(
+    config: &Config,
+    path: &str,
+    startup: &mut Option<crate::launch::Startup>,
+) -> Result<()> {
     LocalRuntime::new().block_on(async {
-        let (client, driver) = moto_sdk::io::net::connect()
-            .await
-            .map_err(|_| "cannot connect to sys-io")?;
+        let deadline = startup.as_ref().map(|startup| startup.deadline);
+        let (client, driver) = crate::motor_ipc::until(
+            async {
+                moto_sdk::io::net::connect()
+                    .await
+                    .map_err(|_| "cannot connect to sys-io")
+            },
+            deadline,
+        )
+        .await?;
         let anchor = client
             .try_reserve()
             .map_err(|_| "cannot reserve transport channel")?;
         let driver = LocalRuntime::spawn(driver.run());
-        let result = activate(config, &client).await;
+        let mut service = None;
+        let result = match crate::motor_ipc::until(
+            prepare(config, path, &client, &mut service, deadline),
+            deadline,
+        )
+        .await
+        {
+            Ok(activation) => activate(config, activation, startup).await,
+            Err(error) => Err(error),
+        };
         drop(anchor);
         driver.await;
+        // Driver shutdown acknowledges the physical socket closes as well.
+        if let Some(service) = &mut service {
+            service.finish(result);
+        }
         result
     })
 }
 
-async fn activate(config: &Config, client: &NetClient) -> Result<()> {
+struct Activation {
+    device: IpDevice,
+    scheduler: Scheduler,
+    outer: Vec<Arc<UdpSocket>>,
+    output: Rc<RefCell<queue::Queue>>,
+    ready: Arc<Ready>,
+    stats: stats::Stats,
+}
+
+async fn prepare(
+    config: &Config,
+    path: &str,
+    client: &NetClient,
+    service: &mut Option<control::Service>,
+    deadline: Option<moto_sdk::rt::time::Instant>,
+) -> Result<Activation> {
     // Reserve private buffers and validate every physical binding before
     // registration publishes any route or local tunnel address.
     let scheduler = Scheduler::new(config, Instant::now())?;
@@ -133,6 +192,12 @@ async fn activate(config: &Config, client: &NetClient) -> Result<()> {
             .map_err(|_| "cannot bind physical UDP transport")?,
         );
     }
+    let mut stats = stats::Stats::start(config, path);
+    *service = Some(control::Service::start(
+        stats.values.clone(),
+        ready.clone(),
+        deadline,
+    )?);
     let registration = Registration {
         name: config.name.clone(),
         mtu: MTU as u16,
@@ -157,12 +222,48 @@ async fn activate(config: &Config, client: &NetClient) -> Result<()> {
     let device = IpDevice::register(&registration)
         .await
         .map_err(|_| "cannot register IP device")?;
-    println!(
-        "{}: active (pid={})",
-        config.name,
-        moto_sdk::sys::current_pid()
-    );
-    forward(device, scheduler, outer, output, ready).await
+    stats.publish(&scheduler);
+    Ok(Activation {
+        device,
+        scheduler,
+        outer,
+        output,
+        ready,
+        stats,
+    })
+}
+
+async fn activate(
+    config: &Config,
+    activation: Activation,
+    startup: &mut Option<crate::launch::Startup>,
+) -> Result<()> {
+    let Activation {
+        device,
+        scheduler,
+        outer,
+        output,
+        ready,
+        mut stats,
+    } = activation;
+    if let Some(startup) = startup.take() {
+        let snapshot = stats.values.lock().unwrap().snapshot.interface.clone();
+        if let Err(error) = startup.ready(&snapshot) {
+            device
+                .unregister()
+                .await
+                .map_err(|_| "startup failed; provisional cleanup is unconfirmed")?;
+            return Err(error);
+        }
+    } else {
+        println!(
+            "{}: active (pid={})",
+            config.name,
+            moto_sdk::sys::current_pid()
+        );
+    }
+    stats.state(crate::control::State::Up);
+    forward(device, scheduler, outer, output, ready, &mut stats).await
 }
 
 async fn forward(
@@ -171,6 +272,7 @@ async fn forward(
     outer: Vec<Arc<UdpSocket>>,
     output: Rc<RefCell<queue::Queue>>,
     ready: Arc<Ready>,
+    stats: &mut stats::Stats,
 ) -> Result<()> {
     let result = {
         let (sender, receiver) = device.split();
@@ -181,11 +283,18 @@ async fn forward(
             inner: receiver,
             output,
         };
-        drive(&mut scheduler, &mut io, writer.as_mut(), &ready).await
+        drive(&mut scheduler, &mut io, writer.as_mut(), &ready, stats).await
     };
     // Channel closure retires the interface. Fatal exit must not wait for
     // unrelated applications to receive their terminal socket notifications.
-    drop(device);
+    if result.is_ok() {
+        device
+            .unregister()
+            .await
+            .map_err(|_| "interface cleanup failed")?;
+    } else {
+        drop(device);
+    }
     result
 }
 
@@ -194,8 +303,8 @@ async fn drive(
     io: &mut MotorIo<'_>,
     mut writer: Pin<&mut impl Future<Output = Result<()>>>,
     ready: &Ready,
+    stats: &mut stats::Stats,
 ) -> Result<()> {
-    let mut stats = stats::Stats::start();
     let mut timer = None;
     loop {
         let deadline = scheduler.deadline();
@@ -205,19 +314,28 @@ async fn drive(
                 async_runtime::sleep(deadline.saturating_duration_since(Instant::now())),
             ));
         }
-        std::future::poll_fn(|cx| {
-            *ready.0.lock().unwrap() = Some(cx.waker().clone());
+        let stopped = std::future::poll_fn(|cx| {
+            {
+                let mut signal = ready.0.lock().unwrap();
+                signal.waker = Some(cx.waker().clone());
+                if signal.failed {
+                    return Poll::Ready(Err("control service failed"));
+                }
+                if signal.stop {
+                    return Poll::Ready(Ok(true));
+                }
+            }
             if let Poll::Ready(result) = writer.as_mut().poll(cx) {
-                return Poll::Ready(result);
+                return Poll::Ready(result.map(|()| false));
             }
             let before = scheduler.counters.batches;
             if let Poll::Ready(result) = scheduler.poll(cx, io, Instant::now()) {
                 stats.publish(scheduler);
-                return Poll::Ready(result);
+                return Poll::Ready(result.map(|()| false));
             }
             stats.publish(scheduler);
             if scheduler.counters.batches != before || scheduler.deadline() != deadline {
-                return Poll::Ready(Ok(()));
+                return Poll::Ready(Ok(false));
             }
             if Pin::new(&mut timer.as_mut().unwrap().1).poll(cx).is_ready() {
                 cx.waker().wake_by_ref();
@@ -225,6 +343,9 @@ async fn drive(
             Poll::Pending
         })
         .await?;
+        if stopped {
+            return Ok(());
+        }
         // Only this loop requests an I/O turn, once per bounded batch.
         async_runtime::yield_to_io().await;
     }

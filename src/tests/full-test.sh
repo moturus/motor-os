@@ -162,6 +162,7 @@ test_vm_configure_ssh
 # IPv6 test network was introduced.
 "$WD/test-build-base-networking.sh"
 "$WD/test-external-sources.sh"
+"$WD/test-wasm-selection.sh"
 "$WD/test-sys-lib-workspace.sh"
 "$WD/test-full-test-size.sh"
 "$WD/test-vm-console-filter.sh"

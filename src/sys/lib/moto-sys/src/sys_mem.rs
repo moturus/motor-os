@@ -54,7 +54,6 @@ impl SysMem {
     pub const F_CUSTOM_USER: u32 = 0x40;
     // Only valid with F_SHARE_SELF; applies to the target mapping, while the
     // caller gets an R+W alias to the same frames. W+X is rejected per mapping.
-    // Targeting the caller's own address space requires CAP_IO_MANAGER.
     pub const F_EXECUTABLE: u32 = 0x80;
 
     // Only with F_READABLE | F_WRITABLE, eager or with F_LAZY: a heap

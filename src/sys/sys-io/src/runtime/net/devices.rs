@@ -37,6 +37,18 @@ impl Devices {
                 .count()
     }
 
+    pub(super) fn external_net_device_pids(&self) -> Vec<u64> {
+        let mut pids: Vec<_> = self
+            .iter()
+            .map(|(_, device)| device)
+            .chain(self.retiring.values().map(|retired| &retired.device))
+            .filter_map(|device| device.provider_pid)
+            .collect();
+        pids.sort_unstable();
+        pids.dedup();
+        pids
+    }
+
     pub(super) fn slot_count(&self) -> usize {
         self.active.len()
     }
@@ -66,8 +78,8 @@ impl Devices {
             .filter_map(|(index, device)| Some((index, device.as_ref()?)))
     }
 
-    /// Withdraw from discovery before detaching users. Existing socket handles
-    /// still index the retiring entry until their final cleanup releases it.
+    /// Withdraw from routing before detaching users. Existing socket handles
+    /// and provider discovery retain the device until cleanup releases it.
     pub(super) fn retire(&mut self, index: usize) -> bool {
         let Some(mut device) = self.active.get_mut(index).and_then(Option::take) else {
             return false;
@@ -118,7 +130,7 @@ impl Devices {
 }
 
 // Indexing is for users that already own a socket or another device resource.
-// New work and enumeration must use get()/get_mut()/iter(), which exclude retirees.
+// New socket work must use get()/get_mut()/iter(), which exclude retirees.
 impl Index<usize> for Devices {
     type Output = NetDev<'static>;
 
@@ -166,8 +178,12 @@ pub(crate) mod self_test {
         let mut devices = Devices::default();
         let boot = devices.push(device("loopback"));
         let other = devices.push(device("wg1"));
+        st_assert!(devices.external_net_device_pids().is_empty());
+        devices[other].provider_pid = Some(29);
         for expected in 2..10 {
             let index = devices.push(device("wg0"));
+            devices[index].provider_pid = Some(17);
+            st_assert_eq!(devices.external_net_device_pids(), vec![17, 29]);
             st_assert_eq!(index, expected);
             let life = Rc::downgrade(&devices[index].device_runtime_notify);
             let buffer = || moto_netstack::socket::icmp::PacketBuffer::new(vec![], vec![]);
@@ -177,6 +193,7 @@ pub(crate) mod self_test {
             );
             let polled = devices[index].poll_completion();
             st_assert!(devices.retire(index));
+            st_assert_eq!(devices.external_net_device_pids(), vec![17, 29]);
             st_assert!(polled.now_or_never().unwrap().is_err());
             st_assert!(!devices.retire(index));
             st_assert!(devices.active[index].is_none());
@@ -192,6 +209,7 @@ pub(crate) mod self_test {
             devices.reap(index);
             st_assert!(life.upgrade().is_some());
             devices.finish_removal(index);
+            st_assert_eq!(devices.external_net_device_pids(), vec![29]);
             st_assert!(life.upgrade().is_none());
             st_assert!(devices.retiring.is_empty());
             st_assert_eq!(devices[boot].name(), "loopback");
@@ -199,6 +217,7 @@ pub(crate) mod self_test {
         }
         st_assert!(devices.retire(other));
         devices.finish_removal(other);
+        st_assert!(devices.external_net_device_pids().is_empty());
         st_assert_eq!(devices.iter().count(), 1);
         st_assert_eq!(devices.slot_count(), 10);
         Ok(())

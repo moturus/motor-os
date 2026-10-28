@@ -2,6 +2,7 @@ permission_policy: "motor-os-permissions.yaml"
 input_files:
   - "/system/services/russhd"
   - "/system/bin/wg"
+  - "/system/bin/wg-tool"
   - "/system/services/strobe"
   - "/system/services/sys-init"
   - "/system/services/sys-tty"
@@ -111,6 +112,7 @@ assembly_required_executables:
   - "rust-analyzer/devtools/rust/bin/rust-analyzer"
   - "javy/devtools/bin/javy"
   - "javy/devtools/bin/wasmi"
+  - "wasmtime/devtools/bin/wasmtime"
   - "wasmtime/devtools/bin/wasmtime-rt"
 source_dirs:
   - source: "src/bin/red"

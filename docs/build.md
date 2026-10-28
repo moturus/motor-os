@@ -136,8 +136,9 @@ src/build-motor-os.sh --javy-only --wasmtime-only
 make dev.img wasm.img BUILD=release -j"$(nproc)"
 ```
 
-Both images install `/devtools/bin/javy`, `/devtools/bin/wasmi` and the
-runtime-only `/devtools/bin/wasmtime-rt`, with Javy's default plugin at
+Both images install `/devtools/bin/javy`, `/devtools/bin/wasmi`, the full
+`/devtools/bin/wasmtime` and runtime-only `/devtools/bin/wasmtime-rt`, with Javy's
+default plugin at
 `/devtools/javy/plugins/default.wasm` and build provenance under
 `/devtools/javy` and `/devtools/wasmtime`. See
 [WebAssembly on Motor OS](wasm.md) for the installed files and the developer
@@ -162,14 +163,16 @@ workspace and compile its dependencies: about 10 seconds for a release image
 and 4 minutes for a debug one. So it needs the `moto-tap` network below and no
 other running VM.
 
-The wasm image has a 1 GiB data partition and does not include the native
-development toolchain. The full Wasmtime compiler follows in a later milestone.
+The wasm image has a 1 GiB data partition and installs the same four wasm
+tools, including the full Wasmtime compiler, but not the native development
+toolchain.
 
 On Motor OS, compile into a writable directory and execute with explicit masks:
 
 ```sh
 MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -o /none/tmp/hello.wasm
 MOTOR_OS_CAPS=0 /devtools/bin/wasmi /none/tmp/hello.wasm
+MOTOR_OS_CAPS=0 /devtools/bin/wasmtime run /none/tmp/hello.wasm
 ```
 
 Javy and Wasmtime follow published `moturus` branches and record resolved
@@ -192,13 +195,34 @@ By default these Rust checks run both release images at 256 and 224 MiB
 checks on the first VM only: Javy static and
 dynamic compilation, TypeScript, default and custom plugins, Wasmi execution,
 memory limits and a deliberately refused page fault, errors, fuel and
-permission refusals, and `wasmtime-rt` lifecycle, limits, artifact
-refusals, TypeScript and WASI p2 sockets. `src/tests/full-test-dev.sh --release`
+permission refusals, and Wasmtime native compilation, raw execution/serving,
+native loading in both CLIs, explicit Pulley, lifecycle, limits, artifact
+refusals, TypeScript, WASI p2 sockets/filesystem, and p2/p3 HTTP hello/echo.
+HTTP checks include fragmented headers, bounded concurrency, p3 defaults and
+instance turnover, foreground Ctrl-C and shutdown during an active response.
+`src/tests/full-test-dev.sh --release`
 runs them on the wasm image at 224 MiB and the developer image at 256 MiB, and
 the Linux identity checks once; debug suites skip them.
-Engine regressions remain in the owning forks. Upstream Brotli is used; compressed
-source bytes can differ between Linux and Motor OS because their math libraries
-round some logarithms differently.
+Engine regressions remain in the owning forks; Wasmtime's suite also runs its
+existing engine checks natively in the VM. Upstream Brotli is used; the
+Linux identity checks require equal output bytes, including compressed source,
+with the same inputs and plugin.
+
+For a focused change, `--suite wasmtime` or `--suite javy` selects the
+smoke binary to build and run; `--suite both` is the default. Image and
+memory selection work the same way with either suite.
+
+The sys-init service-mask checks use separate test images:
+
+```sh
+src/tests/test-wasm.sh --prepare --services --suite wasmtime
+src/tests/test-wasm.sh --services --suite wasmtime
+```
+
+These variants add p2/p3 servers configured with `svc:256:`. The client
+checks their None role and sys-init parent, serves requests, and shuts them
+down. The same image, memory and VMM selectors apply; the release developer
+gate runs this phase on `wasm:224` and `dev:256` too.
 
 For the external sources, the build stages, and their outputs, see
 [Building Motor OS with its external sources](build-motor-os.md); for how the
