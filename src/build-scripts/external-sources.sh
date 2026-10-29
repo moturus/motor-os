@@ -11,9 +11,9 @@
 # is pinned by the forks' lockfiles; external-sources/ keeps no checkout of
 # them.
 MOTOR_JAVY_BRANCH=motor-9.1.0
-MOTOR_JAVY_REV="${MOTOR_JAVY_REV:-571ed9345cab170ce1e91e9617255fc012855cf2}"
+MOTOR_JAVY_REV="${MOTOR_JAVY_REV:-36bd317110dae63e8447d9a9e4d01384415cbb99}"
 MOTOR_WASMTIME_BRANCH=motor-50.0.0
-MOTOR_WASMTIME_REV="${MOTOR_WASMTIME_REV:-b37fb81c8f14698b0da909e7ff8b1277078db7f2}"
+MOTOR_WASMTIME_REV="${MOTOR_WASMTIME_REV:-a7d3ac2395d1200c21ee4160e5ecbdc38b34443a}"
 
 # "repo:branch" follows the branch head; "repo:branch:revision" builds that
 # revision of the branch.

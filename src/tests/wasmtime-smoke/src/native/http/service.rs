@@ -48,6 +48,50 @@ pub(super) fn run() -> Result<()> {
             thread::sleep(Duration::from_millis(10));
         }
     }
+
+    // Run the independent role matrix after these services have exited so
+    // the small-VM compilation checks have the same baseline as the main suite.
+    std::fs::write("/none/wasm-services/roles-start", "start")?;
+    let started = Instant::now();
+    loop {
+        match std::fs::read_to_string("/none/wasm-services/roles-result") {
+            Ok(report) => {
+                print_role_log(&report)?;
+                if report == "PASS" {
+                    break;
+                }
+                return Err(format!("wasm roles: {report}").into());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        if started.elapsed() >= Duration::from_secs(120) {
+            print_role_log("role matrix did not finish within 120s")?;
+            return Err("wasm role workflows did not finish within 120s".into());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    println!("PASS wasm workflows: None, Interactive, System and extra capabilities");
+
+    // This SSH-side driver is Interactive; the System-only test launcher must
+    // return a diagnostic here without starting work or aborting the process.
+    let error = super::super::roles::run()
+        .err()
+        .ok_or("role launcher accepted Interactive")?;
+    if !error
+        .to_string()
+        .contains("role launcher requires System, got Interactive")
+    {
+        return Err(format!("unexpected role launcher diagnostic: {error}").into());
+    }
+    println!("PASS role-launcher-diagnostic: {error}");
+    Ok(())
+}
+
+fn print_role_log(report: &str) -> Result<()> {
+    let log = std::fs::read_to_string("/none/wasm-services/roles.log")
+        .map_err(|error| format!("wasm roles: {report}; reading log: {error}"))?;
+    print!("{log}");
     Ok(())
 }
 

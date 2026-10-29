@@ -9,17 +9,17 @@ Run these commands in the VM's shell:
 
 ```sh
 cd /devtools/src/wasm
-MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -o /none/tmp/hello.wasm
-MOTOR_OS_CAPS=0 /devtools/bin/wasmi /none/tmp/hello.wasm
+/devtools/bin/javy build hello.js -o "$TMPDIR/hello.wasm"
+/devtools/bin/wasmi "$TMPDIR/hello.wasm"
 ```
 
 The same module runs natively with Wasmtime, or can be compiled once and
 loaded by either Wasmtime CLI:
 
 ```sh
-MOTOR_OS_CAPS=0 /devtools/bin/wasmtime run /none/tmp/hello.wasm
-MOTOR_OS_CAPS=0x200 /devtools/bin/wasmtime compile /none/tmp/hello.wasm -o /none/tmp/hello.cwasm
-MOTOR_OS_CAPS=0 /devtools/bin/wasmtime-rt run --allow-precompiled /none/tmp/hello.cwasm
+/devtools/bin/wasmtime run "$TMPDIR/hello.wasm"
+/devtools/bin/wasmtime compile "$TMPDIR/hello.wasm" -o "$TMPDIR/hello.cwasm"
+/devtools/bin/wasmtime-rt run --allow-precompiled "$TMPDIR/hello.cwasm"
 ```
 
 Expected output of each run:
@@ -29,10 +29,12 @@ Hello from WebAssembly on Motor OS!
 {"squares":[1,4,9,16],"total":30}
 ```
 
-The capability masks launch the tools with role None. `0x200` grants
-filesystem write access for an output file; running a module needs no
-capabilities for this example. `/none/tmp` is writable by role None. Javy
-embeds the default QuickJS plugin, so no plugin argument is needed.
+All workflows run as None, Interactive or System. These commands inherit the
+shell's role and use its writable `TMPDIR`. Writing output requires
+`CAP_FS_WRITE`; running this example needs no capabilities. To explicitly
+select None, use `MOTOR_OS_CAPS=0x200` for compilation, `MOTOR_OS_CAPS=0` for
+execution, and `/none/tmp/hello.wasm` and `/none/tmp/hello.cwasm` for the output
+paths. Javy embeds the default QuickJS plugin, so no plugin argument is needed.
 
 Edit `hello.js` and repeat the commands to compile and run your changes.
 See `/devtools/www/wasm.html` for the installed tools and support files.

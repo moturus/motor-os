@@ -151,7 +151,7 @@ pub(super) fn run(suite: &mut Suite) -> Result<()> {
     post_return::run(suite)
 }
 
-fn address(log: &str, prefix: &str) -> Result<SocketAddr> {
+pub(super) fn address(log: &str, prefix: &str) -> Result<SocketAddr> {
     let address = log
         .lines()
         .find_map(|line| line.strip_prefix(prefix))
@@ -159,7 +159,12 @@ fn address(log: &str, prefix: &str) -> Result<SocketAddr> {
     Ok(address.trim_end_matches('/').parse()?)
 }
 
-fn request(addr: SocketAddr, body: &[u8], expected: &[u8], fragmented: bool) -> Result<()> {
+pub(super) fn request(
+    addr: SocketAddr,
+    body: &[u8],
+    expected: &[u8],
+    fragmented: bool,
+) -> Result<()> {
     let socket = connect(addr)?;
     let mut writer = socket.try_clone()?;
     let headers = format!(
@@ -189,7 +194,7 @@ fn request(addr: SocketAddr, body: &[u8], expected: &[u8], fragmented: bool) -> 
     })
 }
 
-fn connect(addr: SocketAddr) -> Result<TcpStream> {
+pub(super) fn connect(addr: SocketAddr) -> Result<TcpStream> {
     let socket = TcpStream::connect_timeout(&addr, IO_TIMEOUT)?;
     socket.set_read_timeout(Some(IO_TIMEOUT))?;
     socket.set_write_timeout(Some(IO_TIMEOUT))?;

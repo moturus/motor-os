@@ -20,6 +20,7 @@ const KILLED: i32 = -1;
 
 pub struct Suite {
     name: &'static str,
+    output: Box<dyn Write>,
     pub root: PathBuf,
     cases: usize,
     refusals: u64,
@@ -30,16 +31,37 @@ impl Suite {
     /// Prints the installed provenance in `sources` and creates a scratch
     /// directory writable by role None.
     pub fn new(name: &'static str, sources: &str) -> Result<Self> {
+        Self::new_in(
+            name,
+            sources,
+            Path::new("/none/wasm-tests"),
+            std::io::stdout(),
+        )
+    }
+
+    /// Creates a suite beneath an existing test directory and reports to `output`.
+    pub fn new_in(
+        name: &'static str,
+        sources: &str,
+        parent: &Path,
+        output: impl Write + 'static,
+    ) -> Result<Self> {
         // Retained outputs stay on disk so the small-VM memory measurements
-        // exclude fixture storage. Child TMPDIR still exercises /none/tmp.
-        let root = PathBuf::from(format!("/none/wasm-tests/{name}-{}", std::process::id()));
+        // exclude fixture storage. Children keep their role-specific TMPDIR.
+        let root = parent.join(format!("{name}-{}", std::process::id()));
         create_writable_dir(&root)?;
-        println!("{name}: installed-tool checks; scratch={}", root.display());
-        println!("{}", fs::read_to_string(sources)?);
+        let mut output = Box::new(output);
+        writeln!(
+            output,
+            "{name}: installed-tool checks; scratch={}",
+            root.display()
+        )?;
+        writeln!(output, "{}", fs::read_to_string(sources)?)?;
         let available = MemoryStats::get().map_err(|e| format!("{e:?}"))?.available;
-        println!("usable_memory_bytes={available}");
+        writeln!(output, "usable_memory_bytes={available}")?;
         Ok(Self {
             name,
+            output,
             root,
             cases: 0,
             refusals: admission_refusals()?,
@@ -88,6 +110,7 @@ impl Suite {
         let stdout_path = self.root.join(format!("{label}.stdout"));
         let stderr_path = self.root.join(format!("{label}.stderr"));
         let mut rush = Command::new("/system/bin/rush");
+        preserve_system_role(&mut rush);
         rush.args(["-c", command])
             .current_dir(&self.root)
             .stdin(if piped { Stdio::piped() } else { Stdio::null() })
@@ -137,11 +160,12 @@ impl Suite {
                 format!("{label}: expected exit {code}, got {status}\n{stdout}\n{stderr}").into(),
             );
         }
-        println!(
+        writeln!(
+            self.output,
             "PASS {label}: exit={code} elapsed_ms={} sampled_vm_peak_bytes={peak} max_gap_us={}",
             job.started.elapsed().as_millis(),
             gap.as_micros()
-        );
+        )?;
         self.cases += 1;
         Ok((stdout, stderr))
     }
@@ -172,7 +196,10 @@ impl Suite {
         if refused != 1 {
             return Err(format!("{label}: {refused} admission refusals, not one").into());
         }
-        println!("{label}: held={hold} expected_admission_refusals=1");
+        writeln!(
+            self.output,
+            "{label}: held={hold} expected_admission_refusals=1"
+        )?;
         self.refusals += 1;
         self.expected_refusals += 1;
         Ok(())
@@ -200,15 +227,16 @@ impl Suite {
 
     /// Fails on any memory admission refusal since `new` and removes the
     /// scratch directory.
-    pub fn finish(self) -> Result<()> {
+    pub fn finish(mut self) -> Result<()> {
         if admission_refusals()? != self.refusals {
             return Err("unexpected memory admission refusals".into());
         }
         fs::remove_dir_all(&self.root)?;
-        println!(
+        writeln!(
+            self.output,
             "{}: {} commands PASS; admission_refusal_delta=0 expected_refusals={}",
             self.name, self.cases, self.expected_refusals
-        );
+        )?;
         Ok(())
     }
 }
@@ -305,15 +333,24 @@ pub fn used_memory() -> Result<u64> {
 /// Directories are created readable but not writable for lower roles.
 fn create_writable_dir(dir: &Path) -> Result<()> {
     fs::create_dir(dir)?;
-    if !Command::new("/system/bin/chmod")
-        .arg("rwxrwxrwx")
-        .arg(dir)
-        .status()?
-        .success()
-    {
+    let mut chmod = Command::new("/system/bin/chmod");
+    preserve_system_role(&mut chmod);
+    if !chmod.arg("rwxrwxrwx").arg(dir).status()?.success() {
         return Err(format!("could not make {dir:?} writable to role None").into());
     }
     Ok(())
+}
+
+/// System does not propagate on ordinary spawns. Keep the launcher's authority
+/// for its shell and for chmod of directories it created as System.
+fn preserve_system_role(command: &mut Command) {
+    let caps = moto_sdk::sys::ProcessStaticPage::get().capabilities;
+    if caps & moto_sdk::sys::caps::CAP_SYS != 0 {
+        command.env(
+            moto_sdk::sys::caps::MOTOR_OS_CAPS_ENV_KEY,
+            format!("0x{caps:x}"),
+        );
+    }
 }
 
 fn admission_refusals() -> Result<u64> {

@@ -61,32 +61,22 @@ pub fn run(once: Once) -> Result<()> {
         "MOTOR_OS_CAPS=0 /devtools/bin/wasmi --version",
         0,
     )?;
-    suite.refusal(
-        "compiler-role-refusal",
-        "/devtools/bin/javy build missing.js -o forbidden.wasm",
-        "role None",
-    )?;
-    suite.refusal(
-        "runner-role-refusal",
-        "/devtools/bin/wasmi missing.wasm",
-        "role None",
-    )?;
-    // The driver can pass its spawn capability; ordinary children do not inherit CAP_LOG.
-    suite.refusal(
-        "compiler-cap-refusal",
-        "MOTOR_OS_CAPS=0x204 /devtools/bin/javy build missing.js -o forbidden.wasm",
-        "excess capabilities",
-    )?;
-    suite.refusal(
-        "runner-cap-refusal",
-        "MOTOR_OS_CAPS=0x104 /devtools/bin/wasmi missing.wasm",
-        "excess capabilities",
-    )?;
     fs::write(
         suite.root.join("hello.js"),
         include_str!("../fixtures/hello.js"),
     )?;
-    suite.compile("hello-static", "hello.js", "hello.wasm", "-C deterministic")?;
+    suite.command(
+        "hello-inherited-role",
+        "/devtools/bin/javy build hello.js -o hello.wasm -C deterministic",
+        0,
+    )?;
+    let (stdout, stderr) = suite.command(
+        "hello-inherited-role-execute",
+        "/devtools/bin/wasmi hello.wasm",
+        0,
+    )?;
+    assert_eq!(stdout, "hello from Motor 42\n");
+    assert!(stderr.is_empty());
     suite.execute("hello-execute", "hello.wasm", "", "hello from Motor 42\n")?;
     suite.compile(
         "hello-explicit-plugin",

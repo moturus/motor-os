@@ -1,5 +1,6 @@
 //! Installed Wasmtime tools with fixtures from the same fork and configuration.
 use std::fs;
+use std::io::Write;
 use std::time::{Duration, Instant};
 
 use wasm_smoke_suite::{Job, Result, Suite, process_active};
@@ -8,6 +9,7 @@ mod compiler;
 mod filesystem;
 mod http;
 mod p3;
+mod roles;
 
 const RUNTIME: &str = "/devtools/bin/wasmtime-rt";
 const COMPILER: &str = "/devtools/bin/wasmtime";
@@ -62,16 +64,6 @@ pub fn run_suite(suite: &mut Suite) -> Result<()> {
         "engine-tests",
         &format!("MOTOR_OS_CAPS=0x200 {FIXTURES}/engine-tests"),
         0,
-    )?;
-    suite.refusal(
-        "role-refusal",
-        &format!("{RUNTIME} run --allow-precompiled {FIXTURES}/lifecycle.cwasm"),
-        "role None",
-    )?;
-    suite.refusal(
-        "cap-refusal",
-        &invocation("0x104", "", "lifecycle"),
-        "excess capabilities",
     )?;
 
     // Command lifecycle: stdio, exit status, traps and interruption.
@@ -293,12 +285,26 @@ fn runtime_pid(job: &Job) -> Result<u64> {
 }
 
 pub fn run() -> Result<()> {
-    let mut suite = Suite::new("wasmtime-smoke", "/devtools/wasmtime/sources.txt")?;
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.as_slice() == ["--roles"] {
+        let result = roles::run();
+        let report = match &result {
+            Ok(()) => "PASS".to_owned(),
+            Err(error) => format!("FAIL: {error}"),
+        };
+        writeln!(roles::open_log()?, "{report}")?;
+        fs::write("/none/wasm-services/roles-result.tmp", report)?;
+        fs::rename(
+            "/none/wasm-services/roles-result.tmp",
+            "/none/wasm-services/roles-result",
+        )?;
+        return result;
+    }
+    let mut suite = Suite::new("wasmtime-smoke", "/devtools/wasmtime/sources.txt")?;
     match args.as_slice() {
         [] => run_suite(&mut suite)?,
         [arg] if arg == "--services" => http::services()?,
-        _ => return Err("usage: wasmtime-smoke [--services]".into()),
+        _ => return Err("usage: wasmtime-smoke [--services | --roles]".into()),
     }
     suite.finish()
 }

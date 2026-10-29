@@ -150,6 +150,14 @@ for vm in "${vms[@]}"; do
     if [ "$suite" = javy-smoke ]; then args=("${once[@]}"); once=(); fi
     vm_ssh "/user/tmp/$suite" "${args[@]}" 2>&1 | tee -a "$evidence/$label.log"
   done
+  if [ "$services" = true ]; then
+    for role in none none-extra interactive system; do
+      grep -Eq "^PASS $role-serve-runtime: exit=0 elapsed_ms=[0-9]+ sampled_vm_peak_bytes=[1-9][0-9]* max_gap_us=[0-9]+$" \
+        "$evidence/$label.log" || fail "$label lost $role launcher evidence"
+    done
+    grep -Eq '^wasm-roles: [1-9][0-9]* commands PASS; admission_refusal_delta=0 expected_refusals=0$' \
+      "$evidence/$label.log" || fail "$label lost the role matrix summary"
+  fi
   vm_ssh shutdown
   status=0
   wait "$VMM_PID" || status=$?

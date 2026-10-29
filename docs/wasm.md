@@ -31,9 +31,12 @@ not installed;
 during tests. The low-RAM qualification keeps these fixtures and retained
 outputs on disk; the tools' None-role `TMPDIR` still uses memfs at `/none/tmp`.
 
-Both Wasmtime CLIs run as role None (`MOTOR_OS_CAPS=0`, `0x100`, `0x200` or
-`0x300`). Raw `run` needs no filesystem-write capability. `compile` needs
-`0x200` to write its output. Loading a compiled artifact needs
+All four tools and their compile, run, plugin and serve workflows run as
+None, Interactive or System, with the caller's ordinary capabilities. None-role
+masks `MOTOR_OS_CAPS=0`, `0x100`, `0x200` and `0x300` remain sufficient for
+read-only, network, filesystem-write and combined access respectively.
+Raw `run` needs no filesystem-write capability. `compile` needs
+`CAP_FS_WRITE` (`0x200`) to write its output. Loading a compiled artifact needs
 `--allow-precompiled`; only load trusted artifacts from a matching build and
 configuration. Native Motor artifacts are specific to Motor, and are not
 interchangeable with Linux artifacts. Explicit `--target pulley64` selects
@@ -123,17 +126,17 @@ In the developer VM's shell:
 
 ```sh
 cd /devtools/src/wasm
-MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -o /none/tmp/hello.wasm
-MOTOR_OS_CAPS=0 /devtools/bin/wasmi /none/tmp/hello.wasm
+/devtools/bin/javy build hello.js -o "$TMPDIR/hello.wasm"
+/devtools/bin/wasmi "$TMPDIR/hello.wasm"
 ```
 
 The same Wasm can run directly with Wasmtime, or be compiled once and loaded
 by either Wasmtime CLI:
 
 ```sh
-MOTOR_OS_CAPS=0 /devtools/bin/wasmtime run /none/tmp/hello.wasm
-MOTOR_OS_CAPS=0x200 /devtools/bin/wasmtime compile /none/tmp/hello.wasm -o /none/tmp/hello.cwasm
-MOTOR_OS_CAPS=0 /devtools/bin/wasmtime-rt run --allow-precompiled /none/tmp/hello.cwasm
+/devtools/bin/wasmtime run "$TMPDIR/hello.wasm"
+/devtools/bin/wasmtime compile "$TMPDIR/hello.wasm" -o "$TMPDIR/hello.cwasm"
+/devtools/bin/wasmtime-rt run --allow-precompiled "$TMPDIR/hello.cwasm"
 ```
 
 `wasmtime serve handler.wasm` likewise compiles a WASI HTTP component and
@@ -147,10 +150,13 @@ Hello from WebAssembly on Motor OS!
 {"squares":[1,4,9,16],"total":30}
 ```
 
-The masks launch the tools with role None: `0x200` grants Javy filesystem
-write access for its output, while Wasmi needs no capabilities for this example.
-`/none/tmp` is writable by role None. The default plugin is embedded, and the
-example runs offline. Edit `hello.js` and repeat the commands to try changes.
+These commands inherit the shell's role and use its writable `TMPDIR`:
+`/user/tmp` for Interactive, `/system/tmp` for System, and `/none/tmp` for None.
+To explicitly select None from a more privileged shell, use
+`MOTOR_OS_CAPS=0x200` for Javy and `wasmtime compile`, `MOTOR_OS_CAPS=0` for
+the runners, and replace the output paths with `/none/tmp/hello.wasm` and
+`/none/tmp/hello.cwasm`. The default plugin is embedded, and the example runs
+offline. Edit `hello.js` and repeat the commands to try changes.
 
 See [Building Motor OS](build.md) for image construction and the focused
 installed-tool checks, and [capabilities](caps.md) for the masks.
@@ -158,5 +164,6 @@ installed-tool checks, and [capabilities](caps.md) for the masks.
 The host-side `src/tests/test-wasm.sh` checks the installed tools.
 `src/tests/full-test-dev.sh --release` runs these checks on the wasm image at
 224 MiB and the developer image at 256 MiB. Javy's Linux byte-identity checks
-run on the first VM only; Wasmtime service-mask checks run on both images.
+run on the first VM only; Wasmtime service-mask checks and compile/run/plugin/
+serve checks under all process roles run on both images.
 Debug runs skip these Wasm checks.
