@@ -321,7 +321,7 @@ fn rotation_and_space_cleanup(slot: &str) {
         .saturating_sub(other_previous_bytes)
         .saturating_sub(2 * 1024 * 1024)
         .max(8 * 1024 * 1024);
-    let fill_path = crate::temp_path(&format!(
+    let fill_path = crate::disk_temp_path(&format!(
         "strobe-space-{:016x}",
         std::random::random::<u64>(..)
     ));

@@ -107,6 +107,14 @@ pub(crate) fn none_temp_path(name: &str) -> std::path::PathBuf {
     std::path::Path::new("/none/tmp").join(name)
 }
 
+/// Motor FS scratch for tests that must reach the disk: every role's tmp is memfs.
+pub(crate) const DISK_TEMP_DIR: &str = "/user/test-tmp";
+
+pub(crate) fn disk_temp_path(name: &str) -> std::path::PathBuf {
+    std::fs::create_dir_all(DISK_TEMP_DIR).unwrap();
+    std::path::Path::new(DISK_TEMP_DIR).join(name)
+}
+
 pub(crate) fn set_directory_access(
     path: &std::path::Path,
     access: moto_sdk::io::fs::AccessPermissions,

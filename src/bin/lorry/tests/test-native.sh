@@ -14,7 +14,9 @@ fi
 MOTOR_TOOLCHAIN="$LORRY_MOTOR_TOOLCHAIN"
 MOTOR_LINKER="$LORRY_MOTOR_LINKER"
 MOTOR_SYSROOT="$LORRY_MOTOR_SYSROOT"
-REMOTE_BASE="/user/tmp/lorry-self"
+# On disk: /user/tmp is memfs, and --warm keeps the guest tree across boots.
+REMOTE_TEST_TMP="/user/test-tmp"
+REMOTE_BASE="$REMOTE_TEST_TMP/lorry-self"
 NONE_REMOTE_ROOT="/none/tmp/lorry-self-none"
 # CAP_SPAWN and CAP_FS_WRITE without CAP_INTERACTIVE: a None-role process.
 NONE_CAPS=0x204
@@ -571,6 +573,7 @@ run_native() {
     local clippy_fixture="$REMOTE_ROOT/clippy-native-fixture"
     local destination="$REMOTE_ROOT/lorry-first"
 
+    remote_command "[ -d $REMOTE_TEST_TMP ] || /system/bin/mkdir $REMOTE_TEST_TMP"
     remote_command "[ -d $REMOTE_BASE ] || /system/bin/mkdir $REMOTE_BASE"
     remote_command "[ -d $REMOTE_ROOT ] || /system/bin/mkdir $REMOTE_ROOT"
     REMOTE_CREATED=1

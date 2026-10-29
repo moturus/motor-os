@@ -4,7 +4,9 @@ use moto_sdk::sys_io::api_fs;
 use std::io::ErrorKind;
 
 const RAM_DIR: &str = "/none/tmp/systest-mounts";
-const DISK_DIR: &str = "/user/tmp/systest-mounts";
+// In crate::DISK_TEMP_DIR, on Motor FS.
+const DISK_DIR: &str = "/user/test-tmp/systest-mounts";
+const MEMFS_MOUNTS: [&str; 3] = ["/none/tmp", "/system/tmp", "/user/tmp"];
 
 async fn memfs_mount(client: &std::rc::Rc<FsClient>) -> Result<MountInfo, String> {
     client
@@ -81,6 +83,7 @@ fn namespace() {
             .all(|entry| { entry.unwrap().file_name() != ".shadowed-by-memfs" })
     );
     std::fs::create_dir(RAM_DIR).unwrap();
+    std::fs::create_dir_all(crate::DISK_TEMP_DIR).unwrap();
     std::fs::create_dir(DISK_DIR).unwrap();
     let pattern: Vec<u8> = (0..100_003).map(|i| (i * 17 + i / 256) as u8).collect();
     let ram = format!("{RAM_DIR}/file");
@@ -144,6 +147,15 @@ fn namespace() {
 
     moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().unwrap();
+        let mounts = client.mounts().await.unwrap();
+        for path in MEMFS_MOUNTS {
+            assert!(
+                mounts
+                    .iter()
+                    .any(|mount| mount.path == path && mount.kind == MountKind::MemFs),
+                "missing {path} memfs mount: {mounts:?}"
+            );
+        }
         let mount = memfs_mount(&client).await.unwrap();
         assert!(mount.id != 0 && !mount.corrupted);
         assert!(mount.used.is_some() && mount.entries.is_some() && mount.cap.is_some());
@@ -362,13 +374,16 @@ fn memory() {
                     check(count != 0, "zero cache workload write")?;
                     offset += count as u64;
                 }
+                // The workload drained this mount's cache: the total is now
+                // the other memfs mounts' share.
+                let others = metric("fs.memfs.cached_free_bytes")?;
                 client
                     .delete_entry(file)
                     .await
                     .map_err(|err| err.to_string())?;
                 held[0] = None;
                 check(
-                    metric("fs.memfs.cached_free_bytes")? <= cache_cap,
+                    metric("fs.memfs.cached_free_bytes")?.saturating_sub(others) <= cache_cap,
                     "free cache exceeds cap",
                 )?;
                 let after = memfs_mount(&client).await?;
@@ -429,7 +444,7 @@ fn memory() {
                 .map_err(|err| err.to_string())?;
             held[0] = None;
             let (disk_dir, _) = client
-                .stat("/user/tmp")
+                .stat(crate::DISK_TEMP_DIR)
                 .await
                 .map_err(|err| err.to_string())?;
             let disk_probe = client

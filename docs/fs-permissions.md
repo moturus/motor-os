@@ -9,10 +9,12 @@ This document describes permissions on newly built images. It does not define
 a migration for existing images and does not impose an OS-wide W^X rule on
 files created after boot.
 
-`/none/tmp` is an empty, volatile memfs after each boot. Its root inherits the
-image's `rwxrwxrwx` mode through `/system/cfg/sys-fs.toml`; only System may
-change a mounted root's mode. `/user/tmp` and `/system/tmp` remain on disk.
-Memfs charges live data and metadata against its configured capacity. With
+`/system/tmp`, `/user/tmp` and `/none/tmp` are empty, volatile memfs mounts
+after each boot, configured by `/system/cfg/sys-fs.toml`. Each root inherits
+its directory's image mode; only System may change a mounted root's mode.
+Tests that need Motor FS storage, or data that survives a reboot, use
+`/user/test-tmp` instead. Memfs charges live data and metadata against each
+mount's configured capacity. With
 the default configuration the cap is guest RAM rounded down to 16 MiB, minus
 16 MiB, with an 8 MiB minimum. Allocating requests also preserve a sampled
 16 MiB memory reserve (8 MiB below 32 MiB RAM); cached free pages are reclaimed

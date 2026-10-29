@@ -1357,7 +1357,10 @@ check_ls_colors() {
   [ "$style" = $'\033'"[0;91m" ] ||
     fail "ls $option executable style was '$style'"
 
-  output="$(rmux_ls "$option" /user/cfg | vm_rmux 2>&1)"
+  # Files created at run time are executable by System, so use a shipped one,
+  # listed alone: a listing of /user/cfg can wrap inside the name on the
+  # 80-column pane. The glob keeps the name out of the echoed command.
+  output="$(rmux_ls "$option" '/user/cfg/rush.t?ml' | vm_rmux 2>&1)"
   case "$output" in
     *"rush.toml"*) ;;
     *) fail "ls $option did not list the non-executable test file: '$output'" ;;
