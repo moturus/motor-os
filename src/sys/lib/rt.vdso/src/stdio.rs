@@ -1685,9 +1685,11 @@ impl PosixFile for ChildStdio {
     }
 
     fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
+        // The peer is gone: the same error the pipe itself reports once it
+        // sees the reader closing, so a writer learns of the child's exit the
+        // same way whichever side noticed first.
         if self.event_source.is_closed() {
-            // return Ok(0);
-            return Err(moto_rt::E_BAD_HANDLE);
+            return Err(moto_rt::E_NOT_CONNECTED);
         }
         if self.scan_ctrl_c
             && let Some(consumed) = self.inner.ctrl_c_scan(buf, |action| {
