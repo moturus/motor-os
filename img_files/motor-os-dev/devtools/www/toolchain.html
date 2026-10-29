@@ -559,7 +559,7 @@ for security-sensitive environments: it takes the same <code>Cargo.toml</code> a
 dependencies once and explicitly with <code>lorry vendor</code>, and then builds, runs, and
 tests packages offline using
 <code>/devtools/bin/rustc</code> and, for crates with C parts, <code>/devtools/bin/cc</code>
-and <code>llvm ar</code>. It builds red, gears, and itself natively in the developer-image test.
+and <code>llvm ar</code>. It builds red and itself natively in the developer-image test.
 It has its own page: <a href="lorry.html">Lorry: the package manager</a>.</p>
 <pre><code>lorry new hello && cd hello
 lorry vendor --accept-all      # once, with network access

@@ -441,12 +441,11 @@ mod tests {
         );
     }
 
-    /// The argument vector gears sends (long forms of the same options its
-    /// host transport passes to upstream curl).
+    /// A streaming API request with an environment-expanded credential.
     #[test]
-    fn parses_gears_argument_vector() {
+    fn parses_streaming_api_argument_vector() {
         // SAFETY: this test's variable name is unique to it.
-        unsafe { std::env::set_var("CURL_TEST_GEARS_KEY", "sk-secret") };
+        unsafe { std::env::set_var("CURL_TEST_STREAM_KEY", "sk-secret") };
         let action = Options::parse([
             "--disable",
             "--silent",
@@ -473,9 +472,9 @@ mod tests {
             "--header",
             "Content-Type: application/json",
             "--variable",
-            "%CURL_TEST_GEARS_KEY",
+            "%CURL_TEST_STREAM_KEY",
             "--expand-header",
-            "Authorization: Bearer {{CURL_TEST_GEARS_KEY}}",
+            "Authorization: Bearer {{CURL_TEST_STREAM_KEY}}",
             "--data-binary",
             "@-",
             "https://openrouter.ai/api/v1/chat/completions",

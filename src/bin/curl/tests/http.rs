@@ -46,7 +46,7 @@ fn options(url: String) -> Options {
         url,
         max_time: Duration::from_secs(3),
         // An explicit HTTP transfer must not attempt to load this file.
-        ca_cert: Some("/nonexistent/gears-http-ca.pem".into()),
+        ca_cert: Some("/nonexistent/http-ca.pem".into()),
         ..Options::default()
     }
 }

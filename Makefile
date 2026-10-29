@@ -60,7 +60,7 @@ sys-base: strobe sys-io sys-init sys-tty
 sys: sys-base dns-resolver
 user-base: sysbox rush red rmux russhd
 user: user-base kibim httpd httpd-axum ssh wg
-user-dev: user curl gears gix lorry mdbg rnetbench crossbench \
+user-dev: user curl gix lorry mdbg rnetbench crossbench \
 	systest mio-test tokio-tests crossterm-smoke wg-self-test
 
 .PHONY: all images boot core sys-base sys user-base user user-dev
@@ -68,7 +68,7 @@ user-dev: user curl gears gix lorry mdbg rnetbench crossbench \
 .PHONY: mbr.bin boot.bin kloader kernel vdso
 .PHONY: strobe sys-io sys-init sys-tty dns-resolver
 .PHONY: sysbox sysbox-tests systest mio-test tokio-tests crossterm-smoke
-.PHONY: rush kibim red rmux russhd ssh httpd httpd-axum gears
+.PHONY: rush kibim red rmux russhd ssh httpd httpd-axum
 .PHONY: gix lorry curl wg wg-self-test
 .PHONY: mdbg rnetbench crossbench
 .PHONY: clean clippy
@@ -230,13 +230,6 @@ rnetbench:
 	cd src/bin/rnetbench && CARGO_TARGET_DIR="$(OBJ_DIR)/rnetbench" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/rnetbench" "$(OBJ_DIR)/rnetbench/$(SUB_DIR)/rnetbench"
 
-gears:
-	mkdir -p $(BIN_DIR)
-	cd src/bin/gears && CARGO_TARGET_DIR="$(OBJ_DIR)/gears" \
-		$(DO_BUILD) --bins
-	strip -o "$(BIN_DIR)/gears" "$(OBJ_DIR)/gears/$(SUB_DIR)/gears"
-	strip -o "$(BIN_DIR)/gears-batteries" "$(OBJ_DIR)/gears/$(SUB_DIR)/gears-batteries"
-
 lorry:
 	mkdir -p $(BIN_DIR)
 	# Prepare the exact cc-rs archive used by the offline C++ contract.
@@ -388,7 +381,6 @@ clippy: vdso
 	cd src/bin/red && $(DO_CLIPPY)
 	cd src/bin/rmux && $(DO_CLIPPY)
 	cd src/bin/rnetbench && $(DO_CLIPPY)
-	cd src/bin/gears && $(DO_CLIPPY) --bins --examples
 	cd src/bin/gix && \
 		cargo fetch --locked && \
 		CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$(MOTOR_SYSROOT)/bin/motor-clang" \

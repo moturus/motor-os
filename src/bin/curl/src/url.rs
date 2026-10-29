@@ -159,7 +159,7 @@ impl HttpUrl {
 }
 
 /// Schemes are case-insensitive (RFC 3986 §3.1); upstream curl accepts
-/// `HTTP://` and Gears forwards the URL text as configured.
+/// `HTTP://` and callers may forward URL text as configured.
 fn split_scheme(value: &str) -> Option<(Scheme, &str)> {
     let (scheme, rest) = value.split_once("://")?;
     if scheme.eq_ignore_ascii_case("http") {

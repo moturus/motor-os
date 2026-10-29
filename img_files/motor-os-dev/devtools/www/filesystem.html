@@ -437,7 +437,7 @@ with the permission model below showing through <code>Permissions</code>.</p>
   <tr><td><code>/system/logs</code></td><td>Service logs written by strobe. Interactive may read them; None cannot enter the directory.</td></tr>
   <tr><td><code>/system/tmp</code></td><td>System scratch, closed to other roles.</td></tr>
   <tr><td><code>/user/bin</code></td><td>User programs: red, rmux, kibim, httpd, httpd-axum. Interactive may install programs here.</td></tr>
-  <tr><td><code>/user/cfg</code></td><td>Interactive configuration and credentials (red, rmux, kibim, gears, lorry). Hidden from None.</td></tr>
+  <tr><td><code>/user/cfg</code></td><td>Interactive configuration and credentials (red, rmux, kibim, lorry). Hidden from None.</td></tr>
   <tr><td><code>/user/tmp</code></td><td>Interactive scratch, closed to None.</td></tr>
   <tr><td><code>/none</code></td><td>The None role's home: <code>cfg</code> for its configuration and <code>tmp</code> for its scratch, both writable by None.</td></tr>
   <tr><td><code>/devtools</code></td><td>Developer image only: <code>bin</code>, <code>llvm</code>, <code>rust</code>, <code>lorry</code>, <code>tests</code>, <code>www</code>, and the writable <code>src</code> tree.</td></tr>

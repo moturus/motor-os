@@ -84,7 +84,7 @@ What works today:
   Lorry, a smaller, stricter Cargo replacement for security-sensitive
   environments (Cargo-compatible: the same `Cargo.toml` and `Cargo.lock`,
   byte-identical binaries; but offline, with every dependency fetched once,
-  checked, and approved before it is built), plus Gears, curl, mdbg, and the
+  checked, and approved before it is built), plus curl, mdbg, and the
   test suites.
 
 ## Status

@@ -355,7 +355,7 @@ fn enforces_the_total_transfer_timeout() {
     assert_eq!(error.code(), CurlError::TIMEOUT);
 }
 
-/// The gears transport in one test: a POST whose body arrives on stdin,
+/// A streaming POST whose body arrives on stdin,
 /// whose Authorization header reaches the argument vector only as a
 /// variable name, and whose response comes back head first (`--include`).
 #[test]

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="What the Motor OS developer image adds: gix, Lorry, Gears, mdbg, the native toolchain, curl, Lua, and the test suites.">
+<meta name="description" content="What the Motor OS developer image adds: gix, Lorry, mdbg, the native toolchain, curl, Lua, and the test suites.">
 <meta name="theme-color" content="#0a0a0a">
 <title>Developer image | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
@@ -399,18 +399,18 @@ a.card h3 { color: var(--accent); }
 <h1>Developer image</h1>
 <p class="lead"><code>motor-os-dev.qcow2</code> is the standard image plus everything
 needed to build and test programs inside the VM: native C, C++, and Rust compilers, gix,
-Lorry, Gears, curl, Lua, sed, mdbg, the test suites, and source snapshots. It is 4 GB and is normally
+Lorry, curl, Lua, sed, mdbg, the test suites, and source snapshots. It is 4 GB and is normally
 started with <code>run-dev.sh</code> (8 vCPUs, 8 GiB).</p>
 
 <h2>Layout</h2>
 <div class="table-wrap">
 <table>
   <tr><th>Path</th><th>Contents</th></tr>
-  <tr><td><code>/devtools/bin</code></td><td><code>cc</code>, <code>c++</code>, <code>rustc</code>, <code>rustfmt</code>, <code>clippy-driver</code> (launcher scripts), <code>gix</code>, <code>lorry</code>, <code>gears</code>, <code>mdbg</code>, <code>lua</code>, <code>sed</code>, <a href="wasm.html"><code>javy</code>, <code>wasmi</code>, <code>wasmtime</code> and <code>wasmtime-rt</code></a>, and <code>www</code>, the script that serves this website. On <code>PATH</code>.</td></tr>
+  <tr><td><code>/devtools/bin</code></td><td><code>cc</code>, <code>c++</code>, <code>rustc</code>, <code>rustfmt</code>, <code>clippy-driver</code> (launcher scripts), <code>gix</code>, <code>lorry</code>, <code>mdbg</code>, <code>lua</code>, <code>sed</code>, <a href="wasm.html"><code>javy</code>, <code>wasmi</code>, <code>wasmtime</code> and <code>wasmtime-rt</code></a>, and <code>www</code>, the script that serves this website. On <code>PATH</code>.</td></tr>
   <tr><td><code>/devtools/llvm</code></td><td>The LLVM multicall binary (clang, lld, and the tools), headers, and static libraries: mlibc, libc++, libc++abi, libunwind, compiler-rt, and the C ABI shim over the runtime.</td></tr>
   <tr><td><code>/devtools/rust</code></td><td>Native rustc, rustfmt, clippy-driver, and rust-analyzer with a full <code>x86_64-unknown-motor</code> sysroot and matching <code>rust-src</code>. There is no Cargo on the image; Lorry is the build driver.</td></tr>
-  <tr><td><code>/devtools/src</code></td><td>Writable workspace with sample sources under <code>hello-world/</code> and <a href="wasm.html"><code>wasm/</code></a>, and snapshots of red, lorry, gears, moto-rt, and moto-sys under <code>motor-os/</code>, so that those can be rebuilt natively.</td></tr>
-  <tr><td><code>/devtools/tests</code></td><td><code>systest</code>, <code>mio-test</code>, <code>tokio-tests</code>, <code>crossterm-smoke</code>, <code>crossbench</code>, <code>rnetbench</code>, and <code>gears/gears-mock-provider</code>.</td></tr>
+  <tr><td><code>/devtools/src</code></td><td>Writable workspace with sample sources under <code>hello-world/</code> and <a href="wasm.html"><code>wasm/</code></a>, and snapshots of red, lorry, moto-rt, and moto-sys under <code>motor-os/</code>, so that those can be rebuilt natively.</td></tr>
+  <tr><td><code>/devtools/tests</code></td><td><code>systest</code>, <code>mio-test</code>, <code>tokio-tests</code>, <code>crossterm-smoke</code>, <code>crossbench</code>, <code>rnetbench</code>.</td></tr>
   <tr><td><code>/devtools/lorry</code></td><td>Lorry's dependency repository and compiled-unit cache: <code>user/</code> for Interactive, <code>none/</code> for None.</td></tr>
   <tr><td><code>/devtools/javy</code></td><td>Javy's default plugin under <code>plugins/</code>, build provenance, and staged-file checksums.</td></tr>
   <tr><td><code>/devtools/wasmtime</code></td><td>Wasmtime's build provenance and staged-file checksums.</td></tr>
@@ -467,27 +467,9 @@ gix -r project push git@example.test:project.git HEAD:refs/heads/topic</code></p
 an interrupted operation, and the limits, is on the <a href="gix.html">gix</a> page.</p>
 
 <h2>Gears</h2>
-<p>Gears is a small, extensible agent harness for working with a language model from
-the terminal, on Linux and on Motor OS. Its core owns provider streaming, one agent loop,
-cancellation, sessions, a full-screen and a line-mode UI, command hooks, and optional
-directory-backed tools. The developer image ships shell and common-command manifests
-under <code>/user/cfg/gears/tools/</code>, initially disabled. Use <code>/tools</code> and
-<code>/tool enable NAME</code> to select them. It does not prescribe a coding workflow.</p>
-<pre><code>gears --model provider/model
-gears -p "answer once" --model provider/model</code></pre>
-<p>Configuration is <code>/user/cfg/gears/gears.toml</code>: an OpenAI-compatible
-<code>base_url</code> (OpenRouter by default), the model, a key file, an optional egress
-allowlist, timeouts, and context-window limits. Every tool call checks saved session/global grants, then permission hooks. Saved
-denials and hook denials refuse the call; a hook may require fresh confirmation.
-Interactive users can allow or deny once, for the session, or globally. Unattended
-calls use hook policy and honor saved denials. The
-<code>sh</code> tool is not a sandbox: an approved command has the same filesystem authority
-as Gears. Sessions are append-only JSONL trees under <code>/user/cfg/gears/sessions/</code>,
-with <code>--continue</code>, <code>--resume</code>, <code>--fork</code>, and in-session
-<code>/new</code>, <code>/resume</code>, <code>/fork</code>, <code>/tree</code>, and
-<code>/compact</code>. Gears has a deterministic local mock provider so it can be
-tested without an Internet provider. Run <code>src/bin/gears/tests/full-test.sh</code>
-on the host for its standalone test suite; add <code>--release</code> for release builds.</p>
+<p>Gears is a standalone agent harness for Linux and Motor OS, maintained in a
+separate repository. Build and test it natively from its own source tree; it is
+not bundled in the developer image.</p>
 
 <h2>mdbg</h2>
 <p><code>mdbg print-stacks PID</code> pauses a process through the kernel's debug interface
