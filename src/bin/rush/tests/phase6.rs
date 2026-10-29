@@ -347,6 +347,17 @@ fn noexec_parses_without_executing() {
 }
 
 #[test]
+fn noexec_covers_pipelines() {
+    // Stages do not run through the single-command path; a `-n` pipeline once
+    // applied its redirections and ran its commands.
+    let path = temp_path("noexec_pipeline");
+    let run = run_c(&format!("set -n; echo hi >{} | cat", path.display()));
+    assert_eq!(run.stdout, "");
+    assert_eq!(run.code, 0);
+    assert!(!path.exists(), "a -n pipeline created {}", path.display());
+}
+
+#[test]
 fn noexec_is_ignored_when_interactive() {
     // Otherwise a typo would wedge the session: `set +n` could never run.
     let run = run_args(&["--piped"], "set -n\necho still-running\n");

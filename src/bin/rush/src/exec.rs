@@ -360,6 +360,14 @@ fn check_errexit(status: i32, shell: &mut Shell) {
 }
 
 fn exec_pipeline(pipeline: &Pipeline, shell: &mut Shell, io: &IoEnv) -> i32 {
+    // `set -n`: read and parse commands without executing them. An interactive
+    // shell ignores it (POSIX), otherwise a typo would wedge the session — and
+    // since `set +n` would itself not run, nothing could turn it back off.
+    // Checked here, ahead of both the single-command and the multi-stage
+    // path: a stage applies its redirections before anything else runs.
+    if shell.opts.get(Opt::NoExec) && !shell.is_interactive() {
+        return 0;
+    }
     let status = match pipeline.commands.as_slice() {
         [single] => exec_command(single, shell, io),
         cmds => run_pipeline(cmds, shell, io),
@@ -373,12 +381,6 @@ fn exec_pipeline(pipeline: &Pipeline, shell: &mut Shell, io: &IoEnv) -> i32 {
 }
 
 fn exec_command(command: &AstCommand, shell: &mut Shell, io: &IoEnv) -> i32 {
-    // `set -n`: read and parse commands without executing them. An interactive
-    // shell ignores it (POSIX), otherwise a typo would wedge the session — and
-    // since `set +n` would itself not run, nothing could turn it back off.
-    if shell.opts.get(Opt::NoExec) && !shell.is_interactive() {
-        return 0;
-    }
     match command {
         AstCommand::Simple(simple) => exec_simple(simple, shell, io, Background::No),
         AstCommand::Compound { kind, redirects } => exec_compound_cmd(kind, redirects, shell, io),
