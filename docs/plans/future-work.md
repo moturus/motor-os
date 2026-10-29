@@ -1,5 +1,13 @@
 # Future work -- recorded, deliberately not scheduled
 
+Source review: 2026-10-28, Motor OS `8bb9345c`. Non-memory issues were
+checked against source only, without builds, tests, or runtime validation.
+Memory capacity, allocation failure, reclamation, and accounting entries
+were skipped and left unchanged. Runtime and I/O latency items, including
+per-operation allocation overhead, were reviewed. Historical timings below
+are not new measurements. An unexplained historical failure stays open
+unless the source establishes that its cause was fixed.
+
 ## Shared zero page
 
 Motor OS kernel should have a single shared copy-on-write zero page,
@@ -18,37 +26,66 @@ deduce layout from address so that it can replace mlibc's alloc
 (b) Investigate using RCU and a background memory reclaim task:
 current reclaim stalls allocs/frees.
 
-## A pipe writer is never told that its reader is gone (2026-10-09)
+## Pipe closure is not reported as BrokenPipe (2026-10-09)
 
-When a parent drops the read end of a child's piped stdout, the child's
-writes keep succeeding: a native writer looping on `write_all` to stdout ran
-until killed after 30 s, using CPU throughout, and never saw an error. POSIX
-would deliver `EPIPE`. `stdio_pipe.rs` has `reader_closing` →
-`E_NOT_CONNECTED` handling, so the reader's close probably never reaches the
-writer while the parent's rt.vdso relay keeps draining; this is unconfirmed.
-Upstream Wasmtime's `p2_cli_stdout_epipe` program cannot pass, so it is
-excluded from `wasmtime-smoke`. rush pipelines do not show it: rush runs
-stages one at a time through temp files, so `writer | head` never starts
-`head` while the writer runs.
+The native writer no longer keeps succeeding after its reader is dropped:
+rt.vdso's `create_stdio_pipes` gives the child a direct pipe, closing the
+parent descriptor drops its endpoint, and `StdioPipe::write_timeout_impl`
+propagates peer-close errors. The source of
+`systest::stdio::test_child_stdout_reader_drop` covers termination after
+reader drop, but its child accepts any write error.
+
+The remaining WASI EPIPE problem is error classification.
+`src/sys/lib/moto-sdk/src/ipc/stdio_pipe.rs` returns `E_NOT_CONNECTED` for
+`reader_closing` or propagates a failed kernel wait/wake. `moto_rt::Error`
+has no `BrokenPipe` variant. The selected `x86_64-unknown-motor-1.99.1`
+stdlib's `sys/stdio/motor.rs` propagates that error, and
+`sys/io/error/motor.rs::decode_error_kind` never maps an error to
+`std::io::ErrorKind::BrokenPipe`. In the separate Wasmtime checkout,
+`crates/wasi/src/cli.rs::stream_error_from` recognizes only `BrokenPipe`
+as `StreamError::Closed`; its `p2_cli_stdout_epipe` fixture rejects other
+errors and remains excluded by `src/build-scripts/build-wasmtime.sh`.
+
+Add a distinct pipe-closure error and propagate it through the ABI and
+stdlib. Translate peer loss only for a valid pipe writer; do not globally
+reinterpret invalid descriptors or disconnected sockets as broken pipes.
+This needs reviewed moto-rt and external stdlib changes. Then strengthen the
+native reader-drop assertion and enable the upstream EPIPE fixture with a
+parent that closes its reader. No external source was changed in this review.
 
 ## Motor OS filesystem behavior that WASI guests see (2026-10-09)
 
-`moto_rt::Error` has no "directory not empty": sys-io's `map_err_into_native`
-sends `DirectoryNotEmpty` as `FileTooLarge`, so native `std::fs::remove_dir`
-on a non-empty directory reports `FileTooLarge`. The Wasmtime adapter maps it
-back for directory removal and rename. A lookup under a deleted directory's
-handle fails with `InvalidData` rather than `NotFound`, which WASI reports as
-`io`. Motor OS checks write permission on each write, not at open, so an open
-for writing succeeds where POSIX would fail with `EACCES`, and the guest's
-libc reports the failed write as `EIO`. A proper fix for the first needs a
-`moto_rt::Error` variant and std's mapping.
+Remaining native filesystem gaps, with some WASI workarounds:
 
-Native rename replaces a destination of the other kind: a directory moved
-onto a file deletes the file, and a file moved onto an empty directory deletes
-the directory, where POSIX fails with `ENOTDIR`/`EISDIR` (motor-fs
-`do_move_entry_txn`). The adapter looks up the destination's kind first; a
-concurrent replacement between that lookup and the move still gets the native
-behavior, within the same parent.
+- `src/sys/sys-io/src/util.rs::map_err_into_native` still maps
+  `DirectoryNotEmpty` to `FileTooLarge`; `moto_rt::Error` has no distinct
+  variant. Add an ABI error code and propagate it through sys-io, moto-rt,
+  and std's error mapping. Changes to moto-rt and the external stdlib port
+  need separate review. The Wasmtime workaround does not fix native callers.
+- Native `CMD_STAT` still accepts a cached parent ID and passes it to
+  `MotorFs::stat`. `motor-fs/src/layout.rs::DirEntryBlock::validate_entry`
+  returns `InvalidInput` for a freed entry and `InvalidData` for a reused
+  generation. Distinguish stale caller IDs from corrupt on-disk references
+  and report a missing entry at the API boundary. The Wasmtime adapter now
+  represents directory handles as paths and resolves them afresh, so the
+  old sequential deleted-directory guest lookup no longer exercises this
+  native defect. Concurrent stale-ID operations remain affected.
+- `rt.vdso/src/rt_fs.rs::file_open_inner` now refuses write intent without
+  `CAP_FS_WRITE`. It still does not check the existing file's role
+  permissions for an ordinary non-truncating write open: path lookup
+  checks traversal, and the later write checks write access. Add a server
+  operation that validates the requested access against the authenticated
+  role before returning an open result. Keep the existing per-operation
+  checks unless permission-revocation semantics are deliberately changed.
+- `motor-fs/src/txn.rs::do_move_entry_txn` still discards the destination
+  kind returned by `lookup_child` and deletes the target before linking the
+  source. Compare source and destination kinds inside this same exclusive
+  transaction, before deletion, and return distinct directory/file errors.
+  sys-io also currently maps `IsADirectory` to `InvalidArgument`; preserve
+  that distinction through the ABI. A client-side preflight lookup cannot
+  close the race with another rename.
+
+Paths above are under `src/sys/lib` except the explicitly named sys-io file.
 
 ## sys-io aborts when a TCP connection is established at the memory floor (2026-10-04)
 
@@ -149,6 +186,15 @@ the system releases it when Gears exits or is killed. Session locks can use
 the same approach. Until then they treat a fresh or unreadable lock
 conservatively. Do not add boot work or a lock service for this.
 
+Still present in the separate `../gears` repository (read only for this
+review): `src/session.rs::acquire_lock` calls
+`src/run_lock.rs::create_pid_file`. Its two-second grace protects a fresh
+empty record, but an owner paused longer can still lose its lock; concurrent
+stale-file removers can also unlink a replacement owner's lock. Hold an
+exclusively locked `File` in the session for its lifetime, as `DirectoryLock`
+does, and never unlink the lock file on release. Keep the PID informational.
+This proposed implementation belongs outside the Motor OS repository.
+
 ## FS block cache at RAM/16 (2026-10-01)
 
 sys-io's block cache (`block_cache_blocks` in
@@ -172,27 +218,6 @@ Before adopting:
 - [OOM handling](../oom-handling.md) argues the cache is filled at boot and
   so never grows sys-io afterwards. With RAM/16 it grows after boot up to its
   capacity and never shrinks; revisit that argument and the memory floors.
-
-## Any process can kill most other processes (2026-09-26)
-
-`SysCpu::kill_pid` (`F_KILL_PID` in `sys_kill_impl`,
-`src/sys/kernel/src/uspace/sys_cpu.rs`) checks only the target: it refuses to
-kill a process that holds `CAP_SYS`. It does not check the caller at all. So
-any process, even one with no capabilities, can kill every process that lacks
-`CAP_SYS`. That includes other users' programs, dns-resolver (which runs with
-`CAP_LOG | CAP_NET`), and a future privileged rmux server.
-
-This predates the `CAP_NET`/`CAP_FS_WRITE` work. It was found by a review of
-the new-caps IPC fixes, not by a failure. Current callers are Rush's `kill`
-builtin, gears on Motor OS, and systest (`spawn_wait_kill`, `ipc_service`).
-
-Possible rules, to choose from when this is picked up:
-
-- require a capability to kill a process other than oneself;
-- allow killing only one's own descendants; or
-- allow it only when the caller holds every capability the target holds.
-
-Check what Rush's `kill` and gears need before choosing.
 
 ## A TCP bind at the memory floor can abort the process (2026-09-27)
 
@@ -221,6 +246,14 @@ admission, as `57796b3d` did for network teardown. It touches rt.vdso and
 moto-sdk, so it needs its own reviewed patch. Until then the test can flake.
 
 ## IPC listener is published before its missed-wake snapshot (2026-09-26)
+
+Still present: `shared::create` publishes under `LISTENERS`, then
+`sys_handle_shared` calls `Process::add_object` / `WaitObject::new` after
+that lock is released. `OP_GET` now always wakes shared-service peers,
+including silent clients, but that wake can still precede the snapshot.
+Capture the initial `WaitObject` before publication and insert that same
+snapshot into the process handle table; audit lock order if instead moving
+handle creation under `LISTENERS`. Do not recapture the counter afterward.
 
 A shared endpoint is created in two steps. `shared::create`
 (`src/sys/kernel/src/uspace/shared.rs`) inserts the new listener into the
@@ -280,9 +313,6 @@ image with 8 GiB and 4 vCPUs:
 - 150 runs of the IPC tests alone while busy loops kept all 16 host CPUs
   busy.
 
-Next time, a step watchdog in the test would name where it stops. That is a
-test change under `src/sys`, so it needs the full debug and release gates.
-
 Seen a third time on 2026-10-08, on the `dev` branch at `a4d30f3c` (the
 lorry branch's kernel and sys-io fixes cherry-picked onto `99a13d6f`), in a
 release `full-test-dev.sh` run with 8 GiB. The last systest line was again
@@ -312,6 +342,16 @@ client connects only after the test reads `retrying`, so both sides wait
 forever. A fix belongs in the test (for example, let `retry` also report a
 successful refill) and touches `src/sys/tests`, so it needs the full gates.
 
+The source still has this independent test handshake problem:
+`run_child("retry")` prints only after a request-free return from `wait`,
+while `LocalServer::wait` sets a deadline only after a refused refill.
+The existing `refill_watchdog` diagnoses a stall but does not prevent it.
+Make the test observe refill attempts/results directly, including successful
+refills, and release the hoarder from that observation. If deterministic
+refusal is required, use a targeted test hook rather than assuming that
+memory pressure makes every attempt fail. This is not evidence that the
+historical stalls all came from the kernel publication race.
+
 ## A directory listing ends when another process removes an entry (2026-10-08)
 
 `readdir` in rt.vdso (`src/sys/lib/rt.vdso/src/rt_fs.rs`) remembers the next
@@ -323,8 +363,16 @@ change during it.
 This keeps Lorry from pipelining builds on Motor OS. A dependent's rustc lists
 each dependency directory while a library's rustc still removes temporary
 files there, so the listing could miss a library and the build would fail
-with "can't find crate". Lorry pipelines on Linux only, until `readdir` keeps
-going past a removed entry.
+with "can't find crate". `src/bin/lorry/src/executor.rs::PIPELINING` is still
+disabled on Motor OS.
+
+Still present: `readdir` replaces its cursor with `Done` before
+`get_next_entry`, which validates the saved entry ID in motor-fs. A removed
+successor therefore exhausts the stream. Use a directory-relative cursor
+that survives entry deletion, and return the next entry's name, metadata,
+and continuation together under filesystem serialization. Its ordering must
+handle name-hash collisions and block/generation reuse. Merely retrying the
+stale ID, or restarting at the first entry, cannot guarantee progress.
 
 ## A process can take an rmux server's name first (2026-09-27)
 
@@ -336,22 +384,40 @@ while the name is held: the client reports the holder's PID and gives up.
 Open question: is that enough, or should a name like this be reserved for
 processes with the matching mask? Reserving it would need kernel support.
 
+Still present: `src/sys/kernel/src/uspace/shared.rs::create` reserves only
+`sys-io`; `src/bin/rmux/src/sys/ipc.rs::service_name` embeds the mask and
+`open` authenticates it only after connecting. A possible fix is a kernel
+authenticated service namespace keyed by creator capabilities, with the
+expected mask supplied by lookup. Keep the peer-mask check as well. This is
+a namespace-policy decision, not a reason to kill the existing name holder
+or silently fall back to an unauthenticated transport.
+
 ## IPC service error codes (2026-09-26)
 
-Needs a decision. A conflicting `create` of a service name returns
-`E_INVALID_ARGUMENT`; should it return `E_ALREADY_IN_USE`? A `get` on a live
-server with no free listener returns `E_NOT_FOUND`; should it return
-`E_NOT_READY`? systest's `ipc_service.rs` pins the current codes, so a change
-must update those assertions.
+Partially fixed: `shared::get` now returns `E_NOT_READY` for a live service
+with no free listener, and `ipc_service.rs` asserts it. The remaining
+decision is whether a conflicting `shared::create` should return
+`E_ALREADY_IN_USE` instead of `E_INVALID_ARGUMENT`. Change that branch and
+the ownership-conflict assertions together; check callers that classify
+service-start failures before changing the contract.
 
 ## Any process can use up a sync IPC service's listeners (2026-09-26)
 
-A process can connect to a `moto_sdk::ipc::sync` service and never send a request.
-The kernel has then handed out a listener that the server does not know is
-taken, because a server learns of a connection only from its first request.
-Enough such connections leave no free listener, and other clients get
-`E_NOT_FOUND` until they close. This affects every such service (sys-log,
-dns-resolver, rmux). It costs availability, not authority.
+Partially fixed: kernel `sys_obj.rs::OP_GET` now wakes a shared-service
+server on connection, `LocalServer::wait` reports it and replenishes the
+pool, and `test_silent_connections` covers this behavior. Pool exhaustion
+now returns `E_NOT_READY`.
+
+The total connection limit remains vulnerable. In
+`src/sys/strobe/src/logging.rs::process_ipc` and
+`src/sys/dns-resolver/src/main.rs::process`, the `!have_req()` return
+still precedes the capability check. Silent unauthorized peers can consume
+all connection slots. `src/bin/rmux/src/sys/ipc.rs::serve` already checks
+capabilities on a connection notification and disconnects unauthorized
+silent peers; apply that ordering to the other services. For peers that are
+authorized to connect, choose explicit per-peer quotas and an initial-request
+deadline if idle occupancy must be bounded; notification alone does not
+provide admission fairness. Do not expire legitimate long-poll RPCs.
 
 ## 96 MiB guests fail systest (2026-09-27)
 
@@ -398,64 +464,27 @@ If this hardening is revisited, validate BAR boundaries before probing,
 using a bounded cached walk from BAR0. Review its additional boot-time PCI
 reads then; no change or extra boot work is scheduled now.
 
-## Deferred filesystem flush race (2026-09-09)
-
-Fix after merging the pending filesystem branch, per maintainer direction.
-Recheck the proposed change against that branch before implementing it.
-
-`motor-fs` can acknowledge an explicit flush before committing all preceding
-writes. This is a preexisting production race, shared by the host Tokio and
-Motor OS runtime paths, not an allocator-test defect. During kernel allocator
-validation, the existing host test `tests::resize_truncate_crash_regrow`
-failed with `InvalidData`: main transaction 12 versus logged transaction 11.
-The failure preceded the main VM boot; guest allocator code was not running.
-
-Cause in `src/sys/lib/motor-fs/src/txn_log.rs`: the timeout task takes the
-pending batch out of its shared holder before sending it to the committer.
-An explicit `Flush` can already be queued ahead of that batch. The committer
-then sees an empty holder, flushes earlier device writes, and acknowledges
-the caller; the timeout-owned batch commits afterward. A caller that drops
-and reopens the filesystem after the acknowledgment can overlap that commit.
-`BlockCache::new` reads the pinned log blocks before the main superblock, so
-the reopened cache can combine the previous log with the new superblock.
-
-Temporary ordering logs on the existing concurrent filesystem suite captured
-this sequence for the failing crash/regrow case (capacity 1):
-
-1. Explicit flush requested with transaction 12, four blocks pending.
-2. Timeout takes transaction 12 and queues its batch behind `Flush`.
-3. Committer handles `Flush` with an empty transaction-13 holder and
-   acknowledges completion.
-4. Committer only now consumes transaction 12; the test concurrently reopens
-   and rejects main transaction 12 versus logged transaction 11.
-
-Both preserved disk images had matching transaction-12 headers by the time
-they were copied: the later commit completed, but the reopening cache had
-already observed inconsistent generations. A later consistent image does
-not disprove the race.
-
-Proposed fix: timeout tasks enqueue a transaction-ID-tagged request without
-taking the batch. Only the committer handles that request by checking and
-taking the matching pending batch. This keeps timeout ownership changes
-ordered with explicit flushes. Preserve stale-ID checks, error propagation,
-and the rule that no holder borrow spans an await. Do not mask the defect
-with a longer timer or a reopen retry.
-
-Validation: from `src/sys/lib/motor-fs`, run
-`cargo test --features image-admin` in debug and release; the crate-local
-Cargo configuration supplies `tokio_unstable`. These existing tests are
-already part of `src/tests/full-test.sh`; the eventual production fix also
-needs the normal core-OS gate. No new reproducer or test workaround was added.
-All temporary source logging has been removed. Original failures, ordering
-traces, diagnostic patch, and disk images are retained on the development
-host under `/tmp/kernel-phys-host-shutdown.9ox3kE/` (`DIAGNOSIS.md` indexes them).
-
-This establishes the filesystem test failure's cause, not the earlier quiet
-VM exit during pressure. That separate unresolved finding and its evidence
-remain in Git history (the retired kernel-phys-mem.md plan). Kernel validation resumes
-with this filesystem fix explicitly deferred; no test is skipped or weakened.
+Still present in `src/sys/lib/virtio-async/src`: `virtio_device.rs` validates
+`bar < 6`, but `pci.rs::PciBar::init` immediately probes the selected
+register and, for a 64-bit BAR, the next one. Reject selectors naming an
+upper half and a 64-bit BAR starting at BAR5 before either sizing write.
+Keep the earlier boot-work review requirement; this source review does not
+schedule the hardening.
 
 ## Unresolved native Lorry self-build stall (2026-09-05)
+
+Source review: unresolved historical failure, not proof of a current
+deadlock. `src/bin/lorry/src/executor.rs` now changes scheduling state under
+one mutex, notifies after completions, and reports an empty ready queue
+with no dispatched work as an error. It can still wait while a dispatched
+unit is stuck. `src/bin/lorry/src/process.rs::execute_observed` drains
+stderr, joins the stdout reader, and then waits for rustc, without a
+compiler deadline. These are distinct places where progress can stop;
+none identifies what happened in this run, especially the unresponsive SSH.
+The next fix should follow evidence distinguishing dispatch, spawn, pipe
+EOF, child exit, and filesystem/IPC waits. Record unit/PID/phase and the
+corresponding blocked handles before changing synchronization. Do not add
+a larger timeout or call the resolver optimization a liveness fix.
 
 The release developer gate's `native-lorry-self-gate` timed out at its
 unchanged 1,200-second limit in an 8-vCPU/8-GiB VM. Native vendoring had
@@ -484,6 +513,18 @@ log came from host terminal job control stopping SSH, not a guest timer
 failure. Preserve the original timeout independently of later passing gates.
 
 ## Unresolved logging RPC stall (2026-09-07)
+
+Source review: unresolved. `systest/src/logging.rs::rpc_result` still uses
+`do_rpc(None)`. `strobe/src/logging.rs::process_log_request` synchronously
+sends to the 64-entry I/O queue before `process_ipc` calls `finish_rpc`;
+the I/O thread can be in filesystem write/flush/rotation. Thus a parked
+RPC client alone does not distinguish missing request delivery from queue
+backpressure or a missing response wake. The old filesystem flush-ordering
+race is fixed, but that does not establish this stall's cause. Correlate
+the request/response sequence, server wait snapshot, queue send/receive,
+and filesystem completion. Fix the demonstrated missing transition; a
+nonblocking queue, if chosen, must return an explicit refusal rather than
+silently discard accepted records. Paths are under `src/sys`.
 
 During kill-after-wait kernel validation, the second debug main-image gate
 stalled after `logging::basic test PASS`. Systest's main thread waited in
@@ -537,6 +578,21 @@ flakiness.
 
 ## Network RX monitor intervention (2026-09-06)
 
+Source review: a related defect is fixed, but the recorded incident has
+no established source-level attribution. In
+`src/sys/lib/virtio-async/src/virtio_queue.rs`, allocation, completion drop,
+and the main reclaim task all use `reclaim_used_and_rearm` (`da52055d`).
+It updates EVENT_IDX after opportunistic reclamation and rechecks the used
+ring after arming; `test_opportunistic_reclaim_rearms` covers both paths
+and cursor wrap. The debug monitor remains as a detector/recovery path,
+which does not by itself mean the old defect persists.
+
+Keep the historical failure open until it can be tied to that corrected
+path. If intervention recurs, capture the device/driver used indices,
+armed event index, IRQ handle wake count, and completion waiter together.
+Repair the specific interrupt/re-arm or waiter-registration edge indicated
+by those values; do not make monitor polling part of normal RX progress.
+
 Debug runs 1 and 3 of the network-channel allocation gates exhibited the
 previously diagnosed network RX monitor intervention. Logs were recorded
 under `build/network-allocation.YuWF2O/`. Those gates validated allocation
@@ -549,23 +605,23 @@ Found while reviewing file I/O and the async runtime; the run's report
 git history. Unlike the rest of this file these are scheduled: pick them up
 in this order.
 
-The former sys-tty/kernel-log interleaving item is complete; see
-[Kernel logs and the serial console](../kernel-logs.md).
-
-1. **Loopback accepts take a second each after a dozen connections.** A
-   process that connects to its own listener sees every accept take ~1.00 s
-   after the first 9-15 connections: the closed connections still hold the
-   NetPool reservations the listener needs, the accept pump's reservation
-   request times out, and it retries after 10 ms, 100 ms, then 1000 ms
-   (`rt_net: accept pump reservation failed: TimedOut; retry in ...`, which
-   `test_mio_accept_pump_progress` prints on every passing run). Remote
-   clients are unaffected, since their sockets live in another process, but
-   loopback services and tests are: `systest close-race 300` takes 298 s, at
-   HEAD and with the perf patches alike. Fix: release, or stop counting, the
-   reservations of closed connections before the pump asks, and replace the
-   exponential backoff with a bounded short retry. Gain: loopback accepts
-   about 50x faster after a burst (20 ms instead of 1 s per connection), no
-   retry noise in the suite, and the close-race reproducer usable at scale.
+1. **Loopback accept latency / pool release notification.** The historical
+   run saw ~1-second accepts after 9-15 connections and a 298-second
+   `systest close-race 300`. Those timings are not established for this tree.
+   The current `moto-sdk/src/io/net/tcp.rs::TcpStream::drop` transfers its
+   reservation to a driver record; `channel.rs::next_driver_msg` releases
+   it after the queued writes and close have entered the ring, not after
+   TCP linger. However, `rt.vdso/src/net/pool.rs::NetPool::reserve` still
+   satisfies parked callers only when a new channel is published: freeing
+   a slot on an existing channel does not notify them.
+   `net/accept_pump.rs` still backs off 10/100/1000 ms after a reservation
+   failure. Add release notification so a free live-channel slot satisfies
+   an existing waiter, preserving cancellation and final-channel shutdown
+   ordering and avoiding callbacks under channel/pool locks. Keep teardown
+   reservations until their messages are published. Do not substitute a
+   shorter retry loop for fixing the missing notification. A later latency
+   measurement must distinguish provisioning, slot release, and accept
+   readiness; the old one-second symptom alone cannot identify the cause.
 
 2. **Resolved: the allocator held its slab lock across the fallback
    `SysMem::alloc`.** The allocator now holds no lock across a backend call,
@@ -584,26 +640,7 @@ The former sys-tty/kernel-log interleaving item is complete; see
    baseline after bursts instead of holding the peak, which matters on small
    VMs and for the memory-pressure model's accounting.
 
-4. **Resolved 2026-09-09: `MAX_BLOCKS_IN_TXN_LOG` 256 stopped sys-io on the
-   first large write.** The mechanism was descriptor retention: a completion
-   held its descriptors until dropped, and the worker held completions until
-   `Commit`. [`block_io.rs`](../../src/sys/sys-io/src/runtime/fs/block_io.rs)
-   now owns all block-queue traffic in one I/O task that drops completions as
-   the device finishes them, so batch size no longer interacts with queue
-   depth. Raising the batch is still one of the write-path levers below and
-   still unmeasured.
-
-5. **sys-io allocates a Vec of every wait handle on each park.**
-   `LocalRuntime::wait` builds the array of registered wait handles anew per
-   park; sys-io registers one per channel, so under a listener flood that is
-   a 16-24 KB allocation per park, which the allocator serves with a page
-   map/unmap pair and a TLB shootdown IPI. Fix: keep the handle array
-   resident between parks and rebuild it only when the registration set
-   changes. Gain: one map/unmap and one IPI less per park while many
-   channels are open (sys-io parks up to ~130k times in a benchmark run);
-   the structural fix is the kernel wait-set item at the end of this file.
-
-6. **Debug-only loopback `ConnectionReset` in the suite.** In 2 of 3 debug
+4. **Debug-only loopback `ConnectionReset` in the suite.** In 2 of 3 debug
    full runs with the perf patches a net test read `ConnectionReset` where
    an orderly close was expected (`poll.rs:147`: the child got an RST
    instead of "pong" after the server wrote it and dropped the stream;
@@ -617,7 +654,19 @@ The former sys-tty/kernel-log interleaving item is complete; see
    written just before a close is never replaced by a reset, a correctness
    bug once it reaches a real peer.
 
-7. **Killing the ssh session mid-suite leaves two vCPUs spinning.** Killing
+   Source review: keep the incident unresolved, with a narrower hypothesis.
+   `moto-sdk/src/io/net/tcp.rs::TcpStream::drop` now publishes queued TX
+   before close; `sys-io/src/runtime/net/socket/tcp.rs::reclaim_tcp_socket`
+   now lets queued TX drain after channel EOF under the orphan limit
+   (`dc37ef4b`). That fixes a concrete teardown race, but the historical
+   resets were never attributed to it. Current reset branches include
+   unread incoming data, zero linger, the orphan limit, and linger expiry.
+   Identify which branch fires with the failing ping/pong shape before
+   changing close semantics; do not remove deliberate resets or extend
+   linger to conceal a lost completion. Paths are under `src/sys/lib` for
+   moto-sdk and `src/sys` for sys-io.
+
+5. **Killing the ssh session mid-suite leaves two vCPUs spinning.** Killing
    the ssh client while systest was in its pressure/admission tests (child
    processes being killed by design) twice left the guest with two vCPUs at
    100% and the network dead, once on a debug build and once on release; an
@@ -627,19 +676,32 @@ The former sys-tty/kernel-log interleaving item is complete; see
    threads from the console. Gain: closes a hang class that any operator can
    trigger with Ctrl+C on a session.
 
-8. **sys-io's statistics provider is absent for a moment after boot.**
+   Source review: unresolved; no current source path establishes the two
+   spinning threads' identities. russhd's output pumps, child-reaping task,
+   and input coordinator in `src/bin/russhd/src/local_session.rs` run
+   independently. Kernel `Process::die` posts kills; endpoint cleanup in
+   `src/sys/kernel/src/uspace/process.rs` precedes visible process exit.
+   Neither the newer single-close guard in russhd nor other teardown fixes
+   prove this hang repaired. Capture the spinning stacks and lock owners,
+   then trace session close, descendant termination, and sys-io disconnect
+   handling. Fix the demonstrated held-lock or wake/cancellation cycle;
+   do not add sleeps to the kill path.
+
+6. **sys-io's statistics provider is absent for a moment after boot.**
    `moto_sdk::stats::Collector::providers()` does not list sys-io (provider 2)
    for a short window after boot: `systest fs-bench` started ~2 s after ssh
    came up panicked on the lookup, and two places in the suite retry around
-   it. Fix: register with the stats registry before sys-io accepts its
-   first client, or have the collector wait for the registry's first
-   snapshot. Gain: tools and scripts read sys-io's counters as soon as the
-   VM answers, and the retry loops in the suite can go.
-
-The former item 9, `CpuStatsV1::entry`'s incorrect slice length, is fixed.
-The correction and three synthetic snapshot tests pass three debug and three
-release full-system gates, plus `full-test-dev.sh --release` (2026-09-06).
-No package publication or stdlib change was needed.
+   it. Still present: `src/sys/sys-io/src/main.rs` starts sys-init before a
+   500 ms sleep and `stats_server::start`; `stats_server.rs` sleeps another
+   second before registration. It registers before binding `sys-io-stats`,
+   so discovery can also briefly advertise an unavailable endpoint.
+   `moto-sdk/src/stats/userspace.rs::Collector::providers` remains a
+   best-effort snapshot, not a readiness barrier. Bind the provider before
+   advertising it and replace timer-based startup with registry readiness.
+   For callers that require a provider, expose an explicit readiness/error
+   contract instead of unwrapping an optional snapshot entry. Do not block
+   sys-io's first FS clients on strobe: startup depends on those clients.
+   Any change to boot's critical path still needs boot-latency review.
 
 ## Performance follow-ups from the same run (not scheduled)
 
@@ -652,27 +714,48 @@ read median 208 -> 6 us, write 190 -> 280 MB/s, rnetbench round trip
 or hypervisor (a cross-CPU hop is ~1 us with halt polling and ~25 us
 without). Left on the table, largest first:
 
-- **Write path** (Finding 6 of the run). Three device barriers per 64-block
-  transaction batch, every data block journaled twice, and one transaction
-  per 4 KB chunk of a write message; for a 20 MB write about 36 of 80 ms
-  are barrier waits and the background committer tops out near 300-450 MB/s
-  regardless of CPU. Levers: one transaction per message instead of per
-  chunk, metadata-only journaling for newly allocated data blocks (no second
-  copy of the data), and larger batches once bug 5 above is understood.
-  Estimate: up to ~2x on writes.
+- **Write path** (Finding 6 of the run). Still present, partly improved.
+  `src/sys/sys-io/src/runtime/fs.rs::on_cmd_write_multi` holds one FS write
+  guard per message but still calls `MotorFs::write` per block-sized chunk;
+  each call runs `Txn::do_write_txn`. The log limit in
+  `src/sys/lib/motor-fs/src/layout.rs` is still 64 blocks. `txn_log.rs` now
+  groups log writes and contiguous home-block writes into scatter-gather
+  runs, but data is still written to the log and then its home location.
+  `commit_txn_batch` queues four `Commit` boundaries; these drain earlier
+  completions in `moto-sdk/src/async_fs/block_cache.rs`, whereas explicit
+  `Flush` issues a device flush. The old "three device barriers" description
+  does not describe those distinctions.
+  Start with a bounded multi-block transaction API, retaining partial-write
+  and failure semantics. Metadata-only logging for newly allocated blocks
+  requires ordering their data before committing metadata and proving crash
+  recovery. A larger log also changes the on-disk layout and must not be
+  treated as a local constant tweak. The former descriptor-retention
+  deadlock is fixed; throughput and any claimed gain still need measurement.
 - **Client-side work per synchronous FS op** (Finding 7). Of a ~9 us hot
   read, ~4 us is the vdso's own runtime work: boxing the task closure, a
-  oneshot, `LocalRuntime::spawn` per op (five allocations), a `BTreeMap`
+  oneshot, `LocalRuntime::spawn` per op, a `BTreeMap`
   response slot. Running the io task inline instead of spawning measured
   10.7 -> 8.0 us per read. Candidates: resident worker tasks or a
   `FuturesUnordered` of in-flight io tasks polled alongside the task
   channel, a slot array for responses, a preallocated per-thread request
-  block. Estimate: 2-3 us per op (20-25% of a hot read), more for open and
-  stat, which do two to three round trips.
-- **One round trip for `open` and `stat`.** Fold the metadata into the
-  `CMD_STAT_PATH` response so that a stat is one request and an open two
-  (path plus create/open) instead of two and three. Estimate: 3-5 us per
-  open or stat.
+  block. The structural overhead remains in
+  `rt.vdso/src/rt_fs.rs::{async_run,main_runtime_task}` and
+  `moto-sdk/src/io/fs.rs::responses` (both under `src/sys/lib`). There is
+  now a resident response pump, but each submitted operation still spawns
+  its own task. Try a bounded resident worker design first; keep the
+  response pump independently runnable and preserve synchronous callers'
+  buffer lifetimes. Do not serialize all FS work behind an inline await.
+  The old allocation count and latency estimate need remeasurement.
+- **One round trip for `stat`.** Still present in
+  `src/sys/lib/rt.vdso/src/rt_fs.rs::stat`: `stat_internal` obtains an ID and
+  kind, then `metadata` makes a second request. `CMD_STAT_PATH` in
+  `moto-sdk/src/sys_io/api_fs.rs` and sys-io's `on_cmd_stat_path` still return
+  only ID/kind. Add a versioned path-plus-metadata response, with metadata
+  resolved under the same filesystem lock and authenticated role. Plain
+  non-truncating opens of existing files already need only the path lookup;
+  they construct the local `File` directly. Create, append, and truncate
+  have additional operations, so the old universal three-request open
+  claim is removed. Coordinate this work with the open-permission fix above.
 - **Halt-poll placement and policy.** `post()` scans from the thread's last
   CPU and treats a polling CPU as idle; the residual IPIs (0.2-1.8 per op in
   some runs) are wakes aimed at a CPU that is running, so preferring a
@@ -681,6 +764,13 @@ without). Left on the table, largest first:
   cost nothing on a guest that only ticks if the idle host CPU of the
   fixed window ever matters; the KVM-style adaptive window was measured and
   rejected (it loses most of the latency win: 25 us hot reads).
+  Source review: the placement follow-up remains in
+  `src/sys/kernel/src/sched/scheduler.rs::post`, which selects by `idle`
+  without prioritizing `polling`. Policy has already changed: `halt_poll`
+  uses 200 us normally and 10 us after three consecutive misses, resetting
+  on a hit. Evaluate a polling-CPU-first idle scan against cache affinity
+  before adopting it, and retain the global queue when all CPUs are busy.
+  A last-activity policy remains an experiment, not an established fix.
 - **Recorded verdicts.** The sliding read window (DEPTH 5) was dropped
   after a same-sitting A/B: cold_fs_read 269-279 vs 526-649 MB/s and
   crossbench sequential read 309-323 vs 382-435 MB/s for the batch of 4; it
@@ -689,9 +779,22 @@ without). Left on the table, largest first:
   the CPU 0 concentration was the affinity plus every other thread sleeping
   between hops, never the cause of the slowness. The cloud-hypervisor
   cross-check showed the same effects as qemu.
+  These are retained experimental decisions, not unresolved bugs. The
+  current `moto-sdk/src/io/fs.rs::read` still uses `WINDOW = 4`; no source
+  evidence justifies reviving the rejected window or affinity experiment.
 - Networking follow-ups from the run (small-write throughput under halt
   polling, RX batching, per-packet wakes) are in
   `networking-remaining-steps.md`.
+  Still candidates, with the old throughput regression unmeasured on this
+  tree: sys-io's `runtime/net/device.rs::rx_task` consumes/reposts individual
+  completions and calls `rx_notify.notify_one` for each accepted packet;
+  virtio's reclaimer drains available used entries but has no timed RX
+  coalescing window. `rt.vdso/src/net/blocking.rs::tcp_read` still goes
+  directly to its blocking bridge after constructing the read future,
+  without the write path's bounded spin. Start with bounded RX batches and
+  one notification per batch; preserve the arm/recheck protocol and compare
+  interactive latency before considering read-side busy polling. Notification
+  coalescing in the runtime means a notify call is not necessarily a syscall.
 
 ## Recorded, deliberately not scheduled
 
@@ -724,6 +827,14 @@ the ruling; nothing here should be picked up without a fresh call.
   stating that this evidence is non-exhaustive; it must not depend on this
   new OS facility.
 
+  Still absent: `src/sys/lib/moto-sys/src/stats.rs::ProcessInfoV1` retains
+  the 32-byte name and snapshot-only interface. Kernel
+  `src/sys/kernel/src/xray/stats.rs::KProcessStats::iterate` walks weak
+  process records, not an execution journal. An eventual opt-in event
+  stream should record successful starts and exits with a stable identity
+  across PID reuse, a monotonic sequence, and explicit overflow reporting.
+  Keep arguments excluded by default and preserve the existing deferral.
+
 - **gix: streaming for large objects, and an object size limit** (ruled by
   U. Lasiotus, 2026-09-20). `gix clone` of `moturus/helix` failed on a
   17.6 MiB generated parser because every object was limited to 16 MiB. Git
@@ -743,41 +854,45 @@ the ruling; nothing here should be picked up without a fresh call.
 
 - **`channel.rs` SeqCst fence audit** (out of scope, ruled
   2026-08-15). The io_channel wake edges now carry their own ordering;
-  the SeqCst fences predate that and are likely removable. Removing
-  them is its own independently-tested step whose perf verdict should
-  close promptly in the same sitting -- correctness-sensitive and
-  unhurried, so it waits for a sitting dedicated to it.
+  the extra channel-driver fences predate that and are candidates for
+  removal. Remove them in an independently tested change with a performance
+  verdict in the same sitting; this waits for a dedicated review of the
+  ordering argument.
 
-- **Wire `sysbox syslog`** (moved out of the networking ledger,
-  2026-08-15: not networking). `do_syslog` exists unwired, and nothing on
-  the image reads the kernel log remotely. Ordinary rt.vdso diagnostics now
-  go to stderr first, and authorized service records go through System-role
-  strobe to `/system/logs`; the kernel log remains relevant for kernel and
-  direct `SysRay::log` records and for the capability-gated fallback when
-  stderr fails. A remote reader is therefore still useful, but no longer the
-  primary way to diagnose every headless daemon. The related console-buffer
-  drain is worth a look in the same sitting: fallback panic text can be lost
-  when the console buffer does not drain before teardown, which is why a vdso
-  panic on that path can present as silent exit-222.
+  Still present in `src/sys/lib/moto-sdk/src/io/net/channel.rs` at
+  `dispatch_incoming` and `tx_send_batch`. Prove publication and wake
+  ordering separately for each before removing it. The SeqCst fences in
+  `ipc/io_channel.rs::{set_client_waiting,is_client_waiting}` and the
+  corresponding server/page-wait methods are part of the wait-bit versus
+  queue/page-publication handshake; they are not covered by this proposed
+  removal. Stronger individual loads/stores alone do not replace them.
 
-- **Resolved 2026-08-20: intermittent `moto_async` channel hang.**
-  It recurred in `test_moto_channel_multithreaded`; a focused unchanged
-  reproduction stalled on round 26. Two `mdbg` snapshots showed both sender
-  threads had exited while the receiver alone remained parked. The last
-  `Sender` used to wake the receiver from its `Drop` body before Rust
-  dropped the underlying MPMC sender field, allowing the receiver to register
-  after the early wake, still observe a connected empty channel, and sleep
-  forever. Sender teardown now drops the underlying endpoint before the
-  last-sender notifier. A deterministic regression holds teardown inside the
-  old gap while the receiver re-registers; the fixed focused suite then
-  passed 100 consecutive runs under the same stall detector. No retry or
-  timeout workaround was added.
+- **Drain pending kernel logs when sys-tty exits** (remaining part of the
+  2026-08-15 logging follow-up). Remote kernel-log access is now supplied by
+  `src/sys/sys-tty/src/forwarder.rs` and strobe's `/system/logs/kernel.log`;
+  the old unwired `do_syslog` is gone. See [kernel logs](../kernel-logs.md).
+  The teardown guarantee is still incomplete: `sys-tty/src/main.rs` stops
+  its kernel-ring reader on child exit and drains `Output`, but never waits
+  for `Forwarder`'s file queue to finish. `Output::drain` does not cover that
+  queue or kernel records not yet read. rt.vdso's panic path also exits
+  without a sink-completion acknowledgment (its debug sleep is not one).
+  For orderly teardown, drain a captured kernel-ring boundary and add a
+  bounded forwarder flush acknowledgment before exit; define how an
+  unavailable sink reports undelivered records. Do not delay boot or add a
+  panic-path sleep. The old silent exit-222 observation is not enough to
+  attribute a particular lost record to one of these queues.
 
-- **kernel `wait-set`** - a kernel-side wait-set/aggregation primitive
-  (the structural fix). Beyond the cap, the current shape is O(n) per park: every SysCpu::wait
-  re-validates and re-registers all ~1024 objects (the loop in sys_cpu.rs:78-121), on every one of sys-io's ~130k waits in this run. An
-  epoll-like kernel object — register a handle once into a wait set, block on the set's single handle — removes both the cliff and the
-  per-wait linear cost. This fits the netstack-scalability trajectory, but it's a significant kernel + async-runtime project.
+- **kernel `wait-set`** — still absent. The retained vectors in
+  `src/sys/lib/moto-sdk/src/async_runtime/local_runtime.rs` remove repeated
+  user-space allocation, but `build_wait_list` still scans registrations
+  and `src/sys/kernel/src/uspace/sys_cpu.rs::process_wait_handles` validates
+  and registers every supplied handle on each wait. The configurable
+  `max_wait_handles` limit also remains. A persistent kernel wait-set with
+  incremental add/remove and a ready queue would remove that repeated
+  scan. Specify handle-close, duplicate-handle, cancellation, and
+  missed-wake semantics first; retain the small inline-wait fast path for
+  ordinary RPCs. This remains a separate kernel/runtime project, not a
+  reason to increase the limit or add polling.
 
 - **virtio queue: allocation-waiter hygiene and wakeups** (recorded 2026-09-08).
   Releasing a descriptor chain wakes at most two queued allocation waiters,
@@ -794,6 +909,15 @@ the ruling; nothing here should be picked up without a fresh call.
   of a registered `VqAlloc`; stale entries must not consume a live waiter's
   wakeup.
 
+  Still present in `src/sys/lib/virtio-async/src/virtio_queue.rs`:
+  `VqAlloc::poll` appends a waker on every pending poll, has no registration
+  token or cancellation cleanup, and `free_descriptor_chain` pops at most
+  two entries. Two stale or non-fitting entries can consume the last
+  wake opportunity. Register each future once, update its waker on repoll,
+  and remove it on success/drop. Then use a bounded wake-all or a
+  descriptor-count-aware selection policy. The EVENT_IDX re-arm fix does
+  not repair this separate waiter-queue issue.
+
 - **Block I/O task: recover the sequential cost** (recorded 2026-09-09).
   The single-owner task costs 3 to 5 percent of sequential throughput against
   the old driver. Three measured
@@ -806,6 +930,17 @@ the ruling; nothing here should be picked up without a fresh call.
   readers. Pick up only with a matched-load network measurement and the
   threaded latency probe; patch and data under `build/virtio-waiters-results/`.
 
+  The proposed implementation is still absent: `block_io.rs::Request::new`
+  always uses `Rc<RefCell<Response>>`, including one-chunk requests; `run`
+  polls completions without a direct used-ring drain at entry;
+  `runtime/fs.rs` gives the inbox 64 entries; and
+  `moto-sdk/src/async_runtime/channel.rs::RecvFuture::poll` still busy-spins on
+  an empty inbox before arming. Revisit the one-chunk response first as a
+  separate change, preserving early descriptor release and earliest-chunk
+  error reporting. Evaluate drain/batching and a nonspinning receive mode
+  independently. The old 3–5% cost and the rejected combined prototype's
+  gains are historical measurements, not established current performance.
+
 ## Declined review findings (2026-09-24)
 
 Considered in the review of the `CAP_NET`/`CAP_FS_WRITE` work and declined.
@@ -817,6 +952,11 @@ Do not raise them again.
 - vsock credit on undecodable headers (finding 14). No credit stall was shown.
   Credit advertisements are cumulative, and malformed headers must not become
   trusted credit input.
+  Source review: the declined behavior remains deliberate.
+  `src/sys/sys-io/src/runtime/net/vsock.rs::handle_vsock_packet` returns on
+  a decode error before updating connection state; only a validated
+  `PacketHeader` reaches the credit logic. No fix is proposed and this
+  finding is not reopened.
 
 ## P3: TIME-WAIT sockets still hold 10-25 KiB each (2026-10-18)
 
