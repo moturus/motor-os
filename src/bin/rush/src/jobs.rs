@@ -84,12 +84,13 @@ fn unless_explicit(
     env: &[(String, String)],
 ) -> Option<(&'static str, String)> {
     let (key, val) = grant?;
-    (!has_explicit_env(key, env)).then_some((key, val))
+    (!has_explicit_env(key, env.iter().map(|(name, _)| name.as_str()))).then_some((key, val))
 }
 
-/// Whether a command assignment or the exported environment supplies `key`.
-pub fn has_explicit_env(key: &str, env: &[(String, String)]) -> bool {
-    env.iter().any(|(name, _)| name == key) || std::env::var_os(key).is_some()
+/// Whether a command assignment (one of `names`) or the exported environment
+/// supplies `key`.
+pub fn has_explicit_env<'a>(key: &str, names: impl IntoIterator<Item = &'a str>) -> bool {
+    names.into_iter().any(|name| name == key) || std::env::var_os(key).is_some()
 }
 
 // ---- child stdio ------------------------------------------------------------

@@ -39,8 +39,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::ast::{
-    AndOr, AndOrOp, CaseClause, Command as AstCommand, CompoundCommand, ForClause, FunctionBody,
-    IfClause, List, ListItem, Pipeline, RedirOp, Redirect, Separator, SimpleCommand, WhileClause,
+    AndOr, AndOrOp, Assignment, CaseClause, Command as AstCommand, CompoundCommand, ForClause,
+    FunctionBody, IfClause, List, ListItem, Pipeline, RedirOp, Redirect, Separator, SimpleCommand,
+    WhileClause,
 };
 use crate::builtins::{self, Builtin};
 use crate::expand;
@@ -430,15 +431,14 @@ fn launches_child(mut argv: &[String], shell: &Shell) -> bool {
     false
 }
 
-fn refuse_inproc_caps(
-    argv: &[String],
-    assigns: &[(String, String)],
-    shell: &Shell,
-    io: &IoEnv,
-) -> bool {
-    if !crate::sys::CAPS_ENV_KEY.is_some_and(|key| jobs::has_explicit_env(key, assigns))
-        || launches_child(argv, shell)
-    {
+/// Refuse an in-process command that carries a capability mask: only a child
+/// process can take one. The check precedes the command's redirections, so a
+/// refused command has no side effects; the mask's presence is all that
+/// matters, so the still unexpanded assignment names suffice.
+fn refuse_inproc_caps(argv: &[String], assigns: &[Assignment], shell: &Shell, io: &IoEnv) -> bool {
+    let requested = crate::sys::CAPS_ENV_KEY
+        .is_some_and(|key| jobs::has_explicit_env(key, assigns.iter().map(|a| a.name.as_str())));
+    if !requested || launches_child(argv, shell) {
         return false;
     }
     let name = argv.first().map_or("in-process command", String::as_str);
@@ -447,6 +447,16 @@ fn refuse_inproc_caps(
         "rush: {name}: MOTOR_OS_CAPS requires a child process"
     );
     true
+}
+
+/// Expand a command's assignment values in `io`: the environment after its
+/// redirections, which POSIX §2.9.1 performs first (`x=$(cat) <f` reads `f`).
+fn expand_assigns(simple: &SimpleCommand, shell: &mut Shell, io: &IoEnv) -> Vec<(String, String)> {
+    simple
+        .assigns
+        .iter()
+        .map(|a| (a.name.clone(), expand::to_string(&a.value, shell, io)))
+        .collect()
 }
 
 fn exec_simple(
@@ -459,29 +469,45 @@ fn exec_simple(
     // last command substitution it performed (`x=$(false)` fails), so watch for
     // one across this command's expansions.
     shell.clear_cmdsub_status();
-    let assigns: Vec<(String, String)> = simple
-        .assigns
-        .iter()
-        .map(|a| (a.name.clone(), expand::to_string(&a.value, shell, io)))
-        .collect();
-
     let mut argv = Vec::new();
     for word in &simple.words {
         argv.extend(expand::to_fields(word, shell, io));
     }
-
     // An expansion error (`set -u`, `${x?}`) aborts the command before it runs.
     if shell.fatal_pending() {
         maybe_die_fatal(shell);
         return 2;
     }
 
+    // Alias expansion in command position (a documented-limits approximation:
+    // the value is whitespace-split into words, without re-quoting or `$`
+    // re-expansion, and a name is expanded at most once to avoid loops).
+    expand_aliases(&mut argv, shell);
+
+    // A capability mask is refused before anything takes effect: a bare
+    // assignment may carry one, a command or a redirection may not.
+    if (!argv.is_empty() || !simple.redirects.is_empty())
+        && refuse_inproc_caps(&argv, &simple.assigns, shell, io)
+    {
+        return 126;
+    }
+
+    // Redirections apply to every command, builtin or external; build them once
+    // (this also gives `> file` alone its file-creation side effect). They come
+    // before the assignment values, so `x=$(cat) <f` reads `f` (POSIX §2.9.1).
+    let (fds, sole_use) = match build_fds_for_simple(io, &simple.redirects, shell) {
+        Ok(built) => built,
+        Err(code) => return code,
+    };
+    let assigns = expand_assigns(simple, shell, &IoEnv { fds: fds.clone() });
+    if shell.fatal_pending() {
+        maybe_die_fatal(shell);
+        return 2;
+    }
+    trace(shell, io, &assigns, &argv);
+
     if argv.is_empty() {
-        if !simple.redirects.is_empty() && refuse_inproc_caps(&argv, &assigns, shell, io) {
-            return 126;
-        }
         let mut status = shell.cmdsub_status().unwrap_or(0);
-        trace(shell, io, &assigns, &[]);
         // Assignment-only command: assignments persist in the shell.
         for (k, v) in &assigns {
             if let Err(e) = shell.set(k, v.clone()) {
@@ -491,33 +517,9 @@ fn exec_simple(
                 shell.mark_fatal(2);
             }
         }
-        if !simple.redirects.is_empty() {
-            // Opening the targets is the observable effect (e.g. `> file`).
-            if let Err(code) = build_fds(io, &simple.redirects, shell) {
-                status = code;
-            }
-        }
         maybe_die_fatal(shell);
         return status;
     }
-
-    trace(shell, io, &assigns, &argv);
-
-    // Alias expansion in command position (a documented-limits approximation:
-    // the value is whitespace-split into words, without re-quoting or `$`
-    // re-expansion, and a name is expanded at most once to avoid loops).
-    expand_aliases(&mut argv, shell);
-
-    if refuse_inproc_caps(&argv, &assigns, shell, io) {
-        return 126;
-    }
-
-    // Redirections apply to every command, builtin or external; build them once
-    // (this also gives the file-creation side effect for output-less builtins).
-    let (fds, sole_use) = match build_fds_for_simple(io, &simple.redirects, shell) {
-        Ok(built) => built,
-        Err(code) => return code,
-    };
 
     // Dispatch order (POSIX §2.9.1): a *special* builtin is found before any
     // function and cannot be shadowed; a *regular* builtin is found after
@@ -1240,7 +1242,10 @@ fn run_shell_script(
     // since the native loader cannot use the /system/bin/sh script as an ELF
     // interpreter.
     #[cfg(not(unix))]
-    if jobs::has_explicit_env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, env) {
+    if jobs::has_explicit_env(
+        moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
+        env.iter().map(|(name, _)| name.as_str()),
+    ) {
         let mut child_args = Vec::with_capacity(args.len() + 1);
         child_args.push(program.to_string());
         child_args.extend_from_slice(args);
@@ -1546,45 +1551,8 @@ fn run_pipeline(cmds: &[AstCommand], shell: &mut Shell, io: &IoEnv) -> i32 {
 
         let stage = match command {
             AstCommand::Simple(simple) => {
-                let assigns: Vec<(String, String)> = simple
-                    .assigns
-                    .iter()
-                    .map(|a| (a.name.clone(), expand::to_string(&a.value, shell, io)))
-                    .collect();
-                let mut argv = Vec::new();
-                for word in &simple.words {
-                    argv.extend(expand::to_fields(word, shell, io));
-                }
-                expand_aliases(&mut argv, shell);
-                trace(shell, io, &assigns, &argv);
-
-                let external = !argv.is_empty()
-                    && builtins::lookup(&argv[0]).is_none()
-                    && shell.get_function(&argv[0]).is_none();
-                let program = if external {
-                    resolve_program(&argv[0], shell)
-                } else {
-                    None
-                };
-
                 run_inproc_stage(taken, is_last, io, shell, |shell, sio| {
-                    if external {
-                        match &program {
-                            Some(p) => {
-                                let fds = match build_fds(sio, &simple.redirects, shell) {
-                                    Ok(f) => f,
-                                    Err(code) => return code,
-                                };
-                                spawn_external(p, &argv[1..], &assigns, &fds, &NO_SOLE_USE, shell)
-                            }
-                            None => {
-                                eprintln!("rush: {}: command not found", argv[0]);
-                                127
-                            }
-                        }
-                    } else {
-                        run_simple_inproc(simple, &argv, &assigns, sio, shell)
-                    }
+                    run_simple_stage(simple, shell, sio)
                 })
             }
             // A compound command as a pipeline stage.
@@ -1618,39 +1586,49 @@ fn run_pipeline(cmds: &[AstCommand], shell: &mut Shell, io: &IoEnv) -> i32 {
     last_status
 }
 
-/// Run one simple command (a builtin, function, or assignment-only) as an
-/// in-process pipeline stage, over the stage's I/O environment `sio`.
-fn run_simple_inproc(
-    simple: &SimpleCommand,
-    argv: &[String],
-    assigns: &[(String, String)],
-    sio: &IoEnv,
-    shell: &mut Shell,
-) -> i32 {
+/// Run one simple command as a pipeline stage over the stage's I/O environment
+/// `sio`, in [`exec_simple`]'s order: words, the capability check, redirections,
+/// then assignment values, all in that environment, so `echo x | echo "$(cat)"`
+/// reads the pipe as in dash. The stage is a subshell (the caller restores
+/// state), and an external command's files are pumped rather than moved into
+/// the child.
+fn run_simple_stage(simple: &SimpleCommand, shell: &mut Shell, sio: &IoEnv) -> i32 {
+    let mut argv = Vec::new();
+    for word in &simple.words {
+        argv.extend(expand::to_fields(word, shell, sio));
+    }
+    expand_aliases(&mut argv, shell);
     if (!argv.is_empty() || !simple.redirects.is_empty())
-        && refuse_inproc_caps(argv, assigns, shell, sio)
+        && refuse_inproc_caps(&argv, &simple.assigns, shell, sio)
     {
         return 126;
-    }
-    if argv.is_empty() {
-        // Assignment-only stage (subshell: discarded by the caller's restore).
-        for (k, v) in assigns {
-            let _ = shell.set(k, v.clone());
-        }
-        return 0;
     }
     let fds = match build_fds(sio, &simple.redirects, shell) {
         Ok(f) => f,
         Err(code) => return code,
     };
+    let assigns = expand_assigns(simple, shell, &IoEnv { fds: fds.clone() });
+    trace(shell, sio, &assigns, &argv);
+    if argv.is_empty() {
+        // Assignment-only stage: the subshell discards the assignments.
+        for (k, v) in &assigns {
+            let _ = shell.set(k, v.clone());
+        }
+        return 0;
+    }
     if let Some(b) = builtins::lookup(&argv[0]) {
-        return run_builtin_pipeline_safe(b, argv, assigns, &fds, shell);
+        return run_builtin_pipeline_safe(b, &argv, &assigns, &fds, shell);
     }
     if let Some(body) = shell.get_function(&argv[0]) {
-        return exec_function_call(&body, argv, assigns, &fds, shell);
+        return exec_function_call(&body, &argv, &assigns, &fds, shell);
     }
-    // Unreachable: run_pipeline only routes builtins/functions here.
-    127
+    match resolve_program(&argv[0], shell) {
+        Some(program) => spawn_external(&program, &argv[1..], &assigns, &fds, &NO_SOLE_USE, shell),
+        None => {
+            let _ = writeln!(fds[2].err_writer(), "rush: {}: command not found", argv[0]);
+            127
+        }
+    }
 }
 
 /// Run a builtin as a pipeline-stage subshell, taming the builtins that would

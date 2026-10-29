@@ -502,6 +502,51 @@ fn command_substitution_runs_in_the_enclosing_io() {
     assert_eq!(out.stderr, b"");
 }
 
+#[test]
+fn assignment_values_expand_after_redirections() {
+    // POSIX §2.9.1 performs a command's redirections before expanding its
+    // assignment values, so a substitution there reads the redirected stdin.
+    let input = tmp("assign_in");
+    std::fs::write(&input, "from-file\n").unwrap();
+    let p = input.display();
+    assert_eq!(
+        run_c(&format!("x=$(cat) < {p}; printf '[%s]' \"$x\"")).stdout,
+        "[from-file]"
+    );
+    let r = run_c(&format!("FOO=$(cat) env < {p}"));
+    assert!(
+        r.stdout.lines().any(|l| l == "FOO=from-file"),
+        "{}",
+        r.stdout
+    );
+    let _ = std::fs::remove_file(&input);
+    // A redirection that fails aborts the command before anything is assigned.
+    let missing = tmp("assign_missing");
+    let _ = std::fs::remove_file(&missing);
+    let r = run_c(&format!(
+        "x=1 < {m}; printf '[%s]' \"$x\"",
+        m = missing.display()
+    ));
+    assert_eq!(r.stdout, "[]");
+}
+
+#[test]
+fn pipeline_stage_words_expand_in_the_stage() {
+    // A stage's words see the stage's stdin, so a substitution reads the
+    // upstream output; its own redirections and assignments follow, in order.
+    assert_eq!(run_c("echo x | echo \"[$(cat)]\"").stdout, "[x]\n");
+    assert_eq!(
+        run_c("echo x | echo \"[$(cat)]\" | tr a-z A-Z").stdout,
+        "[X]\n"
+    );
+    assert_eq!(
+        run_c("echo x | echo \"[$(cat)]\" < /dev/null").stdout,
+        "[x]\n"
+    );
+    let r = run_c("echo x | FOO=$(cat) env");
+    assert!(r.stdout.lines().any(|l| l == "FOO=x"), "{}", r.stdout);
+}
+
 // ---- here-documents --------------------------------------------------------
 
 #[test]
