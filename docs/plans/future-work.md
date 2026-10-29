@@ -8,6 +8,63 @@ per-operation allocation overhead, were reviewed. Historical timings below
 are not new measurements. An unexplained historical failure stays open
 unless the source establishes that its cause was fixed.
 
+## WireGuard load test flakes: a single ICMP probe inside a UDP flood (2026-10-29)
+
+`systest wireguard-load <wg pid>` (`src/sys/tests/systest/src/wireguard_load.rs`,
+run by `test-wireguard.sh` in the six guest/host/managed cases) fails at line
+68 with `TimedOut`: in release `full-test.sh` runs on the None-reserve tree it
+failed 1 of 8 times on 2026-10-29 (first sighting, also the day before in an
+earlier run), then 3 of 12, then 3 of 4 in a row; never in debug, where the
+load is ~50x lighter. The test, for 2 s per case: one thread floods
+1372-byte datagrams through the tunnel to the host peer with a non-blocking
+socket (yielding on WouldBlock), one thread reads the echoes, and the main
+thread loops over a 4 KiB file write-read plus one ICMP echo to the host over
+the physical NIC with a 1 s timeout and no retry, asserting each loop
+iteration under 1 s. It is a pre-existing test (`5d5a49aa`, 2026-10-26);
+nothing in it or in the UDP/ICMP paths changed with the None reserve work
+(the ICMP gate gained one shared-page load and one map lookup, and the
+failure is a timeout, not a refusal).
+
+Measured with temporary instrumentation (per-echo latency, sys-io counters,
+host counters; since removed) over 14 standalone runs of the suite, 71 load
+instances completed:
+
+- Normal instance: 800-900 echo round trips in 2 s, worst echo 1-30 ms;
+  about 400k datagrams "sent", of which ~150k are dropped by sys-io at the
+  full netstack UDP transmit buffer (`SendError::BufferFull` in
+  `src/sys/sys-io/src/runtime/net/socket/udp.rs`, counted in
+  `net.udp.tx_buffer_full_drops`) while still acknowledged to the client, so
+  `send_to` returns `Ok(1372)` and never WouldBlock.
+- Degraded instance (9 of 71, worst echo over 100 ms, all with 240k+ such
+  drops): the sender spins harder (1.1-1.5 M sends), sys-io and the wg process
+  starve, and everything through sys-io stalls: worst echo 713 ms, worst file
+  write-read 857 ms, one instance with 1.5 M drops delivered 786 echoes in 2 s
+  and the following TCP exchange test timed out at 3 s. Stall length scales
+  with the drop count.
+- Lost probe (2 of 3 timeouts): the second or third echo of an instance,
+  issued milliseconds into the load with everything before it at 5 ms, gets
+  no reply within 1 s. The host answers every echo it receives (snmp
+  `InEchos` == `OutEchoReps`, 4784 per suite run, no ICMP rate limiting,
+  conntrack far from full), and its tap drops packets toward the guest while
+  the guest does not drain its ring (`moto-tap` TX dropped: +3 to +4390 per
+  suite run, +2502 in a clean one). So the reply is lost on the way back in,
+  or the request before it leaves the guest; the guest counts no device drops.
+- The flood itself loses 80-90% of its datagrams somewhere past the UDP
+  socket (received 45k of ~260k transmitted); that is the test's design.
+
+Not caused by host load, stray VMs or peer processes (checked), or by
+anything in sys-io's admission paths. Fix options, to decide: have the UDP
+transmit path return `E_NOT_READY` (WouldBlock) when the netstack buffer is
+full instead of acknowledging a dropped datagram, which gives non-blocking
+senders real backpressure and stops the spin (a sys-io behavior change, to
+be checked against other UDP users); make the probe tolerate a lost reply or
+give the loop a budget that fits a saturated link (a test change, needs
+approval: it weakens the assertion); or both. Logs:
+`/tmp/claude-1000/-home-posk-motor-dev-motor-os/48f9ee6b-a3a5-4f1b-be1a-a3b299e672e6/scratchpad/`
+(`gate-r2-release-3-wgload.log`, `gate-r4-release-{1,2}-wgload.log`,
+`gate-r4-release-3.log`, `wg-run-*.log`, `wg2-run-*.log`, `wg-loop*.out`,
+`tap-drops.txt`, `icmp-{before,after}.txt`).
+
 ## Shared zero page
 
 Motor OS kernel should have a single shared copy-on-write zero page,
