@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::*;
 
-use russh::server::{Msg, Server as _, Session};
+use russh::server::{Msg, Session};
 use russh::*;
 
 use russhd::config;
@@ -63,14 +63,59 @@ async fn main() {
         ..Default::default()
     };
     let config = Arc::new(russh_config);
-    let mut sh = ConnectionHandler::new(program_config.clone(), None);
 
     let listener = tokio::net::TcpListener::bind(program_config.listen_on())
         .await
         .unwrap();
     let listen_addr = listener.local_addr().unwrap();
     log::info!("Listening on {listen_addr}");
-    sh.run_on_socket(config, &listener).await.unwrap();
+    serve(config, program_config, listener).await
+}
+
+/// russh's `run_on_socket`, except that a failed accept ends neither the server
+/// nor its sessions: `run_on_socket` returns at the first one, and dropping it
+/// disconnects every session. Under memory pressure an accept can fail.
+async fn serve(
+    config: Arc<server::Config>,
+    program_config: Arc<config::Config>,
+    listener: tokio::net::TcpListener,
+) -> ! {
+    loop {
+        let (socket, peer_addr) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(err) => {
+                log::warn!("accept failed: {err:?}");
+                // The cause lasts while pressure does; do not spin on it.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+        // Connection setup allocates more at once than the memory reserve can
+        // grant once memory runs out, and russhd aborts on a failed allocation:
+        // shed new connections under pressure, as sys-io sheds new clients.
+        #[cfg(target_os = "motor")]
+        if moto_sdk::sys::memory_pressure() {
+            log::warn!("dropping a connection from {peer_addr} under memory pressure");
+            drop(socket);
+            continue;
+        }
+        let config = config.clone();
+        let handler = ConnectionHandler::new(program_config.clone(), peer_addr);
+        tokio::spawn(async move {
+            if config.nodelay
+                && let Err(err) = socket.set_nodelay(true)
+            {
+                log::warn!("set_nodelay() failed: {err:?}");
+            }
+            let result = match server::run_stream(config, socket, handler).await {
+                Ok(session) => session.await,
+                Err(err) => Err(err),
+            };
+            if let Err(err) = result {
+                log::info!("Session error: {err:?}");
+            }
+        });
+    }
 }
 
 #[allow(unused)]
@@ -91,7 +136,7 @@ struct ConnectionHandler {
     config: Arc<config::Config>,
 
     channel: Option<(Channel<Msg>, server::Handle)>,
-    remote_addr: Option<SocketAddr>,
+    remote_addr: SocketAddr,
     pty_request: Option<PtyRequest>,
     authenticated_user: Option<String>,
 
@@ -102,7 +147,8 @@ struct ConnectionHandler {
 }
 
 impl ConnectionHandler {
-    fn new(config: Arc<config::Config>, remote_addr: Option<SocketAddr>) -> Self {
+    fn new(config: Arc<config::Config>, remote_addr: SocketAddr) -> Self {
+        log::info!("New Client: {remote_addr:?}");
         static ID: AtomicU64 = AtomicU64::new(0);
         Self {
             config,
@@ -248,18 +294,6 @@ impl ConnectionHandler {
         );
 
         Ok(())
-    }
-}
-
-impl server::Server for ConnectionHandler {
-    type Handler = Self;
-    fn new_client(&mut self, addr: Option<std::net::SocketAddr>) -> Self {
-        log::info!("New Client: {addr:?}");
-        Self::new(self.config.clone(), addr)
-    }
-
-    fn handle_session_error(&mut self, error: <Self::Handler as russh::server::Handler>::Error) {
-        log::info!("Session error: {error:?}");
     }
 }
 
@@ -600,15 +634,11 @@ impl server::Handler for ConnectionHandler {
 
 impl Drop for ConnectionHandler {
     fn drop(&mut self) {
-        let from = self
-            .remote_addr
-            .map(|addr| format!(" from {addr:?}"))
-            .unwrap_or_default();
         log::info!(
-            "Dropping Connection #{} for user '{}'{}",
+            "Dropping Connection #{} for user '{}' from {:?}",
             self.id,
-            self.authenticated_user.as_ref().unwrap_or(&String::new()),
-            from
+            self.authenticated_user.as_deref().unwrap_or_default(),
+            self.remote_addr
         );
     }
 }
