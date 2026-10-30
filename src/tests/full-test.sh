@@ -912,6 +912,9 @@ fi
 # pipeline remain pipes, and a background job receives null stdin. The helper
 # exits nonzero if any fd has the wrong kind.
 route_dir=$TEST_TMP/stdio-routes
+# A debug build's runtime logs to stderr. Where a route merges stderr into the
+# compared output, drop those log lines first.
+without_runtime_logs() { sed -E '/^ *[0-9]+:[0-9]{3}: (TRACE|DEBUG|INFO|WARN|ERROR) /d' <<<"$1"; }
 vm_ssh "/system/bin/mkdir $route_dir"
 kind="TMPDIR=$TEST_TMP $TEST_BIN/systest stdio-file-direct-kind pipe"
 out="$(vm_ssh_stdout "/system/bin/rush -c '$kind file pipe >$route_dir/simple; echo RC=\$?; cat $route_dir/simple'")"
@@ -927,8 +930,10 @@ out="$(vm_ssh_stdout "/system/bin/rush -c 'F() { $kind pipe pipe; }; F >$route_d
 out="$(vm_ssh_stdout "/system/bin/rush -c '$kind pipe pipe | cat >$route_dir/pipeline; cat $route_dir/pipeline'")"
 [ "$out" = "kind-ok" ] || fail "rush pipeline pump route: '$out'"
 out="$(vm_ssh_stdout "/system/bin/rush -c '$kind file pipe 2>&1 1>$route_dir/split; echo RC=\$?; cat $route_dir/split'")"
+out="$(without_runtime_logs "$out")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush 2>&1 1>f order: '$out'"
 out="$(vm_ssh_stdout "/system/bin/rush -c '$kind file file 1>$route_dir/joined 2>&1; echo RC=\$?; cat $route_dir/joined'")"
+out="$(without_runtime_logs "$out")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush 1>f 2>&1 order: '$out'"
 out="$(vm_ssh_stdout "/system/bin/rush -c 'echo builtin >$route_dir/builtin; cat $route_dir/builtin'")"
 [ "$out" = "builtin" ] || fail "rush builtin pump route: '$out'"
