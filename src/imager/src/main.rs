@@ -1131,7 +1131,7 @@ mod tests {
             .directories
             .iter()
             .any(|path| path == "/user/cfg/lorry" || path.starts_with("/user/cfg/lorry/")));
-        assert_eq!(config.source_dirs.len(), 8);
+        assert_eq!(config.source_dirs.len(), 5);
         for (source, destination) in [
             ("src/bin/red", "/devtools/src/motor-os/bin/red"),
             ("src/bin/lorry", "/devtools/src/motor-os/bin/lorry"),
