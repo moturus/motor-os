@@ -170,6 +170,11 @@ impl IoEnv {
 
 // ---- AST walk ---------------------------------------------------------------
 
+// Interactive shells ignore `set -n`, so a user can still run `set +n`.
+fn noexec(shell: &Shell) -> bool {
+    shell.opts.get(Opt::NoExec) && !shell.is_interactive()
+}
+
 fn exec_list(list: &List, shell: &mut Shell, io: &IoEnv) -> i32 {
     let mut status = 0;
     for item in &list.0 {
@@ -205,6 +210,10 @@ fn exec_list(list: &List, shell: &mut Shell, io: &IoEnv) -> i32 {
 /// documented degradation, and the reason `{ sleep 5; } &` blocks where
 /// `sleep 5 &` does not.
 fn exec_background(and_or: &AndOr, shell: &mut Shell, io: &IoEnv) -> i32 {
+    // The lone-command path bypasses exec_pipeline; skip job creation too.
+    if noexec(shell) {
+        return 0;
+    }
     let started = shell.jobs.started();
     let status = match lone_simple(and_or) {
         Some(simple) => {
@@ -360,12 +369,9 @@ fn check_errexit(status: i32, shell: &mut Shell) {
 }
 
 fn exec_pipeline(pipeline: &Pipeline, shell: &mut Shell, io: &IoEnv) -> i32 {
-    // `set -n`: read and parse commands without executing them. An interactive
-    // shell ignores it (POSIX), otherwise a typo would wedge the session — and
-    // since `set +n` would itself not run, nothing could turn it back off.
-    // Checked here, ahead of both the single-command and the multi-stage
+    // `set -n` is checked ahead of both the single-command and the multi-stage
     // path: a stage applies its redirections before anything else runs.
-    if shell.opts.get(Opt::NoExec) && !shell.is_interactive() {
+    if noexec(shell) {
         return 0;
     }
     let status = match pipeline.commands.as_slice() {
@@ -1869,7 +1875,9 @@ fn exec_while(clause: &WhileClause, shell: &mut Shell, io: &IoEnv) -> i32 {
     shell.enter_loop();
     loop {
         exec_condition(&clause.cond, shell, io);
-        if shell.flow() != Flow::Normal {
+        // A condition can enable -n; its skipped commands return success,
+        // which must not be interpreted as a reason to keep looping.
+        if noexec(shell) || shell.flow() != Flow::Normal {
             break;
         }
         // `while` runs the body while the condition is true (status 0); `until`
@@ -1913,8 +1921,11 @@ fn exec_case(clause: &CaseClause, shell: &mut Shell, io: &IoEnv) -> i32 {
 
 /// Consume a pending loop-control signal after a loop body. Returns `true` when
 /// the enclosing loop should stop iterating (a `break`, an outer-targeted
-/// `continue`/`break n`, or a `return`); `false` to keep looping.
+/// `continue`/`break n`, a `return`, or `set -n`); `false` to keep looping.
 fn loop_should_break(shell: &mut Shell) -> bool {
+    if noexec(shell) {
+        return true;
+    }
     match shell.flow() {
         Flow::Normal => false,
         Flow::Break(1) => {
@@ -2046,4 +2057,96 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 fn temp_path(tag: &str) -> PathBuf {
     let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!("rush_{}_{}_{}", crate::sys::pid(), tag, n))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn noexec_skips_background_commands_and_jobs() {
+        let target = TempFile::new("noexec_background").unwrap();
+        (&*target.file).write_all(b"untouched\n").unwrap();
+        for initial_noexec in [false, true] {
+            for command in [
+                "echo ran &",
+                "set +n &",
+                "set -- ran &",
+                "echo ran >\"$1\" &",
+                "{ echo ran; } &",
+                "echo ran | echo tail &",
+                "false || echo ran &",
+            ] {
+                let mut shell = Shell::new();
+                let params = vec![target.path.to_str().unwrap().to_string()];
+                shell.set_params(params.clone());
+                shell.opts.set(Opt::NoExec, initial_noexec);
+                let script = if initial_noexec {
+                    command.to_string()
+                } else {
+                    format!("set -n; {command}")
+                };
+                let output = capture(&script, &mut shell, &IoEnv::inherit()).unwrap();
+                assert_eq!(output, "", "{script}");
+                assert_eq!(shell.status(), 0, "{script}");
+                assert_eq!(shell.jobs.started(), 0, "{script}");
+                assert!(shell.opts.get(Opt::NoExec), "{script}");
+                assert_eq!(shell.params(), params, "{script}");
+                assert_eq!(
+                    std::fs::read_to_string(&target.path).unwrap(),
+                    "untouched\n",
+                    "{script}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn noexec_stops_active_loops() {
+        // Unlike dash, stop when -n is enabled inside an active loop instead
+        // of spinning forever over skipped conditions and bodies.
+        for script in [
+            "while ! false; do set -n; done",
+            "while true; do set -n; done",
+            "until false; do set -n; done",
+            "while set -n; do :; done",
+            "until ! set -n; do :; done",
+            "while true; do while ! false; do set -n; done; done",
+        ] {
+            let mut shell = Shell::new();
+            assert_eq!(run_source(script, &mut shell), 0, "{script}");
+            assert!(shell.opts.get(Opt::NoExec), "{script}");
+            assert!(!shell.in_loop(), "{script}");
+        }
+    }
+
+    #[test]
+    fn noexec_stops_for_before_the_next_assignment() {
+        let mut shell = Shell::new();
+        assert_eq!(
+            run_source(
+                "for noexec_item in first second; do set -n; done",
+                &mut shell
+            ),
+            0
+        );
+        assert_eq!(shell.get("noexec_item").as_deref(), Some("first"));
+        assert!(!shell.in_loop());
+    }
+
+    #[test]
+    fn interactive_noexec_keeps_background_commands_and_loops_running() {
+        let mut shell = Shell::new();
+        shell.set_interactive(true);
+        let output = capture(
+            "set -n; echo background & while true; do echo loop; break; done",
+            &mut shell,
+            &IoEnv::inherit(),
+        )
+        .unwrap();
+        assert_eq!(output, "background\nloop\n");
+        assert_eq!(shell.status(), 0);
+        assert_eq!(shell.jobs.started(), 1);
+        assert!(!shell.in_loop());
+    }
 }
