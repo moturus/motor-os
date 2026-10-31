@@ -450,6 +450,7 @@ which looks for an executable, works). <code>kill</code>, <code>cd</code>,
   <tr><td><a href="editors.html">kibim</a></td><td><code>/user/bin</code></td><td>A small kilo-style editor; standard and developer images.</td></tr>
   <tr><td>httpd</td><td><code>/user/bin</code></td><td>A small static-file HTTP server with optional TLS: <code>httpd -a ADDR:PORT -d DIR [--ssl-cert PEM --ssl-key PEM]</code>.</td></tr>
   <tr><td>httpd-axum</td><td><code>/user/bin</code></td><td>The same job on axum, tower-http, and Tokio, with TLS through rustls. Serves this website.</td></tr>
+  <tr><td><a href="#ssh-client">ssh, scp, sftp, ssh-keygen, ssh-copy-id</a></td><td><code>/user/bin</code></td><td>SSH shells and commands, SFTP file transfers, key generation and installation; see the client reference below.</td></tr>
   <tr><td>russhd</td><td><code>/system/services</code></td><td>The SSH server; started by sys-init (see <a href="running.html">Running Motor OS</a>).</td></tr>
   <tr><td>curl</td><td><code>/system/bin</code></td><td>Developer image: a small curl-compatible HTTPS client written in Rust, used by Lorry to fetch crates and by gix for Git transfers.</td></tr>
   <tr><td>gix</td><td><code>/devtools/bin</code></td><td>Developer image: a small Git client with <code>init</code>, <code>clone</code> and <code>fetch</code> over HTTPS or SSH, <code>status</code>, <code>log</code>, <code>diff</code>, <code>add</code>, <code>unstage</code>, <code>restore</code>, <code>commit</code>, <code>branch</code>, <code>tag</code>, <code>remote</code>, <code>switch</code>, <code>checkout</code>, <code>merge</code>, <code>recover</code>, and <code>push</code> of one branch or tag over SSH. See the <a href="gix.html">gix</a> page.</td></tr>
@@ -460,6 +461,213 @@ which looks for an executable, works). <code>kill</code>, <code>cd</code>,
 <p>The developer image adds gix, Lorry, mdbg, the native compilers, and the test
 suites; see <a href="devtools.html">Developer image</a>.</p>
 
+<h2 id="ssh-client">SSH clients</h2>
+
+<p>Motor OS provides <code>ssh</code>, <code>scp</code>, <code>sftp</code>, <code>ssh-keygen</code>, and <code>ssh-copy-id</code> in
+<code>/user/bin</code>. These commands implement the capabilities below; unsupported
+OpenSSH options are errors. Run <code>ssh --help</code> for the SSH option reference.</p>
+
+<h3 id="remote-shells-and-commands">Remote shells and commands</h3>
+
+<pre><code>ssh user@host
+ssh -p 2222 user@host echo hello
+ssh -t user@host top
+ssh -T user@host cat &lt; input.txt &gt; output.txt</code></pre>
+
+<p>Destinations use <code>[user@]host</code>; bracket IPv6 addresses, such as
+<code>motor@[2001:db8::1]</code>. The default port is 22. With no command, <code>ssh</code> opens
+an interactive shell and requires a terminal on stdin. Commands run without
+a remote terminal by default; <code>-t</code> requests one (and requires a local
+terminal), while <code>-T</code> disables it. Command arguments are joined with spaces
+for the remote shell; preserve any required remote quoting explicitly.</p>
+
+<p>Command sessions forward stdin, stdout, and stderr and return the remote
+exit status (0–255); client errors or a missing usable status return 255.
+Interactive sessions forward Ctrl+C and terminal size changes. At the
+start of a line, <code>~.</code> disconnects and <code>~~</code> sends a literal tilde.</p>
+
+<h3 id="shared-connection-options-and-authentication">Shared connection options and authentication</h3>
+
+<p><code>ssh</code>, <code>scp</code>, <code>sftp</code>, and <code>ssh-copy-id</code> share authentication, host-key checks,
+configuration, and jump routing. Put options before the destination or
+transfer operands; <code>--</code> ends option parsing.</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>Option</th><th>Meaning</th></tr>
+  <tr><td><code>-p PORT</code></td><td>Port for <code>ssh</code> and <code>ssh-copy-id</code>.</td></tr>
+  <tr><td><code>-P PORT</code></td><td>Port for <code>scp</code> and <code>sftp</code>.</td></tr>
+  <tr><td><code>-i FILE</code></td><td>Private identity for <code>ssh</code>, <code>scp</code>, and <code>sftp</code>; repeat to try multiple keys. For <code>ssh-copy-id</code>, selects the <strong>public key to install</strong>.</td></tr>
+  <tr><td><code>-F FILE</code></td><td>Config file; <code>none</code> or <code>/dev/null</code> disables configuration.</td></tr>
+  <tr><td><code>-J JUMPS</code></td><td>Jump host or comma-separated chain (see below).</td></tr>
+  <tr><td><code>-o Key=Value</code></td><td>Set a supported configuration option (see below).</td></tr>
+</table>
+</div>
+
+<p>Clients try configured OpenSSH private keys, prompting for encrypted-key
+passphrases when needed, then password authentication if the server offers
+it. Keys with unsafe permissions are ignored. <code>BatchMode=yes</code> disables
+password, passphrase, and host-confirmation prompts. Agents and
+keyboard-interactive authentication are not supported. <code>IdentitiesOnly</code> is
+accepted; identities always come from the configured files.</p>
+
+<p>Host-key checking defaults to <code>ask</code>: display the unknown key's fingerprint
+and record it only after <code>yes</code>. <code>StrictHostKeyChecking=yes</code> requires an
+already trusted key; <code>accept-new</code> records unknown keys without prompting.
+Changed keys of a known algorithm are rejected under every policy.
+Known-host records use <code>HOST KEYTYPE BASE64</code> for port 22 and
+<code>[HOST]:PORT KEYTYPE BASE64</code> otherwise, using the resolved <code>HostName</code>.
+Blank lines, comments, and trailing key comments are accepted; hashed
+hosts, patterns, comma-separated hosts, and <code>@</code> markers are unsupported.
+The known-hosts file's parent directory must already exist.</p>
+
+<h3 id="file-transfers">File transfers</h3>
+
+<p><code>scp</code> and <code>sftp</code> use the remote SFTP subsystem; legacy SCP is unsupported.</p>
+
+<pre><code>scp -P 2222 file.txt user@host:/path/file.txt
+scp first.txt second.txt user@host:/path/directory
+scp -r user@host:/path/directory /user/tmp
+sftp -P 2222 user@host
+sftp -b /user/tmp/sftp.commands user@host</code></pre>
+
+<p><code>scp [-r] SOURCE... TARGET</code> requires exactly one remote side, written
+<code>[user@]host:path</code> (including bracketed IPv6). Uploads accept multiple local
+sources when the remote target is a directory; downloads accept one remote
+source. <code>-r</code> copies directory trees. Remote paths are literal, with no
+wildcard or tilde expansion. Local-to-local and remote-to-remote copies,
+symbolic links, and <code>scp -p</code> are unsupported. Transfers preserve an existing
+target's permissions; new files and directories use source permissions
+translated to Motor OS roles when local.</p>
+
+<p><code>sftp [-b FILE] [user@]host</code> opens a command prompt, or reads commands from
+<code>FILE</code> (<code>-</code> means stdin). Batch mode disables authentication prompts and
+stops on the first error; the interactive prompt reports errors and
+continues. Commands accept single/double quotes and backslash escapes,
+with literal paths and no wildcard expansion.</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>SFTP command</th><th>Meaning</th></tr>
+  <tr><td><code>pwd</code>, <code>lpwd</code></td><td>Print remote/local working directory.</td></tr>
+  <tr><td><code>cd PATH</code>, <code>lcd PATH</code></td><td>Change remote/local working directory.</td></tr>
+  <tr><td><code>ls [PATH]</code>, <code>lls [PATH]</code></td><td>List remote/local names.</td></tr>
+  <tr><td><code>get [-r] SOURCE [TARGET]</code></td><td>Download a file or directory tree.</td></tr>
+  <tr><td><code>put [-r] SOURCE [TARGET]</code></td><td>Upload a file or directory tree.</td></tr>
+  <tr><td><code>mkdir PATH</code>, <code>lmkdir PATH</code></td><td>Create a remote/local directory.</td></tr>
+  <tr><td><code>rm PATH</code>, <code>rmdir PATH</code></td><td>Remove a remote file or empty directory.</td></tr>
+  <tr><td><code>rename [-l] OLD NEW</code></td><td>Rename remotely; use replacing <code>posix-rename</code> if advertised, otherwise ordinary no-replace rename. <code>-l</code> forces no-replace rename.</td></tr>
+  <tr><td><code>help</code></td><td>List commands.</td></tr>
+  <tr><td><code>bye</code>, <code>exit</code>, <code>quit</code></td><td>Close the session.</td></tr>
+</table>
+</div>
+
+<h3 id="generate-and-install-login-keys">Generate and install login keys</h3>
+
+<pre><code>ssh-keygen -t ed25519 -C motor-client
+ssh-keygen -y -f /user/cfg/ssh/id_ed25519
+ssh-copy-id -i /user/cfg/ssh/id_ed25519.pub user@host</code></pre>
+
+<p><code>ssh-keygen</code> generates Ed25519 OpenSSH keys, defaulting to
+<code>/user/cfg/ssh/id_ed25519</code> and a matching <code>.pub</code> file. <code>-f FILE</code> selects a
+different output, <code>-C COMMENT</code> sets the comment, and <code>-q</code> suppresses success
+messages. It prompts twice for an optional encryption passphrase unless
+<code>-N PASSPHRASE</code> is supplied (<code>-N ''</code> creates an unencrypted key). Existing
+private or public files are never overwritten. <code>-y -f FILE</code> prints the
+public key from an existing private key, prompting to decrypt if needed.
+Generation supports only <code>-t ed25519</code>.</p>
+
+<p><code>ssh-copy-id</code> reads exactly one OpenSSH public-key line (default
+<code>/user/cfg/ssh/id_ed25519.pub</code>), authenticates using existing credentials,
+and installs it through SFTP into <code>.ssh/authorized_keys</code> under the remote
+SFTP home directory. It keeps existing content and skips keys with the
+same type and key data, regardless of comments. It sets <code>.ssh</code> to 0700
+and creates/appends the key file with mode 0600. Use <code>-p PORT</code> for a custom
+port and <code>-o IdentityFile=PATH</code> to select an existing authentication key;
+<code>-i</code> selects the public key being installed.</p>
+
+<p>This installation targets servers that read <code>.ssh/authorized_keys</code>.
+Motor OS's own <code>russhd</code> instead loads a single <code>authorized_key</code> per user
+from <code>/system/cfg/sshd.toml</code> at startup; copying an <code>authorized_keys</code> file
+does not authorize logins there. Edit that configuration and restart the
+server, or provision <code>users.motor.authorized_key</code> in an image with
+<code>imager set --ssh-key FILE -i IMAGE</code> (see <a href="imager.html">imager</a>).</p>
+
+<h3 id="host-configuration-and-jump-hosts">Host configuration and jump hosts</h3>
+
+<p>Motor OS reads OpenSSH-style client configuration from <code>/user/cfg/ssh/config</code>.
+For example:</p>
+
+<pre><code>Host ssh-hub
+    HostName 11.12.13.14
+    User foo
+
+Host ssh-leaf
+    HostName 10.0.0.4
+    User bar
+    ProxyJump ssh-hub</code></pre>
+
+<p>Run <code>ssh ssh-hub</code> to connect directly, or <code>ssh ssh-leaf</code> to connect through
+<code>ssh-hub</code>. The gateway must allow TCP forwarding to the destination. The local
+client authenticates and checks host keys for both connections, so the gateway
+does not need a copy of the destination's private key.</p>
+
+<p><code>ssh</code>, <code>scp</code>, <code>sftp</code>, and <code>ssh-copy-id</code> share configuration and jump routing.
+For example, <code>scp file ssh-leaf:/path/file</code> uses the same gateway. Gix currently
+passes <code>-F /dev/null</code>, explicitly disabling client config for its SSH commands.</p>
+
+<p><code>Host</code> supports multiple patterns, <code>*</code>, <code>?</code>, and <code>!</code> negation. Blank lines,
+comments, double-quoted values, and <code>Key Value</code> / <code>Key=Value</code> syntax are
+accepted. Directive names are case-insensitive. Match against the alias in
+the command, even when <code>HostName</code> specifies a different network address.</p>
+
+<p>Supported settings (also accepted through <code>-o Key=Value</code>):</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>Setting</th><th>Meaning / default</th></tr>
+  <tr><td><code>HostName</code></td><td>Network destination; defaults to the command's host.</td></tr>
+  <tr><td><code>User</code></td><td>Login name; defaults to <code>$USER</code>, or <code>motor</code>.</td></tr>
+  <tr><td><code>Port</code></td><td>Remote port; 22.</td></tr>
+  <tr><td><code>IdentityFile</code></td><td>Private-key path; <code>/user/cfg/ssh/id_ed25519</code>. Repeatable; <code>none</code> suppresses the default.</td></tr>
+  <tr><td><code>ProxyJump</code></td><td>Gateway or chain; <code>none</code> disables jumping.</td></tr>
+  <tr><td><code>IdentitiesOnly</code></td><td><code>yes</code> / <code>no</code>; default <code>no</code> (file identities only in either case).</td></tr>
+  <tr><td><code>StrictHostKeyChecking</code></td><td><code>ask</code> (default), <code>yes</code>, or <code>accept-new</code>.</td></tr>
+  <tr><td><code>UserKnownHostsFile</code></td><td><code>/user/cfg/ssh/known_hosts</code>.</td></tr>
+  <tr><td><code>BatchMode</code></td><td><code>yes</code> / <code>no</code>; default <code>no</code>.</td></tr>
+  <tr><td><code>ConnectTimeout</code></td><td>Setup timeout in integer seconds; 0 (default) disables it.</td></tr>
+  <tr><td><code>ServerAliveInterval</code></td><td>Keepalive interval in integer seconds; 0 (default) disables it.</td></tr>
+  <tr><td><code>ServerAliveCountMax</code></td><td>Maximum unanswered keepalives; 3.</td></tr>
+</table>
+</div>
+
+<p>Command-line settings take priority. Otherwise the first matching scalar
+setting wins; put specific blocks before <code>Host *</code> defaults. Identity files
+accumulate in order, without duplicates. Explicit identity lists replace the
+default <code>/user/cfg/ssh/id_ed25519</code>; <code>IdentityFile none</code> suppresses the default
+without adding a key. Without <code>User</code>, the default is <code>$USER</code>, or <code>motor</code>.
+Known hosts default to <code>/user/cfg/ssh/known_hosts</code>.</p>
+
+<p>Each jump uses its own matching host block. Target command-line settings do
+not become jump settings. <code>ProxyJump</code> accepts aliases or <code>[user@]host[:port]</code>,
+including bracketed IPv6 addresses and comma-separated chains. The first
+jump in a chain can itself have a configured gateway. <code>ProxyJump none</code>
+disables jumping. Routes are limited to 16 hosts, including the destination;
+cycles fail before connection setup.</p>
+
+<p>Use <code>ssh -J ssh-hub ssh-leaf</code> to choose a gateway on the command line, <code>-F path</code>
+to choose a config file, or <code>-F none</code> / <code>-F /dev/null</code> to disable config.
+The supported settings are also accepted with <code>-o Key=Value</code>.</p>
+
+<p>Paths are literal. Use <code>/user/cfg/ssh/key</code>, not <code>~/.ssh/key</code>. <code>Include</code>,
+<code>Match</code>, <code>ProxyCommand</code>, value expansion, SSH URI jump syntax, agents,
+certificates, multiplexing, and system-wide config are not supported.
+General port forwarding (<code>-L</code>, <code>-R</code>, <code>-D</code>), agent forwarding, and X11
+forwarding are also unsupported; <code>ProxyJump</code> provides gateway routing.
+Unsupported directives and malformed settings report a filename and line;
+they are not silently ignored. A missing default config is allowed, while
+a missing file explicitly selected with <code>-F</code> is an error.</p>
+
 <h2>Configuration files</h2>
 <div class="table-wrap">
 <table>
@@ -467,6 +675,7 @@ suites; see <a href="devtools.html">Developer image</a>.</p>
   <tr><td><code>/system/cfg/sys-init.cfg</code></td><td>sys-init: the console program and role, strobe, and the services with their capability masks.</td></tr>
   <tr><td><code>/system/cfg/sys-net.toml</code></td><td>sys-io: network devices, addresses, routes, DNS servers, and limits.</td></tr>
   <tr><td><code>/system/cfg/sshd.toml</code></td><td>russhd: listen address, host key, users, passwords, and authorized keys.</td></tr>
+  <tr><td><code>/user/cfg/ssh/config</code>, <code>id_ed25519</code>, <code>known_hosts</code></td><td>SSH clients: host configuration, default private identity, and trusted server keys; see <a href="#ssh-client">SSH clients</a>.</td></tr>
   <tr><td><code>/system/cfg/sys-tty.cfg</code>, <code>/system/cfg/rush.cfg</code></td><td>The console shell's environment and startup file.</td></tr>
   <tr><td><code>/system/cfg/libc/hosts</code>, <code>resolv.conf</code></td><td>The DNS resolver and the C library. <code>resolv.conf</code> is written by sys-io.</td></tr>
   <tr><td><code>/user/cfg/red.toml</code>, <code>rmux.toml</code>, <code>kibim/</code>, <code>lorry.toml</code></td><td>Per-program settings, all optional.</td></tr>
