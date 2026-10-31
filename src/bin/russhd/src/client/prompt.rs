@@ -2,6 +2,51 @@
 use std::io::Read;
 use std::io::{self, IsTerminal, Write};
 
+#[cfg(any(test, target_os = "motor"))]
+#[derive(Default)]
+struct TerminalInput {
+    after_cr: bool,
+}
+
+#[cfg(any(test, target_os = "motor"))]
+impl TerminalInput {
+    fn accept(&mut self, byte: u8) -> bool {
+        let after_cr = std::mem::replace(&mut self.after_cr, byte == b'\r');
+        !(after_cr && byte == b'\n')
+    }
+
+    fn read(&mut self, input: &mut impl Read, bytes: &mut [u8]) -> io::Result<usize> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let read = input.read(bytes)?;
+            let mut written = 0;
+            for index in 0..read {
+                let byte = bytes[index];
+                if self.accept(byte) {
+                    bytes[written] = byte;
+                    written += 1;
+                }
+            }
+            if written != 0 || read == 0 {
+                return Ok(written);
+            }
+        }
+    }
+}
+
+// Host-key prompts run on a worker thread; authentication and forwarding must
+// retain their CRLF state even when the LF arrives in a later read.
+#[cfg(target_os = "motor")]
+static TERMINAL_INPUT: std::sync::Mutex<TerminalInput> =
+    std::sync::Mutex::new(TerminalInput { after_cr: false });
+
+#[cfg(target_os = "motor")]
+pub(crate) fn read_terminal(input: &mut impl Read, bytes: &mut [u8]) -> io::Result<usize> {
+    TERMINAL_INPUT.lock().unwrap().read(input, bytes)
+}
+
 pub fn line(message: &str) -> io::Result<String> {
     prompt(message, true)
 }
@@ -48,10 +93,13 @@ fn prompt(message: &str, echo: bool) -> io::Result<String> {
     #[cfg(unix)]
     let _echo = (!echo).then(EchoGuard::disable).transpose()?;
     #[cfg(target_os = "motor")]
-    let value = if stdin_terminal {
-        read_edited_line(io::stdin().lock(), &mut output, echo)?
-    } else {
-        read_edited_line_motor(&mut output, echo)?
+    let value = {
+        let mut input = TERMINAL_INPUT.lock().unwrap();
+        if stdin_terminal {
+            read_edited_line(io::stdin().lock(), &mut output, echo, &mut input)?
+        } else {
+            read_edited_line_motor(&mut output, echo, &mut input)?
+        }
     };
     #[cfg(not(target_os = "motor"))]
     let value = {
@@ -68,7 +116,11 @@ fn prompt(message: &str, echo: bool) -> io::Result<String> {
 }
 
 #[cfg(target_os = "motor")]
-fn read_edited_line_motor(output: &mut impl Write, echo: bool) -> io::Result<String> {
+fn read_edited_line_motor(
+    output: &mut impl Write,
+    echo: bool,
+    input: &mut TerminalInput,
+) -> io::Result<String> {
     read_edited_line_with(
         || {
             let mut byte = [0_u8; 1];
@@ -78,6 +130,7 @@ fn read_edited_line_motor(output: &mut impl Write, echo: bool) -> io::Result<Str
         },
         output,
         echo,
+        input,
     )
 }
 
@@ -93,6 +146,7 @@ fn read_edited_line(
     mut input: impl Read,
     output: &mut impl Write,
     echo: bool,
+    state: &mut TerminalInput,
 ) -> io::Result<String> {
     read_edited_line_with(
         || {
@@ -103,6 +157,7 @@ fn read_edited_line(
         },
         output,
         echo,
+        state,
     )
 }
 
@@ -111,9 +166,13 @@ fn read_edited_line_with(
     mut read_byte: impl FnMut() -> io::Result<Option<u8>>,
     output: &mut impl Write,
     echo: bool,
+    input: &mut TerminalInput,
 ) -> io::Result<String> {
     let mut value = Vec::new();
     while let Some(byte) = read_byte()? {
+        if !input.accept(byte) {
+            continue;
+        }
         match byte {
             b'\r' | b'\n' => {
                 if echo {
@@ -181,7 +240,13 @@ mod tests {
     #[test]
     fn raw_line_edits_and_echoes() {
         let mut output = Vec::new();
-        let value = read_edited_line(&b"ab\x7fc\r"[..], &mut output, true).unwrap();
+        let value = read_edited_line(
+            &b"ab\x7fc\r"[..],
+            &mut output,
+            true,
+            &mut TerminalInput::default(),
+        )
+        .unwrap();
         assert_eq!(value, "ac");
         assert_eq!(output, b"ab\x08 \x08c\n");
     }
@@ -189,9 +254,91 @@ mod tests {
     #[test]
     fn raw_secret_does_not_echo() {
         let mut output = Vec::new();
-        let value = read_edited_line(&b"bad\x15good\n"[..], &mut output, false).unwrap();
+        let value = read_edited_line(
+            &b"bad\x15good\n"[..],
+            &mut output,
+            false,
+            &mut TerminalInput::default(),
+        )
+        .unwrap();
         assert_eq!(value, "good");
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn enter_does_not_submit_the_next_prompt() {
+        for ending in ["\r\n", "\r", "\n"] {
+            let bytes = format!("yes{ending}password{ending}{ending}next{ending}");
+            let mut input = bytes.as_bytes();
+            let mut state = TerminalInput::default();
+            let mut output = Vec::new();
+            assert_eq!(
+                read_edited_line(&mut input, &mut output, true, &mut state).unwrap(),
+                "yes"
+            );
+            for expected in ["password", "", "next"] {
+                assert_eq!(
+                    read_edited_line(&mut input, &mut output, false, &mut state).unwrap(),
+                    expected,
+                    "ending {ending:?}"
+                );
+            }
+            assert_eq!(output, b"yes\n");
+        }
+    }
+
+    #[test]
+    fn carriage_return_completes_prompt_without_lookahead() {
+        let mut state = TerminalInput::default();
+        let mut bytes = b"yes\r".iter().copied();
+        let value = read_edited_line_with(
+            || Ok(Some(bytes.next().expect("read past Enter"))),
+            &mut Vec::new(),
+            true,
+            &mut state,
+        )
+        .unwrap();
+        assert_eq!(value, "yes");
+        assert!(state.after_cr);
+    }
+
+    #[test]
+    fn terminal_forwarding_retains_prompt_state_and_empty_lines() {
+        let mut input = &b"password\r\nfirst\r\n\r\nlast\n"[..];
+        let mut state = TerminalInput::default();
+        assert_eq!(
+            read_edited_line(&mut input, &mut Vec::new(), false, &mut state).unwrap(),
+            "password"
+        );
+        let mut output = Vec::new();
+        let mut byte = [0];
+        loop {
+            let read = state.read(&mut input, &mut byte).unwrap();
+            if read == 0 {
+                break;
+            }
+            output.extend_from_slice(&byte[..read]);
+        }
+        assert_eq!(output, b"first\r\rlast\n");
+    }
+
+    #[test]
+    fn terminal_crlf_is_coalesced_at_every_read_boundary() {
+        let bytes = b"one\r\ntwo\r\n\r\nthree\nfour\rfive";
+        for split in 0..=bytes.len() {
+            let mut input = bytes[..split].chain(&bytes[split..]);
+            let mut state = TerminalInput::default();
+            let mut output = Vec::new();
+            let mut buffer = [0; 64];
+            loop {
+                let read = state.read(&mut input, &mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                output.extend_from_slice(&buffer[..read]);
+            }
+            assert_eq!(output, b"one\rtwo\r\rthree\nfour\rfive", "split {split}");
+        }
     }
 
     #[test]

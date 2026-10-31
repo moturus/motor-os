@@ -170,9 +170,19 @@ async fn run_channel(
     }
     std::thread::spawn(move || {
         let mut stdin = std::io::stdin().lock();
+        #[cfg(target_os = "motor")]
+        let terminal = std::io::stdin().is_terminal();
         loop {
             let mut bytes = vec![0_u8; 32 * 1024];
-            match stdin.read(&mut bytes) {
+            #[cfg(target_os = "motor")]
+            let read = if terminal {
+                prompt::read_terminal(&mut stdin, &mut bytes)
+            } else {
+                stdin.read(&mut bytes)
+            };
+            #[cfg(not(target_os = "motor"))]
+            let read = stdin.read(&mut bytes);
+            match read {
                 Ok(0) | Err(_) => break,
                 Ok(read) => {
                     bytes.truncate(read);

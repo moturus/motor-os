@@ -250,6 +250,22 @@ test_ssh_client_host() {
   printf '%s\n' "$output" | tr -d '\r' | grep -qx password-ok ||
     fail "password-auth command returned '$output'"
 
+  local prompt_known="$TEST_TMP/ssh-client-host-prompts.known"
+  local terminal_dump
+  terminal_dump="$(command -v od)"
+  password_command="/user/bin/ssh -T -F /dev/null -p $port -i $guest_wrong -o IdentitiesOnly=yes -o StrictHostKeyChecking=ask -o UserKnownHostsFile=$prompt_known motor@$host $terminal_dump -An -tx1"
+  password_status=0
+  # One CRLF is one Enter, including between host-key/password prompts and
+  # between the password prompt and forwarded terminal input.
+  output="$(printf 'yes\r\nvroomvroom\r\nfirst\r\nsecond\r\n' |
+    ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
+      "/system/bin/rush -c '$password_command' 2>$password_stderr" 2>&1)" || password_status=$?
+  vm_ssh "/system/bin/cat $password_stderr" >&2 || fail "could not read CRLF-auth diagnostics"
+  [ "$password_status" -eq 0 ] || fail "CRLF host-key/password prompts failed: $password_status"
+  printf '%s\n' "$output" | tr -d '\r' | grep -qx ' 66 69 72 73 74 0d 73 65 63 6f 6e 64 0d' ||
+    fail "terminal Enter was not forwarded once: '$output'"
+  vm_ssh "/system/bin/rm $prompt_known" || fail "could not remove prompt known-hosts fixture"
+
   local copy_id="/user/bin/ssh-copy-id -F /dev/null -p $port -o BatchMode=yes -o StrictHostKeyChecking=yes -i $guest_key.pub motor@$host"
   vm_ssh "$copy_id" >/dev/null || fail "ssh-copy-id failed"
   [ "$(stat -c %a "$SSH_CLIENT_HOST_ROOT/.ssh")" = 700 ] ||

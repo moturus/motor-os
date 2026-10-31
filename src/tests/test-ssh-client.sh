@@ -79,6 +79,12 @@ out="$(printf 'loopback stdin\n' | "${HOST_SSH[@]}" \
   fail "scripted loopback ssh failed"
 [ "$out" = "loopback stdin" ] || fail "scripted ssh returned '$out'"
 
+expected="$(printf 'loopback\r\n\r\npayload\r\nend')"
+out="$(printf '%s' "$expected" | "${HOST_SSH[@]}" \
+  "/user/bin/ssh $GUEST_CONNECTION motor@127.0.0.1 /system/bin/cat")" ||
+  fail "scripted loopback ssh with CRLF data failed"
+[ "$out" = "$expected" ] || fail "ssh changed CRLF bytes in piped stdin"
+
 if "${HOST_SSH[@]}" \
   "/user/bin/ssh $GUEST_CONNECTION motor@127.0.0.1 '/system/bin/rush -c \"exit 7\"'"; then
   fail "ssh lost the remote nonzero status"
