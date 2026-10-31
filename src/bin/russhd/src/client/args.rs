@@ -78,6 +78,11 @@ pub enum HostKeyPolicy {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionOptions {
+    pub config_file: Option<PathBuf>,
+    pub hostname: Option<String>,
+    pub user: Option<String>,
+    pub proxy_jump: Option<String>,
+    pub(crate) identity_files_set: bool,
     pub port: u16,
     port_set: bool,
     pub identities: Vec<PathBuf>,
@@ -100,6 +105,11 @@ pub struct ConnectionOptions {
 impl Default for ConnectionOptions {
     fn default() -> Self {
         Self {
+            config_file: None,
+            hostname: None,
+            user: None,
+            proxy_jump: None,
+            identity_files_set: false,
             port: 22,
             port_set: false,
             identities: Vec::new(),
@@ -141,7 +151,12 @@ impl ConnectionOptions {
         if value.is_empty() {
             return Err(ParseError::new("identity path must not be empty"));
         }
-        self.identities.push(PathBuf::from(value));
+        super::config::literal_path(value)?;
+        self.identity_files_set = true;
+        let path = PathBuf::from(value);
+        if value != "none" && !self.identities.contains(&path) {
+            self.identities.push(path);
+        }
         Ok(())
     }
 
@@ -171,7 +186,29 @@ impl ConnectionOptions {
         if value.is_empty() || value.chars().any(char::is_control) {
             return Err(ParseError::new(format!("invalid {key} value")));
         }
-        if key.eq_ignore_ascii_case("IdentitiesOnly") {
+        if key.eq_ignore_ascii_case("HostName") {
+            super::config::literal_path(value)?;
+            let host = value
+                .strip_prefix('[')
+                .and_then(|host| host.strip_suffix(']'))
+                .unwrap_or(value);
+            if host.is_empty()
+                || host.contains(['[', ']', '@'])
+                || host.chars().any(char::is_whitespace)
+            {
+                return Err(ParseError::new("invalid HostName"));
+            }
+            self.hostname.get_or_insert_with(|| value.to_owned());
+        } else if key.eq_ignore_ascii_case("User") {
+            self.user.get_or_insert_with(|| value.to_owned());
+        } else if key.eq_ignore_ascii_case("ProxyJump") {
+            super::config::jump_hosts(value)?;
+            self.proxy_jump.get_or_insert_with(|| value.to_owned());
+        } else if key.eq_ignore_ascii_case("Port") {
+            self.set_port(value)?;
+        } else if key.eq_ignore_ascii_case("IdentityFile") {
+            self.add_identity(value)?;
+        } else if key.eq_ignore_ascii_case("IdentitiesOnly") {
             let parsed = parse_yes_no(key, value)?;
             set_first(
                 &mut self.identities_only,
@@ -196,6 +233,7 @@ impl ConnectionOptions {
                 parsed,
             );
         } else if key.eq_ignore_ascii_case("UserKnownHostsFile") {
+            super::config::literal_path(value)?;
             if value.is_empty() {
                 return Err(ParseError::new("UserKnownHostsFile must not be empty"));
             }
@@ -264,6 +302,7 @@ fn parse_seconds(key: &str, value: &str) -> Result<Option<Duration>, ParseError>
 pub struct Destination {
     pub user: String,
     pub host: String,
+    pub user_explicit: bool,
 }
 
 impl Destination {
@@ -297,6 +336,7 @@ impl Destination {
         Ok(Self {
             user: user.to_owned(),
             host: host.to_owned(),
+            user_explicit: value.contains('@'),
         })
     }
 }
@@ -337,21 +377,24 @@ mod tests {
             Destination::parse_with_default("host", "motor").unwrap(),
             Destination {
                 user: "motor".into(),
-                host: "host".into()
+                host: "host".into(),
+                user_explicit: false,
             }
         );
         assert_eq!(
             Destination::parse_with_default("root@192.0.2.1", "motor").unwrap(),
             Destination {
                 user: "root".into(),
-                host: "192.0.2.1".into()
+                host: "192.0.2.1".into(),
+                user_explicit: true,
             }
         );
         assert_eq!(
             Destination::parse_with_default("root@[2001:db8::1]", "motor").unwrap(),
             Destination {
                 user: "root".into(),
-                host: "2001:db8::1".into()
+                host: "2001:db8::1".into(),
+                user_explicit: true,
             }
         );
         assert!(Destination::parse_with_default("2001:db8::1", "motor").is_err());

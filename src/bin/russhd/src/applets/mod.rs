@@ -399,12 +399,15 @@ fn parse_common(
         return Ok(true);
     }
     if option_value(args, index, 'F', |value| {
-        if value == "/dev/null" {
-            Ok(())
-        } else {
-            Err(ParseError::new("only -F /dev/null is supported"))
+        if value.is_empty() {
+            return Err(ParseError::new("-F requires a config path"));
         }
+        options.config_file = Some(PathBuf::from(value));
+        Ok(())
     })? {
+        return Ok(true);
+    }
+    if option_value(args, index, 'J', |value| options.apply("ProxyJump", value))? {
         return Ok(true);
     }
     option_value(args, index, 'o', |value| options.apply_o(value))
@@ -497,7 +500,8 @@ mod tests {
         assert_eq!(parsed.destination.host, "-host");
         assert_eq!(parsed.command, ["-x"]);
         assert!(parse_ssh(&strings(&["-v", "host"])).is_err());
-        assert!(parse_ssh(&strings(&["-F", "config", "host"])).is_err());
+        let parsed = parse_ssh(&strings(&["-F", "config", "host"])).unwrap();
+        assert_eq!(parsed.connection.config_file, Some(PathBuf::from("config")));
 
         let parsed = parse_ssh(&strings(&["host", "command", "--help"])).unwrap();
         assert_eq!(parsed.command, ["command", "--help"]);

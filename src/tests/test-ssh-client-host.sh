@@ -266,6 +266,8 @@ test_ssh_client_host() {
     fail "terminal Enter was not forwarded once: '$output'"
   vm_ssh "/system/bin/rm $prompt_known" || fail "could not remove prompt known-hosts fixture"
 
+  MOTOR_SSH_PASSWORD_TARGET_PORT="$port" bash "$WD/test-ssh-config.sh"
+
   local copy_id="/user/bin/ssh-copy-id -F /dev/null -p $port -o BatchMode=yes -o StrictHostKeyChecking=yes -i $guest_key.pub motor@$host"
   vm_ssh "$copy_id" >/dev/null || fail "ssh-copy-id failed"
   [ "$(stat -c %a "$SSH_CLIENT_HOST_ROOT/.ssh")" = 700 ] ||

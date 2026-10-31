@@ -78,6 +78,8 @@ impl Fixture {
             args.push(format!("--motor-applet={applet}"));
         }
         args.extend([
+            "-F".to_owned(),
+            "none".to_owned(),
             "-P".to_owned(),
             self.port.to_string(),
             "-i".to_owned(),
@@ -96,7 +98,7 @@ impl Fixture {
 
     fn ssh_args(&self) -> Vec<String> {
         let mut args = self.base_args(None);
-        args[0] = "-p".to_owned();
+        args[2] = "-p".to_owned();
         args
     }
 
@@ -357,6 +359,161 @@ fn transport_uses_jump_forwarding_and_propagates_refusal() {
             .any(|line| line.starts_with(&format!("[127.0.0.1]:{} ", target.port)))
     );
     assert_eq!(known.lines().count(), 2);
+}
+
+#[test]
+fn proxyjump_authenticates_every_hop_streams_and_transfers_files() {
+    let target = Fixture::start();
+    let second = JumpFixture::start("second-user", &target.identity, target.port);
+    let first = JumpFixture::start("first-user", &target.identity, second.port);
+    let path = target.root.join("client-config");
+    let text = format!(
+        "Host first\nHostName 127.0.0.1\nUser first-user\nPort {}\nHost second\nHostName 127.0.0.1\nUser second-user\nPort {}\nProxyJump first\nHost target\nHostName 127.0.0.1\nUser motor\nPort {}\nProxyJump second\nHost *\nIdentityFile {}\nUserKnownHostsFile {}\nStrictHostKeyChecking accept-new\nBatchMode yes\n",
+        first.port,
+        second.port,
+        target.port,
+        target.identity.display(),
+        target.known_hosts.display()
+    );
+    std::fs::write(&path, &text).unwrap();
+    let mut args = vec![
+        "-F".to_owned(),
+        path.to_str().unwrap().to_owned(),
+        "target".to_owned(),
+    ];
+    args.push("printf out; printf err >&2; cat; exit 7".to_owned());
+    let output = target.run(&args, b"input\r\n");
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+    assert_eq!(output.stdout, b"outinput\r\n");
+    assert_eq!(output.stderr, b"err");
+    first.assert_closed();
+    second.assert_closed();
+    assert_eq!(
+        *first.requests.lock().unwrap(),
+        [("127.0.0.1".to_owned(), second.port.into())]
+    );
+    assert_eq!(
+        *second.requests.lock().unwrap(),
+        [("127.0.0.1".to_owned(), target.port.into())]
+    );
+    let known = std::fs::read_to_string(&target.known_hosts).unwrap();
+    assert!(known.contains(&first.key.public_key().to_openssh().unwrap()));
+    assert!(known.contains(&second.key.public_key().to_openssh().unwrap()));
+    assert_eq!(known.lines().count(), 3);
+
+    *args.last_mut().unwrap() = "cat".to_owned();
+    let payload = (0..FULL_DUPLEX_STREAM_SIZE)
+        .map(|i| (i % 251) as u8)
+        .collect::<Vec<_>>();
+    let output = run_full_duplex(&args, payload.clone());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, payload);
+    first.assert_closed();
+    second.assert_closed();
+
+    let source = target.root.join("jump-source");
+    let remote = target.root.join("jump-remote");
+    let downloaded = target.root.join("jump-downloaded");
+    std::fs::write(&source, &payload).unwrap();
+    let scp = [
+        "--motor-applet=scp".to_owned(),
+        "-F".to_owned(),
+        path.to_str().unwrap().to_owned(),
+    ];
+    let upload = [
+        scp.to_vec(),
+        vec![
+            source.display().to_string(),
+            format!("target:{}", remote.display()),
+        ],
+    ]
+    .concat();
+    let output = target.run(&upload, b"");
+    assert!(output.status.success(), "{output:?}");
+    first.assert_closed();
+    second.assert_closed();
+    let download = [
+        scp.to_vec(),
+        vec![
+            format!("target:{}", remote.display()),
+            downloaded.display().to_string(),
+        ],
+    ]
+    .concat();
+    let output = target.run(&download, b"");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(std::fs::read(downloaded).unwrap(), payload);
+    first.assert_closed();
+    second.assert_closed();
+
+    let wrong = format!(
+        "[127.0.0.1]:{} {}\n",
+        target.port,
+        first.key.public_key().to_openssh().unwrap()
+    );
+    std::fs::write(
+        &target.known_hosts,
+        known
+            .lines()
+            .filter(|line| !line.starts_with(&format!("[127.0.0.1]:{} ", target.port)))
+            .map(|line| format!("{line}\n"))
+            .collect::<String>()
+            + &wrong,
+    )
+    .unwrap();
+    let output = target.run(&args, b"");
+    assert_eq!(output.status.code(), Some(255));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("target"));
+    first.assert_closed();
+    second.assert_closed();
+
+    // Reject a wrong jump key before authentication or any target forwarding.
+    let first_prefix = format!("[127.0.0.1]:{} ", first.port);
+    let wrong_jump = known
+        .lines()
+        .map(|line| {
+            if line.starts_with(&first_prefix) {
+                format!(
+                    "{first_prefix}{}\n",
+                    second.key.public_key().to_openssh().unwrap()
+                )
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect::<String>();
+    std::fs::write(&target.known_hosts, wrong_jump).unwrap();
+    let before = first.requests.lock().unwrap().len();
+    let output = target.run(&args, b"");
+    assert_eq!(output.status.code(), Some(255));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("first"));
+    first.assert_closed();
+    assert_eq!(first.requests.lock().unwrap().len(), before);
+    std::fs::write(&target.known_hosts, &known).unwrap();
+
+    std::fs::write(&path, text.replace("User first-user", "User wrong-user")).unwrap();
+    let output = target.run(&args, b"");
+    assert_eq!(output.status.code(), Some(255));
+    first.assert_closed();
+    assert_eq!(first.requests.lock().unwrap().len(), before);
+
+    // A refused forwarding request must not fall back to a direct TCP dial.
+    std::fs::write(
+        &path,
+        text.replace(
+            &format!("Port {}\nProxyJump second", target.port),
+            "Port 1\nProxyJump second",
+        ),
+    )
+    .unwrap();
+    let output = target.run(&args, b"");
+    assert_eq!(output.status.code(), Some(255));
+    first.assert_closed();
+    second.assert_closed();
 }
 
 #[derive(Clone)]

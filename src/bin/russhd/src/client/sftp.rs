@@ -5,14 +5,14 @@ use russh_sftp::client::rawsession::Limits;
 use russh_sftp::protocol::Version;
 
 use super::args::{ConnectionOptions, Destination};
-use super::{session, transport};
+use super::session;
 use crate::sftp_extensions::{POSIX_RENAME, POSIX_RENAME_VERSION};
 
 pub struct SftpConnection {
     pub raw: RawSftpSession,
     pub limits: Limits,
     pub posix_rename: bool,
-    ssh: transport::Peer,
+    ssh: session::Connection,
 }
 
 impl SftpConnection {
@@ -21,19 +21,31 @@ impl SftpConnection {
         destination: &Destination,
     ) -> Result<Self, Error> {
         let ssh = session::connect_authenticated(options, destination).await?;
-        let channel = ssh.channel_open_session().await?;
-        channel.request_subsystem(true, "sftp").await?;
-        let mut raw = RawSftpSession::new(channel.into_stream());
-        raw.set_timeout(u64::MAX).await;
-        let version = raw.init().await?;
-        let posix_rename = supports_posix_rename(&version);
-        let limits = configure_limits(&mut raw, &version).await?;
-        Ok(Self {
-            raw,
-            limits,
-            posix_rename,
-            ssh,
-        })
+        let result = async {
+            let channel = ssh.channel_open_session().await?;
+            channel.request_subsystem(true, "sftp").await?;
+            let mut raw = RawSftpSession::new(channel.into_stream());
+            raw.set_timeout(u64::MAX).await;
+            let version = raw.init().await?;
+            let posix_rename = supports_posix_rename(&version);
+            let limits = configure_limits(&mut raw, &version).await?;
+            Ok::<_, Error>((raw, limits, posix_rename))
+        }
+        .await;
+        match result {
+            Ok((raw, limits, posix_rename)) => Ok(Self {
+                raw,
+                limits,
+                posix_rename,
+                ssh,
+            }),
+            Err(error) => {
+                if let Err(cleanup) = ssh.close().await {
+                    log::debug!("closing failed SFTP route: {cleanup}");
+                }
+                Err(error)
+            }
+        }
     }
 
     pub async fn close(self) -> Result<(), Error> {

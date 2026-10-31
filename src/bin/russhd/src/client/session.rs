@@ -1,6 +1,4 @@
 use std::io::{IsTerminal, Read, Write};
-#[cfg(target_os = "motor")]
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use russh::ChannelMsg;
@@ -41,13 +39,97 @@ pub async fn run_ssh(args: SshArgs) -> Result<i32, russh::Error> {
     Ok(status)
 }
 
+type Handle = transport::Peer;
+
+pub struct Connection {
+    handles: Vec<Handle>,
+}
+
+impl std::ops::Deref for Connection {
+    type Target = Handle;
+    fn deref(&self) -> &Handle {
+        self.handles.last().unwrap()
+    }
+}
+
+impl std::ops::DerefMut for Connection {
+    fn deref_mut(&mut self) -> &mut Handle {
+        self.handles.last_mut().unwrap()
+    }
+}
+
+impl Connection {
+    pub async fn close(mut self) -> Result<(), russh::Error> {
+        close_handles(std::mem::take(&mut self.handles)).await
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        if !self.handles.is_empty()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            let handles = std::mem::take(&mut self.handles);
+            runtime.spawn(async move {
+                if let Err(error) = close_handles(handles).await {
+                    log::debug!("closing SSH route: {error}");
+                }
+            });
+        }
+    }
+}
+
+async fn close_handles(handles: Vec<Handle>) -> Result<(), russh::Error> {
+    let mut first_error = None;
+    for handle in handles.into_iter().rev() {
+        let result = handle.close().await;
+        if let Err(error) = result {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
 pub async fn connect_authenticated(
     options: &ConnectionOptions,
     destination: &Destination,
-) -> Result<transport::Peer, russh::Error> {
-    let mut session = transport::connect(options, destination).await?;
-    authenticate(&mut session, options, destination).await?;
-    Ok(session)
+) -> Result<Connection, russh::Error> {
+    let config = super::config::Config::load(options.config_file.as_deref())
+        .map_err(|error| russh::Error::InvalidConfig(error.to_string()))?;
+    let route = config
+        .resolve(options, destination)
+        .map_err(|error| russh::Error::InvalidConfig(error.to_string()))?;
+    let mut connection = Connection {
+        handles: Vec::new(),
+    };
+    for hop in route {
+        let result = async {
+            let handle = if let Some(jump) = connection.handles.last() {
+                transport::connect_via(jump, &hop.options, &hop.destination).await?
+            } else {
+                transport::connect(&hop.options, &hop.destination).await?
+            };
+            connection.handles.push(handle);
+            authenticate(
+                connection.handles.last_mut().unwrap(),
+                &hop.options,
+                &hop.destination,
+            )
+            .await
+        }
+        .await;
+        if let Err(error) = result {
+            let error = russh::Error::InvalidConfig(format!(
+                "{} ({}@{}:{}): {error}",
+                hop.alias, hop.destination.user, hop.destination.host, hop.options.port
+            ));
+            if let Err(cleanup) = connection.close().await {
+                log::debug!("closing failed SSH route: {cleanup}");
+            }
+            return Err(error);
+        }
+    }
+    Ok(connection)
 }
 
 async fn authenticate(
@@ -66,33 +148,23 @@ async fn authenticate(
         russh::client::AuthResult::Success => unreachable!(),
     };
 
-    #[cfg(target_os = "motor")]
-    let identities = {
-        let mut identities = options.identities.clone();
-        if !options.identities_only {
-            identities.push(PathBuf::from("/user/cfg/ssh/id_ed25519"));
-        }
-        identities
-    };
-    #[cfg(not(target_os = "motor"))]
-    let identities = options.identities.clone();
     if methods.contains(&russh::MethodKind::PublicKey) {
-        for path in identities {
+        for path in &options.identities {
             if !path.exists() {
                 continue;
             }
-            if let Err(error) = safe_identity(&path) {
+            if let Err(error) = safe_identity(path) {
                 eprintln!("Warning: ignoring identity '{}': {error}", path.display());
                 continue;
             }
-            let key = match load_secret_key(&path, None) {
+            let key = match load_secret_key(path, None) {
                 Ok(key) => key,
                 Err(russh::keys::Error::KeyIsEncrypted) if !options.batch_mode => {
                     let mut passphrase = prompt::secret(&format!(
                         "Enter passphrase for key '{}': ",
                         path.display()
                     ))?;
-                    let result = load_secret_key(&path, Some(&passphrase));
+                    let result = load_secret_key(path, Some(&passphrase));
                     prompt::clear_secret(&mut passphrase);
                     match result {
                         Ok(key) => key,

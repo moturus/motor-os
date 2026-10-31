@@ -46,7 +46,7 @@ fail() {
 for option in --help -h; do
   out="$("${HOST_SSH[@]}" "/user/bin/ssh $option")" ||
     fail "ssh $option did not exit successfully"
-  for expected in 'Usage: ssh' 'No client config file is read' \
+  for expected in 'Usage: ssh' /user/cfg/ssh/config \
     /user/cfg/ssh/id_ed25519 /user/cfg/ssh/known_hosts; do
     case "$out" in
       *"$expected"*) ;;

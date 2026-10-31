@@ -11,11 +11,18 @@ Options:
   -t                  Require an interactive terminal
   -T                  Disable terminal allocation
   -o Key=Value        Set a connection option (listed below)
-  -F /dev/null        Compatibility option; other config paths are unsupported
+  -F file             Select a config file (none or /dev/null: disable config)
+  -J [user@]host[:port][,...]
+                      Connect through one or more jump hosts
   --                  End options
 
 Connection options for -o:
-  IdentitiesOnly=yes|no                  Use only keys supplied with -i
+  HostName=host                         Override the connection address
+  User=user                             Set the remote login name
+  Port=port                             Set the remote port
+  IdentityFile=path                     Add a private key (none: no default key)
+  ProxyJump=[user@]host[:port][,...]      Jump hosts (none: connect directly)
+  IdentitiesOnly=yes|no                  Use configured identity files only
   StrictHostKeyChecking=ask|yes|accept-new
                                         Host key policy (default: ask)
   UserKnownHostsFile=path                Override the known-hosts file
@@ -25,14 +32,20 @@ Connection options for -o:
   ServerAliveCountMax=count             Unanswered keepalives (default: 3)
 
 Configuration (Motor OS):
-  No client config file is read; set connection options on the command line.
+  Config file:         /user/cfg/ssh/config (OpenSSH syntax)
   Default private key: /user/cfg/ssh/id_ed25519
   Known hosts:         /user/cfg/ssh/known_hosts
   The default user is $USER, or motor if USER is unset or empty.
+  Host blocks support aliases, multiple patterns, *, ? and ! negation.
+  Supported settings are listed above. Command-line settings take priority;
+  otherwise the first matching value wins. IdentityFile entries accumulate.
+  Include, Match, ProxyCommand, agents and value expansion are unsupported.
+  Paths are literal; use /user/cfg/ssh/key rather than ~/.ssh/key.
 
 Examples:
   ssh motor@host
   ssh -p 2222 motor@host /system/bin/echo hello
   ssh -i /user/cfg/ssh/id_ed25519 -o BatchMode=yes motor@host command
+  ssh -J motor@gateway motor@private-host
 
 Related commands: scp, sftp, ssh-keygen, ssh-copy-id.
