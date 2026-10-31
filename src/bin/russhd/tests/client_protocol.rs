@@ -1378,9 +1378,10 @@ async fn output_of(session: &russh::client::Handle<TestClient>, command: &str) -
     out
 }
 
-/// Runs one SFTP subsystem on `session` through the version exchange and
-/// closes its channel.
-async fn sftp_handshake(session: &russh::client::Handle<TestClient>) {
+/// Opens an SFTP subsystem and completes its version exchange.
+async fn open_sftp(
+    session: &russh::client::Handle<TestClient>,
+) -> russh::Channel<russh::client::Msg> {
     let mut channel = session.channel_open_session().await.unwrap();
     channel.request_subsystem(true, "sftp").await.unwrap();
     // SSH_FXP_INIT for protocol version 3.
@@ -1398,10 +1399,52 @@ async fn sftp_handshake(session: &russh::client::Handle<TestClient>) {
     }
     // SSH_FXP_VERSION.
     assert_eq!(reply[4], 2, "unexpected SFTP reply {reply:?}");
+    channel
+}
+
+/// Completes an SFTP handshake and closes the channel from the client side.
+async fn sftp_handshake(session: &russh::client::Handle<TestClient>) {
+    let channel = open_sftp(session).await;
     // russh does not report the server's reply to a close the client sent, so
     // there is nothing to wait for: the next channel open is ordered after it.
     channel.eof().await.unwrap();
     channel.close().await.unwrap();
+}
+
+#[test]
+fn server_closed_sftp_channels_release_the_connection() {
+    let fixture = Fixture::start();
+    block_on(async {
+        let session = fixture.connect().await;
+        for _ in 0..2 {
+            let mut channel = open_sftp(&session).await;
+            assert!(matches!(
+                session.channel_open_session().await,
+                Err(russh::Error::ChannelOpenFailure(_))
+            ));
+
+            // OpenSSH sends EOF and waits for the server's close. Sending
+            // CLOSE ourselves would bypass the subsystem's completion path.
+            channel.eof().await.unwrap();
+            let mut exit_status = None;
+            loop {
+                match channel.wait().await {
+                    Some(russh::ChannelMsg::ExitStatus {
+                        exit_status: status,
+                    }) => {
+                        exit_status = Some(status);
+                    }
+                    Some(russh::ChannelMsg::Close) => break,
+                    None => panic!("SFTP ended without the server closing its channel"),
+                    Some(_) => {}
+                }
+            }
+            assert_eq!(exit_status, Some(0));
+        }
+
+        // Reuse the same authenticated connection; no fresh-connection fallback.
+        assert_eq!(output_of(&session, "printf alive").await, b"alive");
+    });
 }
 
 #[test]

@@ -4,11 +4,14 @@
 use std::io::IsTerminal;
 
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::*;
+use std::task::{Context, Poll};
 
 use russh::server::{Msg, Session};
 use russh::*;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use russhd::config;
 use russhd::local_session::{self, ChannelCloseGuard, StdinTx};
@@ -115,6 +118,47 @@ async fn serve(
                 log::info!("Session error: {err:?}");
             }
         });
+    }
+}
+
+/// Records SFTP completion before the inner stream automatically closes its
+/// channel, so a client can reuse the connection as soon as it sees that close.
+struct SftpStream {
+    inner: ChannelStream<Msg>,
+    close_guard: ChannelCloseGuard,
+}
+
+impl Drop for SftpStream {
+    fn drop(&mut self) {
+        self.close_guard.claim();
+    }
+}
+
+impl AsyncRead for SftpStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for SftpStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
     }
 }
 
@@ -237,6 +281,11 @@ impl ConnectionHandler {
         if self.sftp_channel_id.is_some() {
             return Err(russh::Error::Inconsistent);
         }
+        let close_guard = self
+            .close_guard
+            .as_ref()
+            .ok_or(russh::Error::Inconsistent)?
+            .clone();
         let (channel, _session) = self.channel.take().ok_or(russh::Error::Inconsistent)?;
         drop(
             self.receive_credit
@@ -246,7 +295,11 @@ impl ConnectionHandler {
         self.sftp_channel_id = Some(channel.id());
 
         let sftp = russhd::sftp_session::SftpSession::default();
-        russh_sftp::server::run(channel.into_stream(), sftp).await;
+        let stream = SftpStream {
+            inner: channel.into_stream(),
+            close_guard,
+        };
+        russh_sftp::server::run(stream, sftp).await;
         Ok(())
     }
 
