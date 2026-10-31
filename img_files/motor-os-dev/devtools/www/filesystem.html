@@ -566,9 +566,8 @@ keyed by connection, with at most 64 queued waiters per connection. A lock is re
 when the file is closed or when its owner's connection to sys-io goes away.
 After <code>wait()</code> or <code>try_wait()</code> reports process completion, its locks
 no longer block other clients: acquisition checks disconnected owners even if the
-connection cleanup task has not run yet. Under memory pressure, releasing
-a lock is the one filesystem request that is still served, so that waiters queued before
-an episode are not stranded.</p>
+connection cleanup task has not run yet. Memory pressure does not refuse lock
+operations.</p>
 <nav class="pager">
 <a class="pager-prev" href="memory.html"><span>Previous</span>Memory</a>
 <a class="pager-next" href="networking.html"><span>Next</span>Networking</a>

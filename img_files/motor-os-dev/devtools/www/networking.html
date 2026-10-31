@@ -498,8 +498,8 @@ this is an accepted non-POSIX exception.</p>
   roughly 3,500 concurrent sockets per machine, and one 64 KiB-stack client thread per
   channel. There is no per-process quota yet: one process can hold every channel, and any
   role can bind any port.</li>
-  <li>Under memory pressure, new listeners, connects, UDP binds, echo requests, and
-  client connections are refused until memory is available again (see
+  <li>Network services retain their socket/channel limits and ordinary backpressure.
+  The memory-pressure flag no longer refuses network requests or clients (see
   <a href="memory.html">Memory</a>).</li>
   <li>The MTU comes from the device (<code>VIRTIO_NET_F_MTU</code>) or is 1500. Link status
   changes are not yet tracked.</li>

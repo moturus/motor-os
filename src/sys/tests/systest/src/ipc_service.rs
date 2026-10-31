@@ -6,7 +6,6 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdout, Command, Stdio};
 
 const CHILD: &str = "ipc-service-child";
-const HOARD: &str = "ipc-service-hoard";
 const POOL_GROWTH: &str = "ipc-service-pool-growth";
 const CHILD_CAPS: u64 = moto_sys::caps::CAP_SPAWN | moto_sys::caps::CAP_INTERACTIVE;
 
@@ -31,7 +30,6 @@ pub fn run_command(args: &[String]) -> bool {
             assert_eq!(listen(&args[2]).err(), Some(moto_rt::E_INVALID_ARGUMENT));
         }
         Some(CHILD) if args.len() == 3 => run_child(&args[2]),
-        Some(HOARD) if args.len() == 2 => run_hoard(),
         Some(POOL_GROWTH) if args.len() == 3 => run_pool_growth(&args[2]),
         _ => return false,
     }
@@ -100,62 +98,17 @@ fn run_child(url: &str) {
     assert_eq!(duplicate, SysHandle::NONE);
 }
 
-// Keeps free memory at the user floor until stdin closes, taking back any
-// memory that other processes free meanwhile. Every mapping is charged 64
-// extra pages, so kernel objects, charged 16, take the last pages below that.
-fn run_hoard() -> ! {
-    use moto_sys::{SysMem, sys_mem::PAGE_SIZE_SMALL};
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    // The reader takes stdin's buffer, and with it its allocator cache,
-    // before memory goes to the floor, where it could get neither.
-    let reader_ready = std::sync::Arc::new(AtomicBool::new(false));
-    let ready = reader_ready.clone();
-    std::thread::spawn(move || {
-        let stdin = std::io::stdin();
-        ready.store(true, Ordering::Release);
-        let _ = stdin.read_line(&mut String::new());
-        std::process::exit(0);
-    });
-    while !reader_ready.load(Ordering::Acquire) {
-        std::thread::yield_now();
-    }
-    let pid = std::process::id();
-    let object = format!("shared:url={HOARD}-{pid};address=4096;page_type=small;page_num=1");
-    let take = |pages| SysMem::alloc(PAGE_SIZE_SMALL, pages).is_ok();
-    let fill = || {
-        while take(64) {}
-        while take(1) {}
-        while SysObj::create(SysHandle::SELF, 0, &object).is_ok() {}
-    };
-    println!("ready");
-    fill();
-    println!("hoarded");
-    loop {
-        fill();
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-}
-
-// Object admission reserves 64 KiB, so the pool must grow in small increments.
+// Grow the pool past the old contiguous allocation boundary.
 // A contiguous pool of this many entries fills 64 KiB, and the next insertion
 // would double it to 128 KiB. Larger counts leave the kernel heap bloated for
 // the rest of the suite: it does not shrink when the listeners are freed.
 fn run_pool_growth(url: &str) -> ! {
-    use moto_sys::{SysMem, sys_mem::PAGE_SIZE_SMALL};
-
     let object = format!("shared:url={url};address=4096;page_type=small;page_num=1");
     for _ in 0..8_192 {
         SysObj::create(SysHandle::SELF, 0, &object).unwrap();
     }
     println!("ready");
-    while SysMem::alloc(PAGE_SIZE_SMALL, 64).is_ok() {}
-    while SysMem::alloc(PAGE_SIZE_SMALL, 1).is_ok() {}
-    // Mapping admission stops above the smaller object charge. The following
-    // insertion must succeed without consuming the protected user reserve.
     SysObj::create(SysHandle::SELF, 0, &object).unwrap();
-    let stats = moto_sys::stats::AdmissionStats::get().unwrap();
-    assert!(stats.free_for_admission() >= stats.user_floor_pages);
     println!("grown");
     loop {
         std::thread::park();
@@ -295,7 +248,6 @@ pub fn run_tests() {
     test_dup_races_close();
     test_listener_pool_closes();
     test_listener_pool_growth();
-    test_refused_refill_retries();
 }
 
 fn test_silent_connections() {
@@ -498,119 +450,4 @@ fn test_dup_races_close() {
     SysMem::unmap(SysHandle::SELF, 0, u64::MAX, listener_page).unwrap();
     SysMem::unmap(SysHandle::SELF, 0, u64::MAX, client_page).unwrap();
     println!("test_dup_races_close PASS ({duplicated} of {ROUNDS} duplicated)");
-}
-
-// The refill test's steps that wait without a deadline. The test stalled twice
-// in developer gates (2026-09-27, 2026-10-07) and ran out the suite's clock;
-// the watchdog names the step that stops instead.
-const REFILL_STEPS: [&str; 10] = [
-    "starting the server",
-    "accepting the first connection",
-    "starting the hoarder",
-    "waiting for the hoarder to take the memory",
-    "waiting for the first answer at the floor",
-    "reading the server's first reply",
-    "waiting for the server to retry",
-    "waiting for the hoarder to exit",
-    "reading the server's late reply",
-    "stopping the server",
-];
-const REFILL_DONE: usize = usize::MAX;
-static REFILL_STEP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-fn refill_step(step: usize) {
-    REFILL_STEP.store(step, std::sync::atomic::Ordering::Release);
-}
-
-// Started before memory goes to the floor. It allocates nothing afterwards,
-// and its exit closes the children's stdin, which ends them too.
-fn refill_watchdog() {
-    use std::time::{Duration, Instant};
-    const STALL: Duration = Duration::from_secs(60);
-    std::thread::spawn(|| {
-        let mut last = REFILL_STEP.load(std::sync::atomic::Ordering::Acquire);
-        let mut since = Instant::now();
-        loop {
-            std::thread::sleep(Duration::from_secs(1));
-            let step = REFILL_STEP.load(std::sync::atomic::Ordering::Acquire);
-            if step == REFILL_DONE {
-                return;
-            }
-            if step != last {
-                (last, since) = (step, Instant::now());
-            } else if since.elapsed() >= STALL {
-                let step = REFILL_STEPS[step];
-                println!("test_refused_refill_retries: STALL while {step} for {STALL:?}");
-                std::process::exit(3);
-            }
-        }
-    });
-}
-
-// When memory is low, the kernel refuses new listeners. The server must keep
-// serving its open connection, and must add a listener again soon after the
-// memory comes back, even if no client wakes it.
-fn test_refused_refill_retries() {
-    refill_step(0);
-    refill_watchdog();
-    let url = format!("systest-ipc-refill-{}", std::process::id());
-    let mut peer = Peer::start(&url);
-    let mut client = ClientConnection::new(ChannelSize::Small).unwrap();
-    let mut late = ClientConnection::new(ChannelSize::Small).unwrap();
-    client.connect(&url).unwrap();
-    refill_step(1);
-    peer.command("accept"); // Takes the only listener; the next wait() refills.
-
-    refill_step(2);
-    let mut hoarder = Peer::spawn(&[HOARD]);
-    // Nothing here may allocate until the hoarder is gone: at the floor this
-    // process cannot grow its heap either.
-    let mut hoarded = [0_u8; 8];
-    refill_step(3);
-    hoarder.stdout.read_exact(&mut hoarded).unwrap();
-    assert_eq!(&hoarded, b"hoarded\n");
-    peer.send("rpc"); // The refill is refused.
-    client.req::<RequestHeader>().cmd = 1;
-    refill_step(4);
-    client.do_rpc(None).unwrap();
-    assert_eq!(client.resp::<ResponseHeader>().result, moto_rt::E_OK);
-    let mut ok = [0_u8; 3];
-    refill_step(5);
-    peer.stdout.read_exact(&mut ok).unwrap();
-    assert_eq!(&ok, b"ok\n");
-    peer.send("retry");
-    // Keep the pressure until the server has actually returned from a wait
-    // without a request, rather than merely queuing its next command.
-    let mut retrying = [0_u8; 9];
-    refill_step(6);
-    peer.stdout.read_exact(&mut retrying).unwrap();
-    assert_eq!(&retrying, b"retrying\n");
-    drop(hoarder.child.stdin.take());
-    refill_step(7);
-    assert!(hoarder.child.wait().unwrap().success());
-    drop(hoarder); // A dead process keeps its memory until its last handle closes.
-
-    // Only the retry timer can add the listener this client needs.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while let Err(err) = late.connect(&url) {
-        assert_eq!(err, moto_rt::E_NOT_READY);
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no listener after refusal"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    late.req::<RequestHeader>().cmd = 1;
-    // A lost first wake would block this rpc for good; fail loudly instead.
-    let answer_by = moto_rt::time::Instant::now() + std::time::Duration::from_secs(10);
-    late.do_rpc(Some(answer_by))
-        .expect("the server did not answer the first request on a fresh listener");
-    assert_eq!(late.resp::<ResponseHeader>().result, moto_rt::E_OK);
-    refill_step(8);
-    peer.expect("ok\n");
-    drop((client, late));
-    refill_step(9);
-    peer.stop();
-    refill_step(REFILL_DONE);
-    println!("test_refused_refill_retries PASS");
 }

@@ -34,22 +34,15 @@ pub struct KernelStaticPage {
 
     pub num_cpus: u32,
 
-    // Nonzero while free physical memory sits below the kernel's pressure
-    // watermark: new memory-growing work (process spawns, new sockets, new
-    // sys-io clients) should fail fast with OOM instead of digging the hole
-    // deeper. Appended last: earlier field offsets are ABI.
+    // Nonzero while physical free memory is below the pressure watermarks.
     pub memory_pressure: AtomicU32,
 
     // Nonzero random boot identity, initialized once before starting userspace.
     // Appended last: earlier field offsets are ABI.
     pub boot_random_id: u64,
 
-    // Admission's two "taken but not allocated" counts, appended after
-    // `boot_random_id` for the same reason: pages reserved by admitted
-    // operations that have not completed yet, and pages committed to
-    // demand-paged executable images and not yet filled.
-    pub committed_pages: AtomicU64,
-    pub reserved_pages: AtomicU64,
+    // Physical free memory in 4 KiB pages, sampled with pressure publication.
+    pub free_pages: AtomicU64,
 }
 
 impl KernelStaticPage {
@@ -69,6 +62,8 @@ impl KernelStaticPage {
 const _: () =
     assert!(core::mem::size_of::<KernelStaticPage>() as u64 <= KernelStaticPage::PAGE_SIZE);
 const _: () = assert!(core::mem::offset_of!(KernelStaticPage, boot_random_id) == 64);
+const _: () = assert!(core::mem::offset_of!(KernelStaticPage, memory_pressure) == 60);
+const _: () = assert!(core::mem::offset_of!(KernelStaticPage, free_pages) == 72);
 
 /// Whether the kernel signals memory pressure. One shared-page load.
 #[cfg(feature = "userspace")]

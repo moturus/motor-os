@@ -42,15 +42,6 @@ impl Drop for Page {
 
 const STRUCT_PAGE_SZ: usize = core::mem::size_of::<Page>();
 const _STRUCT_PAGE_SZ: () = assert!(core::mem::size_of::<Page>() == 72);
-// struct Page is the largest per-page metadata admission must cover; see
-// mm::admission::METADATA_BYTES_PER_PAGE. Pages are packed into small pages, so
-// each costs PAGE_SIZE_SMALL / STRUCT_PAGES_IN_SMALL_PAGE of that budget; the
-// rest goes to struct Frame (see phys) and page tables.
-const _STRUCT_PAGE_FITS_ADMISSION: () = assert!(
-    (PAGE_SIZE_SMALL as usize / STRUCT_PAGES_IN_SMALL_PAGE)
-        <= (super::admission::METADATA_BYTES_PER_PAGE * 5 / 8)
-);
-
 const STRUCT_PAGES_IN_SMALL_PAGE: usize = PAGE_SIZE_SMALL as usize / STRUCT_PAGE_SZ; // == 56.
 const _STRUCT_PAGES_IN_SMALL_PAGE: () = assert!(STRUCT_PAGES_IN_SMALL_PAGE == 56);
 
@@ -479,7 +470,7 @@ impl VmemSegment {
 
     // Maps or reserves every page of the segment, in address order. Fails
     // only when the page table refuses the mapping options: it never fails
-    // for lack of memory, admission keeps that away and exhaustion panics.
+    // for lack of memory; exhaustion currently panics.
     fn construct(&mut self) -> Result<(), ErrorCode> {
         let num_pages = self.segment.size >> PAGE_SIZE_SMALL_LOG2;
         let huge = self.huge_candidates();
@@ -613,7 +604,7 @@ impl VmemSegment {
 
     /// Installs a private copy of `source`, or a zeroed page with `None`.
     /// The region lock covers the absence check through installation, so
-    /// overlapping fills never allocate twice against one page's commitment.
+    /// overlapping fills never allocate twice against the same page.
     pub(super) fn fill_file_page(
         &mut self,
         addr: u64,

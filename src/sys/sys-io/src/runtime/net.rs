@@ -23,7 +23,6 @@ mod devices;
 mod half_open;
 mod icmp;
 mod packet_device;
-mod pressure;
 mod registration;
 #[cfg(debug_assertions)]
 mod self_test;
@@ -173,8 +172,8 @@ struct NetRuntime {
     // Bounds established sockets waiting for accept().
     completed: Rc<completed::CompletedBacklog>,
 
-    // Refuses new memory-growing work while global availability is low.
-    pressure: Rc<pressure::Pressure>,
+    // Reclaim unused filesystem cache blocks when requests observe pressure.
+    free_caches: Rc<super::fs::memory::FreeCaches>,
 
     // Bounds sockets that finish a graceful close after their client exits.
     orphan_lingers: Rc<Cell<usize>>,
@@ -495,15 +494,10 @@ impl NetRuntime {
         // exhaustion stopped replenishment), serving this client would leave
         // connects answering `NotFound`. Refuse it explicitly instead --
         // dropping the refused connection frees its channel pages, which is
-        // exactly what this task's backoff retry needs to re-arm. Memory
-        // pressure refuses the same way, now with the explicit error rather
-        // than a silent drop.
+        // exactly what this task's backoff retry needs to re-arm.
         let at_floor = self.stats.net_listeners_armed.get() == 0;
-        let pressured = self.pressure.active();
-        if at_floor || pressured {
-            if pressured {
-                self.pressure.client_refused();
-            }
+        self.free_caches.reclaim_if_pressured();
+        if at_floor {
             self.stats
                 .clients_refused
                 .set(self.stats.clients_refused.get() + 1);
@@ -864,7 +858,6 @@ impl NetRuntime {
         }
         self.half_open
             .discard_deferred(|(index, _)| *index == device_idx);
-        self.pressure.remove_device(device_idx);
         let (listeners, sockets) = {
             let inner = self.inner.borrow();
             (
@@ -991,6 +984,7 @@ impl NetRuntime {
         msg: moto_sdk::ipc::io_channel::Msg,
         sender: channel_budget::ClientSender,
     ) {
+        self.free_caches.reclaim_if_pressured();
         let Ok(net_cmd) = NetCmd::try_from(msg.command) else {
             let remote_handle = sender.remote_handle();
 
@@ -1194,11 +1188,8 @@ pub(super) async fn init(
             config::ram_scaled(completed::DEFAULT_MAX_GLOBAL),
             config::ram_scaled(completed::DEFAULT_MAX_PER_LISTENER),
         )),
-        pressure: Rc::new(pressure::Pressure::new(
-            net_stats.clone(),
-            fs.free_caches.clone(),
-        )),
         orphan_lingers: Rc::new(Cell::new(0)),
+        free_caches: fs.free_caches.clone(),
         fs: fs.root_fs(),
         dns_write_lock: Rc::new(moto_sdk::async_runtime::LocalMutex::new(())),
         channel_budget,
@@ -1219,7 +1210,6 @@ pub(super) async fn init(
         };
         config::write_resolv_conf(&runtime.fs, &initial_dns_servers).await?;
         stats::spawn_stats_responder(runtime.clone());
-        pressure::spawn_recovery(runtime.clone());
     }
 
     runtime.spawn_net_runtime().await;

@@ -1,7 +1,6 @@
 //! Harness shared by the installed wasm tool checks on Motor: each case runs one
 //! rush command with a deadline and an expected exit status while sampling
-//! whole-VM memory, and a suite fails if any memory admission was refused
-//! outside its deliberate exhaustion cases.
+//! whole-VM memory.
 #![cfg(target_os = "motor")]
 
 use std::fs;
@@ -10,21 +9,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use moto_sdk::stats::Collector;
 use moto_sdk::sys::stats::{MemoryStats, ProcessInfoV1};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const DEADLINE: Duration = Duration::from_secs(120);
-/// The status of a process the kernel killed.
-const KILLED: i32 = -1;
 
 pub struct Suite {
     name: &'static str,
     output: Box<dyn Write>,
     pub root: PathBuf,
     cases: usize,
-    refusals: u64,
-    expected_refusals: u64,
 }
 
 impl Suite {
@@ -64,8 +58,6 @@ impl Suite {
             output,
             root,
             cases: 0,
-            refusals: admission_refusals()?,
-            expected_refusals: 0,
         })
     }
 
@@ -179,32 +171,6 @@ impl Suite {
         Ok(())
     }
 
-    /// Runs `command`, which the kernel must kill when one of its page faults
-    /// is refused, while this driver holds all usable memory but `free` bytes.
-    /// That single refusal is expected; any other still fails the suite.
-    pub fn refused_fault(&mut self, label: &str, command: &str, free: u64) -> Result<()> {
-        let stats = MemoryStats::get().map_err(|e| format!("memory stats: {e:?}"))?;
-        let hold = (stats.available - stats.used()).saturating_sub(free) as usize;
-        let mut held = Vec::new();
-        held.try_reserve_exact(hold)?;
-        held.resize(hold, 1_u8);
-        let before = admission_refusals()?;
-        let result = self.command(label, command, KILLED);
-        drop(held);
-        result?;
-        let refused = admission_refusals()? - before;
-        if refused != 1 {
-            return Err(format!("{label}: {refused} admission refusals, not one").into());
-        }
-        writeln!(
-            self.output,
-            "{label}: held={hold} expected_admission_refusals=1"
-        )?;
-        self.refusals += 1;
-        self.expected_refusals += 1;
-        Ok(())
-    }
-
     pub fn same_bytes(&self, first: &str, second: &str) -> Result<()> {
         let mut first = fs::File::open(self.root.join(first))?;
         let mut second = fs::File::open(self.root.join(second))?;
@@ -225,18 +191,10 @@ impl Suite {
         }
     }
 
-    /// Fails on any memory admission refusal since `new` and removes the
-    /// scratch directory.
+    /// Removes the scratch directory.
     pub fn finish(mut self) -> Result<()> {
-        if admission_refusals()? != self.refusals {
-            return Err("unexpected memory admission refusals".into());
-        }
         fs::remove_dir_all(&self.root)?;
-        writeln!(
-            self.output,
-            "{}: {} commands PASS; admission_refusal_delta=0 expected_refusals={}",
-            self.name, self.cases, self.expected_refusals
-        )?;
+        writeln!(self.output, "{}: {} commands PASS", self.name, self.cases)?;
         Ok(())
     }
 }
@@ -351,26 +309,4 @@ fn preserve_system_role(command: &mut Command) {
             format!("0x{caps:x}"),
         );
     }
-}
-
-fn admission_refusals() -> Result<u64> {
-    let kernel = Collector::kernel();
-    let catalog = Collector::describe(&kernel).map_err(|e| format!("metric catalog: {e:?}"))?;
-    // Refusals are counted on the kernel's own process stats.
-    let values = Collector::query_scoped(&kernel, moto_sdk::sys::stats::PID_KERNEL)
-        .map_err(|e| format!("kernel metrics: {e:?}"))?;
-    let mut total = 0;
-    for name in ["mem.admission_refused_user", "mem.admission_refused_sys_io"] {
-        let id = catalog
-            .iter()
-            .find(|m| m.name == name)
-            .ok_or("missing refusal metric")?
-            .id;
-        total += values
-            .iter()
-            .find(|m| m.metric == id)
-            .ok_or("missing refusal counter")?
-            .value;
-    }
-    Ok(total)
 }

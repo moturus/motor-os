@@ -84,7 +84,6 @@ impl NetRuntime {
         registration
             .validate()
             .map_err(crate::util::map_native_error)?;
-        self.pressure.admit()?;
         let mut cfg = config::DeviceCfg {
             mac: None,
             dhcp: false,

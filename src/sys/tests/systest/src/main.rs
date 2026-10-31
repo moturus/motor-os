@@ -3,9 +3,9 @@
 #![feature(local_waker)]
 #![feature(random)]
 
-mod admission;
 mod checked_copy_in;
 mod cold_spawn;
+mod memory;
 mod raw_spawn;
 mod sched_fairness;
 // mod channel_test;
@@ -45,7 +45,6 @@ mod net_caps;
 mod net_driver;
 mod net_harness;
 mod poll;
-mod pressure;
 mod process_permissions;
 mod rush_caps;
 mod sparse;
@@ -658,14 +657,12 @@ pub fn guest_ram_mib() -> u64 {
     (moto_sys::stats::MemoryStats::get().unwrap().available >> 20) + 10
 }
 
-// Pages admission would still grant above the user floor. Tests that touch
-// memory in bulk size themselves from it: a refused lazy first touch kills
-// the process, and small guests have less to spare than the full sizes.
+// Leave room for metadata and concurrent services in bulk-memory tests.
 pub fn spare_pages() -> u64 {
-    let stats = moto_sys::stats::AdmissionStats::get().unwrap();
-    stats
-        .free_for_admission()
-        .saturating_sub(stats.user_floor_pages)
+    moto_sys::KernelStaticPage::get()
+        .free_pages
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .saturating_sub(1024)
 }
 
 fn test_concurrent_lazy_memory_map_write() {
@@ -956,15 +953,6 @@ fn test_file_write() {
     println!("test_file_write() PASS");
 }
 
-fn test_oom() {
-    let mut child = subcommand::spawn();
-    child.oom();
-    let status = child.wait().unwrap();
-    assert!(!status.success());
-
-    println!("test_oom() PASS");
-}
-
 // W^X: executing from heap or stack must kill the process (NX).
 fn test_nx() {
     let mut child = subcommand::spawn();
@@ -1030,46 +1018,6 @@ fn test_writable_executable_elf_rejected() {
     }
 
     println!("test_writable_executable_elf_rejected PASS");
-}
-
-// A segment larger than memory is refused for lack of memory, and spawn has
-// to say so rather than call the binary invalid.
-fn test_oversized_elf_segment_reports_oom() {
-    let mut bytes = std::fs::read(std::env::current_exe().unwrap()).unwrap();
-    let phoff = u64::from_le_bytes(bytes[32..40].try_into().unwrap()) as usize;
-    let phentsize = u16::from_le_bytes(bytes[54..56].try_into().unwrap()) as usize;
-    let phnum = u16::from_le_bytes(bytes[56..58].try_into().unwrap()) as usize;
-    let mut modified = false;
-    for idx in 0..phnum {
-        let offset = phoff + idx * phentsize;
-        let kind = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
-        let flags = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap());
-        // A writable segment's tail is zero-filled, so only p_memsz grows.
-        if kind == 1 && flags & 2 != 0 {
-            bytes[offset + 40..offset + 48].copy_from_slice(&(1_u64 << 40).to_le_bytes());
-            modified = true;
-            break;
-        }
-    }
-    assert!(modified, "current executable has no writable PT_LOAD");
-
-    let path = std::env::temp_dir().join("systest-oversized-elf-segment");
-    write_executable(&path, &bytes);
-    let result = std::process::Command::new(&path)
-        .arg("test-native-net-cancellation")
-        .spawn();
-    std::fs::remove_file(path).unwrap();
-
-    match result {
-        Ok(mut child) => {
-            let _ = child.kill();
-            let status = child.wait().unwrap();
-            panic!("loader mapped a 1 TiB segment: {status}");
-        }
-        Err(err) => assert_eq!(err.kind(), std::io::ErrorKind::OutOfMemory, "{err:?}"),
-    }
-
-    println!("test_oversized_elf_segment_reports_oom PASS");
 }
 
 fn test_caps() {
@@ -1382,10 +1330,6 @@ fn main() {
         mounts::none_role();
         return;
     }
-    if args.len() == 2 && args[1] == "test-memfs-pressure" {
-        pressure::test_memfs_reclamation();
-        return;
-    }
     if args.len() == 2 && args[1] == "paging-soak" {
         cold_spawn::run_soak_tests();
         return;
@@ -1503,10 +1447,6 @@ fn main() {
     if args.len() == 4 && args[1] == "stderr-burst" {
         sys_tty::stderr_burst(args[2].parse().unwrap(), args[3].parse().unwrap());
     }
-    if args.len() == 2 && args[1] == "admission-class-tests" {
-        admission::test_process_classes();
-        return;
-    }
     if args.len() == 2 && args[1] == "sparse-tests" {
         sparse::run_all_tests();
         return;
@@ -1520,10 +1460,6 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "capability-policy-tests" {
         test_caps();
-        return;
-    }
-    if args.len() == 4 && args[1] == "admission-class-child" {
-        admission::class_child(args[2].parse().unwrap(), args[3].parse().unwrap());
         return;
     }
     if args.len() >= 2 && args[1] == "close-race-child" {
@@ -1720,19 +1656,6 @@ fn main() {
         fs::metadata_page_pressure_test();
         return;
     }
-    // The FS pressure regression; the suite runs the same body at spam size
-    // 128. The optional argument sizes the mid-episode lock-acquire spam;
-    // the large default exists to drive a build *without* the FS refusal set
-    // into a sys-io OOM -- a demonstrator, not a test: run that form on a
-    // disposable release boot and read the verdict from the serial log.
-    if (args.len() == 2 || args.len() == 3) && args[1] == "test-fs-pressure" {
-        let lock_spam = args
-            .get(2)
-            .map(|arg| arg.parse().unwrap())
-            .unwrap_or(100_000);
-        pressure::test_fs_under_pressure(lock_spam);
-        return;
-    }
     if args.len() == 2 && args[1] == "test-ipv6-loopback" {
         tcp::test_ipv6();
         return;
@@ -1755,11 +1678,6 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "test-moto-async" {
         moto_async::run_all_tests();
-        return;
-    }
-    if (args.len() == 2 || args.len() == 3) && args[1] == "listener-exhaustion-probe" {
-        let cap = args.get(2).map_or(512, |arg| arg.parse().unwrap());
-        admission::run_listener_exhaustion_probe(cap);
         return;
     }
     // The suite runs one round of the rebind race; the knob for a soak of just
@@ -1964,7 +1882,7 @@ fn main() {
     tcp::test_disconnect_before_rx_ready_releases_channels();
     strlen::run_all_tests();
     mem_blocks::run_all_tests();
-    pressure::run_all_tests();
+    memory::run_all_tests();
     test_invalid_memory_map_options();
     executable_memory::run_all_tests();
     test_fixed_memory_map_overlap();
@@ -2053,13 +1971,9 @@ fn main() {
     sysbox_tail::run_test();
     sysbox_wc::run_test();
     sysbox_which::run_test();
-    test_oom();
-    diagnostics::test_vdso_panic_at_floor();
-    admission::run_all_tests();
     sparse::run_all_tests();
     test_nx();
     test_writable_executable_elf_rejected();
-    test_oversized_elf_segment_reports_oom();
     std::thread::sleep(Duration::new(1, 10_000_000));
     test_rt_mutex();
     sys_io_self_test::run_all_tests();
@@ -2073,7 +1987,7 @@ fn main() {
     udp::run_all_tests();
     icmp::run_all_tests();
     ip_device::run_all_tests();
-    pressure::run_all_tests();
+    memory::run_all_tests();
 
     mpmc::test_mpmc();
     mpmc::test_array_queue();

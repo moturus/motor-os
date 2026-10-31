@@ -32,7 +32,7 @@ pub fn run_thread_exit_race_child() -> ! {
     std::thread::spawn(move || {
         for _ in 0..64 {
             // Put the exit barrier next to the syscall, without std thread
-            // setup letting process exit win before kernel admission begins.
+            // setup letting process exit win before kernel construction begins.
             creator_attempts.fetch_add(1, Ordering::Release);
             let _ = SysCpu::spawn(
                 SysHandle::SELF,

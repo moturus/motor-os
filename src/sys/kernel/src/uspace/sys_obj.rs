@@ -53,13 +53,6 @@ fn sys_handle_create(
                     return Err(moto_rt::E_INVALID_ARGUMENT);
                 };
 
-                // The new address space is ordinary regardless of who creates
-                // it, so it is admitted at the user floor.
-                let _admission = crate::mm::admission::admit(
-                    crate::mm::admission::MemClass::User,
-                    crate::mm::admission::PROCESS_CHARGE_PAGES,
-                )?;
-
                 let address_space = crate::mm::user::UserAddressSpace::new().unwrap();
                 let sys_object = SysObject::new_owned(
                     Arc::new(moto_sys::url_decode(debug_name)),
@@ -384,15 +377,6 @@ pub(super) fn sys_obj_impl(thread: &super::process::Thread, args: &SyscallArgs) 
 
     match args.operation {
         SysObj::OP_CREATE => {
-            // Held until the object (or IPC pair) is created.
-            let _admission = match crate::mm::admission::admit(
-                thread.owner().address_space().mem_class(),
-                crate::mm::admission::OBJECT_CHARGE_PAGES,
-            ) {
-                Ok(admission) => admission,
-                Err(_) => return ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY),
-            };
-
             if args.version > 0 {
                 return ResultBuilder::version_too_high();
             }

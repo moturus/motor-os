@@ -208,7 +208,7 @@ another cache has since claimed or refilled.
 Memory on a list is reachable from every thread: the tier before growth
 scans the other shards, and reclaim drains every list before it looks for
 empty batches. A per-thread list would keep other threads' frees where a
-process at its admission floor cannot reach them; that is why the lists
+process under memory pressure cannot reach them; that is why the lists
 are sharded by CPU. `release_cache` gives every private block back; the
 cache may be used again afterwards. Listed slots need no release: they
 belong to the shard, not the thread.

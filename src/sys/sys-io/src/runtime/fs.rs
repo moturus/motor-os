@@ -19,12 +19,12 @@ use crate::runtime::fs::virtio_partition::VirtioPartition;
 use crate::util::map_err_into_native;
 use crate::util::map_native_error;
 
-pub(crate) mod admission;
 mod block_io;
 mod config;
 mod entry_ids;
 mod lock_manager;
 mod mbr;
+pub(crate) mod memory;
 mod mounts;
 #[cfg(debug_assertions)]
 pub(super) mod self_test;
@@ -40,7 +40,7 @@ pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
     lock_manager::self_test::TESTS,
     mounts::self_test::TESTS,
     config::self_test::TESTS,
-    admission::self_test::TESTS,
+    memory::self_test::TESTS,
     self_test::TESTS,
     &[
         ("fs::spawn::queued_mutations", stats::test_executable_locks),
@@ -373,7 +373,7 @@ impl FileSystem for FS {
 #[derive(Clone)]
 pub(crate) struct FsRuntime {
     mounts: Rc<RefCell<mounts::MountTable>>,
-    pub(crate) free_caches: Rc<admission::FreeCaches>,
+    pub(crate) free_caches: Rc<memory::FreeCaches>,
     entry_ids: Rc<entry_ids::EntryIds>,
     fs_stats: Rc<stats::FsStats>,
     locks: Rc<RefCell<lock_manager::LockManager<PendingLockResponse>>>,
@@ -415,17 +415,10 @@ impl FsRuntime {
     }
 
     fn admit_allocation(&self, command: u16, destination: &mounts::Resolved) -> Result<()> {
-        if admission::needs_reserve(command, destination.kind) {
-            self.free_caches.reserve(&self.fs_stats)?;
+        if memory::needs_memory(command, destination.kind) {
+            self.free_caches.check(&self.fs_stats)?;
         }
         Ok(())
-    }
-
-    fn pressure_refused(&self) -> std::io::Error {
-        self.fs_stats
-            .pressure_refused
-            .set(self.fs_stats.pressure_refused.get() + 1);
-        ErrorKind::OutOfMemory.into()
     }
 }
 
@@ -531,7 +524,7 @@ pub(super) async fn init(
     };
 
     let mounts = Rc::new(RefCell::new(mounts::MountTable::new(fs)));
-    let free_caches = Rc::new(admission::FreeCaches::default());
+    let free_caches = Rc::new(memory::FreeCaches::default());
     config::load(&mounts, &free_caches)
         .await
         .unwrap_or_else(|err| {
@@ -612,16 +605,7 @@ async fn fs_listener(
     // after spawn_new_listener() is called.
     spawn_new_listener(runtime.clone()).await;
 
-    // Under memory pressure a new client is refused.
-    if runtime.free_caches.pressure() {
-        runtime
-            .fs_stats
-            .pressure_refused_clients
-            .set(runtime.fs_stats.pressure_refused_clients.get() + 1);
-        log::debug!("FS: dropping new client under memory pressure.");
-        return Ok(());
-    }
-
+    runtime.free_caches.reclaim_if_pressured();
     let (role, can_write, can_spawn) =
         match moto_sys::SysObj::get_capabilities(sender.remote_handle()) {
             Ok(capabilities) => (
@@ -640,7 +624,7 @@ async fn fs_listener(
 
     // The wait-handle budget (see channel_budget): a channel past it would
     // eventually make the runtime thread's SysCpu::wait exceed the kernel's
-    // handle cap, which is fatal. Dropped like the pressure refusal above;
+    // handle cap, which is fatal. Drop the connection;
     // the client's pending op fails with the channel error.
     let Ok(sender) = runtime.channel_budget.admit_fs(sender) else {
         log::debug!("FS: dropping new client: the channel budget is exhausted.");
@@ -716,27 +700,6 @@ async fn request_task(
     let _ = ticket_tx.send(()).await;
 }
 
-/// Freeing a held memfs ID is allowed under pressure. Resize's size-dependent
-/// check happens under the very guard used to mutate, in its handler.
-fn served_under_pressure(msg: &moto_sdk::ipc::io_channel::Msg, runtime: &FsRuntime) -> bool {
-    // The decoder owns the operation-byte layout (it is infallible and
-    // allocation-free); reading the byte directly here would be a second
-    // copy of that layout.
-    (msg.command == api_fs::CMD_FILE_LOCK
-        && api_fs::file_lock_msg_decode(*msg)
-            .is_ok_and(|(_, _, operation)| operation == moto_rt::fs::UNLOCK))
-        || match msg.command {
-            api_fs::CMD_DELETE_ENTRY => Some(api_fs::delete_entry_msg_decode(*msg)),
-            api_fs::CMD_RESIZE => Some(api_fs::resize_msg_decode(*msg).0),
-            _ => None,
-        }
-        .is_some_and(|entry_id| {
-            runtime
-                .decode(entry_id)
-                .is_ok_and(|entry| entry.kind == api_fs::MountKind::MemFs)
-        })
-}
-
 async fn on_msg(
     msg: moto_sdk::ipc::io_channel::Msg,
     sender: channel_budget::ClientSender,
@@ -745,9 +708,8 @@ async fn on_msg(
     can_write: bool,
     can_spawn: bool,
 ) {
-    // The capability gate, ahead of the pressure gate so that a forbidden
-    // request is reported as such. It covers every lock operation and flush,
-    // and frees donated pages for the same reason the pressure gate does.
+    // The capability gate covers every lock operation and flush. Refused
+    // requests must release donated pages, which no handler will decode.
     // Building a child takes the requester's spawn capability, which the
     // kernel would check only once the image is loaded.
     let forbidden =
@@ -760,22 +722,9 @@ async fn on_msg(
         return;
     }
 
-    // The memory-pressure gate. The gate itself does not allocate (a shared-
-    // page load, a Cell bump, a POD response), though by this point the
-    // message has already cost its spawned task in `fs_listener` -- bounded
-    // transient work, MAX_IN_FLIGHT tickets per connection, the class the
-    // floors absorb. Unrecognized commands fall through to the usual
-    // InvalidData answer rather than inflating the refusal counter. Donated
-    // pages must be freed here -- a handler releases them by decoding, which
-    // never happens for a refused request, and the channel's page pool would
-    // leak a slot per refusal.
-    let pressured = api_fs::known_cmd(msg.command) && runtime.free_caches.pressure();
-    if pressured && !served_under_pressure(&msg, &runtime) {
+    runtime.free_caches.reclaim_if_pressured();
+    if msg.command == api_fs::CMD_SPAWN && moto_sys::memory_pressure() {
         api_fs::release_donated_pages(&msg, &sender);
-        runtime
-            .fs_stats
-            .pressure_refused
-            .set(runtime.fs_stats.pressure_refused.get() + 1);
         let resp = api_fs::empty_resp_encode(msg.id, Err(moto_rt::Error::OutOfMemory));
         let _ = sender.send(resp).await;
         return;
@@ -806,11 +755,9 @@ async fn on_msg(
         moto_sdk::sys_io::api_fs::CMD_SET_ALL_PERMISSIONS => {
             on_cmd_set_all_permissions(msg, &sender, runtime, role).await
         }
-        moto_sdk::sys_io::api_fs::CMD_RESIZE => {
-            on_cmd_resize(msg, &sender, runtime, role, pressured).await
-        }
+        moto_sdk::sys_io::api_fs::CMD_RESIZE => on_cmd_resize(msg, &sender, runtime, role).await,
         moto_sdk::sys_io::api_fs::CMD_DELETE_ENTRY => {
-            on_cmd_delete_entry(msg, &sender, runtime, role, pressured).await
+            on_cmd_delete_entry(msg, &sender, runtime, role).await
         }
         moto_sdk::sys_io::api_fs::CMD_FLUSH => on_cmd_flush(msg, &sender, runtime).await,
         moto_sdk::sys_io::api_fs::CMD_GET_FIRST_ENTRY => {
@@ -1528,18 +1475,11 @@ async fn on_cmd_resize(
     sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
-    pressured: bool,
 ) -> Result<()> {
     let (file_id, new_size) = api_fs::resize_msg_decode(msg);
     let file = runtime.decode(file_id)?;
     let mut fs = file.write().await?;
     refuse_if_executing(&runtime, file.id)?;
-    if pressured
-        && (file.kind != api_fs::MountKind::MemFs
-            || new_size > fs.metadata(role, file.local).await?.size)
-    {
-        return Err(runtime.pressure_refused());
-    }
     let resp = api_fs::empty_resp_encode(
         msg.id,
         fs.resize(role, file.local, new_size)
@@ -1547,9 +1487,7 @@ async fn on_cmd_resize(
             .map_err(map_err_into_native),
     );
     core::mem::drop(fs);
-    if pressured {
-        runtime.free_caches.reclaim();
-    }
+    runtime.free_caches.reclaim_if_pressured();
 
     let _ = sender.send(resp).await;
     Ok(())
@@ -1560,7 +1498,6 @@ async fn on_cmd_delete_entry(
     sender: &moto_sdk::ipc::io_channel::Sender,
     runtime: FsRuntime,
     role: Role,
-    pressured: bool,
 ) -> Result<()> {
     let entry_id = api_fs::delete_entry_msg_decode(msg);
     let entry = runtime.decode(entry_id)?;
@@ -1574,9 +1511,7 @@ async fn on_cmd_delete_entry(
             .map_err(map_err_into_native),
     );
     core::mem::drop(fs);
-    if pressured {
-        runtime.free_caches.reclaim();
-    }
+    runtime.free_caches.reclaim_if_pressured();
 
     let _ = sender.send(resp).await;
     Ok(())

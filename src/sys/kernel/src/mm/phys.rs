@@ -50,12 +50,6 @@ impl Frame {
     }
 }
 
-// A slab entry costs the struct plus its 4-byte refcount. Admission budgets
-// mm::admission::METADATA_BYTES_PER_PAGE for all per-page metadata; a Frame
-// entry is the second-largest consumer of it, after struct Page.
-const _FRAME_SLAB_ENTRY_SZ: () =
-    assert!(core::mem::size_of::<Frame>() + 4 <= super::admission::METADATA_BYTES_PER_PAGE / 4);
-
 impl Slabbable for Frame {
     fn inplace_init(&mut self) {
         self.start = 0;
@@ -78,17 +72,13 @@ pub fn total_small_pages() -> u64 {
     PhysicalMemory::inst().blocks.total_pages()
 }
 
-/// The lowest free small-page count the allocator ever reached -- unlike the
-/// admission-check low water, this includes allocations made outside any
-/// admission window, so it measures the overlapping kernel work the floors
-/// must absorb.
+/// The lowest free small-page count the physical allocator ever reached.
 pub fn min_free_small_pages() -> u64 {
     let blocks = &PhysicalMemory::inst().blocks;
     blocks.total_pages() - blocks.high_water_pages()
 }
 
-/// A frame of the given kind. Admission keeps allocations away from
-/// exhaustion, so running out here is a kernel bug, not an error to pass up.
+/// A frame of the given kind. Exhaustion currently panics.
 pub fn allocate_frame(kind: PageType) -> SlabArc<Frame> {
     match PhysicalMemory::inst().allocate_frame(kind) {
         Ok(frame) => frame,
@@ -101,6 +91,7 @@ pub fn allocate_frame(kind: PageType) -> SlabArc<Frame> {
 pub fn allocate_huge_frame() -> Result<SlabArc<Frame>, ErrorCode> {
     let inst = PhysicalMemory::inst();
     let start = inst.blocks.alloc_huge().ok_or(moto_rt::E_OUT_OF_MEMORY)?;
+    super::pressure::update();
     match inst.slab.alloc_arc() {
         Ok(frame) => {
             frame.get_mut().unwrap().start = start;
@@ -173,6 +164,7 @@ pub fn release_low_memory() {
             crate::arch::paging::l3_direct_phys_table_phys_addr(),
         ],
     );
+    super::pressure::update();
 }
 
 #[cfg(debug_assertions)]
@@ -246,7 +238,7 @@ impl PhysicalMemory {
     }
 
     fn allocate_frameless(&'static self, kind: PageType) -> Result<u64, ErrorCode> {
-        match kind {
+        let result = match kind {
             PageType::SmallPage => self.blocks.alloc_small(1).ok_or_else(|| {
                 log::error!(
                     "OOM: failed to allocate a small frame. Total pages: {}; used pages: {}.",
@@ -256,7 +248,9 @@ impl PhysicalMemory {
                 moto_rt::E_OUT_OF_MEMORY
             }),
             _ => panic!(),
-        }
+        };
+        super::pressure::update();
+        result
     }
 
     fn deallocate_frameless(&'static self, phys_addr: u64, kind: PageType) {
@@ -266,17 +260,15 @@ impl PhysicalMemory {
         };
     }
 
-    // Frees happen outside admission windows (teardown, unmap), so this is
-    // where the pressure flag learns memory came back.
     fn free_small(&self, phys_addr: u64) {
         self.blocks.free_small(phys_addr);
-        crate::mm::admission::note_pages_freed();
+        super::pressure::update();
     }
 
     // Huge frames come only from the dual-purpose pool.
     fn free_huge(&self, phys_addr: u64) {
         self.blocks.free_huge(phys_addr);
-        crate::mm::admission::note_pages_freed();
+        super::pressure::update();
     }
 
     fn deallocate_frame(&self, frame: &Frame) {
@@ -302,6 +294,7 @@ impl PhysicalMemory {
             .blocks
             .alloc_small(num_frames as u16)
             .ok_or(moto_rt::E_OUT_OF_MEMORY)?;
+        super::pressure::update();
         let mut result = Vec::with_capacity(num_frames as usize);
         for idx in 0..num_frames {
             let frame_start = start + (idx << PAGE_SIZE_SMALL_LOG2);
@@ -411,14 +404,21 @@ pub fn dump_stats() {
 }
 
 // Take and return one huge frame from the live pool while the BSP is alone:
-// block accounting, alignment, and the admission notification on return.
+// block accounting, alignment, and shared free-page publication.
 #[cfg(debug_assertions)]
 pub fn huge_frame_self_test() {
-    use crate::mm::admission;
+    super::pressure::self_test();
+    let small = phys_allocate_frameless(PageType::SmallPage).unwrap();
+    super::pressure::assert_snapshot();
+    phys_deallocate_frameless(small, PageType::SmallPage);
+    super::pressure::assert_snapshot();
+    let contiguous = phys_allocate_contiguous_frames(PageType::SmallPage, 32).unwrap();
+    super::pressure::assert_snapshot();
+    drop(contiguous);
+    super::pressure::assert_snapshot();
     let inst = PhysicalMemory::inst();
     let before = block_metrics();
     let free_before = inst.blocks.free_pages();
-    let notified = admission::free_notifications();
     let frame = match allocate_huge_frame() {
         Ok(frame) => frame,
         Err(err) => {
@@ -441,10 +441,11 @@ pub fn huge_frame_self_test() {
     assert_eq!(held.taken, before.taken + 1);
     assert_eq!(held.whole, before.whole - 1);
     assert_eq!(inst.blocks.free_pages(), free_before - 512);
+    super::pressure::assert_snapshot();
     drop(frame);
     let after = block_metrics();
     assert_eq!((after.taken, after.whole), (before.taken, before.whole));
     assert_eq!(inst.blocks.free_pages(), free_before);
-    assert!(admission::free_notifications() > notified);
+    super::pressure::assert_snapshot();
     crate::raw_log!("phys huge frame tests PASS");
 }

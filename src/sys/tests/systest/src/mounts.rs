@@ -293,9 +293,9 @@ fn metric(name: &str) -> Result<u64, String> {
 }
 
 fn free_pages() -> Result<u64, String> {
-    moto_sys::stats::AdmissionStats::get()
-        .map(|stats| stats.free_for_admission())
-        .map_err(|err| err.to_string())
+    Ok(moto_sys::KernelStaticPage::get()
+        .free_pages
+        .load(std::sync::atomic::Ordering::Relaxed))
 }
 
 pub(super) async fn delete_held_entries(
@@ -342,7 +342,7 @@ fn memory() {
             .await
             .map_err(|err| err.to_string())?;
         println!(
-            "mounts: initial used {:?}, entries {:?}, cache {}, admission-free {} pages",
+            "mounts: initial used {:?}, entries {:?}, cache {}, physical-free {} pages",
             baseline.used,
             baseline.entries,
             metric("fs.memfs.cached_free_bytes")?,
@@ -391,7 +391,7 @@ fn memory() {
                     after.used == working.used && after.entries == working.entries,
                     "cache cycle leaked live storage",
                 )?;
-                println!("mounts: cache cycle admission-free {} pages", free_pages()?);
+                println!("mounts: cache cycle physical-free {} pages", free_pages()?);
             }
             let small = client
                 .create_entry(dir, EntryKind::File, "small")
@@ -407,7 +407,7 @@ fn memory() {
                 .await
                 .map_err(|err| err.to_string())?;
             held[1] = Some(big);
-            let refused_before = metric("fs.reserve_refused")?;
+            let refused_before = metric("fs.memory_refused")?;
             let mut size = 0;
             loop {
                 match client.write(big, size, &buffer).await {
@@ -420,7 +420,7 @@ fn memory() {
                     Err(err) => return Err(format!("memfs fill: {err}")),
                 }
             }
-            // Probe admission before metrics queries can release incidental
+            // Probe free memory before metrics queries can release incidental
             // buffers or observe later allocator housekeeping.
             let creation = client.create_entry(dir, EntryKind::File, "refused").await;
             if let Ok(entry) = &creation {
@@ -428,15 +428,50 @@ fn memory() {
             }
             check(
                 creation == Err(moto_rt::Error::StorageFull),
-                "creation admitted below reserve",
+                "creation allowed below 4 MiB",
+            )?;
+            check(
+                client.copy_file_range(small, big, 0, 5).await == Err(moto_rt::Error::StorageFull),
+                "copy allowed below 4 MiB",
+            )?;
+            check(
+                client.move_entry(small, dir, "moved").await == Err(moto_rt::Error::StorageFull),
+                "move allowed below 4 MiB",
+            )?;
+            check(
+                client.move_noreplace(small, dir, "moved").await
+                    == Err(moto_rt::Error::StorageFull),
+                "move-noreplace allowed below 4 MiB",
+            )?;
+            let mut read = [0; 5];
+            check(
+                client.read(small, 0, &mut read).await == Ok(5) && &read == b"small",
+                "read refused below 4 MiB",
+            )?;
+            check(
+                client
+                    .metadata(small)
+                    .await
+                    .map_err(|err| err.to_string())?
+                    .size
+                    == 5,
+                "metadata changed below 4 MiB",
+            )?;
+            check(
+                client
+                    .get_first_entry(dir)
+                    .await
+                    .map_err(|err| err.to_string())?
+                    .is_some(),
+                "list failed below 4 MiB",
             )?;
             check(
                 !moto_sys::memory_pressure(),
                 "memfs fill reached kernel pressure",
             )?;
             check(
-                metric("fs.reserve_refused")? > refused_before,
-                "fill stopped at quota instead of the memory reserve",
+                metric("fs.memory_refused")? > refused_before,
+                "fill stopped at quota instead of the 4 MiB limit",
             )?;
             client
                 .delete_entry(small)
@@ -491,8 +526,8 @@ fn memory() {
                 .map_err(|err| err.to_string())?;
             held[0] = None;
             println!(
-                "mounts: reserve refused after {size} bytes; recovery PASS, \
-                 admission-free {} pages",
+                "mounts: memory refused after {size} bytes; recovery PASS, \
+                 physical-free {} pages",
                 free_pages()?
             );
             Ok(())

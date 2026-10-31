@@ -2,12 +2,12 @@
 // Note: only kheap and virt_intrusive provide memory allocation facilities,
 //       other than some corner cases that do frameless allocations.
 
-pub mod admission;
 mod cache;
 pub mod kheap;
 pub mod mmio;
 pub mod phys;
 pub(crate) mod phys_blocks;
+pub mod pressure;
 mod slab;
 pub mod user;
 pub mod user_copy;

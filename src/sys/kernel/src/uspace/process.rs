@@ -223,15 +223,7 @@ impl Process {
 
         log::debug!("New process {debug_name}");
 
-        // System services and I/O managers may use the reserve so they can
-        // keep making progress when ordinary allocations are refused.
-        if capabilities & (moto_sys::caps::CAP_SYS | moto_sys::caps::CAP_IO_MANAGER) != 0 {
-            address_space.mark_privileged();
-        }
-
         let user_stack = address_space.alloc_user_stack(Thread::DEFAULT_USER_STACK_SIZE_PAGES)?;
-        // The kernel stack is allocated here, not on the thread's first run,
-        // so that the growth happens while the creation charge is reserved.
         let kernel_stack =
             match address_space.alloc_kernel_stack(Thread::DEFAULT_KERNEL_STACK_SIZE_PAGES) {
                 Ok(segment) => segment,
@@ -323,6 +315,10 @@ impl Process {
         address_space_handle: SysHandle,
         url_part: &str,
     ) -> Result<(Arc<SysObject>, Option<Arc<Process>>), ErrorCode> {
+        if crate::mm::pressure::active() {
+            return Err(moto_rt::E_OUT_OF_MEMORY);
+        }
+
         let args: alloc::vec::Vec<&str> = url_part.split(';').collect();
         let entry_point: Option<u64> = crate::util::decode_arg::<u64>(&args, "entry_point");
         let capabilities: u64 = crate::util::decode_arg::<u64>(&args, "capabilities").unwrap_or(0);
@@ -400,15 +396,6 @@ impl Process {
                 }
             }
         };
-
-        // Process creation grows memory beyond the generic object charge:
-        // stack segments, the main thread's kernel stack, process structures.
-        // Charged against the target address space's class, per the plan; the
-        // boot path (init.rs) calls Process::new directly and is not admitted.
-        let _admission = crate::mm::admission::admit(
-            address_space.mem_class(),
-            crate::mm::admission::PROCESS_CHARGE_PAGES,
-        )?;
 
         let (_process, object) = Self::new(
             parent.stats.clone(),
@@ -760,6 +747,12 @@ impl Process {
         let mut status = self.status.lock(line!());
         match *status {
             ProcessStatus::Created => {
+                // Sys-io is constructed by bootstrap, outside new_child.
+                if self.pid() != SYS_IO_PID && crate::mm::pressure::active() {
+                    // The starting thread takes the normal exit path below.
+                    *status = ProcessStatus::Exiting(u64::MAX);
+                    return false;
+                }
                 log::debug!(
                     "started process {}: '{}'",
                     self.pid().as_u64(),
@@ -1629,7 +1622,7 @@ impl Thread {
                 }
                 let self_ptr = self_mut as *const Thread;
 
-                // Allocated in Thread::new, within the admitted operation.
+                // Allocated in Thread::new.
                 let kernel_stack_start =
                     self_mut.kernel_stack_segment.unwrap().end() - mm::PAGE_SIZE_SMALL;
 

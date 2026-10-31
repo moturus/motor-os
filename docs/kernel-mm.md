@@ -1,8 +1,7 @@
 # Kernel memory
 
 The design of physical and virtual memory management in the Motor OS
-kernel: `src/sys/kernel/src/mm`. Low-memory admission control and the
-memory-pressure flag are specified in [oom-handling.md](oom-handling.md);
+kernel: `src/sys/kernel/src/mm`. The physical-memory pressure flag and OOM transition are specified in [oom-handling.md](oom-handling.md);
 this document covers what they sit on.
 
 All sizes use binary units. A small page is 4 KiB; a block or huge page is
@@ -28,7 +27,7 @@ is redesigned or its case is recorded as untested.
 | `mm/virt_intrusive.rs` | Segment trees and per-page descriptors built on intrusive collections, so virtual allocation never recurses into the heap. |
 | `mm/user.rs` | User address spaces: heaps, stacks, lazy and shared mappings, huge-page sizing, user-memory access. |
 | `mm/mmio.rs` | MMIO mapping for the kernel's own devices. |
-| `mm/admission.rs` | Admission floors, charges and the pressure flag (see oom-handling.md). |
+| `mm/pressure.rs` | Physical free-page and pressure publication (see oom-handling.md). |
 | `mm/cache.rs` | A cache of freed same-size virtual segments. |
 
 ## Physical memory
@@ -126,7 +125,7 @@ used < 512 is a panic, not a stranded block.
 
 All of these run under the owning block's lock, which is a leaf: no other
 lock is taken and nothing is allocated while it is held. Owning `Frame`
-handles are created, and admission notified, only after the lock is dropped.
+handles are created, and pressure published, only after the lock is dropped.
 
 - Push: validate alignment, bounds, split state, the allocatable interval,
   used > 0, position outside the unused range, and a clear list bit. Encode
@@ -189,7 +188,7 @@ is what makes the exhaustion protocol sound: after a failed complete scan of
 F then W, the allocator Acquire-loads G. If G equals `total_pages` the pool
 is out of memory at that observation. If G is smaller, a free has published
 its bit before its counter decrement, so a rescan will find it. This is the
-concurrent search protocol, not a retry loop; admission does not bound it.
+concurrent search protocol, not a retry loop; no fixed rescan bound applies.
 
 ### Search
 
@@ -313,9 +312,7 @@ process static page. There is no KASLR.
 An address space is a red-black tree of `VmemSegment`s; each segment holds
 its `Page` descriptors. Both live in slabs of intrusive nodes so that
 allocating virtual memory never allocates from the heap. `Page` and
-`SegmentNode` are 72 bytes each, and admission's per-page metadata budget
-(128 bytes per data page) is asserted at compile time to cover `Page`,
-`Frame` and page-table growth.
+`SegmentNode` are 72 bytes each.
 
 A map of zero pages is refused at the syscall entry with
 `E_INVALID_ARGUMENT`: every mapping path builds a segment, and an empty
@@ -341,9 +338,9 @@ sharing into a lazy segment is refused. A lazy segment can be a share source
 once every page of the shared range has been touched; a share is validated
 in full before the first destination page changes.
 
-Neither frame allocation nor page-table growth can fail: admission keeps the
-kernel away from an empty pool, and `phys::allocate_frame` and the
-page-table allocator panic if it is reached anyway. `PageTable::map_page`
+Frame allocation and page-table growth are not yet fallible throughout:
+`phys::allocate_frame` and the page-table allocator panic on exhaustion.
+`PageTable::map_page`
 fails only for mapping options it does not accept; eager construction rolls
 a segment back at its boundary on that error, and a fault that meets it
 leaves its fresh descriptor frameless, which is a hole. Nothing in the
@@ -393,9 +390,7 @@ An eligible segment is 2 MiB aligned. Huge entries are stored first, then
 the small tail. A refused huge candidate becomes 512 small mappings, and
 after the first refusal every remaining candidate is served small without
 asking again; the segment keeps its policy bit either way. Returned size,
-statistics and admission all use `mapped_pages`; the charge is
-`mapping_charge(M, M)` aggregated over the request, which conservatively
-covers full fallback and needs no refund on huge success. `SysMem::map2`
+statistics use `mapped_pages`. `SysMem::map2`
 exposes the returned size; `free` frees the complete segment.
 
 Huge availability is best effort. After a pressure episode most blocks are
@@ -411,7 +406,7 @@ its start (the lower guard) and its full size, and `free` takes that start.
 A guard has no frame and refuses every fault, which kills the faulting
 thread as a stack guard does, and a guarded segment is refused at either
 end of a share. The guards count toward reserved but not resident memory; the eager
-kind is charged for its pages plus a descriptor per guard, the lazy kind
+kind allocates its data and descriptors up front; the lazy kind allocates
 per touched page.
 
 ### Sharing
@@ -438,23 +433,15 @@ descriptor is allocated before `map_page` and installed only on success. On
 failure the virtual segment is removed and its accounting reversed once.
 Kernel LAPIC, IOAPIC and sys-io BAR mappings use the same path.
 
-## Admission and pressure
+## Physical memory pressure
 
-Admission is specified in [oom-handling.md](oom-handling.md). The parts
-that touch the allocator directly:
-
-- `available_small_pages` is the pool's free count; `min_free_small_pages`
-  is derived from the pool's high-water mark and includes allocations made
-  outside any admission window.
-- Every successful free notifies admission after the block lock is dropped.
-- Pressure sampling and publication are serialized by one `SpinLock<()>`,
-  taken with interrupts disabled and holding nothing else. Every update site
-  samples the reservation count (Acquire) and then physical availability
-  inside the lock; callers cannot pass a stale count, and small-page frees
-  participate even while the flag is clear. Only real transitions across the
-  512/768-page hysteresis write the shared flag. This guarantees that a
-  delayed publisher cannot restore an older observation over newer completed
-  updates; it does not make the two counters an instantaneous snapshot.
+Pressure is specified in [oom-handling.md](oom-handling.md). Every physical
+allocation and free publishes actual free pages after releasing allocator
+locks. Sampling and publication use a spinlock owned by `KernelAddressSpace`,
+with interrupts disabled; a delayed publisher cannot overwrite a newer
+completed observation. The
+shared snapshot is initialized before userspace starts. Pressure rises below
+512 pages and clears at 768; the interval retains its previous state.
 
 ## Process memory statistics
 
@@ -471,7 +458,7 @@ coverage is unchanged: not all boot mappings are captured, fixed per-process
 static pages are excluded, and kernel bookkeeping is not charged to each
 process. Reservation and resident counters are sampled independently; a
 concurrent mapping change can make a snapshot temporarily inconsistent.
-Memory limits and admission retain their existing reservation-based policy.
+Per-process memory limits continue to apply to reserved virtual memory.
 
 ## Validation
 

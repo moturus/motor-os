@@ -51,24 +51,6 @@ impl Subcommand {
         self.stdin.flush().unwrap();
     }
 
-    pub fn oom(&mut self) {
-        use std::io::Write;
-        self.stdin.write_all(b"oom\n").unwrap();
-        self.stdin.flush().unwrap();
-    }
-
-    pub fn lazy_fault_at_floor(&mut self) {
-        use std::io::Write;
-        self.stdin.write_all(b"lazy_fault_at_floor\n").unwrap();
-        self.stdin.flush().unwrap();
-    }
-
-    pub fn sparse_fault_at_floor(&mut self) {
-        use std::io::Write;
-        self.stdin.write_all(b"sparse_fault_at_floor\n").unwrap();
-        self.stdin.flush().unwrap();
-    }
-
     pub fn sparse_exit(&mut self) {
         use std::io::Write;
         self.stdin.write_all(b"sparse_exit\n").unwrap();
@@ -94,20 +76,6 @@ impl Subcommand {
             .read_line(&mut line)
             .unwrap();
         assert_eq!(line.trim(), "bad_wait_array: armed");
-    }
-
-    pub fn fault_storm(&mut self) {
-        use std::io::Write;
-        self.stdin.write_all(b"fault_storm\n").unwrap();
-        self.stdin.flush().unwrap();
-    }
-
-    pub fn pressure_squeeze(&mut self, target_pages: u64) {
-        use std::io::Write;
-        self.stdin
-            .write_all(format!("pressure_squeeze {target_pages}\n").as_bytes())
-            .unwrap();
-        self.stdin.flush().unwrap();
     }
 
     pub fn exec_heap(&mut self) {
@@ -148,14 +116,6 @@ impl Subcommand {
         let stdout = self.inst.stdout.as_mut().unwrap();
         BufReader::new(stdout).read_line(&mut line).unwrap();
         assert_eq!(line.trim(), "malformed_udp_fragment: armed");
-    }
-
-    pub fn listener_flood(&mut self, cap: usize) {
-        use std::io::Write;
-        self.stdin
-            .write_all(format!("listener_flood {cap}\n").as_bytes())
-            .unwrap();
-        self.stdin.flush().unwrap();
     }
 }
 
@@ -200,18 +160,6 @@ fn do_command(cmd: String) {
             }
             std::process::exit(3);
         }
-        "oom" => {
-            assert_eq!(1, words.len());
-            trigger_oom()
-        }
-        "lazy_fault_at_floor" => {
-            assert_eq!(1, words.len());
-            crate::admission::run_lazy_fault_at_floor_child()
-        }
-        "sparse_fault_at_floor" => {
-            assert_eq!(1, words.len());
-            crate::sparse::run_fault_at_floor_child()
-        }
         "sparse_exit" => {
             assert_eq!(1, words.len());
             crate::sparse::run_exit_child()
@@ -223,14 +171,6 @@ fn do_command(cmd: String) {
         "bad_wait_array" => {
             assert_eq!(2, words.len());
             crate::checked_copy_in::bad_wait_array_child(words[1].parse().unwrap())
-        }
-        "fault_storm" => {
-            assert_eq!(1, words.len());
-            crate::admission::run_fault_storm_child()
-        }
-        "pressure_squeeze" => {
-            assert_eq!(2, words.len());
-            crate::pressure::run_pressure_squeeze_child(words[1].parse().unwrap())
         }
         // W^X: executing from R+W memory must get this process killed; if
         // it survives, exit(0) so the parent's !success() assert fires.
@@ -449,61 +389,6 @@ fn do_command(cmd: String) {
             assert_eq!(2, words.len());
             crate::udp::run_malformed_fragment_child(words[1]);
         }
-        // Bind listeners until refused (or `cap`), report, hold them until
-        // the next command. The 2026-07 recording: four processes' worth of
-        // aggregate listener buffers stopped the machine at phys.rs:469
-        // instead of failing the bind; the contract is a clean error.
-        // Every allocation the exhaustion window needs is made before it
-        // opens -- at the floor this process cannot grow its heap.
-        "listener_flood" => {
-            use std::fmt::Write as _;
-            assert_eq!(2, words.len());
-            let cap = words[1].parse::<usize>().unwrap();
-            let mut held = Vec::with_capacity(cap);
-            let mut report = String::with_capacity(128);
-            let mut cmd = String::with_capacity(64);
-            let mut refusal = None;
-            while held.len() < cap {
-                match std::net::TcpListener::bind("127.0.0.1:0") {
-                    Ok(listener) => held.push(listener),
-                    Err(err) => {
-                        refusal = Some(err.kind());
-                        break;
-                    }
-                }
-            }
-            let _ = write!(
-                report,
-                "listener_flood: bound {} refusal {refusal:?}",
-                held.len()
-            );
-            println!("{report}");
-            std::io::stdin().read_line(&mut cmd).unwrap();
-            drop(held);
-            do_command(cmd);
-        }
         _ => panic!("unknown command: {words:?}"),
     }
-}
-
-fn trigger_oom() -> ! {
-    use moto_sys::SysMem;
-
-    // First reach memory limit.
-    println!("oom: stage 1");
-    loop {
-        if SysMem::alloc(moto_sys::sys_mem::PAGE_SIZE_SMALL, 8).is_err() {
-            break;
-        }
-    }
-    println!("oom: stage 2");
-
-    // The machine is now at the kernel's user floor, so a heap allocation
-    // large enough to need a new mapping is refused for certain. The Rust
-    // global allocator cannot report that, so this process aborts.
-    let buf: Vec<u8> = Vec::with_capacity(16 << 20);
-    std::hint::black_box(&buf);
-
-    // If it somehow succeeded, exit(0) so the parent's !success() assert fires.
-    std::process::exit(0);
 }

@@ -50,10 +50,6 @@ pub struct UserAddressSpace {
     max_memory: AtomicU64,
     total_usage: AtomicU64,
 
-    // System and I/O-manager address spaces use the lower admission floor.
-    // Set from CAP_SYS | CAP_IO_MANAGER when the process is created.
-    privileged: AtomicBool,
-
     // User mem stats are tracked via @inner.
     // Kernel mem stats (kernel stacks) are tracked here.
     kernel_mem_stats: Arc<MemStats>,
@@ -108,7 +104,6 @@ impl UserAddressSpace {
                     .load(Ordering::Relaxed),
             ),
             total_usage: AtomicU64::new(0),
-            privileged: AtomicBool::new(false),
             kernel_mem_stats: Arc::new(MemStats::new_kernel()),
 
             kernel_stacks: super::cache::SegmentCache::new(),
@@ -155,21 +150,6 @@ impl UserAddressSpace {
 
     pub fn user_mem_stats(&self) -> &Arc<MemStats> {
         self.inner.mem_stats()
-    }
-
-    pub fn mark_privileged(&self) {
-        self.privileged.store(true, Ordering::Relaxed);
-    }
-
-    /// The admission class of this address space. Operations on it are charged
-    /// against this class even when a remote process (e.g. a loader) makes
-    /// them, so loading an ordinary process never widens its guard band.
-    pub fn mem_class(&self) -> super::admission::MemClass {
-        if self.privileged.load(Ordering::Relaxed) {
-            super::admission::MemClass::Privileged
-        } else {
-            super::admission::MemClass::User
-        }
     }
 
     pub fn kernel_mem_stats(&self) -> &Arc<MemStats> {
@@ -366,7 +346,7 @@ impl UserAddressSpace {
         // Ordinary eager private heap above 1 MiB may map huge pages; the
         // policy is the segment's, not inferred from anything else. Its
         // mapping never covers less than requested; the rounded size is
-        // what the caller, the statistics and admission all see.
+        // what the caller and statistics see.
         let sizing = HeapSizing::new(num_pages);
         let mapped = sizing.mapped_pages;
         self.stats_user_add(mapped << PAGE_SIZE_SMALL_LOG2)?;
@@ -559,14 +539,13 @@ impl UserAddressSpace {
     /// Copies each source page into a fresh frame and installs the copies
     /// from `start` on, keeping pages that are already present. Returns the
     /// number of pages installed even if a later page fails. The caller holds
-    /// `pager` through validation, installation and commitment accounting.
+    /// `pager` through validation and installation.
     pub(crate) fn fill_file(
         &self,
         start: u64,
         sources: &[PinnedUserPage],
     ) -> (u64, Result<(), ErrorCode>) {
         let mut installed = 0;
-        // Admitted: the mapping's reservation covers these pages.
         let result = self.inner.with_file_segment(start, |segment| {
             let end = (sources.len() as u64)
                 .checked_mul(PAGE_SIZE_SMALL)
@@ -594,30 +573,6 @@ impl UserAddressSpace {
     }
 
     pub fn fix_pagefault(&self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
-        // A refused fault cannot be reported to the faulting instruction, so
-        // the faulting thread is killed. Deliberate: there is no OOM killer,
-        // and the victim is whoever faults below the floor.
-        //
-        // Admission comes first because it is cheaper than the segment lookup;
-        // a refusal is re-examined for file-paged segments, whose pages were
-        // committed when they were reserved (uspace::pager) and whose faults
-        // allocate nothing here.
-        let _admission = match super::admission::admit(
-            self.mem_class(),
-            super::admission::lazy_fault_charge(),
-        ) {
-            Ok(admission) => admission,
-            Err(err) => {
-                // Check and handle the same segment: unmap must not replace
-                // it with a lazy mapping after the admission bypass.
-                return self
-                    .inner
-                    .with_file_segment(pf_addr, |segment| {
-                        Ok(segment.fix_pagefault(pf_addr, error_code))
-                    })
-                    .unwrap_or(Err(err));
-            }
-        };
         self.inner.fix_pagefault(pf_addr, error_code)
     }
 

@@ -6,9 +6,7 @@ use wasm_smoke_suite::used_memory;
 use super::{Result, Suite, fs};
 
 const WASMI: &str = "MOTOR_OS_CAPS=0 /devtools/bin/wasmi";
-/// Leaves room for the runner to start but not to fault in 96 MiB of memory.
-const FAULT_FREE: u64 = 48 << 20;
-/// Bounds the used-memory drift across the refused fault; the faulted pages
+/// Bounds the used-memory drift across repeated runs; the faulted pages
 /// alone are several times larger.
 const CLEANUP_SLACK: u64 = 8 << 20;
 
@@ -23,14 +21,8 @@ pub(super) fn run(suite: &mut Suite) -> Result<()> {
         0,
     )?;
     let before = used_memory()?;
-    suite.refused_fault(
-        "memory-refused-fault",
-        &format!("{WASMI} backing.wasm --invoke touch"),
-        FAULT_FREE,
-    )?;
-    // The killed runner's pages are back: all 96 MiB fault in again.
     suite.command(
-        "memory-touch-after-fault",
+        "memory-touch",
         &format!("{WASMI} backing.wasm --invoke touch"),
         0,
     )?;

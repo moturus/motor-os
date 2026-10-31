@@ -131,8 +131,7 @@ struct Service {
     owner: Weak<Process>,
     // Listening and connected server endpoints both reserve the service name.
     endpoints: usize,
-    // Small tree nodes keep growth within object admission's fixed charge;
-    // a contiguous queue would reallocate the entire pool on growth.
+    // Small tree nodes avoid reallocating the entire pool on growth.
     pending: BTreeMap<u64, Arc<Shared>>,
 }
 

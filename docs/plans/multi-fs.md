@@ -89,23 +89,15 @@ type = "memfs"
 - Freed pages go to a small per-mount cache (its cap depends on RAM). Past
   that cap they go straight back to the kernel.
 
-### Memory protection (accepted for iteration 1)
+### Memory protection
 
-- The memfs reserve gate refuses allocating requests with `StorageFull`
-  when free-for-admission memory remains below 16 MiB after reclamation
-  (8 MiB on guests under 32 MiB).
-- The FS request gate checks kernel memory pressure before reserve
-  admission. If pressure persists, it returns `OutOfMemory`, except for
-  the freeing operations below.
-- Before a final memory-admission refusal, in the FS and network gates
-  alike, sys-io empties the memfs free-page caches and resamples the signal
-  once. This is admission-time reclamation; failed operations are not
-  replayed, and allocator failures are not universally recoverable.
-- Under kernel memory pressure, memfs deletes and shrinking or unchanged
-  resizes by already-held IDs, and lock releases, are still served.
-  Capability, permission and executable-lock checks still apply. Freed
-  data pages return to the kernel before the reply; pathname cleanup can
-  still be refused at lookup.
+- The [OOM transition](oom-handling.md) replaces the iteration-1 reserve:
+  memfs write/copy/create/move return `StorageFull` below 4 MiB of actual
+  free physical memory, after reclaiming unused cache blocks and resampling.
+  The same threshold applies to every guest size.
+- Pressure-only FS and network request/client gates are removed. Reads,
+  stat, list, sparse resize, deletes, and lock operations remain available.
+  Capability, permission and executable-lock checks still apply.
 - This is a sampled threshold, not a proof against every out-of-memory
   case. See the first next step.
 
@@ -117,7 +109,7 @@ type = "memfs"
   Configured paths can become stale after ancestor renames.
 - `fs.capacity_bytes` and `fs.available_bytes` describe only the data
   partition. memfs totals are `fs.memfs.used_bytes`, `fs.memfs.entries`
-  and `fs.memfs.cached_free_bytes`; `fs.reserve_refused` counts reserve
+  and `fs.memfs.cached_free_bytes`; `fs.memory_refused` counts memory
   refusals.
 - The boot log has one line per mount.
 
@@ -138,7 +130,7 @@ User-facing behavior is also described in `docs/fs-permissions.md`.
    that deferral has now ended. Define the minimum supported guest RAM and
    the service workload that must remain usable. Assess actual metadata,
    index, name and allocator residency against quota charges, concurrent
-   requests and lock waiters, and the 16/8 MiB thresholds. Address
+   requests and lock waiters, and the 4 MiB threshold. Address
    reclamation when no request reaches sys-io and whether pathname cleanup
    needs safe lookup admission. Measure the cost of large sparse deletes
    and cache drains, and whether the cache earns its keep. Add

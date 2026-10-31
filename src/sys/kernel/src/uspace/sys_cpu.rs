@@ -622,14 +622,6 @@ fn sys_spawn_impl(thread: &super::process::Thread, args: &SyscallArgs) -> Syscal
         return ResultBuilder::invalid_argument();
     }
 
-    let _admission = match crate::mm::admission::admit(
-        thread.owner().address_space().mem_class(),
-        crate::mm::admission::THREAD_CHARGE_PAGES,
-    ) {
-        Ok(admission) => admission,
-        Err(_) => return ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY),
-    };
-
     let stack_size = args.args[1];
     let thread_fn = args.args[2];
     let thread_arg = args.args[3];

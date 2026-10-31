@@ -15,8 +15,8 @@ pub mod tests;
 const LOG_DIR_PATH: &str = "/system/logs";
 const LOG_FILE_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const MIN_AVAILABLE_BYTES: u64 = 50 * 1024 * 1024;
-// Records wait here, per connection, while sys-io refuses writes under
-// memory pressure; a drain writes them out once the flag is down.
+// Records wait here, per connection, when writes fail for lack of memory.
+// A later drain attempts the pending work again.
 const BACKLOG_CAPACITY: usize = 64 * 1024;
 const DRAIN_INTERVAL: Duration = Duration::from_millis(100);
 // A failed rotation step is retried this often: forever for kernel.log,
@@ -69,8 +69,7 @@ fn reclaim_previous_logs() {
     }
 }
 
-/// Creates the file with the log permissions, over a fresh sys-io
-/// connection that pressure refuses like any request.
+/// Creates the file with the log permissions over a fresh sys-io connection.
 fn create_log_file(name: &str) -> std::io::Result<()> {
     reclaim_previous_logs();
     moto_sdk::async_runtime::LocalRuntime::new()
@@ -156,8 +155,7 @@ enum DrainError {
     Flush(std::io::Error),
 }
 
-// Existing file channels return this code directly, even if pressure has
-// cleared by the time strobe receives the refusal.
+// Allocation failures can arrive on existing file channels too.
 fn is_pressure_refusal(err: &std::io::Error) -> bool {
     err.kind() == std::io::ErrorKind::OutOfMemory
         || err.raw_os_error() == Some(moto_rt::E_OUT_OF_MEMORY as i32)
@@ -269,11 +267,11 @@ impl Connection {
         self.drain();
     }
 
-    /// Pressure refusals retain pending work. Other write and flush errors
+    /// Allocation refusals retain pending work. Other write and flush errors
     /// lose the record on ordinary tags, as they always did, and switch the
     /// raw kernel file off.
     fn drain(&mut self) {
-        if self.disabled || moto_sys::memory_pressure() {
+        if self.disabled {
             return;
         }
         loop {

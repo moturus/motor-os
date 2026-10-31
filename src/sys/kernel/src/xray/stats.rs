@@ -127,69 +127,51 @@ pub enum MetricType {
     UserCopyWrite = 50,
     UserCopyWriteBytes = 51,
 
-    // Memory-growing operations refused by admission control (mm::admission),
-    // by the floor they would have crossed. A refusal means the guard band
-    // worked; true physical allocator exhaustion is always a defect.
-    // System-wide, reported at PID_SYSTEM.
-    AdmissionRefusedUser = 52,
-
     // Count of TLB-shootdown waits that spun past the 1e9 "slow" mark before
     // the peer acked (arch::tlb) -- almost always a peer vCPU the host
     // descheduled long enough to notice. System-wide, reported at PID_SYSTEM.
-    TlbShootdownSlow = 53,
+    TlbShootdownSlow = 52,
 
-    AdmissionRefusedSysIo = 54,
-    // Pages reserved by admitted operations still in flight.
-    AdmissionReservedPages = 55,
-    // The lowest free small-page count ever seen at an admission check, and
-    // the two floors it must stay above.
-    SmallPagesLowWater = 56,
-    UserFloorPages = 57,
-    SysIoFloorPages = 58,
     // The lowest free small-page count the physical allocator ever reached.
-    // Unlike SmallPagesLowWater it counts allocations made outside admission
-    // windows, so floor-vs-overlap validation reads this one.
-    PhysSmallPagesLowWater = 59,
+    PhysSmallPagesLowWater = 53,
 
     // Targeted TLB shootdowns (W6b part 3): user-PT invalidations that
     // computed a CR3-shadow target mask, and the total CPUs they did not
     // have to IPI/await. skipped/(targeted*(num_cpus-1)) is the win rate.
-    TlbShootdownTargeted = 60,
-    TlbShootdownCpusSkipped = 61,
+    TlbShootdownTargeted = 54,
+    TlbShootdownCpusSkipped = 55,
 
     // Guest halt polling (sched::Scheduler::halt_poll): idle polls that saw
     // a wake vs expired, and cross-CPU wakes that skipped the IPI because
     // the target was polling.
-    SchedPollHit = 62,
-    SchedPollMiss = 63,
-    SchedIpiElided = 64,
+    SchedPollHit = 56,
+    SchedPollMiss = 57,
+    SchedIpiElided = 58,
 
     // The block allocator (mm::phys_blocks), at the PID_SYSTEM scope.
     // Gauges are read from the pool; the low-memory pair scans at most 64
     // blocks under their locks. The huge-mapping counters are declared here
     // and produced by the mapping path once huge pages are mapped.
-    MemBlocksTotal = 65,
-    MemBlocksWhole = 66,
-    MemBlocksSplit = 67,
-    MemBlocksTaken = 68,
-    MemBlocksWholeLow = 69,
-    MemPagesReserved = 70,
-    MemPagesFreeLow = 71,
-    MemBlockSplits = 72,
-    MemBlockRecombined = 73,
-    MemHugePagesMapped = 74,
-    MemHugeFallbacks = 75,
-    /// Pages committed to demand-paged executable images, not yet filled.
-    MemCommittedPages = 76,
+    MemBlocksTotal = 59,
+    MemBlocksWhole = 60,
+    MemBlocksSplit = 61,
+    MemBlocksTaken = 62,
+    MemBlocksWholeLow = 63,
+    MemPagesReserved = 64,
+    MemPagesFreeLow = 65,
+    MemBlockSplits = 66,
+    MemBlockRecombined = 67,
+    MemHugePagesMapped = 68,
+    MemHugeFallbacks = 69,
     /// Syscalls that gave the CPU to the scheduler loop before returning,
     /// because a tick or a wake landed on the CPU while they ran.
-    SchedSyscallExitYields = 77,
+    SchedSyscallExitYields = 70,
     /// Syscall refusals naming an absent page in the caller's file mapping.
-    FilePagedSyscallMisses = 78,
+    FilePagedSyscallMisses = 71,
     /// RAM backing tracked mappings, in bytes; shared pages count per mapping.
-    MemoryResident = 79,
+    MemoryResident = 72,
 
-    TotalMetricTypes = 80,
+    TotalMetricTypes = 73,
 }
 
 impl MetricType {
@@ -264,16 +246,10 @@ impl MetricType {
             MetricType::UserCopyReadBytes => "user_copy_read_bytes",
             MetricType::UserCopyWrite => "user_copy_write",
             MetricType::UserCopyWriteBytes => "user_copy_write_bytes",
-            MetricType::AdmissionRefusedUser => "mem.admission_refused_user",
             MetricType::TlbShootdownSlow => "cpu.tlb_shootdown_slow",
             MetricType::TlbShootdownTargeted => "cpu.tlb_shootdown_targeted",
             MetricType::TlbShootdownCpusSkipped => "cpu.tlb_shootdown_cpus_skipped",
-            MetricType::AdmissionRefusedSysIo => "mem.admission_refused_sys_io",
-            MetricType::AdmissionReservedPages => "mem.admission_reserved_pages",
-            MetricType::SmallPagesLowWater => "mem.small_pages_low_water",
             MetricType::PhysSmallPagesLowWater => "mem.phys_small_pages_low_water",
-            MetricType::UserFloorPages => "mem.user_floor_pages",
-            MetricType::SysIoFloorPages => "mem.sys_io_floor_pages",
             MetricType::SchedPollHit => "sched.poll_hit",
             MetricType::SchedPollMiss => "sched.poll_miss",
             MetricType::SchedIpiElided => "sched.ipi_elided",
@@ -288,7 +264,6 @@ impl MetricType {
             MetricType::MemBlockRecombined => "mem.block_recombined",
             MetricType::MemHugePagesMapped => "mem.huge_pages_mapped",
             MetricType::MemHugeFallbacks => "mem.huge_fallbacks",
-            MetricType::MemCommittedPages => "mem.committed_pages",
             MetricType::SchedSyscallExitYields => "sched.syscall_exit_yields",
             MetricType::FilePagedSyscallMisses => "mem.file_paged_syscall_misses",
             MetricType::MemoryResident => "memory_resident",
@@ -498,14 +473,6 @@ pub struct KProcessStats {
     pub owner: Weak<crate::uspace::Process>,
 
     per_cpu_stats: PerCpuStats,
-
-    // Admission's gauges, system-wide: kept on the PID_SYSTEM node only.
-    // The lowest number of free small pages seen at an admission check,
-    // `u64::MAX` until the first.
-    admission_low_water: AtomicU64,
-    // How many times the free path has notified admission; a debug test oracle.
-    #[cfg(debug_assertions)]
-    admission_free_notifications: AtomicU64,
 }
 
 impl Drop for KProcessStats {
@@ -568,9 +535,6 @@ impl KProcessStats {
             mem_stats_kernel,
             owner,
             per_cpu_stats: PerCpuStats::new(),
-            admission_low_water: AtomicU64::new(u64::MAX),
-            #[cfg(debug_assertions)]
-            admission_free_notifications: AtomicU64::new(0),
         });
 
         match self_.parent.as_ref() {
@@ -776,13 +740,6 @@ impl KProcessStats {
             vals[MetricType::TlbShootdownSlow as usize] =
                 crate::arch::x64::tlb::TLB_SHOOTDOWN_SLOW_COUNT.load(Ordering::Relaxed);
 
-            use crate::mm::admission;
-            vals[MetricType::AdmissionReservedPages as usize] = admission::reserved_pages();
-            vals[MetricType::MemCommittedPages as usize] = admission::committed_pages();
-            vals[MetricType::SmallPagesLowWater as usize] =
-                self.admission_low_water.load(Ordering::Relaxed);
-            vals[MetricType::UserFloorPages as usize] = admission::USER_FLOOR_PAGES;
-            vals[MetricType::SysIoFloorPages as usize] = admission::SYS_IO_FLOOR_PAGES;
             vals[MetricType::PhysSmallPagesLowWater as usize] =
                 crate::mm::phys::min_free_small_pages();
 
@@ -952,33 +909,6 @@ impl KProcessStats {
 
 static SYSTEM_STATS: StaticRef<Arc<KProcessStats>> = StaticRef::default_const();
 static KERNEL_STATS: StaticRef<Arc<KProcessStats>> = StaticRef::default_const();
-
-/// Records a free-small-page count seen at an admission check: the system
-/// node keeps the minimum. Admission runs for userspace only, after `init()`.
-pub fn record_admission_low_water(available: u64) {
-    let low_water = &SYSTEM_STATS.admission_low_water;
-    if available < low_water.load(Ordering::Relaxed) {
-        low_water.fetch_min(available, Ordering::Relaxed);
-    }
-}
-
-/// The free path notified admission; a debug test oracle on the system node.
-/// Frees before `init()` are not counted.
-#[cfg(debug_assertions)]
-pub fn note_admission_free_notification() {
-    if SYSTEM_STATS.is_set() {
-        SYSTEM_STATS
-            .admission_free_notifications
-            .fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-#[cfg(debug_assertions)]
-pub fn admission_free_notifications() -> u64 {
-    SYSTEM_STATS
-        .admission_free_notifications
-        .load(Ordering::Relaxed)
-}
 
 /// Pids fit i32 by design: see docs/plans/pid-refactoring-design.md.
 pub const PID_MAX: u64 = 1 << 31;

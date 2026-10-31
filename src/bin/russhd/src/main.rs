@@ -121,15 +121,6 @@ async fn serve(
                 continue;
             }
         };
-        // Connection setup allocates more at once than the memory reserve can
-        // grant once memory runs out, and russhd aborts on a failed allocation:
-        // shed new connections under pressure, as sys-io sheds new clients.
-        #[cfg(target_os = "motor")]
-        if moto_sdk::sys::memory_pressure() {
-            log::warn!("dropping a connection from {peer_addr} under memory pressure");
-            drop(socket);
-            continue;
-        }
         let config = config.clone();
         let handler = ConnectionHandler::new(program_config.clone(), peer_addr);
         tokio::spawn(async move {

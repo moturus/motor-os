@@ -14,9 +14,7 @@ const PF_W: u32 = 2;
 const PF_R: u32 = 4;
 
 const MAX_PHDRS: u64 = 64;
-/// Limits that keep a hostile header from requesting unbounded work. A huge
-/// segment is not one: admission refuses its memory (`E_OUT_OF_MEMORY`),
-/// as it did for the eager loader.
+/// Bounds parsing work requested by a hostile dynamic header.
 const MAX_DYNAMIC_BYTES: u64 = 64 * 1024;
 pub const USER_LIMIT: u64 = 1 << 46;
 

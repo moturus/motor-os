@@ -24,7 +24,7 @@ const PAGE: u64 = crate::mm::PAGE_SIZE_SMALL;
 const MAX_FILL_PAGES: u64 = 64;
 
 /// Owned by one address space. Its lock protects mapping identity and
-/// commitment through segment creation, installation and removal. Lock order
+/// mappings through segment creation, installation and removal. Lock order
 /// is space -> region/page table, or space -> registry; never the reverse.
 /// Source pins and thread resumes are taken outside the space lock.
 #[derive(Default)]
@@ -127,10 +127,6 @@ fn reserve(caller: &Arc<super::Process>, args: &SyscallArgs) -> Result<u64, Erro
     if !start.is_multiple_of(PAGE) || pages == 0 || prot & !3 != 0 {
         return Err(moto_rt::E_INVALID_ARGUMENT);
     }
-    let reservation = crate::mm::admission::commit(
-        space.mem_class(),
-        crate::mm::admission::mapping_charge(pages, pages),
-    )?;
     let mut state = space.pager.lock(line!());
     if state.retired {
         return Err(moto_rt::E_BAD_HANDLE);
@@ -153,7 +149,6 @@ fn reserve(caller: &Arc<super::Process>, args: &SyscallArgs) -> Result<u64, Erro
         start,
         Mapping {
             id,
-            reservation,
             start,
             end,
             zero_from: u64::MAX,
@@ -237,7 +232,6 @@ fn fill(caller: &Arc<super::Process>, args: &SyscallArgs) -> Result<u64, ErrorCo
         }
         let (installed, result) = space.fill_file(dest, &sources);
         // A failed fill may still have installed a prefix of the window.
-        mapping.reservation.release(installed);
         result?;
         (installed, mapping.take_waiters(dest, dest_end))
     };
@@ -293,9 +287,6 @@ pub(super) fn on_fault(thread: &Thread, addr: u64) -> bool {
             Next::Resume(true)
         } else if page >= mapping.zero_from {
             let filled = space.fill_file_zero(page);
-            if filled == Ok(true) {
-                mapping.reservation.release(1);
-            }
             Next::Resume(filled.is_ok())
         } else {
             mapping.waiters.push(Waiter {
@@ -336,8 +327,8 @@ pub(crate) fn retire_space(space: &UserAddressSpace) {
         }
         (mappings, pager.notify.clone())
     };
-    // Move the collections out, keeping their commitments until no fill can
-    // reach them. No snapshot of addresses or merged waiter buffer is needed.
+    // Retired collections are unreachable by fills. No snapshot of addresses
+    // or merged waiter buffer is needed.
     for mapping in mappings.into_values() {
         resume(mapping.waiters, false);
     }
