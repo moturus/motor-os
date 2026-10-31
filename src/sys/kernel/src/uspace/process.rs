@@ -55,7 +55,7 @@ fn finish_direct_switch(wakee: &Thread) {
     }
 }
 
-// Process ID.
+// Public process ID. Kernel identities are separate, non-wrapping u64s.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ProcessId(u64);
 
@@ -249,7 +249,7 @@ impl Process {
             self_object: None,
             stats: KProcessStats::new(
                 parent,
-                crate::xray::stats::allocate_pid(),
+                crate::xray::stats::allocate_pids(),
                 debug_name,
                 detached,
                 user_mem_stats,
@@ -412,6 +412,10 @@ impl Process {
 
     pub fn pid(&self) -> ProcessId {
         self.stats.pid()
+    }
+
+    pub fn kernel_pid(&self) -> u64 {
+        self.stats.kernel_pid()
     }
 
     /// The parent while it lives: for a delegated child, its requester.

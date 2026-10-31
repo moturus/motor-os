@@ -345,6 +345,8 @@ fn cpu_main(this_cpu: u64) -> ! {
         crate::mm::init_mm_bsp_stage2();
         crate::xray::stats::init();
         #[cfg(debug_assertions)]
+        crate::xray::stats::tests::run();
+        #[cfg(debug_assertions)]
         crate::mm::phys_blocks::test();
         #[cfg(debug_assertions)]
         crate::mm::virt::self_test();

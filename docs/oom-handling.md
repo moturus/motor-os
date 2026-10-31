@@ -10,6 +10,19 @@ The replacement OOM killer and fallible user-page mapping paths are later steps.
 Until those land, physical exhaustion can still panic in frame allocation or
 page-table growth. Removing admission does not make those operations fallible.
 
+## Process identities
+
+Step 2 gives each process a monotonic `u64` kernel PID and a public user PID.
+Kernel PIDs never wrap or repeat; exhausting that counter panics the kernel.
+Public PIDs keep their existing positive-i32 range, wrap to 4,096, and skip
+IDs still in use. Both IDs are equal before the first public-PID wrap.
+
+The statistics tree keeps kernel-PID and user-PID indexes under the same
+children lock, along with the system node's PID counters. Internal child
+traversal uses kernel-PID order. Public lookup, process-list pagination, metric
+scopes, and per-CPU process statistics continue to use user PIDs and their order.
+The shared-page and syscall process-identity formats are unchanged.
+
 ## Published physical memory
 
 `kernel/src/mm/pressure.rs` maintains `KernelStaticPage::memory_pressure` and
@@ -65,3 +78,6 @@ Quiescent kernel checks compare the shared snapshot with the allocator after
 small, huge, and contiguous allocations/frees. Memfs tests cover mutation
 classification, the 4 MiB boundary, and cache reclamation. Old tests that expected
 refusal at admission floors or guaranteed executable commitments are removed.
+Debug-guest PID tests exercise isolated counter/index state across public-PID
+wrap and reuse, kernel-ID exhaustion, and both traversal orders without changing
+the live system counters. Systest also checks public listing pagination.

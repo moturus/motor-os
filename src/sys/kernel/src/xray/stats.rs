@@ -20,6 +20,9 @@ use alloc::sync::Weak;
 
 use moto_sys::stats::*;
 
+#[cfg(debug_assertions)]
+pub(crate) mod tests;
+
 /// The kernel's metric catalog and the source of truth for its metric set.
 /// `repr(u32)` so the discriminant is the metric's stable wire id (emitted
 /// directly into `MetricEntry::metric` / `MetricDescWire`).
@@ -455,16 +458,36 @@ impl Drop for CpuUsageScopeKernel {
     }
 }
 
+// Both indexes and the system node's PID counters share the children lock.
+struct Children {
+    by_kernel_pid: BTreeMap<u64, Weak<KProcessStats>>,
+    by_user_pid: BTreeMap<ProcessId, u64>,
+    next_kernel_pid: u64,
+    next_user_pid: u64,
+}
+
+impl Default for Children {
+    fn default() -> Self {
+        Self {
+            by_kernel_pid: BTreeMap::new(),
+            by_user_pid: BTreeMap::new(),
+            next_kernel_pid: PID_KERNEL + 1,
+            next_user_pid: PID_KERNEL + 1,
+        }
+    }
+}
+
 // Process stats are held in a tree.
 pub struct KProcessStats {
-    pid: ProcessId,
+    kernel_pid: u64,
+    user_pid: ProcessId,
     debug_name: String,
     total_threads: AtomicU64,
     active_threads: AtomicU64,
     parent: Option<Arc<KProcessStats>>,
     total_children: AtomicU64,
     active_children: AtomicU64,
-    children: SpinLock<BTreeMap<ProcessId, Weak<KProcessStats>>>,
+    children: SpinLock<Children>,
     active: AtomicBool,
     detached: bool,
 
@@ -478,22 +501,18 @@ pub struct KProcessStats {
 impl Drop for KProcessStats {
     fn drop(&mut self) {
         if let Some(parent) = self.parent.as_ref() {
-            assert!(parent.children.lock(line!()).remove(&self.pid).is_some());
+            parent.remove_child(self);
         } else {
             panic!("impossible");
         }
-        assert!(SYSTEM_STATS
-            .children
-            .lock(line!())
-            .remove(&self.pid)
-            .is_some());
+        SYSTEM_STATS.remove_child(self);
     }
 }
 
 impl KProcessStats {
     pub fn new(
         parent: Arc<KProcessStats>,
-        pid: ProcessId,
+        pids: (u64, ProcessId),
         debug_name: String,
         detached: bool,
         mem_stats_user: Arc<MemStats>,
@@ -502,7 +521,7 @@ impl KProcessStats {
     ) -> Arc<Self> {
         Self::new_impl(
             Some(parent),
-            pid,
+            pids,
             debug_name,
             detached,
             mem_stats_user,
@@ -513,7 +532,7 @@ impl KProcessStats {
 
     fn new_impl(
         parent: Option<Arc<KProcessStats>>,
-        pid: ProcessId,
+        pids: (u64, ProcessId),
         debug_name: String,
         detached: bool,
         mem_stats_user: Arc<MemStats>,
@@ -521,14 +540,15 @@ impl KProcessStats {
         owner: Weak<crate::uspace::Process>,
     ) -> Arc<Self> {
         let self_ = Arc::new(Self {
-            pid,
+            kernel_pid: pids.0,
+            user_pid: pids.1,
             debug_name,
             total_threads: AtomicU64::new(0),
             active_threads: AtomicU64::new(0),
             parent,
             total_children: AtomicU64::new(0),
             active_children: AtomicU64::new(0),
-            children: SpinLock::new(BTreeMap::new()),
+            children: SpinLock::new(Children::default()),
             active: AtomicBool::new(true),
             detached,
             mem_stats_user,
@@ -539,30 +559,48 @@ impl KProcessStats {
 
         match self_.parent.as_ref() {
             Some(parent) => {
-                assert!(parent
-                    .children
-                    .lock(line!())
-                    .insert(self_.pid, Arc::downgrade(&self_))
-                    .is_none());
+                parent.insert_child(&self_, false);
                 parent.total_children.fetch_add(1, Ordering::Relaxed);
                 parent.active_children.fetch_add(1, Ordering::Relaxed);
             }
-            None => assert_eq!(self_.pid.as_u64(), PID_SYSTEM),
+            None => assert_eq!(self_.user_pid.as_u64(), PID_SYSTEM),
         }
 
-        if self_.pid.as_u64() > PID_KERNEL {
+        if self_.user_pid.as_u64() > PID_KERNEL {
             // This is a userspace process.
-            let prev = SYSTEM_STATS
-                .children
-                .lock(line!())
-                .insert(self_.pid, Arc::downgrade(&self_));
-            // allocate_pid() reserved this slot with a dead placeholder.
-            assert!(prev.is_some_and(|w| w.upgrade().is_none()));
+            SYSTEM_STATS.insert_child(&self_, true);
             SYSTEM_STATS.total_children.fetch_add(1, Ordering::Relaxed);
             SYSTEM_STATS.active_children.fetch_add(1, Ordering::Relaxed);
         }
 
         self_
+    }
+
+    fn insert_child(&self, child: &Arc<Self>, reserved: bool) {
+        let mut children = self.children.lock(line!());
+        let prev = children
+            .by_kernel_pid
+            .insert(child.kernel_pid, Arc::downgrade(child));
+        let user_prev = children
+            .by_user_pid
+            .insert(child.user_pid, child.kernel_pid);
+        if reserved {
+            // allocate_pids() installed both indexes before construction.
+            assert!(prev.is_some_and(|weak| weak.ptr_eq(&Weak::new())));
+            assert_eq!(user_prev, Some(child.kernel_pid));
+        } else {
+            assert!(prev.is_none());
+            assert!(user_prev.is_none());
+        }
+    }
+
+    fn remove_child(&self, child: &Self) {
+        let mut children = self.children.lock(line!());
+        assert!(children.by_kernel_pid.remove(&child.kernel_pid).is_some());
+        assert_eq!(
+            children.by_user_pid.remove(&child.user_pid),
+            Some(child.kernel_pid)
+        );
     }
 
     pub fn process_dropped(&self) {
@@ -589,40 +627,55 @@ impl KProcessStats {
         // Detached children are the exception: they are owned by the kernel and
         // outlive us on purpose (CAP_SPAWN_DETACHED), so they are left running,
         // unless they were never started: nobody else can wake them.
-        Self::for_each_child(
-            &self.children,
-            ProcessId::from_u64(0),
-            line!(),
-            |_, child| {
-                if let Some(child) = child {
-                    crate::uspace::process::post_parent_dropped(child.owner.clone());
-                }
-                true
-            },
-        );
+        Self::for_each_child(&self.children, 0, line!(), |_, child| {
+            if let Some(child) = child {
+                crate::uspace::process::post_parent_dropped(child.owner.clone());
+            }
+            true
+        });
     }
 
-    /// Calls `func` with each entry of `children` from `start` on, in pid
+    /// Calls `func` with each entry of `children` from `start` on, in kernel-PID
     /// order, until it returns false. Each child is upgraded under the lock
     /// but handed to `func` after the lock is released: if that `Arc` is the
     /// last one, dropping it runs `Drop`, which takes the `children` locks of
     /// the child's parent and of the system.
-    fn for_each_child<F>(
-        children: &SpinLock<BTreeMap<ProcessId, Weak<KProcessStats>>>,
-        start: ProcessId,
-        lockword: u32,
-        mut func: F,
-    ) where
-        F: FnMut(ProcessId, Option<Arc<KProcessStats>>) -> bool,
+    fn for_each_child<F>(children: &SpinLock<Children>, start: u64, lockword: u32, mut func: F)
+    where
+        F: FnMut(u64, Option<Arc<KProcessStats>>) -> bool,
     {
         let mut next = start;
         loop {
             let (pid, child) = {
                 let children = children.lock(lockword);
-                let Some((pid, weak)) = children.range(next..).next() else {
+                let Some((pid, weak)) = children.by_kernel_pid.range(next..).next() else {
                     return;
                 };
                 (*pid, weak.upgrade())
+            };
+            if !func(pid, child) {
+                return;
+            }
+            let Some(after) = pid.checked_add(1) else {
+                return;
+            };
+            next = after;
+        }
+    }
+
+    // Public listings retain user-PID order, including after reuse/wrap.
+    fn for_each_user_child<F>(children: &SpinLock<Children>, start: ProcessId, mut func: F)
+    where
+        F: FnMut(ProcessId, Option<Arc<KProcessStats>>) -> bool,
+    {
+        let mut next = start;
+        loop {
+            let (pid, child) = {
+                let children = children.lock(line!());
+                let Some((pid, kernel_pid)) = children.by_user_pid.range(next..).next() else {
+                    return;
+                };
+                (*pid, children.by_kernel_pid[kernel_pid].upgrade())
             };
             if !func(pid, child) {
                 return;
@@ -648,7 +701,11 @@ impl KProcessStats {
     }
 
     pub fn pid(&self) -> ProcessId {
-        self.pid
+        self.user_pid
+    }
+
+    pub fn kernel_pid(&self) -> u64 {
+        self.kernel_pid
     }
 
     pub fn on_thread_added(&self) {
@@ -669,8 +726,8 @@ impl KProcessStats {
     ///
     /// [`collect_metrics`]: KProcessStats::collect_metrics
     pub fn into_v1(&self, dest: &mut ProcessInfoV1) {
-        dest.pid = self.pid.as_u64();
-        dest.parent_pid = self.parent.as_ref().map_or(0, |p| p.pid.as_u64());
+        dest.pid = self.user_pid.as_u64();
+        dest.parent_pid = self.parent.as_ref().map_or(0, |p| p.user_pid.as_u64());
 
         dest.process_role = moto_sys::caps::ProcessRole::None as u8;
         if let Some(proc) = self.owner.upgrade() {
@@ -730,7 +787,7 @@ impl KProcessStats {
         vals[MetricType::PagesKernel as usize] = pages_kernel;
 
         // System-wide memory metrics live at the aggregate (PID_SYSTEM) scope.
-        if self.pid.as_u64() == PID_SYSTEM {
+        if self.user_pid.as_u64() == PID_SYSTEM {
             let phys = crate::mm::phys::PhysStats::get();
             vals[MetricType::MemAvailable as usize] = phys.total_size;
             vals[MetricType::MemUsed as usize] = phys.small_pages_used << small_log2;
@@ -774,27 +831,13 @@ impl KProcessStats {
             if start.as_u64() == PID_SYSTEM && !func(SYSTEM_STATS.as_ref()) {
                 return;
             }
-            Self::for_each_child(&SYSTEM_STATS.children, start, line!(), |_, child| {
+            Self::for_each_user_child(&SYSTEM_STATS.children, start, |_, child| {
                 child.is_none_or(|e| func(e.as_ref()))
             });
-        } else {
-            let entry = {
-                let child_lock = SYSTEM_STATS.children.lock(line!());
-                if let Some(entry) = child_lock.get(&start) {
-                    entry.clone()
-                } else {
-                    return;
-                }
-            };
-
-            if let Some(entry) = entry.upgrade() {
-                Self::for_each_child(
-                    &entry.children,
-                    ProcessId::from_u64(0),
-                    line!(),
-                    |_, child| child.is_none_or(|e| func(e.as_ref())),
-                );
-            }
+        } else if let Some(entry) = stats_from_pid(start.as_u64()) {
+            Self::for_each_user_child(&entry.children, ProcessId::from_u64(0), |_, child| {
+                child.is_none_or(|e| func(e.as_ref()))
+            });
         }
     }
 
@@ -915,40 +958,46 @@ pub const PID_MAX: u64 = 1 << 31;
 /// Post-wrap allocation restarts here, so boot-time pids are never reused.
 const FIRST_WRAP_PID: u64 = 4096;
 
-// Only read/written under the SYSTEM_STATS.children lock.
-static NEXT_PID: AtomicU64 = AtomicU64::new(PID_KERNEL + 1);
-
-/// Allocate a pid for a new userspace process, reserving it in
-/// `SYSTEM_STATS.children` (the source of truth for "pid in use") so that
-/// allocation and registration are serialized by the same lock.
-pub fn allocate_pid() -> ProcessId {
+/// Allocate both identities, reserving their indexes under the same lock
+/// used by registration. Neither identity is rolled back on failure.
+pub fn allocate_pids() -> (u64, ProcessId) {
     let mut children = SYSTEM_STATS.children.lock(line!());
+    allocate_pids_locked(&mut children).expect("process ID space exhausted")
+}
+
+fn allocate_pids_locked(children: &mut Children) -> Option<(u64, ProcessId)> {
+    let kernel_pid = children.next_kernel_pid;
+    let next_kernel_pid = kernel_pid.checked_add(1)?;
     for _ in 0..=PID_MAX {
-        let candidate = NEXT_PID.load(Ordering::Relaxed);
+        let candidate = children.next_user_pid;
         if candidate >= PID_MAX {
-            NEXT_PID.store(FIRST_WRAP_PID, Ordering::Relaxed);
+            children.next_user_pid = FIRST_WRAP_PID;
             continue;
         }
-        NEXT_PID.store(candidate + 1, Ordering::Relaxed);
+        children.next_user_pid = candidate + 1;
         let pid = ProcessId::from_u64(candidate);
-        if let alloc::collections::btree_map::Entry::Vacant(entry) = children.entry(pid) {
-            // Reserve the pid; KProcessStats::new_impl replaces this dead
-            // placeholder with the real entry under the same lock.
-            entry.insert(Weak::new());
-            return pid;
+        if let alloc::collections::btree_map::Entry::Vacant(entry) = children.by_user_pid.entry(pid)
+        {
+            entry.insert(kernel_pid);
+            assert!(children
+                .by_kernel_pid
+                .insert(kernel_pid, Weak::new())
+                .is_none());
+            children.next_kernel_pid = next_kernel_pid;
+            return Some((kernel_pid, pid));
         }
     }
 
     // 2^31 concurrently live processes cannot exist (memory alone forbids
     // it), so a full scan without a vacancy is a kernel bug.
-    panic!("pid space exhausted");
+    None
 }
 
 pub fn init() {
     use alloc::boxed::Box;
     SYSTEM_STATS.set(Box::leak(Box::new(KProcessStats::new_impl(
         None,
-        ProcessId::from_u64(PID_SYSTEM),
+        (PID_SYSTEM, ProcessId::from_u64(PID_SYSTEM)),
         "(total)".to_owned(),
         false,
         Arc::new(MemStats::new_user()),
@@ -958,7 +1007,7 @@ pub fn init() {
 
     KERNEL_STATS.set(Box::leak(Box::new(KProcessStats::new_impl(
         Some(system_stats()),
-        ProcessId::from_u64(PID_KERNEL),
+        (PID_KERNEL, ProcessId::from_u64(PID_KERNEL)),
         "kernel".to_owned(),
         false,
         Arc::new(MemStats::new_user()),
@@ -1006,11 +1055,9 @@ pub fn kernel_stats() -> Arc<KProcessStats> {
 }
 
 pub fn stats_from_pid(pid: u64) -> Option<Arc<KProcessStats>> {
-    SYSTEM_STATS
-        .children
-        .lock(line!())
-        .get(&ProcessId::from_u64(pid))
-        .map(|w| w.upgrade())?
+    let children = SYSTEM_STATS.children.lock(line!());
+    let kernel_pid = children.by_user_pid.get(&ProcessId::from_u64(pid))?;
+    children.by_kernel_pid[kernel_pid].upgrade()
 }
 
 pub fn system_stats_ref() -> &'static KProcessStats {
@@ -1034,7 +1081,7 @@ pub fn fill_percpu_stats_entry(
         if (addr_offset + entry_sz) > crate::mm::PAGE_SIZE_SMALL as usize {
             return false;
         }
-        *((page_addr + addr_offset) as *mut u64) = stats.pid.as_u64();
+        *((page_addr + addr_offset) as *mut u64) = stats.user_pid.as_u64();
         let percpu_entries = core::slice::from_raw_parts_mut(
             (page_addr + addr_offset + 8) as *mut moto_sys::stats::CpuStatsPerCpuEntryV1,
             num_cpus,
@@ -1058,10 +1105,10 @@ pub fn fill_percpu_stats_page(page_addr: usize) -> usize {
     let processes = {
         let mut processes = alloc::vec::Vec::new();
         let lock = SYSTEM_STATS.children.lock(line!());
-        processes.reserve_exact(lock.len());
+        processes.reserve_exact(lock.by_user_pid.len());
 
-        for stats in lock.values() {
-            processes.push(stats.clone());
+        for kernel_pid in lock.by_user_pid.values() {
+            processes.push(lock.by_kernel_pid[kernel_pid].clone());
         }
 
         processes

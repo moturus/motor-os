@@ -563,6 +563,18 @@ pub fn test_pid_invariants() {
     assert!(pid < (1_u64 << 31), "pid does not fit i32: {pid}");
     assert_eq!(std::process::id() as u64, pid);
 
+    let mut page = [moto_sys::stats::ProcessInfoV1::default(); 1];
+    let mut cursor = moto_sys::stats::PID_SYSTEM;
+    let mut found_self = false;
+    while moto_sys::stats::ProcessInfoV1::list(cursor, &mut page).unwrap() != 0 {
+        let listed = page[0].pid;
+        assert!(listed >= cursor && listed < (1 << 31));
+        found_self |= listed == pid;
+        // The cursor is inclusive; the next page must not repeat this PID.
+        cursor = listed + 1;
+    }
+    assert!(found_self, "paged listing omitted the calling process");
+
     println!("test_pid_invariants PASS");
 }
 
