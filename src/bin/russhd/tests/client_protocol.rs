@@ -130,6 +130,235 @@ impl Drop for Fixture {
 
 const FULL_DUPLEX_STREAM_SIZE: usize = 8 * 1024 * 1024;
 
+struct JumpFixture {
+    port: u16,
+    key: russh::keys::PrivateKey,
+    closed: std::sync::mpsc::Receiver<()>,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<(String, u32)>>>,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+struct JumpHandler {
+    user: String,
+    identity: russh::keys::PublicKey,
+    allowed_port: u16,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<(String, u32)>>>,
+    closed: std::sync::mpsc::Sender<()>,
+}
+
+impl Drop for JumpHandler {
+    fn drop(&mut self) {
+        let _ = self.closed.send(());
+    }
+}
+
+impl russh::server::Handler for JumpHandler {
+    type Error = russh::Error;
+
+    async fn auth_publickey(
+        &mut self,
+        user: &str,
+        key: &russh::keys::PublicKey,
+    ) -> Result<Auth, Self::Error> {
+        Ok(if user == self.user && key == &self.identity {
+            Auth::Accept
+        } else {
+            Auth::reject()
+        })
+    }
+
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        channel: Channel<russh::server::Msg>,
+        host: &str,
+        port: u32,
+        _origin: &str,
+        _origin_port: u32,
+        reply: russh::server::ChannelOpenHandle,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.requests.lock().unwrap().push((host.to_owned(), port));
+        if host != "127.0.0.1" || port != u32::from(self.allowed_port) {
+            reply
+                .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
+        }
+        let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", self.allowed_port)).await?;
+        reply.accept().await;
+        tokio::spawn(async move {
+            let mut stream = channel.into_stream();
+            // A deliberately refused host key may reset the tunnel mid-packet.
+            if let Err(error) = tokio::io::copy_bidirectional(&mut stream, &mut socket).await {
+                assert!(
+                    matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                    ),
+                    "{error}"
+                );
+            }
+        });
+        Ok(())
+    }
+}
+
+impl JumpFixture {
+    fn start(user: &str, identity: &Path, allowed_port: u16) -> Self {
+        let key = russh::keys::PrivateKey::random(
+            &mut rand::rng(),
+            russh::keys::ssh_key::Algorithm::Ed25519,
+        )
+        .unwrap();
+        let identity = russh::keys::load_secret_key(identity, None)
+            .unwrap()
+            .public_key()
+            .clone();
+        let (address_tx, address_rx) = std::sync::mpsc::sync_channel(1);
+        let (closed_tx, closed) = std::sync::mpsc::channel();
+        let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = requests.clone();
+        let user = user.to_owned();
+        let host_key = key.clone();
+        let thread = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async move {
+                let config = std::sync::Arc::new(russh::server::Config {
+                    keys: vec![host_key],
+                    auth_rejection_time: Duration::ZERO,
+                    auth_rejection_time_initial: Some(Duration::ZERO),
+                    ..Default::default()
+                });
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                address_tx.send(listener.local_addr().unwrap().port()).unwrap();
+                loop {
+                    tokio::select! {
+                        _ = &mut stop_rx => break,
+                        socket = listener.accept() => {
+                            let (socket, _) = socket.unwrap();
+                            let handler = JumpHandler { user: user.clone(), identity: identity.clone(), allowed_port, requests: log.clone(), closed: closed_tx.clone() };
+                            let config = config.clone();
+                            tokio::spawn(async move {
+                                if let Ok(session) = russh::server::run_stream(config, socket, handler).await {
+                                    let _ = session.await;
+                                }
+                            });
+                        }
+                    }
+                }
+            });
+        });
+        Self {
+            port: address_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            key,
+            closed,
+            requests,
+            stop: Some(stop_tx),
+            thread: Some(thread),
+        }
+    }
+
+    fn assert_closed(&self) {
+        self.closed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("jump connection leaked");
+    }
+}
+
+impl Drop for JumpFixture {
+    fn drop(&mut self) {
+        let _ = self.stop.take().unwrap().send(());
+        self.thread.take().unwrap().join().unwrap();
+    }
+}
+
+#[test]
+fn transport_uses_jump_forwarding_and_propagates_refusal() {
+    use russhd::client::args::{ConnectionOptions, Destination, HostKeyPolicy};
+    use russhd::client::transport;
+
+    let target = Fixture::start();
+    let first = JumpFixture::start("jump-user", &target.identity, target.port);
+    let mut options = ConnectionOptions::default();
+    options.port = first.port;
+    options.known_hosts = Some(target.known_hosts.clone());
+    options.host_key_policy = HostKeyPolicy::AcceptNew;
+    options.batch_mode = true;
+    let key = russh::keys::PrivateKeyWithHashAlg::new(
+        std::sync::Arc::new(russh::keys::load_secret_key(&target.identity, None).unwrap()),
+        None,
+    );
+    block_on(async {
+        for host in ["127.0.0.1", "localhost"] {
+            let jump_destination = Destination::parse("jump-user@127.0.0.1").unwrap();
+            let mut jump = transport::connect(&options, &jump_destination)
+                .await
+                .unwrap();
+            assert!(
+                jump.authenticate_publickey("jump-user", key.clone())
+                    .await
+                    .unwrap()
+                    .success()
+            );
+            let destination = Destination::parse(&format!("motor@{host}")).unwrap();
+            let mut target_options = options.clone();
+            target_options.port = target.port;
+            let result = transport::connect_via(&jump, &target_options, &destination).await;
+            if host == "localhost" {
+                // This address is reachable directly, but the jump denies it.
+                assert!(matches!(
+                    result,
+                    Err(russh::Error::ChannelOpenFailure(
+                        russh::ChannelOpenFailure::AdministrativelyProhibited
+                    ))
+                ));
+            } else {
+                let mut peer = result.unwrap();
+                assert!(
+                    peer.authenticate_publickey("motor", key.clone())
+                        .await
+                        .unwrap()
+                        .success()
+                );
+                let mut channel = peer.channel_open_session().await.unwrap();
+                channel.exec(true, "printf tunneled; exit 7").await.unwrap();
+                let mut output = Vec::new();
+                let mut status = None;
+                while let Some(message) = channel.wait().await {
+                    match message {
+                        russh::ChannelMsg::Data { data } => output.extend_from_slice(&data),
+                        russh::ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
+                        russh::ChannelMsg::Close => break,
+                        _ => {}
+                    }
+                }
+                assert_eq!(output, b"tunneled");
+                assert_eq!(status, Some(7));
+                peer.close().await.unwrap();
+            }
+            jump.close().await.unwrap();
+        }
+    });
+    first.assert_closed();
+    first.assert_closed();
+    assert_eq!(
+        *first.requests.lock().unwrap(),
+        [
+            ("127.0.0.1".to_owned(), target.port.into()),
+            ("localhost".to_owned(), target.port.into()),
+        ]
+    );
+    let known = std::fs::read_to_string(&target.known_hosts).unwrap();
+    assert!(known.contains(&first.key.public_key().to_openssh().unwrap()));
+    assert!(
+        known
+            .lines()
+            .any(|line| line.starts_with(&format!("[127.0.0.1]:{} ", target.port)))
+    );
+    assert_eq!(known.lines().count(), 2);
+}
+
 #[derive(Clone)]
 struct OutputOnlyServer;
 

@@ -47,12 +47,12 @@ impl Deadline {
     }
 }
 
-struct DeadlineStream {
-    stream: tokio::net::TcpStream,
+struct DeadlineStream<S> {
+    stream: S,
     deadline: Deadline,
 }
 
-impl AsyncRead for DeadlineStream {
+impl<S: AsyncRead + Unpin> AsyncRead for DeadlineStream<S> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -63,7 +63,7 @@ impl AsyncRead for DeadlineStream {
     }
 }
 
-impl AsyncWrite for DeadlineStream {
+impl<S: AsyncWrite + Unpin> AsyncWrite for DeadlineStream<S> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -217,6 +217,47 @@ pub async fn connect(
     options: &ConnectionOptions,
     destination: &Destination,
 ) -> Result<Peer, russh::Error> {
+    let (stream, setup_deadline) = connect_tcp(options, destination)?;
+    stream.set_nonblocking(true)?;
+    let stream = tokio::net::TcpStream::from_std(stream)?;
+    connect_stream(options, destination, stream, setup_deadline).await
+}
+
+pub async fn connect_via(
+    jump: &client::Handle<Handler>,
+    options: &ConnectionOptions,
+    destination: &Destination,
+) -> Result<Peer, russh::Error> {
+    let deadline = options
+        .connect_timeout
+        .map(|timeout| {
+            Instant::now()
+                .checked_add(timeout)
+                .ok_or_else(|| std::io::Error::other("ConnectTimeout is too large"))
+        })
+        .transpose()?;
+    let open = jump.channel_open_direct_tcpip(
+        destination.host.clone(),
+        options.port.into(),
+        "127.0.0.1",
+        0,
+    );
+    let channel = if let Some(deadline) = deadline {
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), open)
+            .await
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))??
+    } else {
+        open.await?
+    };
+    connect_stream(options, destination, channel.into_stream(), deadline).await
+}
+
+async fn connect_stream<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+    options: &ConnectionOptions,
+    destination: &Destination,
+    stream: S,
+    setup_deadline: Option<Instant>,
+) -> Result<Peer, russh::Error> {
     let known_hosts = options.known_hosts.clone().ok_or_else(|| {
         russh::Error::InvalidConfig("UserKnownHostsFile is required on this platform".to_owned())
     })?;
@@ -227,9 +268,6 @@ pub async fn connect(
         options.port,
         &preferred.key,
     )?);
-    let (stream, setup_deadline) = connect_tcp(options, destination)?;
-    stream.set_nonblocking(true)?;
-    let stream = tokio::net::TcpStream::from_std(stream)?;
     let deadline = Deadline::new(setup_deadline);
     let stream = DeadlineStream {
         stream,
