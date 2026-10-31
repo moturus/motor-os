@@ -141,12 +141,76 @@ struct JumpFixture {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+/// How a jump fixture moves bytes between its forwarded channel and the target.
+#[derive(Clone, Copy)]
+enum Relay {
+    /// A plain bidirectional copy, as an ordinary jump host does.
+    Direct,
+    /// Provokes the stall of a session stacked on a jump channel: the jump
+    /// advertises a small window with 1 KiB packets, forwards the client's
+    /// first 96 KiB, then reads nothing from the client for two seconds while
+    /// it relays the target's output in 512-byte pieces. With `sleep 1; cat`
+    /// on the target, hundreds of small packets reach the client while its
+    /// window is exhausted and no window adjustment has been sent yet.
+    StarvedWindow,
+}
+
+const STARVED_WINDOW: u32 = 512 * 1024;
+const STARVED_PACKET: u32 = 1024;
+const STARVED_FORWARD_FIRST: usize = 96 * 1024;
+const STARVED_PAUSE: Duration = Duration::from_secs(2);
+const STARVED_PIECE: usize = 512;
+
 struct JumpHandler {
     user: String,
     identity: russh::keys::PublicKey,
     allowed_port: u16,
+    relay: Relay,
     requests: std::sync::Arc<std::sync::Mutex<Vec<(String, u32)>>>,
     closed: std::sync::mpsc::Sender<()>,
+}
+
+/// The `Relay::StarvedWindow` byte pump; see there.
+async fn starved_relay<S>(channel: S, socket: tokio::net::TcpStream)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
+{
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (mut from_client, mut to_client) = tokio::io::split(channel);
+    let (mut from_target, mut to_target) = socket.into_split();
+    let towards_client = tokio::spawn(async move {
+        let mut buf = vec![0; STARVED_PIECE];
+        loop {
+            let read = match from_target.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => read,
+            };
+            if to_client.write_all(&buf[..read]).await.is_err() {
+                break;
+            }
+        }
+        let _ = to_client.shutdown().await;
+    });
+    let mut forwarded = 0;
+    let mut paused = false;
+    let mut buf = vec![0; 32 * 1024];
+    loop {
+        if !paused && forwarded >= STARVED_FORWARD_FIRST {
+            paused = true;
+            tokio::time::sleep(STARVED_PAUSE).await;
+        }
+        let read = match from_client.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        forwarded += read;
+        if to_target.write_all(&buf[..read]).await.is_err() {
+            break;
+        }
+    }
+    let _ = to_target.shutdown().await;
+    let _ = towards_client.await;
 }
 
 impl Drop for JumpHandler {
@@ -189,25 +253,39 @@ impl russh::server::Handler for JumpHandler {
         }
         let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", self.allowed_port)).await?;
         reply.accept().await;
-        tokio::spawn(async move {
-            let mut stream = channel.into_stream();
-            // A deliberately refused host key may reset the tunnel mid-packet.
-            if let Err(error) = tokio::io::copy_bidirectional(&mut stream, &mut socket).await {
-                assert!(
-                    matches!(
-                        error.kind(),
-                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
-                    ),
-                    "{error}"
-                );
+        match self.relay {
+            Relay::Direct => {
+                tokio::spawn(async move {
+                    let mut stream = channel.into_stream();
+                    // A deliberately refused host key may reset the tunnel mid-packet.
+                    if let Err(error) =
+                        tokio::io::copy_bidirectional(&mut stream, &mut socket).await
+                    {
+                        assert!(
+                            matches!(
+                                error.kind(),
+                                std::io::ErrorKind::ConnectionReset
+                                    | std::io::ErrorKind::BrokenPipe
+                            ),
+                            "{error}"
+                        );
+                    }
+                });
             }
-        });
+            Relay::StarvedWindow => {
+                tokio::spawn(starved_relay(channel.into_stream(), socket));
+            }
+        }
         Ok(())
     }
 }
 
 impl JumpFixture {
     fn start(user: &str, identity: &Path, allowed_port: u16) -> Self {
+        Self::start_with(user, identity, allowed_port, Relay::Direct)
+    }
+
+    fn start_with(user: &str, identity: &Path, allowed_port: u16, relay: Relay) -> Self {
         let key = russh::keys::PrivateKey::random(
             &mut rand::rng(),
             russh::keys::ssh_key::Algorithm::Ed25519,
@@ -226,10 +304,16 @@ impl JumpFixture {
         let host_key = key.clone();
         let thread = std::thread::spawn(move || {
             tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async move {
+                let (window_size, maximum_packet_size) = match relay {
+                    Relay::Direct => (2 * 1024 * 1024, 32 * 1024),
+                    Relay::StarvedWindow => (STARVED_WINDOW, STARVED_PACKET),
+                };
                 let config = std::sync::Arc::new(russh::server::Config {
                     keys: vec![host_key],
                     auth_rejection_time: Duration::ZERO,
                     auth_rejection_time_initial: Some(Duration::ZERO),
+                    window_size,
+                    maximum_packet_size,
                     ..Default::default()
                 });
                 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -239,7 +323,7 @@ impl JumpFixture {
                         _ = &mut stop_rx => break,
                         socket = listener.accept() => {
                             let (socket, _) = socket.unwrap();
-                            let handler = JumpHandler { user: user.clone(), identity: identity.clone(), allowed_port, requests: log.clone(), closed: closed_tx.clone() };
+                            let handler = JumpHandler { user: user.clone(), identity: identity.clone(), allowed_port, relay, requests: log.clone(), closed: closed_tx.clone() };
                             let config = config.clone();
                             tokio::spawn(async move {
                                 if let Ok(session) = russh::server::run_stream(config, socket, handler).await {
@@ -1373,4 +1457,45 @@ fn a_second_request_on_one_channel_ends_the_connection_not_the_server() {
         let session = fixture.connect().await;
         assert_eq!(output_of(&session, "printf alive").await, b"alive");
     });
+}
+
+#[test]
+fn proxyjump_survives_a_jump_that_starves_the_window() {
+    let target = Fixture::start();
+    let jump = JumpFixture::start_with(
+        "jump-user",
+        &target.identity,
+        target.port,
+        Relay::StarvedWindow,
+    );
+    let path = target.root.join("client-config");
+    std::fs::write(
+        &path,
+        format!(
+            "Host jump\nHostName 127.0.0.1\nUser jump-user\nPort {}\nHost target\nHostName 127.0.0.1\nUser motor\nPort {}\nProxyJump jump\nHost *\nIdentityFile {}\nUserKnownHostsFile {}\nStrictHostKeyChecking accept-new\nBatchMode yes\n",
+            jump.port,
+            target.port,
+            target.identity.display(),
+            target.known_hosts.display()
+        ),
+    )
+    .unwrap();
+    let args = vec![
+        "-F".to_owned(),
+        path.to_str().unwrap().to_owned(),
+        "target".to_owned(),
+        // The echo starts once the client has exhausted the jump's window.
+        "sleep 1; cat".to_owned(),
+    ];
+    let payload = (0..2 * 1024 * 1024)
+        .map(|i| (i % 251) as u8)
+        .collect::<Vec<_>>();
+    let output = run_full_duplex(&args, payload.clone());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, payload);
+    jump.assert_closed();
 }

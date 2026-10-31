@@ -13,7 +13,7 @@ russh        = { git = "https://github.com/moturus/russh.git", branch = "server-
 russh-sftp   = "=2.1.1"
 serde        = { version = "1.0.*", features = ["derive"] }
 sha2         = "=0.10.8"
-tokio        = { version = "=1.47.1", features = ["fs", "process", "rt", "sync"] }
+tokio        = { version = "=1.47.1", features = ["fs", "io-util", "process", "rt", "sync"] }
 toml         = "0.8.10"
 
 [target.'cfg(unix)'.dependencies]

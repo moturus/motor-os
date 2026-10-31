@@ -249,7 +249,35 @@ pub async fn connect_via(
     } else {
         open.await?
     };
-    connect_stream(options, destination, channel.into_stream(), deadline).await
+    let stream = relay_through(channel.into_stream());
+    connect_stream(options, destination, stream, deadline).await
+}
+
+/// Bytes the hop relay may hold per direction: more than the next session's
+/// receive window plus a packet, so everything its peer may send before that
+/// session reads again always fits.
+fn hop_relay_capacity() -> usize {
+    let defaults = client::Config::default();
+    2 * (defaults.window_size as usize + defaults.maximum_packet_size as usize)
+}
+
+/// Runs the next hop's session over a buffered pipe rather than directly on
+/// the jump channel. Directly on it, the session blocks in its transport flush
+/// while the channel's window is exhausted and stops reading; the jump session
+/// then fills the channel's bounded queue with the bytes coming back and stops
+/// reading too, before the window adjustment that would release the first
+/// session arrives. The pipe lets the jump session always hand over what it
+/// receives.
+fn relay_through<S>(mut channel: S) -> tokio::io::DuplexStream
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (session_end, mut relay_end) = tokio::io::duplex(hop_relay_capacity());
+    tokio::spawn(async move {
+        // An error ends the pipe, which the session sees as its peer closing.
+        let _ = tokio::io::copy_bidirectional(&mut channel, &mut relay_end).await;
+    });
+    session_end
 }
 
 async fn connect_stream<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
