@@ -136,6 +136,14 @@ pub fn parse(applet: Applet, args: &[String]) -> Result<ParsedArgs, ParseError> 
 }
 
 pub fn run(applet: Applet, args: &[String]) -> Result<i32, AppletError> {
+    if applet == Applet::Ssh
+        && args
+            .first()
+            .is_some_and(|arg| matches!(arg.as_str(), "--help" | "-h"))
+    {
+        print!("{}", include_str!("ssh-help.txt"));
+        return Ok(0);
+    }
     let parsed = parse(applet, args)?;
     match parsed {
         ParsedArgs::Ssh(args) => {
@@ -487,6 +495,9 @@ mod tests {
         assert_eq!(parsed.command, ["-x"]);
         assert!(parse_ssh(&strings(&["-v", "host"])).is_err());
         assert!(parse_ssh(&strings(&["-F", "config", "host"])).is_err());
+
+        let parsed = parse_ssh(&strings(&["host", "command", "--help"])).unwrap();
+        assert_eq!(parsed.command, ["command", "--help"]);
     }
 
     #[test]

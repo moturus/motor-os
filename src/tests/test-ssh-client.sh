@@ -43,6 +43,18 @@ fail() {
   exit 1
 }
 
+for option in --help -h; do
+  out="$("${HOST_SSH[@]}" "/user/bin/ssh $option")" ||
+    fail "ssh $option did not exit successfully"
+  for expected in 'Usage: ssh' 'No client config file is read' \
+    /user/cfg/ssh/id_ed25519 /user/cfg/ssh/known_hosts; do
+    case "$out" in
+      *"$expected"*) ;;
+      *) fail "ssh $option did not explain '$expected': '$out'" ;;
+    esac
+  done
+done
+
 cleanup() {
   # sysbox rm takes exactly one operand, so remove the fixtures one by one
   # inside a single guest shell.

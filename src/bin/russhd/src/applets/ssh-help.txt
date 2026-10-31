@@ -1,0 +1,38 @@
+Usage: ssh [options] [user@]host [command [argument ...]]
+
+Connect to a remote host. Without a command, open an interactive shell
+(requires a terminal). With a command, run it and return its exit status.
+Use brackets around IPv6 addresses, for example motor@[::1].
+
+Options:
+  -h, --help           Show this help and exit successfully
+  -p port             Remote port (default: 22)
+  -i file             Private key file (may be repeated)
+  -t                  Require an interactive terminal
+  -T                  Disable terminal allocation
+  -o Key=Value        Set a connection option (listed below)
+  -F /dev/null        Compatibility option; other config paths are unsupported
+  --                  End options
+
+Connection options for -o:
+  IdentitiesOnly=yes|no                  Use only keys supplied with -i
+  StrictHostKeyChecking=ask|yes|accept-new
+                                        Host key policy (default: ask)
+  UserKnownHostsFile=path                Override the known-hosts file
+  BatchMode=yes|no                       Disable prompts (default: no)
+  ConnectTimeout=seconds                Connection setup timeout (0: disabled)
+  ServerAliveInterval=seconds           Keepalive interval (0: disabled)
+  ServerAliveCountMax=count             Unanswered keepalives (default: 3)
+
+Configuration (Motor OS):
+  No client config file is read; set connection options on the command line.
+  Default private key: /user/cfg/ssh/id_ed25519
+  Known hosts:         /user/cfg/ssh/known_hosts
+  The default user is $USER, or motor if USER is unset or empty.
+
+Examples:
+  ssh motor@host
+  ssh -p 2222 motor@host /system/bin/echo hello
+  ssh -i /user/cfg/ssh/id_ed25519 -o BatchMode=yes motor@host command
+
+Related commands: scp, sftp, ssh-keygen, ssh-copy-id.
