@@ -130,11 +130,15 @@ struct PtyRequest {
 
 /// Handles a client connection, which can _potentially_ have multiple channels
 /// (multiple shell sessions, port forwarding, sftp, etc.). But in our current
-/// implementation we support only a single channel.
+/// implementation we support only one channel at a time: a second channel is
+/// refused until the first has been closed by either side.
 struct ConnectionHandler {
     id: u64,
     config: Arc<config::Config>,
 
+    /// The channel this connection serves, from its acceptance until the
+    /// client closes it or russhd has closed it (see `release_channel`).
+    active_channel: Option<ChannelId>,
     channel: Option<(Channel<Msg>, server::Handle)>,
     remote_addr: SocketAddr,
     pty_request: Option<PtyRequest>,
@@ -152,6 +156,7 @@ impl ConnectionHandler {
         static ID: AtomicU64 = AtomicU64::new(0);
         Self {
             config,
+            active_channel: None,
             channel: None,
             pty_request: None,
             id: ID.fetch_add(1, Ordering::Relaxed) + 1,
@@ -164,6 +169,27 @@ impl ConnectionHandler {
         }
     }
 
+    /// Whether russhd has closed the active channel itself, which claims the
+    /// guard. The client's reply to that close never reaches the handler: russh
+    /// drops a close for a channel it has already removed.
+    fn closed_by_russhd(&self) -> bool {
+        self.close_guard
+            .as_ref()
+            .is_some_and(ChannelCloseGuard::claimed)
+    }
+
+    /// Forgets the active channel so the connection can take another one.
+    /// Dropping `stdin_tx` ends the input of a child that is still running.
+    fn release_channel(&mut self) {
+        self.active_channel = None;
+        self.channel = None;
+        self.pty_request = None;
+        self.stdin_tx = None;
+        self.sftp_channel_id = None;
+        self.close_guard = None;
+        self.receive_credit = None;
+    }
+
     async fn spawn_shell(&mut self) -> Result<(), russh::Error> {
         let command = local_session::Command::shell();
         let close_guard = self
@@ -172,7 +198,7 @@ impl ConnectionHandler {
             .ok_or(russh::Error::Inconsistent)?
             .clone();
 
-        let (channel, session) = self.channel.take().unwrap();
+        let (channel, session) = self.channel.take().ok_or(russh::Error::Inconsistent)?;
         let channel_id = channel.id();
         let receive_credit = self
             .receive_credit
@@ -208,8 +234,10 @@ impl ConnectionHandler {
     }
 
     async fn spawn_sftp_server(&mut self) -> Result<(), russh::Error> {
-        assert!(self.sftp_channel_id.is_none());
-        let (channel, _session) = self.channel.take().unwrap();
+        if self.sftp_channel_id.is_some() {
+            return Err(russh::Error::Inconsistent);
+        }
+        let (channel, _session) = self.channel.take().ok_or(russh::Error::Inconsistent)?;
         drop(
             self.receive_credit
                 .take()
@@ -233,7 +261,7 @@ impl ConnectionHandler {
                 return Err(russh::Error::RequestDenied);
             }
 
-            let (channel, session) = self.channel.take().unwrap();
+            let (channel, session) = self.channel.take().ok_or(russh::Error::Inconsistent)?;
             let _ = session.exit_status_request(channel.id(), 0).await;
             let _ = session.eof(channel.id()).await;
             if self
@@ -274,7 +302,7 @@ impl ConnectionHandler {
             .ok_or(russh::Error::Inconsistent)?
             .clone();
 
-        let (channel, session) = self.channel.take().unwrap();
+        let (channel, session) = self.channel.take().ok_or(russh::Error::Inconsistent)?;
         let receive_credit = self
             .receive_credit
             .take()
@@ -422,10 +450,15 @@ impl server::Handler for ConnectionHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         log::info!("New Session: {:?}", channel.id());
-        if self.channel.is_some() {
-            // Dropping `reply` rejects the channel.
+        if self.active_channel.is_some() && self.closed_by_russhd() {
+            self.release_channel();
+        }
+        if self.active_channel.is_some() {
+            // One channel at a time. Dropping `reply` rejects this one.
+            log::info!("Refusing a second channel {:?}", channel.id());
             return Ok(());
         }
+        self.active_channel = Some(channel.id());
 
         self.receive_credit = Some(
             session
@@ -472,6 +505,18 @@ impl server::Handler for ConnectionHandler {
         } else {
             Ok(())
         }
+    }
+
+    async fn channel_close(
+        &mut self,
+        channel_id: ChannelId,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        // Only a close the client sent first arrives here; see `closed_by_russhd`.
+        if self.active_channel == Some(channel_id) {
+            self.release_channel();
+        }
+        Ok(())
     }
 
     #[allow(unused_variables, clippy::too_many_arguments)]
@@ -570,13 +615,21 @@ impl server::Handler for ConnectionHandler {
 
     async fn exec_request(
         &mut self,
-        _channel_id: ChannelId,
+        channel_id: ChannelId,
         data: &[u8],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         let Ok(cmdline) = str::from_utf8(data) else {
             return Err(Self::Error::IO(std::io::ErrorKind::InvalidInput.into()));
         };
+        // A second request on a channel that already runs something ends the
+        // connection, as the other request handlers do, instead of the server.
+        let Some((channel, _)) = &self.channel else {
+            return Err(Self::Error::Inconsistent);
+        };
+        if channel_id != channel.id() {
+            return Err(Self::Error::Inconsistent);
+        }
 
         log::info!("exec_request: `{cmdline}`");
         self.exec(cmdline).await

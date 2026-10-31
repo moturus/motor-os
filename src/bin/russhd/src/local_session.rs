@@ -52,6 +52,11 @@ impl ChannelCloseGuard {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
+
+    /// Whether an owner has already claimed the close.
+    pub fn claimed(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
 }
 
 /// The shell that runs client sessions and commands.

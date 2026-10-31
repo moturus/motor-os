@@ -1112,7 +1112,8 @@ impl Fixture {
         self.session(Some((cols, rows)), command).await
     }
 
-    async fn session(&self, pty: Option<(u32, u32)>, command: &str) -> TestSession {
+    /// An authenticated connection with no channel open yet.
+    async fn connect(&self) -> russh::client::Handle<TestClient> {
         let mut session = russh::client::connect(
             std::sync::Arc::new(russh::client::Config::default()),
             ("127.0.0.1", self.port),
@@ -1129,6 +1130,11 @@ impl Fixture {
             .await
             .unwrap();
         assert!(auth.success());
+        session
+    }
+
+    async fn session(&self, pty: Option<(u32, u32)>, command: &str) -> TestSession {
+        let session = self.connect().await;
         let channel = session.channel_open_session().await.unwrap();
         if let Some((cols, rows)) = pty {
             channel
@@ -1262,4 +1268,109 @@ fn pty_size_reports_survive_a_child_that_floods_questions() {
         count > 0 && count < questions,
         "{count} of {questions} questions were answered"
     );
+}
+
+/// Waits until the server has finished closing `channel`.
+async fn wait_closed(channel: &mut russh::Channel<russh::client::Msg>) {
+    while let Some(msg) = channel.wait().await {
+        if matches!(msg, russh::ChannelMsg::Close) {
+            break;
+        }
+    }
+}
+
+/// The command's output, read until the server closes the channel.
+async fn output_of(session: &russh::client::Handle<TestClient>, command: &str) -> Vec<u8> {
+    let mut channel = session.channel_open_session().await.unwrap();
+    channel.exec(true, command).await.unwrap();
+    let mut out = Vec::new();
+    while let Some(msg) = channel.wait().await {
+        match msg {
+            russh::ChannelMsg::Data { data } => out.extend_from_slice(&data),
+            russh::ChannelMsg::Close => break,
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Runs one SFTP subsystem on `session` through the version exchange and
+/// closes its channel.
+async fn sftp_handshake(session: &russh::client::Handle<TestClient>) {
+    let mut channel = session.channel_open_session().await.unwrap();
+    channel.request_subsystem(true, "sftp").await.unwrap();
+    // SSH_FXP_INIT for protocol version 3.
+    channel
+        .data_bytes(vec![0, 0, 0, 5, 1, 0, 0, 0, 3])
+        .await
+        .unwrap();
+    let mut reply = Vec::new();
+    while reply.len() < 9 {
+        match channel.wait().await {
+            Some(russh::ChannelMsg::Data { data }) => reply.extend_from_slice(&data),
+            Some(russh::ChannelMsg::Close) | None => panic!("the SFTP channel closed early"),
+            Some(_) => {}
+        }
+    }
+    // SSH_FXP_VERSION.
+    assert_eq!(reply[4], 2, "unexpected SFTP reply {reply:?}");
+    // russh does not report the server's reply to a close the client sent, so
+    // there is nothing to wait for: the next channel open is ordered after it.
+    channel.eof().await.unwrap();
+    channel.close().await.unwrap();
+}
+
+#[test]
+fn one_channel_at_a_time_but_sequential_channels_share_a_connection() {
+    let fixture = Fixture::start();
+    block_on(async {
+        let session = fixture.connect().await;
+
+        // OpenSSH `ssh-copy-id -s` runs two sftp sessions over one master
+        // connection. The second used to hit an assert and abort russhd.
+        sftp_handshake(&session).await;
+        sftp_handshake(&session).await;
+
+        // While a command runs, a second session channel is refused and the
+        // running command keeps its input and output.
+        let mut busy = session.channel_open_session().await.unwrap();
+        busy.exec(true, "cat").await.unwrap();
+        assert!(matches!(
+            session.channel_open_session().await,
+            Err(russh::Error::ChannelOpenFailure(_))
+        ));
+        busy.data_bytes(&b"still here"[..]).await.unwrap();
+        let mut echoed = Vec::new();
+        while echoed.len() < b"still here".len() {
+            match busy.wait().await {
+                Some(russh::ChannelMsg::Data { data }) => echoed.extend_from_slice(&data),
+                Some(russh::ChannelMsg::Close) | None => panic!("the busy channel closed"),
+                Some(_) => {}
+            }
+        }
+        assert_eq!(echoed, b"still here");
+        busy.eof().await.unwrap();
+        wait_closed(&mut busy).await;
+
+        // Once the client has closed it, the connection takes a new channel.
+        assert_eq!(output_of(&session, "printf alive").await, b"alive");
+    });
+}
+
+#[test]
+fn a_second_request_on_one_channel_ends_the_connection_not_the_server() {
+    let fixture = Fixture::start();
+    block_on(async {
+        let session = fixture.connect().await;
+        let mut channel = session.channel_open_session().await.unwrap();
+        channel.exec(true, "cat").await.unwrap();
+        // A second exec on a channel that already runs a command is a protocol
+        // violation. russhd answers it by dropping the connection.
+        let _ = channel.exec(true, "cat").await;
+        while channel.wait().await.is_some() {}
+
+        // russhd itself is still serving.
+        let session = fixture.connect().await;
+        assert_eq!(output_of(&session, "printf alive").await, b"alive");
+    });
 }
