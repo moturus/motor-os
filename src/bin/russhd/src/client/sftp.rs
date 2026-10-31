@@ -12,7 +12,7 @@ pub struct SftpConnection {
     pub raw: RawSftpSession,
     pub limits: Limits,
     pub posix_rename: bool,
-    ssh: russh::client::Handle<transport::Handler>,
+    ssh: transport::Peer,
 }
 
 impl SftpConnection {
@@ -37,10 +37,10 @@ impl SftpConnection {
     }
 
     pub async fn close(self) -> Result<(), Error> {
-        self.raw.close_session()?;
-        self.ssh
-            .disconnect(russh::Disconnect::ByApplication, "", "")
-            .await?;
+        let result = self.raw.close_session();
+        let close = self.ssh.close().await;
+        result?;
+        close?;
         Ok(())
     }
 }

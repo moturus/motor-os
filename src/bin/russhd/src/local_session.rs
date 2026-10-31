@@ -146,16 +146,16 @@ impl SessionState {
 }
 
 /// The bytes waiting for a session's child stdin, in the order they arrived:
-/// what is left of one client chunk, then answers to terminal controls.
-///
-/// Client input is taken only when nothing waits, so the client is held back by
-/// its SSH window rather than here. Answers queue behind it, as a terminal's
-/// answers queue behind keys that were already typed.
+/// one client chunk, then answers to terminal controls. Further client input
+/// is buffered separately, so answers are not delayed behind a whole paste.
+/// Draining the SSH channel into a byte-window-bounded backlog keeps its
+/// message queue from blocking the connection on small data packets.
 #[derive(Debug, Default)]
 struct StdinQueue {
     bytes: VecDeque<u8>,
     /// How many of the first `bytes` are client input.
     input: usize,
+    backlog: VecDeque<u8>,
     /// The latest size report that did not fit, for when there is room.
     report: Option<Vec<u8>>,
 }
@@ -164,15 +164,29 @@ impl StdinQueue {
     /// A child that asks this much without reading its stdin gets no more
     /// answers until it reads, and only its latest size report is kept.
     const MAX_ANSWERS: usize = 256 * 1024;
+    const INPUT_CHUNK: usize = 32 * 1024;
 
     fn wants_input(&self) -> bool {
         self.bytes.is_empty()
     }
 
+    fn input_capacity(&self) -> usize {
+        SSH_RECEIVE_WINDOW as usize - self.input - self.backlog.len()
+    }
+
     fn push_input(&mut self, input: &[u8]) {
-        debug_assert!(self.wants_input());
-        self.bytes.extend(input);
-        self.input = input.len();
+        assert!(input.len() <= self.input_capacity());
+        self.backlog.extend(input);
+        self.stage_input();
+    }
+
+    fn stage_input(&mut self) {
+        if !self.wants_input() {
+            return;
+        }
+        let count = self.backlog.len().min(Self::INPUT_CHUNK);
+        self.bytes.extend(self.backlog.drain(..count));
+        self.input = count;
     }
 
     /// Queues the answer to a question, or returns false if the queue is full.
@@ -230,6 +244,7 @@ impl StdinQueue {
         if let Some(report) = self.report.take() {
             self.push_report(&report);
         }
+        self.stage_input();
         u32::try_from(credit).unwrap()
     }
 }
@@ -339,9 +354,9 @@ pub async fn spawn(
     log::info!("Started `{argv}`");
 
     // The one owner of the child's stdin serializes client input, answers to
-    // terminal controls, and resize reports. Keep client input in russh's
-    // bounded channel: its connection task can still send child output while
-    // this task is blocked on a child that does not read stdin. Keep taking
+    // terminal controls, and resize reports. Drain input up to the advertised
+    // byte window even when the child blocks, so russh's bounded packet queue
+    // cannot stop the connection from processing window adjustments. Keep taking
     // controls while a write is blocked, too: the output pump waits for this
     // task to take them, and the child waits for its output to be taken before
     // it reads more of a large paste.
@@ -354,14 +369,19 @@ pub async fn spawn(
     };
     tokio::spawn(async move {
         let mut input_rx = channel.make_reader();
-        let mut input = [0_u8; 32 * 1024];
+        let mut input = [0_u8; StdinQueue::INPUT_CHUNK];
         let mut queue = StdinQueue::default();
         let mut coordinator_open = true;
+        let mut input_open = true;
         loop {
+            if !input_open && queue.pending().is_empty() {
+                break;
+            }
+            let capacity = input.len().min(queue.input_capacity());
             tokio::select! {
-                result = tokio::io::AsyncReadExt::read(&mut input_rx, &mut input), if queue.wants_input() => {
+                result = tokio::io::AsyncReadExt::read(&mut input_rx, &mut input[..capacity]), if input_open && capacity != 0 => {
                     match result {
-                        Ok(0) => break,
+                        Ok(0) => input_open = false,
                         Ok(read) => queue.push_input(&input[..read]),
                         Err(err) => {
                             log::debug!("input.read() failed with error '{err:?}'");
@@ -775,14 +795,35 @@ mod tests {
         assert!(queue.push_answer(b"!?"));
         assert!(!queue.wants_input());
         assert_eq!(queue.pending(), b"paste!?");
+        queue.push_input(b"next");
+        assert_eq!(queue.pending(), b"paste!?");
 
         // Window credit is for the client's bytes the child was given.
         assert_eq!(queue.consume(3), 3);
         assert_eq!(queue.consume(3), 2);
         assert_eq!(queue.pending(), b"?");
-        assert!(!queue.wants_input());
         assert_eq!(queue.consume(1), 0);
+        assert_eq!(queue.consume(4), 4);
+        assert!(queue.pending().is_empty());
         assert!(queue.wants_input());
+    }
+
+    #[test]
+    fn small_packets_are_coalesced_and_input_is_bounded_by_window_bytes() {
+        let mut queue = StdinQueue::default();
+        for _ in 0..1024 {
+            queue.push_input(b"x");
+        }
+        assert_eq!(queue.input + queue.backlog.len(), 1024);
+        queue.push_input(&vec![b'x'; SSH_RECEIVE_WINDOW as usize - 1024]);
+        assert_eq!(queue.input_capacity(), 0);
+        assert!(queue.push_answer(b"answer"));
+        let mut credit = 0;
+        while !queue.pending().is_empty() {
+            credit += queue.consume(queue.pending().len());
+        }
+        assert_eq!(credit, SSH_RECEIVE_WINDOW);
+        assert_eq!(queue.input_capacity(), SSH_RECEIVE_WINDOW as usize);
     }
 
     #[test]

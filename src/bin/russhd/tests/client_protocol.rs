@@ -227,6 +227,16 @@ fn run_full_duplex(args: &[String], input: Vec<u8>) -> Output {
 }
 
 fn run_full_duplex_with(program: &str, args: &[String], input: Vec<u8>) -> Output {
+    run_streaming(program, args, input, Duration::ZERO, Duration::ZERO)
+}
+
+fn run_streaming(
+    program: &str,
+    args: &[String],
+    input: Vec<u8>,
+    input_delay: Duration,
+    output_delay: Duration,
+) -> Output {
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::piped())
@@ -237,8 +247,12 @@ fn run_full_duplex_with(program: &str, args: &[String], input: Vec<u8>) -> Outpu
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
-    let input_thread = std::thread::spawn(move || stdin.write_all(&input));
+    let input_thread = std::thread::spawn(move || {
+        std::thread::sleep(input_delay);
+        stdin.write_all(&input)
+    });
     let output_thread = std::thread::spawn(move || {
+        std::thread::sleep(output_delay);
         let mut bytes = Vec::new();
         stdout.read_to_end(&mut bytes).map(|_| bytes)
     });
@@ -563,6 +577,64 @@ fn server_drains_output_while_child_does_not_read_large_stdin() {
 }
 
 #[test]
+fn remote_close_drains_output_despite_late_stdin() {
+    let fixture = Fixture::start();
+    let mut ssh = fixture.ssh_args();
+    ssh.extend([
+        "motor@127.0.0.1".to_owned(),
+        "head -c 73728 /dev/zero; printf remote-stderr >&2; exit 7".to_owned(),
+    ]);
+    // Hold the stdout pipe full while the remote closes and more stdin arrives.
+    // Output queued in the SSH channel must survive the failed stdin send.
+    let output = run_streaming(
+        SSH,
+        &ssh,
+        vec![0; 4096],
+        Duration::from_millis(200),
+        Duration::from_millis(500),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "{} stdout bytes; stderr: {}",
+        output.stdout.len(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, vec![0; 73728]);
+    assert_eq!(output.stderr, b"remote-stderr");
+}
+
+#[test]
+fn small_stdin_chunks_stream_bidirectionally() {
+    let fixture = Fixture::start();
+    let input = (0..FULL_DUPLEX_STREAM_SIZE)
+        .map(|i| (i % 251) as u8)
+        .collect::<Vec<_>>();
+    let output = block_on(async {
+        let (session, mut reader, writer) = fixture.session(None, "cat").await;
+        let send = async {
+            // Send separate SSH messages; writes to a local pipe may coalesce.
+            for chunk in input.chunks(512) {
+                writer.data_bytes(chunk.to_vec()).await.unwrap();
+            }
+            writer.eof().await.unwrap();
+        };
+        let receive = async {
+            let mut out = Vec::new();
+            read_until(&mut reader, &mut out, |_| false).await;
+            out
+        };
+        let ((), output) = tokio::join!(send, receive);
+        session
+            .disconnect(russh::Disconnect::ByApplication, "", "")
+            .await
+            .unwrap();
+        output
+    });
+    assert_eq!(output, input);
+}
+
+#[test]
 fn server_returns_window_credit_as_child_consumes_stdin() {
     let fixture = Fixture::start();
     let mut ssh = fixture.ssh_args();
@@ -641,7 +713,7 @@ impl russh::client::Handler for TestClient {
     }
 }
 
-type PtySession = (
+type TestSession = (
     russh::client::Handle<TestClient>,
     russh::ChannelReadHalf,
     russh::ChannelWriteHalf<russh::client::Msg>,
@@ -650,7 +722,11 @@ type PtySession = (
 impl Fixture {
     /// A pty session of `cols` x `rows` running `command`. OpenSSH with a piped
     /// stdin sends a zero size, which leaves russhd nothing to answer with.
-    async fn pty_session(&self, cols: u32, rows: u32, command: &str) -> PtySession {
+    async fn pty_session(&self, cols: u32, rows: u32, command: &str) -> TestSession {
+        self.session(Some((cols, rows)), command).await
+    }
+
+    async fn session(&self, pty: Option<(u32, u32)>, command: &str) -> TestSession {
         let mut session = russh::client::connect(
             std::sync::Arc::new(russh::client::Config::default()),
             ("127.0.0.1", self.port),
@@ -668,10 +744,12 @@ impl Fixture {
             .unwrap();
         assert!(auth.success());
         let channel = session.channel_open_session().await.unwrap();
-        channel
-            .request_pty(true, "xterm", cols, rows, 0, 0, &[])
-            .await
-            .unwrap();
+        if let Some((cols, rows)) = pty {
+            channel
+                .request_pty(true, "xterm", cols, rows, 0, 0, &[])
+                .await
+                .unwrap();
+        }
         channel.exec(true, command).await.unwrap();
         let (reader, writer) = channel.split();
         (session, reader, writer)
@@ -686,7 +764,7 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
         .block_on(async {
             tokio::time::timeout(Duration::from_secs(10), future)
                 .await
-                .expect("the pty session did not finish")
+                .expect("the SSH session did not finish")
         })
 }
 

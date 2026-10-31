@@ -14,34 +14,37 @@ use super::transport;
 
 pub async fn run_ssh(args: SshArgs) -> Result<i32, russh::Error> {
     let mut session = connect_authenticated(&args.connection, &args.destination).await?;
-    let terminal = std::io::stdin().is_terminal();
-    let pty = match args.pty {
-        PtyMode::Force if !terminal => {
+    let result = async {
+        let terminal = std::io::stdin().is_terminal();
+        let pty = match args.pty {
+            PtyMode::Force if !terminal => {
+                return Err(russh::Error::InvalidConfig(
+                    "-t requires a terminal on stdin".to_owned(),
+                ));
+            }
+            PtyMode::Force => true,
+            PtyMode::Disable => false,
+            PtyMode::Auto => args.command.is_empty() && terminal,
+        };
+        if args.command.is_empty() && !pty {
             return Err(russh::Error::InvalidConfig(
-                "-t requires a terminal on stdin".to_owned(),
+                "an interactive shell requires a terminal on stdin".to_owned(),
             ));
         }
-        PtyMode::Force => true,
-        PtyMode::Disable => false,
-        PtyMode::Auto => args.command.is_empty() && terminal,
-    };
-    if args.command.is_empty() && !pty {
-        return Err(russh::Error::InvalidConfig(
-            "an interactive shell requires a terminal on stdin".to_owned(),
-        ));
+        let command = (!args.command.is_empty()).then(|| args.command.join(" "));
+        run_channel(&mut session, command, pty).await
     }
-    let command = (!args.command.is_empty()).then(|| args.command.join(" "));
-    let status = run_channel(&mut session, command, pty).await?;
-    session
-        .disconnect(russh::Disconnect::ByApplication, "", "")
-        .await?;
+    .await;
+    let close = session.close().await;
+    let status = result?;
+    close?;
     Ok(status)
 }
 
 pub async fn connect_authenticated(
     options: &ConnectionOptions,
     destination: &Destination,
-) -> Result<russh::client::Handle<transport::Handler>, russh::Error> {
+) -> Result<transport::Peer, russh::Error> {
     let mut session = transport::connect(options, destination).await?;
     authenticate(&mut session, options, destination).await?;
     Ok(session)
@@ -140,7 +143,7 @@ async fn authenticate(
 }
 
 async fn run_channel(
-    session: &mut russh::client::Handle<transport::Handler>,
+    session: &mut transport::Peer,
     command: Option<String>,
     pty: bool,
 ) -> Result<i32, russh::Error> {
@@ -162,7 +165,7 @@ async fn run_channel(
     } else {
         channel.request_shell(true).await?;
     }
-    let (mut reader, writer) = channel.split();
+    let (reader, writer) = channel.split();
     let (input_tx, input_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
     #[cfg(target_os = "motor")]
     if pty {
@@ -196,39 +199,94 @@ async fn run_channel(
 
     let input = forward_stdin(&writer, input_rx, pty);
     tokio::pin!(input);
-    let mut input_done = false;
-    let mut exit_status = None;
-    loop {
-        tokio::select! {
-            message = reader.wait() => {
-                let Some(message) = message else { break };
-                match message {
-                    ChannelMsg::Data { data } => {
-                        std::io::stdout().write_all(&data)?;
-                        std::io::stdout().flush()?;
+    let (output_tx, output_done) = output_writer();
+    let result = {
+        let output = forward_output(reader, output_tx);
+        tokio::pin!(output);
+        let mut input_done = false;
+        loop {
+            tokio::select! {
+                result = &mut output => break result,
+                result = &mut input, if !input_done => {
+                    match result {
+                        Ok(true) => break Ok(None),
+                        Ok(false) => input_done = true,
+                        // Remote closure stops stdin before buffered output has
+                        // necessarily reached stdout or supplied the exit status.
+                        Err(russh::Error::SendError) if session.is_channel_closed() => {
+                            input_done = true;
+                        }
+                        Err(error) => break Err(error),
                     }
-                    ChannelMsg::ExtendedData { data, .. } => {
-                        std::io::stderr().write_all(&data)?;
-                        std::io::stderr().flush()?;
-                    }
-                    ChannelMsg::ExitStatus { exit_status: status } => exit_status = Some(status),
-                    ChannelMsg::Close => break,
-                    _ => {}
                 }
-            }
-            result = &mut input, if !input_done => {
-                if result? {
-                    break;
-                }
-                input_done = true;
             }
         }
-    }
+    };
+    // Dropping the output future closes its queue. Drain the bounded backlog
+    // before restoring terminal modes or returning the remote exit status.
+    output_done
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))??;
     terminal_mode.disable();
-    Ok(exit_status
+    Ok(result?
         .and_then(|status| i32::try_from(status).ok())
         .filter(|status| *status <= 255)
         .unwrap_or(255))
+}
+
+fn output_writer() -> (
+    tokio::sync::mpsc::Sender<ChannelMsg>,
+    tokio::sync::oneshot::Receiver<std::io::Result<()>>,
+) {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+    let (done, result) = tokio::sync::oneshot::channel();
+    // A pipe write can block. Keep it off the async thread that must service
+    // network traffic and forward stdin, with bounded buffering in both directions.
+    std::thread::spawn(move || {
+        let mut write = || -> std::io::Result<()> {
+            while let Some(message) = receiver.blocking_recv() {
+                match message {
+                    ChannelMsg::Data { data } => {
+                        let mut stdout = std::io::stdout().lock();
+                        stdout.write_all(&data)?;
+                        stdout.flush()?;
+                    }
+                    ChannelMsg::ExtendedData { data, .. } => {
+                        let mut stderr = std::io::stderr().lock();
+                        stderr.write_all(&data)?;
+                        stderr.flush()?;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        };
+        let _ = done.send(write());
+    });
+    (sender, result)
+}
+
+async fn forward_output(
+    mut reader: russh::ChannelReadHalf,
+    output: tokio::sync::mpsc::Sender<ChannelMsg>,
+) -> Result<Option<u32>, russh::Error> {
+    let mut exit_status = None;
+    while let Some(message) = reader.wait().await {
+        match message {
+            ChannelMsg::Data { .. } | ChannelMsg::ExtendedData { .. } => {
+                output
+                    .send(message)
+                    .await
+                    .map_err(|_| std::io::Error::other("SSH output writer stopped"))?;
+            }
+            ChannelMsg::ExitStatus {
+                exit_status: status,
+            } => exit_status = Some(status),
+            ChannelMsg::Close => break,
+            _ => {}
+        }
+    }
+    Ok(exit_status)
 }
 
 async fn forward_stdin(

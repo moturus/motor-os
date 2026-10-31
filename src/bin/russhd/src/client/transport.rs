@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::future::Future;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Instant;
@@ -92,10 +93,69 @@ pub struct Handler {
     known_hosts: std::path::PathBuf,
     policy: HostKeyPolicy,
     batch_mode: bool,
+    channel_closed: Arc<AtomicBool>,
+}
+
+pub struct Peer {
+    handle: client::Handle<Handler>,
+    channel_closed: Arc<AtomicBool>,
+}
+
+impl std::ops::Deref for Peer {
+    type Target = client::Handle<Handler>;
+    fn deref(&self) -> &Self::Target {
+        &self.handle
+    }
+}
+
+impl std::ops::DerefMut for Peer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.handle
+    }
+}
+
+impl Peer {
+    pub(super) fn is_channel_closed(&self) -> bool {
+        self.channel_closed.load(Ordering::Acquire)
+    }
+
+    pub async fn close(self) -> Result<(), russh::Error> {
+        let requested = !self.handle.is_closed() && !self.channel_closed.load(Ordering::Acquire);
+        let enqueue = if requested {
+            self.handle
+                .disconnect(russh::Disconnect::ByApplication, "", "")
+                .await
+        } else {
+            Ok(())
+        };
+        let result = self.handle.await;
+        let channel_closed = self.channel_closed.load(Ordering::Acquire);
+        if !channel_closed {
+            enqueue?;
+        }
+        match result {
+            // russh reports a local disconnect with this sentinel, including
+            // the disconnect sent directly from the channel-close callback.
+            Err(russh::Error::Disconnect) if requested || channel_closed => Ok(()),
+            result => result,
+        }
+    }
 }
 
 impl client::Handler for Handler {
     type Error = russh::Error;
+
+    async fn channel_close(
+        &mut self,
+        _channel: russh::ChannelId,
+        session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        // Each peer owns one session or forwarding channel. A queued disconnect
+        // could wait forever behind stdin for a channel the server has closed.
+        session.disconnect(russh::Disconnect::ByApplication, "", "")?;
+        self.channel_closed.store(true, Ordering::Release);
+        Ok(())
+    }
 
     async fn check_server_key(
         &mut self,
@@ -156,7 +216,7 @@ impl client::Handler for Handler {
 pub async fn connect(
     options: &ConnectionOptions,
     destination: &Destination,
-) -> Result<client::Handle<Handler>, russh::Error> {
+) -> Result<Peer, russh::Error> {
     let known_hosts = options.known_hosts.clone().ok_or_else(|| {
         russh::Error::InvalidConfig("UserKnownHostsFile is required on this platform".to_owned())
     })?;
@@ -182,6 +242,7 @@ pub async fn connect(
             .map_err(|_| russh::Error::InvalidConfig("ServerAliveCountMax is too large".into()))?,
         ..Default::default()
     };
+    let channel_closed = Arc::new(AtomicBool::new(false));
     let handler = Handler {
         deadline,
         destination: destination.clone(),
@@ -189,8 +250,13 @@ pub async fn connect(
         known_hosts,
         policy: options.host_key_policy,
         batch_mode: options.batch_mode,
+        channel_closed: channel_closed.clone(),
     };
-    client::connect_stream(Arc::new(config), stream, handler).await
+    let handle = client::connect_stream(Arc::new(config), stream, handler).await?;
+    Ok(Peer {
+        handle,
+        channel_closed,
+    })
 }
 
 fn connect_tcp(
