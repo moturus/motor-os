@@ -154,9 +154,18 @@ impl ConnectionOptions {
     }
 
     pub fn apply_o(&mut self, value: &str) -> Result<(), ParseError> {
-        let (key, value) = value
-            .split_once('=')
-            .ok_or_else(|| ParseError::new("-o requires Key=Value"))?;
+        let (key, values) = super::config::option(value)?
+            .ok_or_else(|| ParseError::new("-o requires a connection option"))?;
+        if values.len() != 1 {
+            return Err(ParseError::new(format!("{key} requires one argument")));
+        }
+        self.apply(&key, &values[0])
+    }
+
+    pub(crate) fn apply(&mut self, key: &str, value: &str) -> Result<(), ParseError> {
+        if value.is_empty() || value.chars().any(char::is_control) {
+            return Err(ParseError::new(format!("invalid {key} value")));
+        }
         if key.eq_ignore_ascii_case("IdentitiesOnly") {
             let parsed = parse_yes_no(key, value)?;
             set_first(
