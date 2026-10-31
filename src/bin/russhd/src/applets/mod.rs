@@ -287,6 +287,9 @@ fn parse_sftp(args: &[String]) -> Result<SftpArgs, ParseError> {
         break;
     }
     let destination = one_destination(args, index)?;
+    if batch_file.is_some() {
+        connection.force_batch_mode();
+    }
     Ok(SftpArgs {
         connection,
         destination,
@@ -512,6 +515,30 @@ mod tests {
         assert!(parse_scp(&strings(&["u@a:x", "u@b:y", "local"])).is_err());
         assert!(parse_scp(&strings(&["u@a:x", "u@b:y"])).is_err());
         assert!(parse_scp(&strings(&["-p", "a", "u@h:b"])).is_err());
+    }
+
+    #[test]
+    fn sftp_batch_mode_survives_later_connection_options() {
+        for values in [
+            &["-b-", "host"][..],
+            &["-b", "commands", "host"],
+            &["-oBatchMode=no", "-b-", "host"],
+            &["-b-", "-oBatchMode=no", "host"],
+        ] {
+            let mut parsed = parse_sftp(&strings(values)).unwrap();
+            // Config resolution applies matching settings after CLI parsing.
+            parsed.connection.apply("BatchMode", "no").unwrap();
+            assert!(parsed.connection.batch_mode, "{values:?}");
+        }
+
+        let mut interactive = parse_sftp(&strings(&["host"])).unwrap();
+        assert!(!interactive.connection.batch_mode);
+        interactive.connection.apply("BatchMode", "yes").unwrap();
+        assert!(interactive.connection.batch_mode);
+
+        let mut explicit = parse_sftp(&strings(&["-oBatchMode=no", "host"])).unwrap();
+        explicit.connection.apply("BatchMode", "yes").unwrap();
+        assert!(!explicit.connection.batch_mode);
     }
 
     #[test]

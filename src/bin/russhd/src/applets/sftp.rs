@@ -9,11 +9,7 @@ use crate::client::prompt;
 use crate::client::sftp::SftpConnection;
 use crate::client::{local, transfer};
 
-pub(super) async fn run(mut args: SftpArgs) -> Result<i32, AppletError> {
-    let batch = args.batch_file.is_some();
-    if batch {
-        args.connection.batch_mode = true;
-    }
+pub(super) async fn run(args: SftpArgs) -> Result<i32, AppletError> {
     let connection = SftpConnection::connect(&args.connection, &args.destination).await?;
     let result = async {
         let remote = connection.raw.realpath(".").await.map_err(sftp_error)?;

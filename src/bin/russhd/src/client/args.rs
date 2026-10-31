@@ -132,6 +132,11 @@ fn default_known_hosts() -> Option<PathBuf> {
 }
 
 impl ConnectionOptions {
+    pub(crate) fn force_batch_mode(&mut self) {
+        self.batch_mode = true;
+        self.batch_mode_set = true;
+    }
+
     pub fn add_identity(&mut self, value: &str) -> Result<(), ParseError> {
         if value.is_empty() {
             return Err(ParseError::new("identity path must not be empty"));
