@@ -86,16 +86,7 @@ pub(super) struct SegmentCache {
 
 impl Drop for SegmentCache {
     fn drop(&mut self) {
-        for idx in 0..CACHE_LINES {
-            assert_eq!(0, self.counts[idx].load(Ordering::Relaxed));
-            let mut lock = self.caches[idx].lock(line!());
-            if lock.is_null() {
-                continue;
-            }
-
-            CacheLine::drop(*lock);
-            *lock = core::ptr::null_mut();
-        }
+        self.release_storage();
     }
 }
 
@@ -148,6 +139,22 @@ impl SegmentCache {
         }
 
         None
+    }
+
+    /// Frees the cache's own pages; the cache must be empty. The terminal drain
+    /// of a space calls this so that the pages go back with the process's
+    /// memory rather than with the space; a later call is a no-op.
+    pub(super) fn release_storage(&self) {
+        for idx in 0..CACHE_LINES {
+            assert_eq!(0, self.counts[idx].load(Ordering::Relaxed));
+            let mut lock = self.caches[idx].lock(line!());
+            if lock.is_null() {
+                continue;
+            }
+
+            CacheLine::drop(*lock);
+            *lock = core::ptr::null_mut();
+        }
     }
 
     fn push_at_line(&self, idx: usize, segment: MemorySegment) -> Result<(), ErrorCode> {

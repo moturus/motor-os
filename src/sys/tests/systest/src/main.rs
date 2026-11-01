@@ -1706,6 +1706,14 @@ fn main() {
         spawn_wait_kill::test_thread_creation_exit_rollback();
         return;
     }
+    if args.len() == 2 && args[1] == "test-exit-releases-memory" {
+        spawn_wait_kill::test_exit_releases_memory();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-address-space-hosts-one-process" {
+        spawn_wait_kill::test_address_space_hosts_one_process();
+        return;
+    }
     if args.len() == 2 && args[1] == "test-kill-after-wait" {
         spawn_wait_kill::test_kill_after_wait();
         return;
@@ -1742,6 +1750,9 @@ fn main() {
     }
     if spawn_wait_kill::is_thread_exit_race_child(&args) {
         spawn_wait_kill::run_thread_exit_race_child();
+    }
+    if spawn_wait_kill::is_exit_release_child(&args) {
+        spawn_wait_kill::run_exit_release_child();
     }
     if raw_spawn::is_child(&args) {
         raw_spawn::run_child(&args);
@@ -1962,6 +1973,8 @@ fn main() {
     spawn_wait_kill::test_shared_listener_restart();
     ipc_service::run_tests();
     spawn_wait_kill::test_thread_creation_exit_rollback();
+    spawn_wait_kill::test_exit_releases_memory();
+    spawn_wait_kill::test_address_space_hosts_one_process();
     swap_cancel::run_tests();
     ctrl_c::run_tests();
     command_output::run_test();

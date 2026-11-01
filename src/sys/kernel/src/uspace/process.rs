@@ -185,6 +185,10 @@ pub struct Process {
     /// thread's status lock; any later thread's start implies it). Outlives
     /// the thread, unlike its own flag: see abandon_if_never_woken().
     start_posted: AtomicBool,
+
+    /// Threads removed from `threads` whose stacks are not yet unmapped;
+    /// protected by the status lock. See on_thread_exited().
+    pending_cleanups: u32,
 }
 
 unsafe impl Send for Process {}
@@ -259,6 +263,7 @@ impl Process {
             debug_session: SpinLock::new(None),
             paused_debuggee: AtomicBool::new(false),
             start_posted: AtomicBool::new(false),
+            pending_cleanups: 0,
         });
 
         // The process is discoverable by pid from here on, so a kill can reach
@@ -397,15 +402,21 @@ impl Process {
             }
         };
 
+        // A space hosts one process in its lifetime; see
+        // UserAddressSpace::claim_for_process.
+        address_space.claim_for_process()?;
         let (_process, object) = Self::new(
             parent.stats.clone(),
-            address_space,
+            address_space.clone(),
             entry_point.unwrap(),
             capabilities,
             detached,
             url,
         )
-        .map_err(|_| moto_rt::E_INTERNAL_ERROR)?;
+        .map_err(|_| {
+            address_space.release_claim();
+            moto_rt::E_INTERNAL_ERROR
+        })?;
 
         Ok((object, requester))
     }
@@ -784,7 +795,6 @@ impl Process {
             self.pid().as_u64(),
             tid.as_u64()
         );
-        let mut exited = false;
         let exited_thread;
         {
             let (self_mut, mut status_lock) = unsafe { self.get_mut() };
@@ -798,6 +808,7 @@ impl Process {
             }
 
             exited_thread = self_mut.threads.remove(&tid).unwrap();
+            self_mut.pending_cleanups += 1;
 
             if self_mut.threads.is_empty() {
                 #[cfg(debug_assertions)]
@@ -806,10 +817,9 @@ impl Process {
                     self.pid().as_u64(),
                     self.debug_name() // Process debug name, not locking.
                 );
-                // Although it would have been nice to set the process status
-                // to exited now, we need to first get the exit status value
-                // from the main thread, and we would rather not have nested locks.
-                exited = true;
+                // The exit completes below, once the stacks are gone: the
+                // status needs the main thread's exit value, and we would
+                // rather not have nested locks.
             } else if self.main_thread.as_ref().unwrap().tid == tid {
                 if status_lock.is_alive() {
                     *status_lock = match thread_status {
@@ -864,7 +874,17 @@ impl Process {
         // behind it.
         exited_thread.cleanup();
 
-        if exited {
+        // A thread leaves the map before its stacks are unmapped, so the exit
+        // completes under whichever thread finishes the last cleanup of an
+        // emptied map; that happens exactly once, as nothing joins an emptied
+        // map.
+        let completed = {
+            let (self_mut, _status_lock) = unsafe { self.get_mut() };
+            self_mut.pending_cleanups -= 1;
+            self_mut.pending_cleanups == 0 && self_mut.threads.is_empty()
+        };
+
+        if completed {
             // Queue executable retirements before exit becomes visible.
             super::pager::retire_space(&self.address_space);
 
@@ -877,6 +897,11 @@ impl Process {
                 }
             }
             drop(objects);
+
+            // The process's memory goes back now, not with the last handle
+            // to it: a handle that outlives the process must neither keep
+            // its pages nor map new ones into the dead space.
+            self.address_space.release_user_memory();
 
             let self_obj = {
                 let (self_mut, mut status_lock) = unsafe { self.get_mut() };

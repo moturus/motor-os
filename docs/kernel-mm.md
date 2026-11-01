@@ -364,6 +364,32 @@ or replace the reservation in between, and a rollback never removes a
 segment another thread has since put at the same address. Any two region
 locks are taken in that one order, the higher region address first.
 
+### Release at process exit
+
+A process's memory goes back when it exits, not when the last handle to it
+is dropped. Threads leave the process's thread map before their stacks are
+unmapped, so the exit completes under whichever thread finishes the last
+stack cleanup of an emptied map. That thread retires the pager mappings,
+closes the IPC endpoints and calls `UserAddressSpace::release_user_memory`
+before the exit becomes visible to waiters: every CPU is moved off the page
+table, which is marked dead so that the unmaps need no further shootdowns;
+the normal and custom regions free their segments (private frames go back,
+shared frames live on in their other mappings), and the page descriptors,
+the process static page and the cached kernel stacks, with the cache's own
+pages, are released, leaving the process's user and kernel memory
+statistics at zero. The regions are
+closed under their locks, so a handle that outlives the process cannot map
+or share new pages into the dead space, and the pager cannot fill it: the
+region answers `E_BAD_HANDLE`, which `SysMem::map` still reports as
+`E_OUT_OF_MEMORY`. Only the page-table root with its kernel entries and the
+kernel static page mapping remain until the address space is dropped. The
+release is idempotent; drop retires and releases again, which also covers
+spaces no process exited from, such as a failed spawn's. An address space
+hosts one process in its lifetime: `Process::new_child` claims it and
+answers `E_ALREADY_IN_USE` for a second process, before or after the first
+one's exit, as that exit frees the stacks and static page a second process
+would use.
+
 ### User heaps and huge pages
 
 Only `alloc_user_heap` requests above 256 small pages are huge-eligible.

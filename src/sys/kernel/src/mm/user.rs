@@ -56,6 +56,8 @@ pub struct UserAddressSpace {
 
     kernel_stacks: super::cache::SegmentCache,
     // user_stacks: super::cache::SegmentCache,
+    /// Set once a process is built on this space; see claim_for_process().
+    hosts_process: AtomicBool,
 }
 
 unsafe impl Send for UserAddressSpace {}
@@ -63,35 +65,63 @@ unsafe impl Sync for UserAddressSpace {}
 
 impl Drop for UserAddressSpace {
     fn drop(&mut self) {
+        // Both are no-ops if a process exited from this space.
         crate::uspace::pager::retire_space(self);
-
-        // W6b: CPUs no longer leave a process's page table on syscall/
-        // preempt, so this CPU (running the teardown) and idle remote CPUs
-        // may still have it as CR3. Teardown mutates the table — including
-        // removing its *kernel* L4 entries (unmap_kernel_from_user), which
-        // triple-faults any CPU still standing on it as soon as a kernel
-        // address misses the (global) TLB. Move everyone off first.
-        crate::arch::tlb::evict_user_page_table(self.inner.page_table_ref().phys_addr());
-
-        self.inner.page_table_ref().mark_dead();
-
-        // We manually clear caches instead of relying on drops
-        // to make sure self.inner is still available, and to
-        // validate usage stats.
-        // while let Some(segment) = self.user_stacks.pop_any_final() {
-        //     self.do_drop_user_stack(segment);
-        // }
-        while let Some(segment) = self.kernel_stacks.pop_any_final() {
-            self.do_drop_kernel_stack(segment);
-        }
-
+        self.release_user_memory();
         log::debug!("UserAddressSpace::drop()");
-        // We don't check that total_usage is zero here, because
-        // memory could still be mapped in self.inner.
     }
 }
 
 impl UserAddressSpace {
+    /// Releases the process's memory: every user segment with its private
+    /// frames, the page descriptors, the process static page and the cached
+    /// kernel stacks with their cache pages; shared frames live on in their
+    /// other mappings. The regions are closed, so a handle that outlives the
+    /// process cannot map into the space again. The page-table root and its
+    /// kernel entries stay until the space is dropped. The caller retires
+    /// the pager mappings first. Process exit calls this once its threads
+    /// are gone and their stacks unmapped; drop calls it again, as a no-op
+    /// or for a space no process exited from.
+    pub fn release_user_memory(&self) {
+        let page_table = self.inner.page_table_ref();
+        if !page_table.is_dead() {
+            // W6b: CPUs no longer leave a process's page table on syscall/
+            // preempt, so this CPU and idle remote CPUs may still have it as
+            // CR3, and the process has no thread left that would install it
+            // again. Teardown mutates the table -- drop even removes its
+            // kernel L4 entries, which triple-faults a CPU still standing on
+            // it as soon as a kernel address misses the TLB. Move everyone
+            // off first; the unmaps of a dead table then skip their
+            // shootdowns.
+            crate::arch::tlb::evict_user_page_table(page_table.phys_addr());
+            page_table.mark_dead();
+        }
+
+        // Drained by hand rather than by drop, so that self.inner is still
+        // available and the usage statistics are validated.
+        while let Some(segment) = self.kernel_stacks.pop_any_final() {
+            self.do_drop_kernel_stack(segment);
+        }
+        self.kernel_stacks.release_storage();
+        self.inner.release_user_memory();
+    }
+
+    /// Binds the space to the process about to be built on it. A space
+    /// hosts one process in its lifetime: the process's exit releases the
+    /// space (see Process::on_thread_exited), so a second process on it
+    /// would run on freed memory.
+    pub fn claim_for_process(&self) -> Result<(), ErrorCode> {
+        self.hosts_process
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| moto_rt::E_ALREADY_IN_USE)
+    }
+
+    /// Undoes claim_for_process() for a process that could not be built.
+    pub fn release_claim(&self) {
+        self.hosts_process.store(false, Ordering::Release);
+    }
+
     pub fn new() -> Result<Arc<Self>, ErrorCode> {
         log::debug!("UserAddressSpace::new()");
 
@@ -107,6 +137,7 @@ impl UserAddressSpace {
             kernel_mem_stats: Arc::new(MemStats::new_kernel()),
 
             kernel_stacks: super::cache::SegmentCache::new(),
+            hosts_process: AtomicBool::new(false),
             //
             // NOTE: commit c090f671a26b193dd6b1c4d36ab5669539d88d7a
             // added several fields to userspace TCB, and httpd started
@@ -1366,4 +1397,75 @@ pub fn shared_alloc_cleanup_self_test() {
     }
     assert_eq!(usage(&peer), peer_before);
     crate::raw_log!("shared alloc cleanup tests PASS");
+}
+
+// Releasing a space's memory the way process exit does: every segment and
+// cached kernel stack goes back with the statistics at zero, a frame shared
+// with a peer survives there, every kind of later reservation is refused,
+// and a second release and the final drop are no-ops.
+#[cfg(debug_assertions)]
+pub fn exit_release_self_test() {
+    const PAGES: u64 = 4;
+    let space = UserAddressSpace::new().unwrap();
+    let peer = UserAddressSpace::new().unwrap();
+    let options =
+        MappingOptions::READABLE | MappingOptions::WRITABLE | MappingOptions::USER_ACCESSIBLE;
+    let refused: Result<(), ErrorCode> = Err(moto_rt::E_BAD_HANDLE);
+
+    let heap = space.alloc_user_heap(PAGES).unwrap();
+    space.copy_to_user(b"shared", heap.start).unwrap();
+    let lazy = space.alloc_user_lazy(PAGES).unwrap();
+    space.fix_pagefault(lazy.start, 6).unwrap();
+    let user_stack = space.alloc_user_stack(16).unwrap();
+    let kernel_stack = space.alloc_kernel_stack(4).unwrap();
+    space.drop_stacks(&user_stack, &Some(kernel_stack));
+    let dest = peer.alloc_user_unmapped(PAGES).unwrap();
+    UserAddressSpace::map_shared(&peer, dest.start, &space, heap.start, options).unwrap();
+    let peer_usage = peer.user_mem_stats().total();
+    assert_ne!(space.user_mem_stats().total(), 0);
+    assert_ne!(space.kernel_mem_stats().total(), 0);
+
+    space.release_user_memory();
+    assert_eq!(space.user_mem_stats().total(), 0);
+    assert_eq!(space.user_mem_stats().resident(), 0);
+    assert_eq!(space.kernel_mem_stats().total(), 0);
+    assert_eq!(space.virt_to_phys(heap.start), None);
+    assert_eq!(peer.read_from_user(dest.start, 6).unwrap(), b"shared");
+
+    assert_eq!(space.alloc_user_heap(PAGES).map(|_| ()), refused);
+    assert_eq!(space.alloc_user_lazy(PAGES).map(|_| ()), refused);
+    assert_eq!(space.alloc_user_unmapped(PAGES).map(|_| ()), refused);
+    assert_eq!(
+        space.allocate_user_fixed(heap.start, PAGES, options),
+        refused
+    );
+    assert_eq!(
+        space.share_from(&peer, dest.start, heap.start, PAGES, options),
+        refused
+    );
+    assert_eq!(
+        space
+            .alloc_user_shared(u64::MAX, PAGES, options, &peer)
+            .map(|_| ()),
+        refused
+    );
+    assert_eq!(
+        peer.alloc_user_shared(u64::MAX, PAGES, options, &space)
+            .map(|_| ()),
+        refused
+    );
+    assert_eq!(
+        space.fix_pagefault(lazy.start + PAGE_SIZE_SMALL, 6),
+        Err(moto_rt::E_INVALID_ARGUMENT)
+    );
+    assert_eq!(space.user_mem_stats().total(), 0);
+    assert_eq!(peer.user_mem_stats().total(), peer_usage);
+
+    space.release_user_memory();
+    assert_eq!(space.user_mem_stats().total(), 0);
+    drop(space);
+    assert_eq!(peer.read_from_user(dest.start, 6).unwrap(), b"shared");
+    peer.unmap(dest.start).unwrap();
+    assert_eq!(peer.user_mem_stats().total(), 0);
+    crate::raw_log!("exit release tests PASS");
 }

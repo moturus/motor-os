@@ -23,6 +23,23 @@ traversal uses kernel-PID order. Public lookup, process-list pagination, metric
 scopes, and per-CPU process statistics continue to use user PIDs and their order.
 The shared-page and syscall process-identity formats are unchanged.
 
+## Memory release at exit
+
+Step 3 returns a process's memory when it exits rather than when the last
+handle to it is dropped. The kernel completes an exit only after every
+thread's stacks are unmapped, then retires the executable pager's mappings,
+closes the process's IPC endpoints and releases its address space before
+waiters see the exit: private frames, page descriptors, the process static
+page and cached kernel stacks go back, shared frames stay alive through their
+other mappings, and the process's user and kernel memory statistics read
+zero. The emptied regions are closed, so a retained process or address-space
+handle cannot map or share pages into the dead space, and the pager cannot
+fill it; only the page-table root and its kernel entries stay until the last
+handle goes. An address space hosts one process: a second process on the
+same space is refused with `E_ALREADY_IN_USE`, as the first one's exit frees
+what the second would run on. The mechanics are in
+[kernel-mm.md](kernel-mm.md).
+
 ## Published free memory
 
 `KernelStaticPage::free_pages` is the physical allocator's live count of free
@@ -86,3 +103,10 @@ refusal at admission floors or guaranteed executable commitments are removed.
 Debug-guest PID tests exercise isolated counter/index state across public-PID
 wrap and reuse, kernel-ID exhaustion, and both traversal orders without changing
 the live system counters. Systest also checks public listing pagination.
+A debug-guest self-test releases a populated address space and checks that
+every later reservation is refused while a peer's shared frame survives;
+systest spawns a child that maps 8 MiB, exits normally or is killed, and
+verifies with the handle still held that its user pages read zero, the pool
+recovered, a shared page survived, and the dead space takes no new mapping;
+it also checks that an address space refuses a second process before and
+after the first one's exit.

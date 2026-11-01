@@ -23,25 +23,26 @@ pub(crate) fn kernel_metric_at(name: &str, scope: u64) -> u64 {
         .unwrap_or_else(|err| panic!("kernel metric '{name}' at scope {scope}: {err:?}"))
 }
 
-fn used_pages() -> u64 {
+pub(crate) fn used_pages() -> u64 {
     moto_sys::stats::MemoryStats::get().unwrap().used_pages
 }
 
-/// Wait for child teardown, then verify that filesystem service still works.
-pub(crate) fn assert_recovered(used_before: u64, tolerance: u64, after_what: &str) {
+/// Wait for the pool to come back to `expected` pages, within `tolerance`,
+/// then verify that filesystem service still works.
+pub(crate) fn assert_recovered(expected: u64, tolerance: u64, after_what: &str) {
     const MAX_WAITS: u32 = 300;
     let wait = || std::thread::sleep(std::time::Duration::from_millis(50));
 
     let mut waits = 0;
     let mut used_after = used_pages();
-    while used_after > used_before + tolerance && waits < MAX_WAITS {
+    while used_after > expected + tolerance && waits < MAX_WAITS {
         wait();
         waits += 1;
         used_after = used_pages();
     }
     assert!(
-        used_after <= used_before + tolerance,
-        "pool did not recover after {after_what}: {used_before} -> {used_after} pages used"
+        used_after <= expected + tolerance,
+        "pool did not recover after {after_what}: {used_after} pages used, {expected} + {tolerance} allowed"
     );
 
     let mut fs_probe = std::fs::metadata("/system/cfg/sys-init.cfg");

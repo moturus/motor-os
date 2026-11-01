@@ -12,6 +12,10 @@ const REGAIN_PROBE_CHILD: &str = "caps-regain-probe-child";
 const INTERRUPT_CHILD: &str = "ctrl-c-interrupt-child";
 const EMPTY_ARGS_CHILD: &str = "empty-args-child";
 const THREAD_EXIT_RACE_CHILD: &str = "thread-exit-race-child";
+const EXIT_RELEASE_CHILD: &str = "exit-release-child";
+/// What the exit-release child maps and touches: well above the pool's
+/// drift while the suite runs.
+const EXIT_RELEASE_BYTES: usize = 8 << 20;
 
 pub fn is_thread_exit_race_child(args: &[String]) -> bool {
     args.len() == 2 && args[1] == THREAD_EXIT_RACE_CHILD
@@ -76,9 +80,163 @@ pub fn test_thread_creation_exit_rollback() {
             0,
             "thread leaked in exit-race episode {episode}"
         );
+        assert_eq!(
+            crate::kernel_metric("pages_user", child.pid as u64),
+            0,
+            "memory retained in exit-race episode {episode}"
+        );
         moto_rt::alloc::release_handle(child.handle).unwrap();
     }
     println!("test_thread_creation_exit_rollback PASS");
+}
+
+pub fn is_exit_release_child(args: &[String]) -> bool {
+    args.len() == 2 && args[1] == EXIT_RELEASE_CHILD
+}
+
+/// Maps and touches `EXIT_RELEASE_BYTES`, reports that on stdout, then exits
+/// once its stdin closes.
+pub fn run_exit_release_child() -> ! {
+    use std::io::{Read, Write};
+
+    let buffer = vec![0x5a_u8; EXIT_RELEASE_BYTES];
+    std::hint::black_box(&buffer);
+    // Readiness goes over stdout: "pages_user" cannot tell the buffer from
+    // the executable's own mappings, which are larger.
+    std::io::stdout().write_all(b"+").unwrap();
+    std::io::stdout().flush().unwrap();
+    let _ = std::io::stdin().read(&mut [0; 1]);
+    std::process::exit(0)
+}
+
+fn spawn_exit_release_child() -> moto_rt::process::SpawnResult {
+    moto_rt::process::spawn(moto_rt::process::SpawnArgs {
+        program: std::env::current_exe()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned(),
+        args: vec![EXIT_RELEASE_CHILD.to_owned()],
+        env: std::env::vars().collect(),
+        cwd: None,
+        stdin: moto_rt::process::STDIO_MAKE_PIPE,
+        stdout: moto_rt::process::STDIO_MAKE_PIPE,
+        stderr: moto_rt::process::STDIO_NULL,
+    })
+    .unwrap()
+}
+
+/// A process's memory goes back when it exits, not with the last handle to
+/// it. With the handle held after a normal exit and after a kill: the
+/// child's user pages read zero, the pool recovers, a page the parent shared
+/// into the child survives through the parent's own mapping, and the dead
+/// space takes no new mapping.
+pub fn test_exit_releases_memory() {
+    use crate::memory::{DRIFT_TOLERANCE_PAGES, assert_recovered, used_pages};
+    use moto_sys::sys_mem::{PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
+    use moto_sys::{SysCpu, SysHandle, SysMem};
+
+    const PATTERN: u64 = 0x5a5a_0ff0_dead_beef;
+    const SHARED: u32 = SysMem::F_SHARE_SELF | SysMem::F_READABLE | SysMem::F_WRITABLE;
+    const PRIVATE: u32 = SysMem::F_READABLE | SysMem::F_WRITABLE;
+    let touched_pages = (EXIT_RELEASE_BYTES >> PAGE_SIZE_SMALL_LOG2) as u64;
+
+    for kill in [false, true] {
+        let child = spawn_exit_release_child();
+        let handle = SysHandle::from_u64(child.handle);
+        let pid = child.pid as u64;
+
+        // The child reports once its buffer is in place.
+        let mut ready = [0_u8; 1];
+        assert_eq!(moto_rt::fs::read(child.stdout, &mut ready), Ok(1));
+        assert_eq!(ready, *b"+");
+        assert!(crate::kernel_metric("pages_user", pid) >= touched_pages);
+        let (_in_child, in_parent) =
+            SysMem::map2(handle, SHARED, u64::MAX, u64::MAX, PAGE_SIZE_SMALL, 1).unwrap();
+        unsafe { (in_parent as *mut u64).write_volatile(PATTERN) };
+        // The pool with the child fully set up: what the spawn machinery
+        // keeps for itself in this process and in sys-io is in here too.
+        let used_alive = used_pages();
+
+        if kill {
+            SysCpu::kill(handle).unwrap();
+        } else {
+            moto_rt::fs::close(child.stdin).unwrap();
+        }
+        let status = moto_rt::process::wait(child.handle).unwrap();
+        assert_eq!(status == 0, !kill, "exit status {status} (killed: {kill})");
+        if kill {
+            moto_rt::fs::close(child.stdin).unwrap();
+        }
+        moto_rt::fs::close(child.stdout).unwrap();
+
+        // The handle is still held.
+        assert_eq!(crate::kernel_metric("pages_user", pid), 0);
+        assert_eq!(crate::kernel_metric("active_threads", pid), 0);
+        assert_eq!(
+            unsafe { (in_parent as *const u64).read_volatile() },
+            PATTERN
+        );
+        assert!(SysMem::map(handle, PRIVATE, u64::MAX, u64::MAX, PAGE_SIZE_SMALL, 1).is_err());
+        assert!(SysMem::map2(handle, SHARED, u64::MAX, u64::MAX, PAGE_SIZE_SMALL, 1).is_err());
+        assert_recovered(
+            used_alive - touched_pages,
+            DRIFT_TOLERANCE_PAGES,
+            "a child exit with its handle held",
+        );
+
+        SysMem::free(in_parent).unwrap();
+        moto_rt::alloc::release_handle(child.handle).unwrap();
+    }
+    println!("test_exit_releases_memory PASS");
+}
+
+/// An address space hosts one process in its lifetime, as the process's
+/// exit releases the space: a second process on it is refused, before and
+/// after that exit.
+pub fn test_address_space_hosts_one_process() {
+    use moto_sys::sys_mem::PAGE_SIZE_SMALL;
+    use moto_sys::{SysCpu, SysHandle, SysMem, SysObj, SysRay};
+
+    let space = SysObj::create(SysHandle::NONE, 0, "address_space:debug_name=one-process").unwrap();
+    let url = "process:entry_point=4096;capabilities=0";
+    let first = SysObj::create(space, 0, url).unwrap();
+    assert_eq!(
+        SysObj::create(space, 0, url),
+        Err(moto_rt::E_ALREADY_IN_USE)
+    );
+
+    SysCpu::kill(first).unwrap();
+    let deadline = moto_rt::time::Instant::now() + std::time::Duration::from_secs(10);
+    while SysRay::process_status(first).unwrap().is_none() {
+        SysCpu::wait(
+            &mut [first],
+            SysHandle::NONE,
+            SysHandle::NONE,
+            Some(deadline),
+        )
+        .expect("the killed process did not exit");
+    }
+    // The exit released the space: it takes neither a process nor a mapping.
+    assert_eq!(
+        SysObj::create(space, 0, url),
+        Err(moto_rt::E_ALREADY_IN_USE)
+    );
+    assert!(
+        SysMem::map(
+            space,
+            SysMem::F_READABLE | SysMem::F_WRITABLE,
+            u64::MAX,
+            u64::MAX,
+            PAGE_SIZE_SMALL,
+            1
+        )
+        .is_err()
+    );
+
+    SysObj::put(first).unwrap();
+    SysObj::put(space).unwrap();
+    println!("test_address_space_hosts_one_process PASS");
 }
 
 pub fn is_empty_args_child(args: &[String]) -> bool {

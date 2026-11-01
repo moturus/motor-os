@@ -803,6 +803,10 @@ impl PageTable {
         }
     }
 
+    pub fn is_dead(&self) -> bool {
+        unsafe { self.inst.get().lock(line!()).dead }
+    }
+
     pub fn map_page(
         &self,
         phys_addr: u64,

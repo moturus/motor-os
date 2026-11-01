@@ -341,6 +341,13 @@ impl VmemRegion {
         }
     }
 
+    #[cfg(debug_assertions)]
+    pub(super) fn is_closed(&self) -> bool {
+        self.used_segments.lock(line!()).is_closed()
+    }
+
+    // Terminal: frees every segment and closes the region under its lock,
+    // so that a later reservation is refused. A second call is a no-op.
     fn clear(&self) {
         let mut segments = self.used_segments.lock(line!());
 
@@ -375,6 +382,9 @@ impl VmemRegion {
     ) -> Result<MemorySegment, ErrorCode> {
         debug_assert!(!self.address_space.is_null());
         debug_assert_ne!(num_pages, 0);
+        if segments.is_closed() {
+            return Err(moto_rt::E_BAD_HANDLE);
+        }
         let size = num_pages << PAGE_SIZE_SMALL_LOG2;
         // Huge-eligible segments start on a 2 MiB boundary, whether or not
         // any candidate ends up huge.
@@ -573,6 +583,9 @@ impl VmemRegion {
         mapping_options: MappingOptions,
     ) -> Result<MemorySegment, ErrorCode> {
         debug_assert!(!self.address_space.is_null());
+        if segments.is_closed() {
+            return Err(moto_rt::E_BAD_HANDLE);
+        }
         let size = num_pages << PAGE_SIZE_SMALL_LOG2;
 
         let memory_segment = MemorySegment {
@@ -851,28 +864,18 @@ pub(super) struct UserAddressSpaceBase {
 
 impl Drop for UserAddressSpaceBase {
     fn drop(&mut self) {
-        self.normal_memory.clear();
-        self.custom_memory.clear();
+        // UserAddressSpace, the only owner, has released the user memory.
+        #[cfg(debug_assertions)]
+        assert!(self.normal_memory.is_closed() && self.custom_memory.is_closed());
 
-        self.base.page_allocator.clear();
-
-        // Need to manually unmap manually mapped pages.
+        // The kernel static page and the kernel's own L4 entries stay until
+        // here; see UserAddressSpace::release_user_memory for why no CPU is
+        // on this table any more.
         self.base.page_table.unmap_page(
             KERNEL_ADDRESS_SPACE.static_shared_phys_addr(),
             KERNEL_STATIC_SHARED_PAGE_USER_VADDR,
             PageType::SmallPage,
         );
-
-        let phys_addr = self
-            .process_static_page_phys_addr
-            .swap(0, Ordering::Relaxed);
-        self.base.page_table.unmap_page(
-            phys_addr,
-            PROCESS_STATIC_SHARED_PAGE_USER_VADDR,
-            PageType::SmallPage,
-        );
-        super::phys::phys_deallocate_frameless(phys_addr, PageType::SmallPage);
-
         self.base.page_table.unmap_kernel_from_user();
 
         #[cfg(debug_assertions)]
@@ -887,6 +890,28 @@ impl UserAddressSpaceBase {
 
     pub(super) fn page_table_ref(&self) -> &PageTable {
         &self.base.page_table
+    }
+
+    /// Frees both user regions with their page descriptors and the process
+    /// static page, and closes the regions. Idempotent. The caller has moved
+    /// every CPU off the page table and marked it dead, so the unmaps here
+    /// do no shootdowns.
+    pub(super) fn release_user_memory(&self) {
+        self.normal_memory.clear();
+        self.custom_memory.clear();
+        self.base.page_allocator.clear();
+
+        let phys_addr = self
+            .process_static_page_phys_addr
+            .swap(0, Ordering::Relaxed);
+        if phys_addr != 0 {
+            self.base.page_table.unmap_page(
+                phys_addr,
+                PROCESS_STATIC_SHARED_PAGE_USER_VADDR,
+                PageType::SmallPage,
+            );
+            super::phys::phys_deallocate_frameless(phys_addr, PageType::SmallPage);
+        }
     }
 
     #[cfg(debug_assertions)]
@@ -957,8 +982,9 @@ impl UserAddressSpaceBase {
     }
 
     pub fn process_static_page_mut(&self) -> &'static mut moto_sys::ProcessStaticPage {
-        let vaddr =
-            self.process_static_page_phys_addr.load(Ordering::Relaxed) + PAGING_DIRECT_MAP_OFFSET;
+        let phys_addr = self.process_static_page_phys_addr.load(Ordering::Relaxed);
+        debug_assert_ne!(0, phys_addr, "the process static page was released");
+        let vaddr = phys_addr + PAGING_DIRECT_MAP_OFFSET;
         unsafe {
             (vaddr as usize as *mut moto_sys::ProcessStaticPage)
                 .as_mut()

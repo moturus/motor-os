@@ -12,6 +12,17 @@ unless the source establishes that its cause was fixed.
 
 Find what regressed.
 
+## Batch the kernel-stack shootdowns of a process exit (2026-11-01)
+
+`UserAddressSpace::release_user_memory` frees an exited process's cached
+kernel stacks one at a time, and each `KERNEL_ADDRESS_SPACE.free` broadcasts
+a kernel page-table shootdown to every CPU, since kernel leaves are global.
+A process that ran many short-lived threads can hold up to 254 cached stacks
+per size class. Freeing them under one invalidation needs a multi-segment
+free in the kernel stack region that clears every mapping first and shoots
+down once. The cost is the old drop-time cost moved to exit, not a
+regression; raised in the step 3 review of docs/plans/oom-handling.md.
+
 ## WireGuard load test flakes: a single ICMP probe inside a UDP flood (2026-10-29)
 
 `systest wireguard-load <wg pid>` (`src/sys/tests/systest/src/wireguard_load.rs`,
@@ -122,6 +133,11 @@ pre-roam endpoint. The gate now waits for the next published tick
 (`f-wg-ring-{1,2,3}.log`, `h-pidstat-{1,2,3}.log`, `f-wg-diag-{1,2}.log`,
 `f-wg-unpin-{1,2,3,4}.log`, `e-wg-release-{1..5}.log`,
 `e-full-test-release-{1,2,3}.log`).
+
+## kernel: PageTable holds a spinlock over PageTableImpl.
+
+But many accessors (e.g. phys_addr, is_dead) can read either
+without locking at all (phys_adr) or an atomic (is_dead)
 
 ## Shared zero page
 

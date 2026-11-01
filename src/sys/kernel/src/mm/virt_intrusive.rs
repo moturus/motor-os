@@ -939,6 +939,9 @@ pub(super) struct SegmentMap {
     free_segment_count: u64,
     used_segment_count: u64,
     slab_count: u64,
+    // Set by clear() under the region lock that guards the map: a cleared
+    // map takes no new segment, so the region refuses later reservations.
+    closed: bool,
 }
 
 impl Drop for SegmentMap {
@@ -953,6 +956,10 @@ impl Drop for SegmentMap {
 }
 
 impl SegmentMap {
+    pub(super) fn is_closed(&self) -> bool {
+        self.closed
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.slab_count == 0
             && self.segments.is_empty()
@@ -1160,6 +1167,7 @@ impl SegmentMap {
     pub(super) fn clear(&mut self) {
         assert_eq!(0, self.used_segment_count);
         debug_assert!(self.segments.is_empty());
+        self.closed = true;
 
         self.free_list.clear();
         self.free_segment_count = 0;
