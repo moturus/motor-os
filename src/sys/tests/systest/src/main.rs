@@ -1568,6 +1568,10 @@ fn main() {
         wireguard::rejection_counters(&args[2]);
         return;
     }
+    if args.len() == 3 && args[1] == "wireguard-await-tick" {
+        wireguard::await_tick(&args[2]);
+        return;
+    }
     if args.len() == 2 && args[1] == "wireguard-fragmented-reply" {
         wireguard::fragmented_reply();
         return;

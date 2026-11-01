@@ -121,6 +121,35 @@ pub fn fragmented_reply() {
     println!("wireguard padded reply over smaller outer path PASS");
 }
 
+/// The daemon publishes its metrics and status snapshot together, once per
+/// 250 ms timer tick.
+pub fn timer_ticks(pid: u64) -> u64 {
+    use moto_sdk::stats::Collector;
+    let provider = Collector::provider_by_name(&format!("wg:{pid}")).unwrap();
+    let metric = Collector::describe(&provider)
+        .unwrap()
+        .into_iter()
+        .find(|metric| metric.name == "wg.timer_ticks")
+        .unwrap();
+    Collector::read(&provider, metric.id, 0).unwrap()
+}
+
+/// Returns once a tick was published after this call started, so a following
+/// `wg-tool status` reflects the traffic that preceded the call.
+pub fn await_tick(pid: &str) {
+    let pid: u64 = pid.parse().unwrap();
+    let before = timer_ticks(pid);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while timer_ticks(pid) == before {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "wg did not publish a timer tick"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    println!("wireguard status snapshot published PASS");
+}
+
 pub fn rejection_counters(pid: &str) {
     use moto_sdk::stats::Collector;
     let pid: u64 = pid.parse().unwrap();
