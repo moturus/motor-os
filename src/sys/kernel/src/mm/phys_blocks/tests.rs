@@ -144,6 +144,7 @@ impl Fixture {
                 taken: AtomicU64::new(0),
                 splits: AtomicU64::new(0),
                 recombined: AtomicU64::new(0),
+                published: crate::util::StaticRef::default_const(),
             },
             trace: None,
         }

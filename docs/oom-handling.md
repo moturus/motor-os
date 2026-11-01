@@ -1,4 +1,4 @@
-# Physical memory pressure and the OOM transition
+# Free physical memory and the OOM transition
 
 The first step of [the OOM plan](plans/oom-handling.md) removes reservation-based
 memory admission. There are no allocation classes, admission floors or charges,
@@ -23,20 +23,23 @@ traversal uses kernel-PID order. Public lookup, process-list pagination, metric
 scopes, and per-CPU process statistics continue to use user PIDs and their order.
 The shared-page and syscall process-identity formats are unchanged.
 
-## Published physical memory
+## Published free memory
 
-`kernel/src/mm/pressure.rs` maintains `KernelStaticPage::memory_pressure` and
-`free_pages`. The latter is actual free physical memory in 4 KiB pages, from
-`phys::available_small_pages()`, without subtracting reservations. Both are
-sampled inside the existing serialized pressure update after small, huge, and
-contiguous allocations/frees release their allocator locks. Initialization
-publishes a snapshot before userspace starts.
+`KernelStaticPage::free_pages` is the physical allocator's live count of free
+4 KiB pages. The kernel stores one snapshot when the kernel address space is
+created, on the BSP before other CPUs allocate, and from then on the block
+allocator's `charge` and `release` apply the delta of every small, huge, and
+contiguous allocation and free with a relaxed atomic add or subtract. Nothing
+samples, no lock is involved, and no stale copy can overwrite a newer one: the
+value is exact up to the operations still in flight on other CPUs. Userspace
+reads it with one relaxed load through `moto_sys::free_pages()`.
 
-Pressure rises below 512 pages (2 MiB) and clears at 768 pages (3 MiB). Between
-these watermarks it retains its previous value. `moto_sys::memory_pressure()`
-and a relaxed load of `KernelStaticPage::free_pages` need no syscall. The shared
-page's earlier fields, including the pressure flag at offset 60 and boot identity
-at offset 64, retain their offsets; `free_pages` starts at offset 72.
+There is no published pressure flag. `moto_sys::LOW_MEMORY_PAGES` (1,024
+pages, 4 MiB) is the one limit services compare the count against, through
+`moto_sys::low_memory()`; the 2 MiB and 3 MiB OOM thresholds belong to the
+kernel's OOM run state in a later step, where hysteresis is serialized anyway.
+The word at offset 60 that held the flag is reserved, so the boot identity at
+offset 64 and `free_pages` at offset 72 keep their offsets.
 
 The `AdmissionStats` query and admission metrics have been removed. Physical
 memory statistics, the physical low-water mark, block allocator metrics, and
@@ -44,27 +47,29 @@ per-process user/kernel memory statistics remain available.
 
 ## Services and spawning
 
-While pressure is raised, sys-io rejects spawn requests with `E_OUT_OF_MEMORY`,
-including those from System processes. The kernel also refuses runtime child
-creation and the first `Created` to `Running` transition, so a delayed wake or
-queued start cannot bypass the check. Bootstrap construction stays separate.
+Below 4 MiB free, sys-io rejects spawn requests with `E_OUT_OF_MEMORY`,
+including those from System processes. The kernel refuses runtime child
+creation and the first `Created` to `Running` transition at the same limit,
+against its own allocator count, so a delayed wake or queued start cannot
+bypass the check. Bootstrap construction stays separate.
 
-Other pressure-only refusals have been removed from sys-io networking and
+Other memory-based refusals have been removed from sys-io networking and
 filesystem services, client runtime spawning, russhd, and strobe. Socket errors
-and actual allocation failures retain their normal handling. Allocator slack
-reclamation and reclamation of unused filesystem cache blocks remain enabled.
+and actual allocation failures retain their normal handling. Below the same
+4 MiB, every process's allocator returns idle pages eagerly and sys-io releases
+unused memfs cache blocks.
 
 ## Memfs
 
-For every guest size, memfs write, copy, create, and move requests check actual
-free physical memory. Below 1,024 pages (4 MiB), sys-io releases unused cached
-memfs blocks and samples again; if still below 4 MiB it returns `StorageFull`.
-At exactly 4 MiB allocating mutations are allowed. This is a sampled check,
-not a reservation: it does not promise a lower bound after the request completes.
+For every guest size, memfs write, copy, create, and move requests check the
+free-page count. Below 1,024 pages (4 MiB), sys-io releases unused cached
+memfs blocks and checks again; if still below 4 MiB it returns `StorageFull`.
+At exactly 4 MiB allocating mutations are allowed. This is a check, not a
+reservation: it does not promise a lower bound after the request completes.
 
 Reads, stat, list, resize, and delete are served independently of this check.
 Memfs resize changes sparse logical length without allocating data blocks.
-Deleting or shrinking under pressure releases unused cached blocks. Capability
+Deleting or shrinking below the limit releases unused cached blocks. Capability
 checks and donated-page cleanup still apply on rejected requests. Mount capacity
 and cache sizing are unchanged; `fs.memory_refused` counts memfs refusals after
 cache reclamation.
@@ -74,7 +79,7 @@ cache reclamation.
 The main full-test suite includes Motor OS kernel and sys-io self-tests, systest
 mapping/accounting and concurrent frame churn, mounted memfs fill/delete and
 service-recovery tests, and filesystem, network, logging, and spawn regressions.
-Quiescent kernel checks compare the shared snapshot with the allocator after
+Quiescent kernel checks compare the shared count with the allocator's after
 small, huge, and contiguous allocations/frees. Memfs tests cover mutation
 classification, the 4 MiB boundary, and cache reclamation. Old tests that expected
 refusal at admission floors or guaranteed executable commitments are removed.

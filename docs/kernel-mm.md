@@ -1,8 +1,9 @@
 # Kernel memory
 
 The design of physical and virtual memory management in the Motor OS
-kernel: `src/sys/kernel/src/mm`. The physical-memory pressure flag and OOM transition are specified in [oom-handling.md](oom-handling.md);
-this document covers what they sit on.
+kernel: `src/sys/kernel/src/mm`. The published free-page count and the OOM
+transition are specified in [oom-handling.md](oom-handling.md); this document
+covers what they sit on.
 
 All sizes use binary units. A small page is 4 KiB; a block or huge page is
 2 MiB, containing 512 small pages. "Huge" means an ordinary allocation
@@ -304,7 +305,7 @@ region below the direct map, laid out so a single L3 table covers it:
 static (4 GiB), kernel stacks (8 GiB), kernel heap (8 GiB), MMIO (1 GiB),
 slabs (7 GiB), then the kernel's copy of sys-io. User addresses run from zero
 to 1 << 45. Two shared pages sit just below kernel data at fixed user
-addresses: the kernel static page (which carries the pressure flag) and the
+addresses: the kernel static page (which carries the free-page count) and the
 process static page. There is no KASLR.
 
 ### Segments and pages
@@ -433,15 +434,13 @@ descriptor is allocated before `map_page` and installed only on success. On
 failure the virtual segment is removed and its accounting reversed once.
 Kernel LAPIC, IOAPIC and sys-io BAR mappings use the same path.
 
-## Physical memory pressure
+## Published free memory
 
-Pressure is specified in [oom-handling.md](oom-handling.md). Every physical
-allocation and free publishes actual free pages after releasing allocator
-locks. Sampling and publication use a spinlock owned by `KernelAddressSpace`,
-with interrupts disabled; a delayed publisher cannot overwrite a newer
-completed observation. The
-shared snapshot is initialized before userspace starts. Pressure rises below
-512 pages and clears at 768; the interval retains its previous state.
+`KernelStaticPage::free_pages` is specified in [oom-handling.md](oom-handling.md).
+The block allocator mirrors its free-page count into that field: one snapshot
+when the kernel address space is created, then a relaxed atomic add or
+subtract in `charge` and `release` for every allocation and free. No lock or
+sampling is involved; the kernel's own checks read the allocator directly.
 
 ## Process memory statistics
 

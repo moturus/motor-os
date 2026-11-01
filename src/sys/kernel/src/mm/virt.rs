@@ -102,7 +102,8 @@ pub fn is_user(vmem_addr: u64) -> bool {
 
 pub fn init() {
     KERNEL_ADDRESS_SPACE.set(KernelAddressSpace::new());
-    super::pressure::update();
+    // Userspace reads the live free-page count from the shared page.
+    super::phys::publish_free_pages(&get_kernel_static_page_mut().free_pages);
 }
 
 /// # Safety
@@ -693,8 +694,6 @@ pub struct KernelAddressSpace {
     next_slabs_addr: AtomicU64,
     /// The executable pager's registry; see `uspace::pager`.
     pager: crate::uspace::pager::PagerRegistry,
-    // Serializes physical free-page sampling and pressure publication.
-    pub(super) pressure_update: SpinLock<()>,
 
     _pin: PhantomPinned,
 }
@@ -733,7 +732,6 @@ impl KernelAddressSpace {
             static_shared_page: UnsafeRef::const_default(),
             next_slabs_addr: AtomicU64::new(VMEM_K_SLABS_START),
             pager: crate::uspace::pager::PagerRegistry::new(),
-            pressure_update: SpinLock::new(()),
 
             _pin: PhantomPinned,
         }));

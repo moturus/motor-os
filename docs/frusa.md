@@ -223,7 +223,7 @@ run and the cache is released. The global allocator fetches the cache and
 sets its shard from `current_cpu` on every call; a thread without a block
 uses the shared path, and frees never create one. The backend is `SysMem`
 pages; a housekeeping resident calls `reclaim()` every five seconds when
-the slack exceeds 1 MiB, or a page under kernel memory pressure.
+the slack exceeds 1 MiB, or a page while free physical memory is below 4 MiB.
 
 ## 7. The kernel heap
 

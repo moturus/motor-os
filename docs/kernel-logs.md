@@ -88,10 +88,10 @@ sys-tty.
 4. Keyboard input is never delayed by output.
 5. Logging remains best-effort. Losses sys-tty detects are marked when
    possible, but a successful UART write or strobe RPC is not a durability
-   guarantee. Queued records are never re-routed. Under memory pressure,
-   sys-io refuses strobe's writes for the whole episode by design, so strobe
-   holds a bounded backlog per connection until the kernel clears the flag,
-   then writes it out and counts what did not fit. Other write and flush
+   guarantee. Queued records are never re-routed. A write or flush that fails
+   with an out-of-memory error is treated as transient: strobe holds a
+   bounded backlog per connection, retries on its next drain, and counts
+   what did not fit. Other write and flush
    failures lose the record on ordinary tags and switch `kernel.log` off. A
    failed file creation or rotation step is retried once a second: forever
    for `kernel.log`, ten times for other files, which are then switched off.
@@ -333,13 +333,13 @@ the RPCs; nothing else blocks on strobe.
   and once more when the connection closes. What that last drain cannot
   write is discarded, and one kernel-log line says how many records of which
   tag were lost; the "stopped log" line is written only when nothing was
-  lost. A drain is not attempted while the kernel's memory-pressure flag is
-  up, because sys-io refuses every request then; a full backlog keeps what
-  it has and counts the newcomers, and the count is written after the
-  backlog as `[kernel log: N messages dropped due to memory pressure]` (a
-  WARN record with the same text for ordinary tags). A write that fails
-  leaves its unwritten bytes at the front for the next drain, so nothing is
-  written twice, and the flush is repeated on its own when it was refused.
+  lost. A drain that fails with an out-of-memory error ends without
+  switching anything off; a full backlog keeps what it has and counts the
+  newcomers, and the count is written after the backlog as `[kernel log: N
+  messages dropped due to memory pressure]` (a WARN record with the same
+  text for ordinary tags). A write that fails leaves its unwritten bytes at
+  the front for the next drain, so nothing is written twice, and the flush
+  is repeated on its own when it was refused.
   Empty raw requests are no-ops. Ordinary ERROR and WARN records request a
   flush; INFO, DEBUG and TRACE records do not. Raw records and lifecycle
   headers request a flush. Holding a record preserves its flush request.
@@ -581,18 +581,12 @@ File mode, using the shipped `kernel-log:strobe` configuration:
 - rotation: native systest pushes `kernel.log` past 4 MiB and leaves
   `kernel.log.prev` plus a bounded `kernel.log`; it separately floods an
   ordinary tag past the same boundary and checks both files;
-- memory pressure: native systest fills its own tag to 32 KiB below the
-  rotation size, holds the pressure flag with the squeeze child of the
-  pressure tests, sends 64 records of 3 KiB and a few kernel records
-  meanwhile, and after recovery watches strobe's own drain while logging
-  continuously on a second tag from a separate thread: each held record is
-  written exactly once, to the rotated-out or the new file, or counted in
-  the dropped-messages line;
-  the drain rotated the file within the cap; the kernel records land after
-  this episode's first marker in `kernel.log`; and both files keep working. A
-  rotation interrupted between its steps needs the flag to rise between two
-  requests, which no test can arrange without an injection point, so that
-  path is covered by inspection only;
+- memory: the test that held a backlog through a kernel memory-pressure
+  episode went with the admission policy; the out-of-memory backlog path
+  returns to the suite with the OOM killer, when a controlled squeeze exists
+  again. A rotation interrupted between its steps by such an error cannot be
+  arranged without an injection point, so that path is covered by
+  inspection only;
 - strobe's native I/O self-test covers empty raw records, short writes and
   pressure refusals without replay, the flush levels, and draining a
   backlog before the disconnect record. A permanent write failure switches

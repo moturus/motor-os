@@ -6,33 +6,34 @@ processes first, then Interactive processes if needed.
 
 ## Intended behavior
 
-Keep `KernelStaticPage::memory_pressure` and `moto_sys::memory_pressure()`.
 Use actual free physical memory (`phys::available_small_pages()`), without
 subtracting reservations or executable commitments. All sizes below are binary.
 
 Publish that count as `KernelStaticPage::free_pages: AtomicU64`, replacing the
-removed admission counters without moving earlier fields. Sample and store it
-inside the serialized pressure update on every physical allocation/free; initialize
-it before userspace uses the page. sys-io's memfs check uses a relaxed shared-page
-load. The snapshot replaces `AdmissionStats` without a new query syscall; kernel
-allocation checks still use the allocator's current count.
+removed admission counters without moving earlier fields. It is the allocator's
+live count: one snapshot when the kernel address space is created, then the
+delta of every charge and release as a relaxed atomic add or subtract. There is
+no published pressure flag; userspace compares the count with
+`moto_sys::LOW_MEMORY_PAGES` (4 MiB) through `moto_sys::low_memory()`, and the
+2 MiB and 3 MiB thresholds live only in the kernel's OOM run state. Kernel
+allocation checks use the allocator's own count.
 
-Only `ProcessRole::System` grants permission to allocate under memory pressure.
-OOM killing also spares sys-io and its direct children and grandchildren regardless
-of role; parentage alone grants no allocation privilege. DNS (None) and russhd
-(Interactive) remain protected from killing, but their allocations and faults
-that need new pages wait while the pressure flag is set.
+Only `ProcessRole::System` grants permission to allocate while an OOM run is
+active. OOM killing also spares sys-io and its direct children and grandchildren
+regardless of role; parentage alone grants no allocation privilege. DNS (None)
+and russhd (Interactive) remain protected from killing, but their allocations
+and faults that need new pages wait while a run is active.
 
-| Physical free memory  | Action                                                |
-|-----------------------|-------------------------------------------------------|
-| < 4 MiB (1,024 pages) | Deny allocating memfs mutations; allow reads/deletes. |
-| < 2 MiB (512 pages)   | Set pressure; only `System` may allocate; start OOM.  |
-| < 512 KiB (128 pages) | Block `System` allocations/faults until OOM finishes. |
-| >= 3 MiB (768 pages)  | Clear pressure and stop OOM killing.                  |
+| Physical free memory  | Action                                                        |
+|-----------------------|---------------------------------------------------------------|
+| < 4 MiB (1,024 pages) | Deny memfs mutations and process starts; allow reads/deletes. |
+| < 2 MiB (512 pages)   | Start an OOM run; only `System` may allocate while it runs.   |
+| < 512 KiB (128 pages) | Block `System` allocations/faults until OOM finishes.         |
+| >= 3 MiB (768 pages)  | End the OOM run; everyone allocates again.                    |
 
-Keep pressure set between 2 and 3 MiB after it has risen. While it is set,
-allocation requests and faults from processes without the System role wait for
-recovery. Once the 512 KiB limit is crossed, System allocation requests and faults
+A run that started below 2 MiB stays active between 2 and 3 MiB. While it is
+active, allocation requests and faults from processes without the System role
+wait for recovery. Once the 512 KiB limit is crossed, System allocation requests and faults
 also wait until the OOM run finishes; crossing back above 512 KiB alone does not
 wake them. Existing mappings and operations that free memory remain usable. Below
 4 MiB, deny memfs mutations that may allocate, including write, copy, create,
@@ -41,15 +42,16 @@ are allowed again at 4 MiB.
 
 - Make every kernel allocation of user pages fallible and propagate failures
   through the mapping paths. Kernel-heap exhaustion remains outside this guarantee.
-- Deny new process starts while the pressure flag is set. sys-io rejects spawn
-  requests with `E_OUT_OF_MEMORY`, including requests made by system processes.
-  Also reject `Process::new_child` in the kernel while pressure is raised.
+- Deny new process starts below 4 MiB free. sys-io rejects spawn requests
+  with `E_OUT_OF_MEMORY`, including requests made by system processes. Also
+  reject `Process::new_child` in the kernel at the same limit, against the
+  allocator's count.
   Creation returns a stopped child, so enforce the rule again at its first
   `Created` to `Running` transition: a later parent wake must not bypass it.
   Keep the bootstrap `Process::new` path separate from runtime spawn checks.
 - Walk eligible `ProcessRole::None` processes newest first by `kernel_pid`.
-  Only after that walk completes, escalate to Interactive if pressure remains.
-  Recheck pressure before each kill and after the victim releases memory.
+  Only after that walk completes, escalate to Interactive if memory stays low.
+  Recheck free memory before each kill and after the victim releases memory.
 - If no eligible victim remains, abort only if free memory is still below
   2 MiB, printing remaining processes and their memory usage first. At 2–3 MiB,
   log that OOM could not reach 3 MiB and finish the run without aborting.
@@ -60,7 +62,7 @@ are allowed again at 4 MiB.
 
 Keep independent security checks, per-process memory limits, filesystem
 capacity limits, socket/channel limits, and ordinary backpressure. Keep
-pressure-driven reclamation of unused allocator/cache memory.
+low-memory reclamation of unused allocator/cache memory.
 
 ## Process IDs and lookup
 
@@ -116,7 +118,7 @@ kernel code:
   `pager.rs`: propagate errors to callers instead of unwrapping or replacing
   allocation errors with unrelated errors.
 
-Pause pressure-denied userspace allocation calls at syscall entry, before
+Pause userspace allocation calls the gate denies at syscall entry, before
 acquiring MM locks or allocating temporary resources. Do not replace these waits
 with immediate `E_OUT_OF_MEMORY` returns. Once an allocation is allowed to run:
 
@@ -124,8 +126,8 @@ with immediate `E_OUT_OF_MEMORY` returns. Once an allocation is allowed to run:
   normal small-page fallback for an opportunistic huge-page allocation.
 - Reject an allocation of 2 MiB or more with `E_OUT_OF_MEMORY` if it cannot be
   satisfied or would leave less than 2 MiB free. Smaller allocations may cross
-  the 2 MiB threshold and start pressure; smaller non-contiguous allocations
-  that cannot proceed wait for pressure to clear.
+  the 2 MiB threshold and start a run; smaller non-contiguous allocations
+  that cannot proceed wait for the run to end.
 - Never allow a non-kernel allocation, including a system process's allocation,
   to leave less than 512 KiB free. Reject it before committing the allocation.
 - Preserve existing errors for invalid requests and per-process memory limits.
@@ -161,8 +163,8 @@ resuming it, and use the pager's status-checked resume path to retry the fault.
 Do not resume a killed thread or post duplicate resumes. Invalid/protection
 faults retain their existing handling.
 
-Pressure clearing and the end of an OOM run wake the object and fault waiters
-through the existing scheduler, outside allocator, pressure-state, process-list,
+The end of an OOM run wakes the object and fault waiters
+through the existing scheduler, outside allocator, run-state, process-list,
 and waiter locks. Each waiter rechecks its own gate; waking grants no allocation
 privilege. Unwind partial work and release MM locks before parking. Use existing
 kill/wake handling, ensuring registrations are cleaned up even if the thread is
@@ -214,23 +216,25 @@ grandchildren, not `SYSTEM_STATS`' aggregate child index. This protects DNS
 More distant descendants, such as their user sessions, remain eligible unless
 they have the System role.
 
-Update the pressure flag on physical allocation and free, covering small,
-huge, and contiguous paths. Request OOM work after allocator locks are
-released. Every transition from clear to raised starts a fresh episode. Each
+The allocator's charge and release see the count cross each threshold exactly
+once, in the return value of their atomic update, covering small, huge, and
+contiguous paths. Request OOM work after allocator locks are released. Every
+drop below 2 MiB with no active run starts a fresh episode. Each
 selection starts from the whole set, so a new run always gives priority to the
 newest eligible None process regardless of what the previous run selected.
 
-When pressure clears at 3 MiB, cancel the current run, clear the 512 KiB block,
+When free memory reaches 3 MiB, cancel the current run, clear the 512 KiB block,
 and wake surviving allocation/fault waiters. Already requested
 kills still finish normal exit cleanup. Queued jobs and exit continuations must
 carry the episode ID in the existing scheduler job argument. Cancel by invalidating
 that ID; stale work returns without selecting victims or changing the current run.
-No queue removal or general cancellation API is needed. Checking only the pressure
-flag is insufficient if it cleared and rose again before an old job ran.
+No queue removal or general cancellation API is needed. Checking only the count
+is insufficient if it recovered and dropped again before an old job ran.
 
 Each job:
 
-1. Checks that it still belongs to the active run and pressure remains raised.
+1. Checks that it still belongs to the active run and free memory is still
+   below 3 MiB.
 2. Scans for the eligible live process ranked first by None before Interactive,
    then by largest `kernel_pid`, skipping dead, already-exiting, and protected
    processes. Keep only the best candidate, not a snapshot of the list.
@@ -241,7 +245,7 @@ Each job:
    a fresh pressure check and selection. Keep only one victim awaiting cleanup.
 
 Do not hold process-list or allocator locks across termination or cleanup.
-Repeat selection while pressure persists. Skipping terminated/exiting processes
+Repeat selection while free memory stays below 3 MiB. Skipping terminated/exiting processes
 makes progress without a stored cursor. The complete None walk emerges from the
 selection rule; the protected DNS resolver does not prevent escalation. No separate
 pass transition or new-arrival handling is needed.
@@ -254,15 +258,15 @@ completed, sample physical free memory again:
   the kernel. Use direct output without allocating a process-list snapshot or
   relying on userspace services.
 - At least 2 MiB but below 3 MiB: log the free memory and that OOM could not reach
-  3 MiB, then finish the run. Keep the pressure flag set, but release the 512 KiB
-  block and wake waiters to recheck their gates. Only eligible System allocations
-  may proceed; protected None and Interactive targets still wait for pressure to
-  clear. Do not abort or spin.
+  3 MiB, then finish the run. Keep the run latched (kernel-internal state;
+  nothing is published), but release the 512 KiB block and wake waiters to
+  recheck their gates. Only eligible System allocations may proceed; protected
+  None and Interactive targets still wait for 3 MiB. Do not abort or spin.
 - At least 3 MiB: finish normally and wake surviving waiters.
 
 Waiters must recheck their process, target address space, and allocation limits
 before retrying. After a stop at 2–3 MiB, a later drop below 2 MiB starts a fresh
-episode even though the pressure flag is still set. Keep this explicit restart
+episode even though the latch is still set. Keep this explicit restart
 trigger: scanning afresh does not schedule a stopped run. Do not spin while free
 memory remains between 2 and 3 MiB.
 
@@ -312,7 +316,9 @@ All work stays in the main repository.
    obsolete admission tests and documentation updates. Keep the pressure flag
    and spawn refusals in sys-io and the kernel. Publish `free_pages` and replace
    the old memfs reserve with the 4 MiB check.
-2. Add the two process IDs and update the statistics maps/lookups.
+2. Add the two process IDs and update the statistics maps/lookups. A
+   follow-up patch then replaced the published pressure flag with the live
+   `free_pages` count (proposal 5 below).
 3. Clear user memory during process exit.
 4. Make user-page allocation fallible, splitting the MM changes into small
    patches with their tests.
@@ -336,12 +342,12 @@ Run kernel tests inside Motor OS and include regressions in
   shared pages, pending pager fills, and concurrent thread exit remain safe.
 - Boundaries at 4 MiB, 2 MiB, 512 KiB, and 3 MiB recovery; syscall and fault
   blocking for ordinary and System processes. Check 2 MiB requests that would
-  cause pressure and concurrent requests against the 512 KiB floor. Verify that
-  pressure-denied calls park at entry and kernel allocations remain exempt.
+  start a run and concurrent requests against the 512 KiB floor. Verify that
+  gate-denied calls park at entry and kernel allocations remain exempt.
 - Victim order within each role and escalation only after the None walk completes.
   Spare DNS, russhd, and other protected services; user descendants remain eligible.
   Verify that ancestry alone gives no allocation privilege: protected None and
-  Interactive services still pause allocations/faults while pressure is set.
+  Interactive services still pause allocations/faults while a run is active.
 - Stop after sufficient reclaim, continue across small victims, and recover
   across repeated episodes. Cover concurrent pressure and single-CPU progress.
 - Reject all new process starts under pressure, including a spawn begun before
@@ -405,6 +411,14 @@ The two process IDs and the agreed allocation and victim policies remain.
    currently derives the same count from total minus used pages, but publishing
    the field in that same patch avoids a temporary syscall-based memfs check.
 
+5. **Adopted: no published pressure flag.** `free_pages` is a live counter
+   maintained by the allocator's charge and release (one snapshot at kernel
+   address-space creation, then deltas), so nothing samples and no publication
+   lock exists. Userspace compares it with `LOW_MEMORY_PAGES`; hysteresis
+   exists only inside the kernel's OOM run state, where it is serialized
+   anyway, and threshold crossings are detected exactly once from the atomic
+   update's return value.
+
 ## Issues to resolve later
 
 Corner cases accepted for now. Resolve them after the transition lands, or
@@ -412,7 +426,7 @@ move them to `future-work.md`.
 
 1. **sys-io parked on a non-System target.** A loader fill into a child, a
    pager fill for a protected None or Interactive process, and a shared
-   mapping are sys-io syscalls whose target is not System, so under pressure
+   mapping are sys-io syscalls whose target is not System, so during a run
    they park, and that sys-io runtime loop, the pager included, stops until
    the run ends. A run that ends without a victim at 2–3 MiB releases only
    System waiters, and sys-io's wait is classified by the target's role, so
@@ -420,7 +434,7 @@ move them to `future-work.md`.
    release waiters by the caller's role at the end of a victimless run. Also
    decide what a refused pager fill does to a protected process: today
    `F_PAGER_FAIL` kills the faulting thread, which would kill DNS or russhd
-   under pressure despite the kill protection.
+   during a run despite the kill protection.
 
 2. **Debugger-paused victims.** `Process::kill` has
    `PausedDebuggee => todo!()`, `post_kill` on a paused thread sets Killed

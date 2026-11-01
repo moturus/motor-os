@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicU32, AtomicU64};
+use core::sync::atomic::AtomicU64;
 
 /// Exclusive end of the normal userspace region, including file-paged mappings.
 pub const USERSPACE_REGION_END: u64 = 1_u64 << 45;
@@ -34,14 +34,14 @@ pub struct KernelStaticPage {
 
     pub num_cpus: u32,
 
-    // Nonzero while physical free memory is below the pressure watermarks.
-    pub memory_pressure: AtomicU32,
+    // Formerly the memory-pressure flag; keeps the later offsets in place.
+    pub reserved: u32,
 
     // Nonzero random boot identity, initialized once before starting userspace.
-    // Appended last: earlier field offsets are ABI.
     pub boot_random_id: u64,
 
-    // Physical free memory in 4 KiB pages, sampled with pressure publication.
+    // Free physical memory in 4 KiB pages: the allocator's live count, kept
+    // by the kernel with one atomic add or subtract per allocation and free.
     pub free_pages: AtomicU64,
 }
 
@@ -62,16 +62,26 @@ impl KernelStaticPage {
 const _: () =
     assert!(core::mem::size_of::<KernelStaticPage>() as u64 <= KernelStaticPage::PAGE_SIZE);
 const _: () = assert!(core::mem::offset_of!(KernelStaticPage, boot_random_id) == 64);
-const _: () = assert!(core::mem::offset_of!(KernelStaticPage, memory_pressure) == 60);
 const _: () = assert!(core::mem::offset_of!(KernelStaticPage, free_pages) == 72);
 
-/// Whether the kernel signals memory pressure. One shared-page load.
+/// Below this many free pages (4 MiB), services refuse new work that needs
+/// memory: process starts and memfs mutations. The kernel applies the same
+/// limit to process starts against its own allocator count.
+pub const LOW_MEMORY_PAGES: u64 = 1024;
+
+/// Free physical memory in 4 KiB pages. One shared-page load; exact up to
+/// the allocations and frees still in flight on other CPUs.
 #[cfg(feature = "userspace")]
-pub fn memory_pressure() -> bool {
+pub fn free_pages() -> u64 {
     KernelStaticPage::get()
-        .memory_pressure
+        .free_pages
         .load(core::sync::atomic::Ordering::Relaxed)
-        != 0
+}
+
+/// Whether free physical memory is below [`LOW_MEMORY_PAGES`].
+#[cfg(feature = "userspace")]
+pub fn low_memory() -> bool {
+    free_pages() < LOW_MEMORY_PAGES
 }
 
 // Describes a per-process page shared between the kernel and the process.

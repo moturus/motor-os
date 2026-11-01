@@ -271,6 +271,8 @@ struct Counters {
     // Cumulative events since the pool was built.
     splits: AtomicU64,
     recombined: AtomicU64,
+    // Once set, mirrors the free-page count: see `publish_free_pages`.
+    published: crate::util::StaticRef<AtomicU64>,
 }
 
 // Storage is permanent in production and private to one pool. Construction
@@ -332,6 +334,9 @@ impl<L: PageLinks> Pool<'_, L> {
             .fetch_add(u64::from(count), Ordering::Release)
             + u64::from(count);
         self.counters.high_water.fetch_max(used, Ordering::Relaxed);
+        if let Some(published) = self.counters.published.get() {
+            published.fetch_sub(u64::from(count), Ordering::Relaxed);
+        }
         #[cfg(debug_assertions)]
         if let Some(trace) = self.trace {
             trace.record(Publication::Charge(count));
@@ -342,6 +347,9 @@ impl<L: PageLinks> Pool<'_, L> {
         self.counters
             .used
             .fetch_sub(u64::from(count), Ordering::Release);
+        if let Some(published) = self.counters.published.get() {
+            published.fetch_add(u64::from(count), Ordering::Relaxed);
+        }
         #[cfg(debug_assertions)]
         if let Some(trace) = self.trace {
             trace.record(Publication::Release(count));

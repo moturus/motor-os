@@ -19,7 +19,7 @@ impl FreeCaches {
     }
 
     pub(crate) fn reclaim_if_pressured(&self) {
-        if moto_sys::memory_pressure() {
+        if moto_sys::low_memory() {
             self.reclaim();
         }
     }
@@ -27,27 +27,22 @@ impl FreeCaches {
     /// Re-evaluate the relevant signal exactly once after reclaiming. This
     /// runs before an operation, without FS locks, and never replays work.
     fn refused(&self, mut free_pages: impl FnMut() -> u64) -> bool {
-        if free_pages() >= MIN_FREE_PAGES {
+        if free_pages() >= moto_sys::LOW_MEMORY_PAGES {
             return false;
         }
         self.reclaim();
-        free_pages() < MIN_FREE_PAGES
+        free_pages() < moto_sys::LOW_MEMORY_PAGES
     }
 
+    // The 4 MiB limit applies to every guest size.
     pub(super) fn check(&self, stats: &super::stats::FsStats) -> Result<()> {
-        if !self.refused(|| {
-            moto_sys::KernelStaticPage::get()
-                .free_pages
-                .load(std::sync::atomic::Ordering::Relaxed)
-        }) {
+        if !self.refused(moto_sys::free_pages) {
             return Ok(());
         }
         stats.memory_refused.set(stats.memory_refused.get() + 1);
         Err(ErrorKind::StorageFull.into())
     }
 }
-
-const MIN_FREE_PAGES: u64 = 1024; // 4 MiB for every guest size.
 
 pub(super) fn needs_memory(command: u16, destination: MountKind) -> bool {
     destination == MountKind::MemFs
@@ -144,19 +139,19 @@ pub(super) mod self_test {
         let mut samples = 0;
         st_assert!(!caches.refused(|| {
             samples += 1;
-            MIN_FREE_PAGES
+            moto_sys::LOW_MEMORY_PAGES
         }));
         st_assert_eq!(samples, 1);
         st_assert_eq!(fs.cached_free_bytes(), 4096);
         samples = 0;
         st_assert!(!caches.refused(|| {
             samples += 1;
-            MIN_FREE_PAGES - u64::from(fs.cached_free_bytes() != 0)
+            moto_sys::LOW_MEMORY_PAGES - u64::from(fs.cached_free_bytes() != 0)
         }));
         st_assert_eq!(samples, 2);
         st_assert_eq!(fs.cached_free_bytes(), 0);
-        st_assert!(caches.refused(|| MIN_FREE_PAGES - 1));
-        st_assert!(!caches.refused(|| MIN_FREE_PAGES + 1));
+        st_assert!(caches.refused(|| moto_sys::LOW_MEMORY_PAGES - 1));
+        st_assert!(!caches.refused(|| moto_sys::LOW_MEMORY_PAGES + 1));
         caches.reclaim(); // Empty and repeated drains free no page twice.
         Ok(())
     }

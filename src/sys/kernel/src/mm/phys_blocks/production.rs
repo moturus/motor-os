@@ -137,6 +137,7 @@ impl BlockPool {
                 taken: AtomicU64::new(0),
                 splits: AtomicU64::new(0),
                 recombined: AtomicU64::new(0),
+                published: crate::util::StaticRef::default_const(),
             },
             links: DirectLinks,
             #[cfg(debug_assertions)]
@@ -284,6 +285,14 @@ impl BlockPool {
 
     pub(crate) fn free_pages(&self) -> u64 {
         self.counters.total - self.used_pages()
+    }
+
+    /// Mirror the free-page count into `target` from now on: one snapshot,
+    /// then the delta of every charge and release. Called once on the BSP
+    /// before any other CPU allocates, so the snapshot cannot miss a change.
+    pub(crate) fn publish_free_pages(&self, target: &'static AtomicU64) {
+        target.store(self.free_pages(), Ordering::Relaxed);
+        self.counters.published.set(target);
     }
 
     pub(crate) fn high_water_pages(&self) -> u64 {

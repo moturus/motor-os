@@ -78,6 +78,27 @@ pub fn min_free_small_pages() -> u64 {
     blocks.total_pages() - blocks.high_water_pages()
 }
 
+/// Mirror the live free-page count into `target`; see `virt::init`.
+pub fn publish_free_pages(target: &'static core::sync::atomic::AtomicU64) {
+    PhysicalMemory::inst().blocks.publish_free_pages(target);
+}
+
+/// Whether free physical memory is below the shared low-memory limit.
+pub fn low_memory() -> bool {
+    available_small_pages() < moto_sys::LOW_MEMORY_PAGES
+}
+
+// The shared count equals the allocator's at quiescent boot checkpoints.
+#[cfg(debug_assertions)]
+fn assert_published_free_pages() {
+    assert_eq!(
+        super::virt::get_kernel_static_page_mut()
+            .free_pages
+            .load(core::sync::atomic::Ordering::Relaxed),
+        available_small_pages()
+    );
+}
+
 /// A frame of the given kind. Exhaustion currently panics.
 pub fn allocate_frame(kind: PageType) -> SlabArc<Frame> {
     match PhysicalMemory::inst().allocate_frame(kind) {
@@ -91,7 +112,6 @@ pub fn allocate_frame(kind: PageType) -> SlabArc<Frame> {
 pub fn allocate_huge_frame() -> Result<SlabArc<Frame>, ErrorCode> {
     let inst = PhysicalMemory::inst();
     let start = inst.blocks.alloc_huge().ok_or(moto_rt::E_OUT_OF_MEMORY)?;
-    super::pressure::update();
     match inst.slab.alloc_arc() {
         Ok(frame) => {
             frame.get_mut().unwrap().start = start;
@@ -164,7 +184,6 @@ pub fn release_low_memory() {
             crate::arch::paging::l3_direct_phys_table_phys_addr(),
         ],
     );
-    super::pressure::update();
 }
 
 #[cfg(debug_assertions)]
@@ -249,7 +268,6 @@ impl PhysicalMemory {
             }),
             _ => panic!(),
         };
-        super::pressure::update();
         result
     }
 
@@ -262,13 +280,11 @@ impl PhysicalMemory {
 
     fn free_small(&self, phys_addr: u64) {
         self.blocks.free_small(phys_addr);
-        super::pressure::update();
     }
 
     // Huge frames come only from the dual-purpose pool.
     fn free_huge(&self, phys_addr: u64) {
         self.blocks.free_huge(phys_addr);
-        super::pressure::update();
     }
 
     fn deallocate_frame(&self, frame: &Frame) {
@@ -294,7 +310,6 @@ impl PhysicalMemory {
             .blocks
             .alloc_small(num_frames as u16)
             .ok_or(moto_rt::E_OUT_OF_MEMORY)?;
-        super::pressure::update();
         let mut result = Vec::with_capacity(num_frames as usize);
         for idx in 0..num_frames {
             let frame_start = start + (idx << PAGE_SIZE_SMALL_LOG2);
@@ -407,15 +422,15 @@ pub fn dump_stats() {
 // block accounting, alignment, and shared free-page publication.
 #[cfg(debug_assertions)]
 pub fn huge_frame_self_test() {
-    super::pressure::self_test();
+    assert_published_free_pages();
     let small = phys_allocate_frameless(PageType::SmallPage).unwrap();
-    super::pressure::assert_snapshot();
+    assert_published_free_pages();
     phys_deallocate_frameless(small, PageType::SmallPage);
-    super::pressure::assert_snapshot();
+    assert_published_free_pages();
     let contiguous = phys_allocate_contiguous_frames(PageType::SmallPage, 32).unwrap();
-    super::pressure::assert_snapshot();
+    assert_published_free_pages();
     drop(contiguous);
-    super::pressure::assert_snapshot();
+    assert_published_free_pages();
     let inst = PhysicalMemory::inst();
     let before = block_metrics();
     let free_before = inst.blocks.free_pages();
@@ -441,11 +456,11 @@ pub fn huge_frame_self_test() {
     assert_eq!(held.taken, before.taken + 1);
     assert_eq!(held.whole, before.whole - 1);
     assert_eq!(inst.blocks.free_pages(), free_before - 512);
-    super::pressure::assert_snapshot();
+    assert_published_free_pages();
     drop(frame);
     let after = block_metrics();
     assert_eq!((after.taken, after.whole), (before.taken, before.whole));
     assert_eq!(inst.blocks.free_pages(), free_before);
-    super::pressure::assert_snapshot();
+    assert_published_free_pages();
     crate::raw_log!("phys huge frame tests PASS");
 }

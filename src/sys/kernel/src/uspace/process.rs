@@ -315,7 +315,7 @@ impl Process {
         address_space_handle: SysHandle,
         url_part: &str,
     ) -> Result<(Arc<SysObject>, Option<Arc<Process>>), ErrorCode> {
-        if crate::mm::pressure::active() {
+        if crate::mm::phys::low_memory() {
             return Err(moto_rt::E_OUT_OF_MEMORY);
         }
 
@@ -752,7 +752,7 @@ impl Process {
         match *status {
             ProcessStatus::Created => {
                 // Sys-io is constructed by bootstrap, outside new_child.
-                if self.pid() != SYS_IO_PID && crate::mm::pressure::active() {
+                if self.pid() != SYS_IO_PID && crate::mm::phys::low_memory() {
                     // The starting thread takes the normal exit path below.
                     *status = ProcessStatus::Exiting(u64::MAX);
                     return false;

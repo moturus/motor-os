@@ -465,9 +465,10 @@ fn memory() {
                     .is_some(),
                 "list failed below 4 MiB",
             )?;
+            // The fill stops at the memfs limit, well above exhaustion.
             check(
-                !moto_sys::memory_pressure(),
-                "memfs fill reached kernel pressure",
+                moto_sys::free_pages() >= moto_sys::LOW_MEMORY_PAGES / 2,
+                "memfs fill overshot the 4 MiB limit by over 2 MiB",
             )?;
             check(
                 metric("fs.memory_refused")? > refused_before,

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="description" content="Memory management in Motor OS: pages and huge pages, the allocator, and physical-memory pressure publication.">
+<meta name="description" content="Memory management in Motor OS: pages and huge pages, the allocator, and the published free-page count.">
 <meta name="theme-color" content="#0a0a0a">
 <title>Memory | Motor OS</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
@@ -398,7 +398,7 @@ a.card h3 { color: var(--accent); }
 <div class="eyebrow">System</div>
 <h1>Memory</h1>
 <p class="lead">Motor OS uses 4 KiB pages, 2 MiB pages for large heaps, eager mappings by
-default, and guarded lazy stacks. The shared memory-pressure flag uses actual free physical memory. The OOM killer and fallible allocation paths are being added in stages.</p>
+default, and guarded lazy stacks. The shared page carries the allocator's live free-page count. The OOM killer and fallible allocation paths are being added in stages.</p>
 
 <h2>Pages and mappings</h2>
 <ul>
@@ -436,18 +436,19 @@ directly. A thread keeps one private block per class for its temporaries, freed 
 wait on short per-CPU lists, and a pointer is located by a binary search over an
 address-sorted index, so no operation walks the heap and no lock is held across a request
 to the kernel. Memory goes back to the kernel on demand: the runtime returns idle pages
-every five seconds once more than 1 MiB is idle, or as soon as a page is idle while the
-memory-pressure flag is up. The kernel uses the same crate with a per-CPU cache in front
+every five seconds once more than 1 MiB is idle, or as soon as a page is idle while free
+physical memory is below 4 MiB. The kernel uses the same crate with a per-CPU cache in front
 of it. The design is in <a href="https://github.com/moturus/motor-os/blob/main/docs/frusa.md"><code>docs/frusa.md</code></a>.</p>
 
-<h2>Physical memory pressure</h2>
-<p>The kernel publishes actual free physical pages in <code>KernelStaticPage::free_pages</code>.
-Pressure rises below 2 MiB and clears at 3 MiB. sys-io and the kernel refuse new process
-starts while pressure is raised, including a delayed first wake of a stopped child.</p>
-<p>Memfs write, copy, create, and move return <code>StorageFull</code> below 4 MiB,
-after releasing unused cached blocks and sampling again. Reads, stat, list, sparse
+<h2>Published free memory</h2>
+<p>The kernel keeps the physical allocator's live free-page count in
+<code>KernelStaticPage::free_pages</code>: one atomic add or subtract per allocation and free,
+no sampling and no lock. There is no pressure flag. Below 4 MiB free, sys-io and the kernel
+refuse new process starts, including a delayed first wake of a stopped child.</p>
+<p>Memfs write, copy, create, and move return <code>StorageFull</code> below the same 4 MiB,
+after releasing unused cached blocks and checking again. Reads, stat, list, sparse
 resize, and deletes remain allowed. Capacity and cache sizing are unchanged.</p>
-<p>Reservation-based admission, its query and metrics, and pressure-only service refusals
+<p>Reservation-based admission, its query and metrics, and the memory-based service refusals
 have been removed. Physical allocator metrics remain available; memfs refusals are counted
 by <code>fs.memory_refused</code>. Physical exhaustion can still panic until the later
 fallible-allocation and OOM-killer steps land.</p>

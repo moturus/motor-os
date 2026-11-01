@@ -723,7 +723,7 @@ async fn on_msg(
     }
 
     runtime.free_caches.reclaim_if_pressured();
-    if msg.command == api_fs::CMD_SPAWN && moto_sys::memory_pressure() {
+    if msg.command == api_fs::CMD_SPAWN && moto_sys::low_memory() {
         api_fs::release_donated_pages(&msg, &sender);
         let resp = api_fs::empty_resp_encode(msg.id, Err(moto_rt::Error::OutOfMemory));
         let _ = sender.send(resp).await;

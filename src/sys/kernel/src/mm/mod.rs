@@ -7,7 +7,6 @@ pub mod kheap;
 pub mod mmio;
 pub mod phys;
 pub(crate) mod phys_blocks;
-pub mod pressure;
 mod slab;
 pub mod user;
 pub mod user_copy;
