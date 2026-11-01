@@ -8,6 +8,21 @@ const INPUT_RECLAIM_PARENT: &str = "stdio-input-reclaim-parent";
 const INPUT_RECLAIM_IDLE: &str = "stdio-input-reclaim-idle";
 const INPUT_RECLAIM_BYTES: usize = 8 * 1024 + 37;
 const INPUT_CLAIM_WAIT_PARENT: &str = "stdio-input-claim-wait-parent";
+const INPUT_EOF_PARENT: &str = "stdio-input-eof-parent";
+const INPUT_EOF_IDLE: &str = "stdio-input-eof-idle";
+const INPUT_EOF_PARTIAL: &str = "stdio-input-eof-partial";
+// Fits the ring, so the writer can close before any relay starts.
+const INPUT_EOF_BYTES: usize = 1024 + 37;
+const INPUT_EOF_PREFIX_BYTES: usize = 100;
+const INPUT_EOF_SIBLING_PARENT: &str = "stdio-input-eof-sibling-parent";
+const INPUT_EOF_HOLDER: &str = "stdio-input-eof-holder";
+const INPUT_DISCONNECT_PARENT: &str = "stdio-input-disconnect-parent";
+const INPUT_DISCONNECT_CHILD: &str = "stdio-input-disconnect-child";
+const INPUT_DISCONNECT_BYTES: &[u8] = b"input that lands with its disconnect";
+// Several rings: relaying them keeps the parent's relay thread out of its wait
+// while the test answers the first bytes and disconnects.
+const INPUT_DISCONNECT_PROMPT_BYTES: usize = 16 * 1024;
+const INPUT_DISCONNECT_ROUNDS: usize = 20;
 const STDIN_EOF_CHILD: &str = "stdio-stdin-eof-child";
 const STDIN_POLL_EOF_CHILD: &str = "stdio-stdin-poll-eof-child";
 const STDIN_EXIT_PARENT: &str = "stdio-stdin-exit-parent";
@@ -546,6 +561,13 @@ pub fn is_stdio_child(args: &[String]) -> bool {
                 | INPUT_RECLAIM_PARENT
                 | INPUT_RECLAIM_IDLE
                 | INPUT_CLAIM_WAIT_PARENT
+                | INPUT_EOF_PARENT
+                | INPUT_EOF_IDLE
+                | INPUT_EOF_PARTIAL
+                | INPUT_EOF_SIBLING_PARENT
+                | INPUT_EOF_HOLDER
+                | INPUT_DISCONNECT_PARENT
+                | INPUT_DISCONNECT_CHILD
                 | STDIN_EOF_CHILD
                 | STDIN_POLL_EOF_CHILD
                 | STDIN_EXIT_PARENT
@@ -567,6 +589,13 @@ pub fn run_stdio_child(args: &[String]) -> ! {
         "self-stdio-close-child" => run_self_stdio_close_child(),
         INPUT_RECLAIM_PARENT => run_input_reclaim_parent(),
         INPUT_CLAIM_WAIT_PARENT => run_input_claim_wait_parent(),
+        INPUT_EOF_PARENT => run_input_eof_parent(args),
+        INPUT_EOF_IDLE => run_input_eof_idle(),
+        INPUT_EOF_PARTIAL => run_input_eof_partial(),
+        INPUT_EOF_SIBLING_PARENT => run_input_eof_sibling_parent(args),
+        INPUT_EOF_HOLDER => run_input_eof_holder(args),
+        INPUT_DISCONNECT_PARENT => run_input_disconnect_parent(),
+        INPUT_DISCONNECT_CHILD => run_input_disconnect_child(),
         STDIN_EOF_CHILD => run_stdin_eof_child(args),
         STDIN_POLL_EOF_CHILD => run_stdin_poll_eof_child(),
         STDIN_EXIT_PARENT => run_stdin_exit_parent(args),
@@ -679,6 +708,210 @@ fn test_inherited_input_reclaim_order() {
     assert!(child.wait().unwrap().success());
     assert_eq!(returned, expected);
     println!("test_inherited_input_reclaim_order PASS");
+}
+
+fn input_eof_bytes() -> Vec<u8> {
+    (0..INPUT_EOF_BYTES).map(|idx| (idx % 251) as u8).collect()
+}
+
+fn wait_for_path(path: &std::path::Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{} did not appear",
+            path.display()
+        );
+        std::thread::yield_now();
+    }
+}
+
+/// Reads stdin through the runtime to its end, so that an error fails here
+/// rather than passing as EOF (see `run_stdin_eof_child`).
+fn read_stdin_to_eof() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut buf = [0; 512];
+    loop {
+        match moto_rt::fs::read(moto_rt::FD_STDIN, &mut buf).unwrap() {
+            0 => return bytes,
+            sz => bytes.extend_from_slice(&buf[..sz]),
+        }
+    }
+}
+
+/// Stdin already holds all the input and its end when each child starts, so
+/// each relay meets EOF while bytes wait in that child's ring.
+fn run_input_eof_parent(args: &[String]) -> ! {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    wait_for_path(std::path::Path::new(&args[2]));
+    for child in [INPUT_EOF_IDLE, INPUT_EOF_PARTIAL] {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .arg(child)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    std::io::stdout().write_all(&read_stdin_to_eof()).unwrap();
+    std::process::exit(0)
+}
+
+/// Leaves only once the relay has handed over everything, none of it read.
+fn run_input_eof_idle() -> ! {
+    let mut buf = [0; INPUT_EOF_BYTES];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while moto_rt::net::peek(moto_rt::FD_STDIN, &mut buf) != Ok(INPUT_EOF_BYTES) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the relay did not forward stdin"
+        );
+        std::thread::yield_now();
+    }
+    std::process::exit(0)
+}
+
+fn run_input_eof_partial() -> ! {
+    let mut prefix = [0; INPUT_EOF_PREFIX_BYTES];
+    let mut read = 0;
+    while read < prefix.len() {
+        let sz = moto_rt::fs::read(moto_rt::FD_STDIN, &mut prefix[read..]).unwrap();
+        assert_ne!(sz, 0, "stdin ended before its prefix");
+        read += sz;
+    }
+    assert_eq!(prefix, input_eof_bytes()[..INPUT_EOF_PREFIX_BYTES]);
+    std::process::exit(0)
+}
+
+/// The source's EOF does not end a child's claim on what it was sent: bytes it
+/// left unread return to the stream, ahead of that EOF, for whoever reads next.
+fn test_inherited_input_reclaim_at_eof() {
+    use std::io::{Read, Write};
+    use std::process::{Command, Stdio};
+
+    let expected = input_eof_bytes();
+    let release = crate::temp_path("stdio-input-eof-release");
+    let _ = std::fs::remove_file(&release);
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .arg(INPUT_EOF_PARENT)
+        .arg(&release)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(&expected).unwrap();
+    drop(stdin);
+    std::fs::write(&release, b"").unwrap();
+
+    let mut returned = Vec::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_end(&mut returned)
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+    std::fs::remove_file(&release).unwrap();
+    assert_eq!(returned, expected[INPUT_EOF_PREFIX_BYTES..]);
+    println!("test_inherited_input_reclaim_at_eof PASS");
+}
+
+fn run_input_eof_sibling_parent(args: &[String]) -> ! {
+    use std::process::{Command, Stdio};
+
+    let done = std::path::Path::new(&args[2]);
+    let mut holder = Command::new(std::env::current_exe().unwrap())
+        .arg(INPUT_EOF_HOLDER)
+        .arg(done)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(read_stdin_to_eof().is_empty());
+    std::fs::write(done, b"").unwrap();
+    assert!(holder.wait().unwrap().success());
+    std::process::exit(0)
+}
+
+fn run_input_eof_holder(args: &[String]) -> ! {
+    wait_for_path(std::path::Path::new(&args[2]));
+    std::process::exit(0)
+}
+
+/// A child with nothing left unread has no claim on a finished stdin: the
+/// parent sees EOF while that child runs, and may be what ends it.
+fn test_inherited_input_eof_while_child_runs() {
+    use std::process::{Command, Stdio};
+
+    let done = crate::temp_path("stdio-input-eof-done");
+    let _ = std::fs::remove_file(&done);
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .arg(INPUT_EOF_SIBLING_PARENT)
+        .arg(&done)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    drop(child.stdin.take());
+    wait_for_child(&mut child, "stdin EOF sibling parent");
+    std::fs::remove_file(&done).unwrap();
+    println!("test_inherited_input_eof_while_child_runs PASS");
+}
+
+fn run_input_disconnect_parent() -> ! {
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg(INPUT_DISCONNECT_CHILD)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(read_stdin_to_eof().is_empty());
+    std::process::exit(0)
+}
+
+fn run_input_disconnect_child() -> ! {
+    use std::io::Write;
+
+    let mut stdout = std::io::stdout();
+    stdout
+        .write_all(&vec![b'x'; INPUT_DISCONNECT_PROMPT_BYTES])
+        .unwrap();
+    stdout.flush().unwrap();
+    assert_eq!(read_stdin_to_eof(), INPUT_DISCONNECT_BYTES);
+    std::process::exit(0)
+}
+
+/// A relay that learns of its source's disconnect from a failed wait still owes
+/// the child what the source wrote first. The prompt keeps the relay thread busy
+/// while the input and the disconnect both land, so its next wait fails despite
+/// the wake latched for those bytes.
+fn test_inherited_input_disconnect() {
+    use std::io::{Read, Write};
+    use std::process::{Command, Stdio};
+
+    for _ in 0..INPUT_DISCONNECT_ROUNDS {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg(INPUT_DISCONNECT_PARENT)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let mut prompt = vec![0; INPUT_DISCONNECT_PROMPT_BYTES];
+        let first = stdout.read(&mut prompt).unwrap();
+        assert_ne!(first, 0);
+        stdin.write_all(INPUT_DISCONNECT_BYTES).unwrap();
+        drop(stdin);
+        stdout.read_exact(&mut prompt[first..]).unwrap();
+        wait_for_child(&mut child, "stdin disconnect parent");
+    }
+    println!("test_inherited_input_disconnect PASS");
 }
 
 /// Vectored I/O on a descriptor kind with no native vectored path. Only
@@ -1770,6 +2003,9 @@ pub fn run_all_tests() {
     test_stdio_reader_drains_after_writer_drop();
     test_stdio_writer_wake_on_reader_drop();
     test_inherited_input_reclaim_order();
+    test_inherited_input_reclaim_at_eof();
+    test_inherited_input_eof_while_child_runs();
+    test_inherited_input_disconnect();
     test_input_claim_waiter_wakes();
     test_wait_drains_inherited_output();
 }

@@ -565,9 +565,10 @@ fn apply_child_ctrl_c(
 }
 
 /// Relays this process's stdin into an inherited-stdio child, as a
-/// task on the relay runtime. Owns the stdin reader for the child's
-/// lifetime; bytes the child did not consume return to the parent's
-/// stream via the overflow stash.
+/// task on the relay runtime. Owns the stdin reader until the child has
+/// drained all it was sent or has exited, even if the source ends first;
+/// bytes the child did not consume return to the parent's stream, ahead
+/// of any EOF, via the overflow stash.
 async fn relay_in(
     stdio: Arc<SelfStdio>,
     to: moto_sdk::ipc::stdio_pipe::RawPipeData,
@@ -612,23 +613,19 @@ async fn relay_in(
         }
     };
 
-    enum RelayEnd {
-        SourceDone,
-        DestinationGone(Vec<u8>),
-    }
-
     let mut ctrl_c = ctrl_c_process.map(|process| CtrlCRelay::new(owned.pipe.clone(), process));
     let mut source_signal = owned.pipe.handle().as_future();
     let mut source_alive = true;
     let mut buf = [0_u8; 80];
-    let end = 'relay: loop {
+    // The relay ends with what it took from the source but never published.
+    let mut unwritten = 'relay: loop {
         if let Some(ctrl_c) = ctrl_c.as_mut() {
             ctrl_c.service(&dest);
         }
         match owned.read(&mut buf, true) {
             Ok(0) => {
                 let _ = dest.close_writer();
-                break 'relay RelayEnd::SourceDone;
+                break 'relay Vec::new();
             }
             Ok(sz) => {
                 let mut chunk = &buf[..sz];
@@ -650,7 +647,7 @@ async fn relay_in(
                                     .await
                                 {
                                     Either::Left((result, _)) if result.is_err() => {
-                                        break 'relay RelayEnd::DestinationGone(chunk.to_vec());
+                                        break 'relay chunk.to_vec();
                                     }
                                     Either::Right((result, _)) if result.is_err() => {
                                         source_alive = false;
@@ -658,34 +655,34 @@ async fn relay_in(
                                     _ => {}
                                 }
                             } else if (&mut dest_signal).await.is_err() {
-                                break 'relay RelayEnd::DestinationGone(chunk.to_vec());
+                                break 'relay chunk.to_vec();
                             }
                         }
                         Err(_) => {
-                            break 'relay RelayEnd::DestinationGone(chunk[published..].to_vec());
+                            break 'relay chunk[published..].to_vec();
                         }
                     }
                 }
             }
-            Err(moto_rt::E_NOT_READY) => {
+            Err(moto_rt::E_NOT_READY) if source_alive => {
                 // Wait for parent stdin data or for the child to go
                 // away; a spurious child-side signal just re-loops.
                 source_signal.rearm();
                 dest_signal.rearm();
                 match futures::future::select(&mut source_signal, &mut dest_signal).await {
-                    Either::Left((result, _)) => {
-                        if result.is_err() {
-                            break 'relay RelayEnd::SourceDone;
-                        }
-                    }
+                    // A wait on a handle whose peer has gone fails even over a
+                    // wake latched for its last bytes, so read once more.
+                    Either::Left((result, _)) => source_alive = result.is_ok(),
                     Either::Right((result, _)) => {
                         if result.is_err() {
-                            break 'relay RelayEnd::DestinationGone(Vec::new());
+                            break 'relay Vec::new();
                         }
                     }
                 }
             }
-            Err(_) => break 'relay RelayEnd::SourceDone,
+            // A source lost without a close: `dest` drops unclosed, so once the
+            // child has its bytes its reads fail rather than report a clean EOF.
+            Err(_) => break 'relay Vec::new(),
         }
     };
 
@@ -693,18 +690,25 @@ async fn relay_in(
     // process again. An event racing this boundary is intentionally lost.
     drop(ctrl_c);
 
-    if let RelayEnd::DestinationGone(mut unwritten) = end {
-        let mut reclaimed = match dest.take_unread() {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                log::warn!("cannot reclaim child stdin ring: {err}");
-                Vec::new()
-            }
-        };
-        reclaimed.append(&mut unwritten);
-        reclaimed.append(&mut owned.overflow);
-        owned.overflow = reclaimed;
+    // The source ending does not end the child's claim on the ring: those bytes
+    // are the child's to read, and a child that leaves first gives them back.
+    while dest.flush_nonblocking() == Err(moto_rt::E_NOT_READY) {
+        dest_signal.rearm();
+        if (&mut dest_signal).await.is_err() {
+            break;
+        }
     }
+
+    let mut reclaimed = match dest.take_unread() {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            log::warn!("cannot reclaim child stdin ring: {err}");
+            Vec::new()
+        }
+    };
+    reclaimed.append(&mut unwritten);
+    reclaimed.append(&mut owned.overflow);
+    owned.overflow = reclaimed;
 
     // Return the reader (and any stash) to the parent. A stash arrives with
     // no handle edge behind it, so readiness is reported here rather than

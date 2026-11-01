@@ -584,6 +584,14 @@ grep -q "^error reading directory '/ssh-stderr-separation-probe'\.$" "$ssh_split
   fail "russhd did not deliver remote stderr as SSH extended data"
 rm -f "$ssh_split_stdout" "$ssh_split_stderr"
 
+# A command that never reads stdin leaves it for the next one, even though the
+# client's EOF reaches the remote shell first.
+ssh_stdin_out="$(printf 'ssh-stdin-marker\n' |
+  vm_ssh '/system/bin/sysbox echo first; /system/bin/sysbox cat')" ||
+  fail "stdin across SSH commands failed"
+[ "$ssh_stdin_out" = "$(printf 'first\nssh-stdin-marker')" ] ||
+  fail "a command that never read stdin lost it: '$ssh_stdin_out'"
+
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
   vm_ssh "[ ! -e /devtools ]" ||
     fail "standard image unexpectedly packages /devtools"
