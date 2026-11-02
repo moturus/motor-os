@@ -881,6 +881,9 @@ esac
 # keys started again, exactly as `RESIZED` does above.
 echo "-- red in a russhd pty session --"
 red_ssh_log=/tmp/test-terminal-size-red-ssh.log
+# script(1) truncates only after it forks, and the waits below must not match
+# the last run's recording.
+: > "$red_ssh_log"
 count="$(bar_count_cmd "$red_ssh_log")"
 red_ssh_keys() {
   sleep 7
