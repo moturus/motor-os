@@ -61,7 +61,7 @@ fn main() {
 EOF
 # Use actual compiler ELF files: shell wrappers cannot be sandbox executables.
 HOST_CXX="$(realpath /usr/bin/clang++)"
-HOST_AR="$(realpath /usr/lib/llvm-21/bin/llvm-ar)"
+HOST_AR="$(realpath "$(dirname "$HOST_CXX")/llvm-ar")"
 SDK_ROOT="$(dirname "$(dirname "$LORRY_MOTOR_LINKER")")"
 # The Clang that the toolchain's motor-clang++ wrapper runs.
 MOTOR_LLVM="$("$RUSTC" --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin"
