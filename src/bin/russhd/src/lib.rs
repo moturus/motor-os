@@ -1,11 +1,13 @@
 #![allow(unexpected_cfgs)]
 pub mod applets;
+pub mod auth_store;
 pub mod client;
 pub mod config;
 pub mod local_session;
 pub mod permissions;
 pub mod sftp_extensions;
 pub mod sftp_session;
+pub mod trusted_file;
 
 // `ring` gets its randomness through getrandom 0.2. Register Motor's entropy
 // source in the library so every binary in this package carries the hook.

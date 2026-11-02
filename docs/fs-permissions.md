@@ -140,17 +140,20 @@ Several installed trees deliberately use the default rule:
 
 ### Exact entries
 
-Two secrets override their matching tree mode:
+Four credential files override their matching tree mode:
 
 | Entry | Mode | Reason |
 |---|---|---|
-| `/system/cfg/sshd.toml` | `rw-r-----` | Contains the development host private key and password verifier; russhd runs as Interactive |
+| `/system/cfg/sshd.toml` | `rw-r-----` | Contains the development host private key; russhd runs as Interactive |
 | `/system/cfg/ssl/ssl-key.pem` | `rw-r-----` | The Interactive development web-server command needs the key; None does not |
+| `/user/cfg/russhd/users.toml` | `rwxrw----` | SSH login names and password verifiers, which russhd refuses if None can read them |
+| `/user/cfg/ssh/authorized_keys.motor` | `rwxrw----` | SSH public keys of the shipped login name |
 
-Both files are supplied by `img_files/motor-os-base`, which is included in all
-four images. `/system/cfg/ssl` is an implicit directory created while walking
-static content, so exact rules and directory rules apply equally to implicit
-and explicitly listed paths.
+The last two carry the mode SFTP gives a new file, so shipped and installed
+credentials match. All four are supplied by `img_files/motor-os-base`, which is
+included in every image. `/system/cfg/ssl` and `/user/cfg/russhd` are implicit
+directories created while walking static content, so exact rules and directory
+rules apply equally to implicit and explicitly listed paths.
 
 ## Policy configuration
 
@@ -196,7 +199,7 @@ The imager rejects:
 
 - unknown policy fields, invalid or non-monotonic modes, non-normalized paths,
   and duplicate tree or exact paths;
-- regular-file profiles that grant execute;
+- regular-file modes that grant execute to any role but System;
 - directory profiles that do not grant System `rwx`, because the builder must
   create children in every directory it constructs;
 - script profiles that do not grant System execute;

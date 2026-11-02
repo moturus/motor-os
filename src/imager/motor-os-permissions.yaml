@@ -76,3 +76,8 @@ entries:
     mode: "rw-r-----"
   - path: "/system/cfg/ssl/ssl-key.pem"
     mode: "rw-r-----"
+  # The mode SFTP gives new files, so that shipped and installed lists match.
+  - path: "/user/cfg/russhd/users.toml"
+    mode: "rwxrw----"
+  - path: "/user/cfg/ssh/authorized_keys.motor"
+    mode: "rwxrw----"

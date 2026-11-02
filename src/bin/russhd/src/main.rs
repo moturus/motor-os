@@ -13,6 +13,7 @@ use russh::server::{Msg, Session};
 use russh::*;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+use russhd::auth_store::{self, Verdict};
 use russhd::config;
 use russhd::local_session::{self, ChannelCloseGuard, StdinTx};
 
@@ -42,14 +43,17 @@ async fn main() {
         return;
     }
 
-    let Ok(program_config) = config::read_from_file(&args[1]) else {
-        log::error!("Error reading config file '{}'.", args[1]);
-        return;
+    let program_config = match config::read_from_file(&args[1]) {
+        Ok(config) => config,
+        Err(err) => {
+            log::error!("Error reading config file '{}': {err}", args[1]);
+            return;
+        }
     };
 
     if program_config.is_default() {
         log::error!(
-            "\n\nWARNING: {}: one of configuration secrets is set to a default/test value. This is NOT secure.\n\n",
+            "\n\nWARNING: {}: the SSH host key is the default test key. This is NOT secure.\n\n",
             args[0]
         );
     }
@@ -58,6 +62,7 @@ async fn main() {
         inactivity_timeout: Some(std::time::Duration::from_secs(3600)),
         auth_rejection_time: std::time::Duration::from_secs(3),
         auth_rejection_time_initial: Some(std::time::Duration::from_secs(0)),
+        methods: auth_methods(),
         window_size: local_session::SSH_RECEIVE_WINDOW,
         keys: vec![program_config.host_key().clone()],
         preferred: Preferred {
@@ -73,6 +78,29 @@ async fn main() {
     let listen_addr = listener.local_addr().unwrap();
     log::info!("Listening on {listen_addr}");
     serve(config, program_config, listener).await
+}
+
+/// What every username is told it can try, whether or not it exists.
+fn auth_methods() -> MethodSet {
+    MethodSet::from([MethodKind::Password, MethodKind::PublicKey].as_slice())
+}
+
+/// A rejection that keeps the method list: `Auth::reject()` would have russh
+/// drop the method just tried from what it advertises.
+fn rejected() -> server::Auth {
+    server::Auth::Reject {
+        proceed_with_methods: Some(auth_methods()),
+        partial_success: false,
+    }
+}
+
+/// A name for the logs: client-supplied text that is not a valid name stays out.
+fn logged_name(user: &str) -> &str {
+    if auth_store::valid_name(user) {
+        user
+    } else {
+        "(invalid name)"
+    }
 }
 
 /// russh's `run_on_socket`, except that a failed accept ends neither the server
@@ -187,6 +215,7 @@ struct ConnectionHandler {
     remote_addr: SocketAddr,
     pty_request: Option<PtyRequest>,
     authenticated_user: Option<String>,
+    warned_shipped_credentials: bool,
 
     stdin_tx: Option<StdinTx>,
     sftp_channel_id: Option<ChannelId>,
@@ -206,10 +235,25 @@ impl ConnectionHandler {
             id: ID.fetch_add(1, Ordering::Relaxed) + 1,
             remote_addr,
             authenticated_user: None,
+            warned_shipped_credentials: false,
             stdin_tx: None,
             sftp_channel_id: None,
             close_guard: None,
             receive_credit: None,
+        }
+    }
+
+    async fn check_key(&mut self, user: &str, key: &keys::ssh_key::PublicKey) -> Verdict {
+        let store = self.config.auth_store().clone();
+        let verdict = auth_store::check_key(store, user.to_owned(), key.clone()).await;
+        self.warn_once(verdict);
+        verdict
+    }
+
+    fn warn_once(&mut self, verdict: Verdict) {
+        if verdict.shipped_credentials && !self.warned_shipped_credentials {
+            self.warned_shipped_credentials = true;
+            log::error!("WARNING: this login uses a shipped test credential. This is NOT secure.");
         }
     }
 
@@ -386,56 +430,21 @@ impl server::Handler for ConnectionHandler {
     //     Ok(Some("Motor OS SSH Server.".to_owned()))
     // }
 
-    async fn auth_none(&mut self, user: &str) -> Result<server::Auth, Self::Error> {
-        let can_pwd = self.config.can_auth_pwd(user);
-        let can_key = self.config.can_auth_pubkey(user);
-
-        if !can_pwd && !can_key {
-            return Ok(server::Auth::reject());
-        }
-
-        let mut methods = vec![];
-        if can_pwd {
-            methods.push(russh::MethodKind::Password);
-        }
-        if can_key {
-            methods.push(russh::MethodKind::PublicKey);
-        }
-
-        Ok(server::Auth::Reject {
-            proceed_with_methods: Some(russh::MethodSet::from((methods).as_slice())),
-            partial_success: false,
-        })
+    async fn auth_none(&mut self, _user: &str) -> Result<server::Auth, Self::Error> {
+        Ok(rejected())
     }
 
+    /// An offer only asks whether signing is worthwhile; it authorizes nothing.
     async fn auth_publickey_offered(
         &mut self,
         user: &str,
         public_key: &keys::ssh_key::PublicKey,
     ) -> Result<server::Auth, Self::Error> {
-        let can_pwd = self.config.can_auth_pwd(user);
-        let can_key = self.config.can_auth_pubkey(user);
-
-        if !can_pwd && !can_key {
-            return Ok(server::Auth::reject());
+        if self.check_key(user, public_key).await.accepted {
+            Ok(server::Auth::Accept)
+        } else {
+            Ok(rejected())
         }
-
-        if can_key && self.config.authenticate_pubkey(user, public_key).is_ok() {
-            return Ok(server::Auth::Accept);
-        }
-
-        let mut methods = vec![];
-        if can_pwd {
-            methods.push(russh::MethodKind::Password);
-        }
-        if can_key {
-            methods.push(russh::MethodKind::PublicKey);
-        }
-
-        Ok(server::Auth::Reject {
-            proceed_with_methods: Some(russh::MethodSet::from((methods).as_slice())),
-            partial_success: true,
-        })
     }
 
     async fn auth_publickey(
@@ -443,23 +452,21 @@ impl server::Handler for ConnectionHandler {
         user: &str,
         key: &keys::ssh_key::PublicKey,
     ) -> Result<server::Auth, Self::Error> {
+        let name = logged_name(user);
         if let Some(authenticated) = self.authenticated_user.as_ref() {
             log::warn!(
-                "auth_pubkey() called for user '{user}' while user '{authenticated}' has been authenticated."
+                "auth_pubkey() called for user '{name}' while user '{authenticated}' has been authenticated."
             );
-            return Ok(server::Auth::reject());
+            return Ok(rejected());
         }
 
-        match self.config.authenticate_pubkey(user, key) {
-            Ok(_) => {
-                log::info!("User {user} authenticated.");
-                self.authenticated_user = Some(user.to_owned());
-                Ok(server::Auth::Accept)
-            }
-            Err(err) => {
-                log::info!("User {user} failed to authenticate: {err:?}.");
-                Ok(server::Auth::reject())
-            }
+        if self.check_key(user, key).await.accepted {
+            log::info!("User {name} authenticated.");
+            self.authenticated_user = Some(user.to_owned());
+            Ok(server::Auth::Accept)
+        } else {
+            log::info!("User {name} failed to authenticate.");
+            Ok(rejected())
         }
     }
 
@@ -476,23 +483,24 @@ impl server::Handler for ConnectionHandler {
         user: &str,
         password: &str,
     ) -> Result<server::Auth, Self::Error> {
+        let name = logged_name(user);
         if let Some(authenticated) = self.authenticated_user.as_ref() {
             log::warn!(
-                "auth_password() called for user '{user}' while user '{authenticated}' has been authenticated."
+                "auth_password() called for user '{name}' while user '{authenticated}' has been authenticated."
             );
-            return Ok(server::Auth::reject());
+            return Ok(rejected());
         }
 
-        match self.config.authenticate_pwd(user, password) {
-            Ok(_) => {
-                log::info!("User {user} authenticated.");
-                self.authenticated_user = Some(user.to_owned());
-                Ok(server::Auth::Accept)
-            }
-            Err(err) => {
-                log::info!("User {user} failed to authenticate: {err:?}.");
-                Ok(server::Auth::reject())
-            }
+        let store = self.config.auth_store().clone();
+        let verdict = auth_store::check_password(store, user.to_owned(), password.to_owned()).await;
+        self.warn_once(verdict);
+        if verdict.accepted {
+            log::info!("User {name} authenticated.");
+            self.authenticated_user = Some(user.to_owned());
+            Ok(server::Auth::Accept)
+        } else {
+            log::info!("User {name} failed to authenticate.");
+            Ok(rejected())
         }
     }
 

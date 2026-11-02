@@ -93,13 +93,18 @@ write_ssh_client_host_config() {
   local address="$2"
   local host_key="$3"
   local command_path="${4:-/bin:/usr/bin}"
+  local credentials="$SSH_CLIENT_HOST_ROOT/credentials"
+  mkdir -m 700 -p "$credentials"
   {
-    printf "version = 1\nlisten_on = '%s'\npath = '%s'\n" "$address" "$command_path"
-    printf 'host_key = """%s"""\n\n[users.motor]\n' "$(cat "$host_key")"
-    printf "salt = 'd6973342749609329b41f52d390fcd0a4732df20e15dc6766d37f09ac8f129a1'\n"
-    printf "password_hash = '37a651a4c34e3738af54c29d1cf7b1d46fc893440797a3b72b578ec151df0d41'\n"
-    printf "authorized_key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMqjlUjeBcqvHyy+RvVL54pfyK7vj5kAkJRt+qLlZWPH'\n"
+    printf "version = 2\nlisten_on = '%s'\npath = '%s'\n" "$address" "$command_path"
+    printf 'host_key = """%s"""\n\n' "$(cat "$host_key")"
+    printf "users_file = '%s'\nauthorized_keys_dir = '%s'\n" \
+      "$credentials/users.toml" "$credentials"
   } > "$path"
+  (umask 077
+    cp "$ROOT_DIR/img_files/motor-os-base/user/cfg/russhd/users.toml" "$credentials/users.toml"
+    cp "$ROOT_DIR/img_files/motor-os-base/user/cfg/ssh/authorized_keys.motor" \
+      "$credentials/authorized_keys.motor")
 }
 
 start_ssh_client_host() {

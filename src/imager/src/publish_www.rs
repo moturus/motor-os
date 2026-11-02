@@ -4,7 +4,7 @@ use crate::chmod;
 use crate::permissions::{FileClass, PermissionPolicy};
 use crate::set::credentials::{self, Credentials};
 use crate::set::image::{self, Fs};
-use crate::set::{invalid, Input};
+use crate::set::{invalid, Input, Selector};
 use moto_sdk::async_fs::{
     AccessPermissions, EntryId, EntryKind, FileSystem, Role, RolePermissions, BLOCK_SIZE,
 };
@@ -359,10 +359,10 @@ pub(super) fn run(args: &[OsString]) -> io::Result<()> {
     let nodes = walk(args.www)?;
     let host_key = Credentials::generate_host_key()?;
     let credentials = [
-        Credentials::read(Input::Password(args.password))?,
-        Credentials::read(Input::LoginKey(args.login_key))?,
+        Credentials::read(Input::Password(args.password), Selector::Default)?,
+        Credentials::read(Input::LoginKey(args.login_key), Selector::Default)?,
         host_key.credentials,
-        Credentials::read(Input::Tls(args.tls))?,
+        Credentials::read(Input::Tls(args.tls), Selector::Default)?,
     ];
     image::update_with(
         args.image,

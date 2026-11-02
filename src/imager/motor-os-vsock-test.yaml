@@ -16,6 +16,7 @@ directories:
   - "/user"
   - "/user/bin"
   - "/user/cfg"
+  - "/user/cfg/ssh"
   - "/user/tmp"
   - "/none"
   - "/none/cfg"

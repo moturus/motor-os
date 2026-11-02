@@ -1,0 +1,15 @@
+# Note: this is a test file. Replace its key before any deployment: see
+# `imager set --ssh-key` and `ssh-copy-id -t`.
+#
+# Public keys for login name `motor`, one `KEYTYPE BASE64 [COMMENT]` per line.
+# russhd refuses records with options such as `from=` or `command=`.
+#
+# the following test key has this matching private key:
+#   -----BEGIN OPENSSH PRIVATE KEY-----
+#   b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+#   QyNTUxOQAAACDKo5VI3gXKrx8svkb1S+eKX8iu74+ZAJCUbfqi5WVjxwAAAIibWu1hm1rt
+#   YQAAAAtzc2gtZWQyNTUxOQAAACDKo5VI3gXKrx8svkb1S+eKX8iu74+ZAJCUbfqi5WVjxw
+#   AAAEDcrKFmgS6474l297L4EWqp+dXnX5vSqvz4i9w4473TmMqjlUjeBcqvHyy+RvVL54pf
+#   yK7vj5kAkJRt+qLlZWPHAAAAAAECAwQF
+#   -----END OPENSSH PRIVATE KEY-----
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMqjlUjeBcqvHyy+RvVL54pfyK7vj5kAkJRt+qLlZWPH

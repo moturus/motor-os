@@ -114,6 +114,7 @@ pub struct CopyIdArgs {
     pub connection: ConnectionOptions,
     pub destination: Destination,
     pub public_key: Option<PathBuf>,
+    pub target: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -346,6 +347,7 @@ fn parse_keygen(args: &[String]) -> Result<KeygenArgs, ParseError> {
 fn parse_copy_id(args: &[String]) -> Result<CopyIdArgs, ParseError> {
     let mut connection = ConnectionOptions::default();
     let mut public_key = None;
+    let mut target = None;
     let mut index = 0;
     let mut options = true;
     while index < args.len() {
@@ -365,6 +367,14 @@ fn parse_copy_id(args: &[String]) -> Result<CopyIdArgs, ParseError> {
         {
             continue;
         }
+        if options
+            && option_value(args, &mut index, 't', |value| {
+                target = Some(value.to_owned());
+                Ok(())
+            })?
+        {
+            continue;
+        }
         if options && args[index].starts_with('-') {
             return Err(unsupported(&args[index]));
         }
@@ -375,6 +385,7 @@ fn parse_copy_id(args: &[String]) -> Result<CopyIdArgs, ParseError> {
         connection,
         destination,
         public_key,
+        target,
     })
 }
 
@@ -564,5 +575,11 @@ mod tests {
         let copy_id = parse_copy_id(&strings(&["-i", "id.pub", "-p", "2200", "u@h"])).unwrap();
         assert_eq!(copy_id.public_key, Some(PathBuf::from("id.pub")));
         assert_eq!(copy_id.connection.port, 2200);
+        assert_eq!(copy_id.target, None);
+
+        let copy_id = parse_copy_id(&strings(&["-t", "/a/list", "u@h"])).unwrap();
+        assert_eq!(copy_id.target.as_deref(), Some("/a/list"));
+        assert!(parse_copy_id(&strings(&["u@h", "-t", "/a/list"])).is_err());
+        assert!(parse_copy_id(&strings(&["-t"])).is_err());
     }
 }

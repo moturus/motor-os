@@ -678,8 +678,8 @@ Motor OS image builder usage:
     imager $MOTORH debug|release <config.yaml> --raw-output <image.img>
     imager chmod MODE VM_IMAGE FILE_PATH
     imager resize -i INPUT_IMG -o OUTPUT_IMG --size X[M|G]
-    imager set --ssh-password <PWD> -i <IMG FILE>
-    imager set --ssh-key <PUBLIC KEY FILE> -i <IMG FILE>
+    imager set [--ssh-user <NAME> | --ssh-new-user <NAME>] --ssh-password <PWD> -i <IMG FILE>
+    imager set [--ssh-user <NAME> | --ssh-new-user <NAME>] --ssh-key <PUBLIC KEY FILE> -i <IMG FILE>
     imager set --ssh-server-key <KEY FILE> -i <IMG FILE>
     imager set --ssl-keys <DIR> -i <IMG FILE>
     imager publish-www <WWW-DIR> --ssh-password <PWD> --ssh-key <PUBLIC KEY FILE>
@@ -693,9 +693,12 @@ for the image copy and a raw intermediate; qcow2 snapshots are not preserved.
 No other process may modify the image while set runs. Guest permissions and
 the host image's permission mode are preserved. This is not secure erasure
 of old credentials from filesystem blocks, snapshots, or backups.
---ssh-password sets motor's password from one literal argument (no CR/LF/BOM).
+--ssh-user selects an existing login name; the default is motor.
+--ssh-new-user creates a login name that has neither a record nor a key file.
+--ssh-password sets the name's password from one literal argument (no CR/LF/BOM).
 The password may appear in shell history and process arguments.
---ssh-key reads motor's OpenSSH public login key from a file.
+--ssh-key reads one OpenSSH public login key from a file and replaces the name's
+whole key file. To add a key to a list, use ssh-copy-id on a running system.
 --ssh-server-key reads an unencrypted OpenSSH private host key from a file.
 --ssl-keys reads ssl-cert.pem and ssl-key.pem from DIR, preserving the CA store.
 Key and certificate contents are copied without cryptographic validation.
@@ -703,8 +706,8 @@ Each command replaces only its selected credentials.
 
 publish-www replaces /user/www-home with a copy of WWW-DIR, writes /user/bin/www
 to serve it with httpd-axum on port 443, sets the password, login key and TLS
-pair as set does, and installs a newly generated Ed25519 SSH host key, all in
-one staged update. It prints the new host public key and its fingerprint.
+pair as set does for motor, and installs a newly generated Ed25519 SSH host
+key, all in one staged update. It prints the new host public key and its fingerprint.
 "
     );
     std::process::exit(1);
@@ -1227,7 +1230,7 @@ mod tests {
             .input_files
             .iter()
             .any(|path| path == "/user/bin/ssh"));
-        assert!(!config
+        assert!(config
             .directories
             .iter()
             .any(|path| path == "/user/cfg/ssh"));
@@ -1250,6 +1253,21 @@ mod tests {
         for yaml in IMAGE_CONFIGS {
             let config: Config = serde_yaml::from_str(yaml).unwrap();
             assert_eq!(config.permission_policy, "motor-os-permissions.yaml");
+        }
+    }
+
+    #[test]
+    fn every_image_has_the_ssh_directory() {
+        for yaml in IMAGE_CONFIGS {
+            let config: Config = serde_yaml::from_str(yaml).unwrap();
+            assert!(config
+                .directories
+                .iter()
+                .any(|path| path == "/user/cfg/ssh"));
+            assert!(config
+                .static_dirs
+                .iter()
+                .any(|path| path == "img_files/motor-os-base"));
         }
     }
 

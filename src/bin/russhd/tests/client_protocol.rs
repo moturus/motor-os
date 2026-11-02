@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,6 +12,15 @@ use russh::{Channel, ChannelId};
 
 const RUSSHD: &str = env!("CARGO_BIN_EXE_russhd");
 const SSH: &str = env!("CARGO_BIN_EXE_ssh");
+const SHIPPED_USERS: &str =
+    include_str!("../../../../img_files/motor-os-base/user/cfg/russhd/users.toml");
+const SHIPPED_KEYS: &str =
+    include_str!("../../../../img_files/motor-os-base/user/cfg/ssh/authorized_keys.motor");
+
+fn write_private(path: &Path, text: &str) {
+    std::fs::write(path, text).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
 
 struct Fixture {
     child: Child,
@@ -25,23 +34,35 @@ struct Fixture {
 impl Fixture {
     fn start() -> Self {
         static ID: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
+        // Credentials must sit in a private tree, which a shared /tmp cannot be.
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
             "russhd-client-protocol-{}-{}",
             std::process::id(),
             ID.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::create_dir(&root).unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        write_private(&root.join("users.toml"), SHIPPED_USERS);
+        write_private(&root.join("authorized_keys.motor"), SHIPPED_KEYS);
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/sshd.toml");
         let config = std::fs::read_to_string(source)
             .unwrap()
             .replace("0.0.0.0:2222", "127.0.0.1:0")
-            .replace("/system/bin:/user/bin", "/bin:/usr/bin");
+            .replace("/system/bin:/user/bin", "/bin:/usr/bin")
+            .replace(
+                "/user/cfg/russhd/users.toml",
+                root.join("users.toml").to_str().unwrap(),
+            )
+            .replace("/user/cfg/ssh", root.to_str().unwrap());
         let config_path = root.join("sshd.toml");
         std::fs::write(&config_path, config).unwrap();
 
         let mut child = Command::new(RUSSHD)
             .arg(&config_path)
             .current_dir(&root)
+            .env("HOME", &root)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -1196,15 +1217,19 @@ impl Fixture {
         self.session(Some((cols, rows)), command).await
     }
 
-    /// An authenticated connection with no channel open yet.
-    async fn connect(&self) -> russh::client::Handle<TestClient> {
-        let mut session = russh::client::connect(
+    async fn unauthenticated(&self) -> russh::client::Handle<TestClient> {
+        russh::client::connect(
             std::sync::Arc::new(russh::client::Config::default()),
             ("127.0.0.1", self.port),
             TestClient,
         )
         .await
-        .unwrap();
+        .unwrap()
+    }
+
+    /// An authenticated connection with no channel open yet.
+    async fn connect(&self) -> russh::client::Handle<TestClient> {
+        let mut session = self.unauthenticated().await;
         let key = russh::keys::load_secret_key(&self.identity, None).unwrap();
         let auth = session
             .authenticate_publickey(
@@ -1541,4 +1566,286 @@ fn proxyjump_survives_a_jump_that_starves_the_window() {
     );
     assert_eq!(output.stdout, payload);
     jump.assert_closed();
+}
+
+fn assert_both_methods(result: russh::client::AuthResult, context: &str) {
+    let russh::client::AuthResult::Failure {
+        remaining_methods,
+        partial_success,
+    } = result
+    else {
+        panic!("{context}: authenticated");
+    };
+    assert_eq!(
+        &*remaining_methods,
+        &[russh::MethodKind::Password, russh::MethodKind::PublicKey],
+        "{context}"
+    );
+    assert!(!partial_success, "{context}");
+}
+
+#[test]
+fn every_name_sees_the_same_methods_at_every_step() {
+    let fixture = Fixture::start();
+    let stranger =
+        russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::ssh_key::Algorithm::Ed25519)
+            .unwrap();
+    let stranger = std::sync::Arc::new(stranger);
+    // Two sessions per name: a rejection takes 3 s, and block_on allows 10.
+    for user in ["motor", "nobody"] {
+        block_on(async {
+            let mut session = fixture.unauthenticated().await;
+            let none = session.authenticate_none(user).await.unwrap();
+            assert_both_methods(none, user);
+            let password = session.authenticate_password(user, "wrong").await.unwrap();
+            assert_both_methods(password, user);
+        });
+        block_on(async {
+            let mut session = fixture.unauthenticated().await;
+            let key = russh::keys::PrivateKeyWithHashAlg::new(stranger.clone(), None);
+            let key = session.authenticate_publickey(user, key).await.unwrap();
+            assert_both_methods(key, user);
+        });
+    }
+
+    // The list costs no credential read, so a broken registry cannot show.
+    write_private(&fixture.root.join("users.toml"), "not a registry");
+    block_on(async {
+        for user in ["motor", "nobody"] {
+            let mut session = fixture.unauthenticated().await;
+            let none = session.authenticate_none(user).await.unwrap();
+            assert_both_methods(none, user);
+        }
+    });
+}
+
+/// A client that takes its time to sign: the server has already answered the
+/// offer when this runs, and `remove` then empties the key file.
+struct SlowSigner {
+    key: std::sync::Arc<russh::keys::PrivateKey>,
+    key_file: PathBuf,
+    remove: bool,
+}
+
+#[derive(Debug)]
+struct SignerError;
+
+impl From<russh::SendError> for SignerError {
+    fn from(_: russh::SendError) -> Self {
+        Self
+    }
+}
+
+impl russh::Signer for SlowSigner {
+    type Error = SignerError;
+
+    async fn auth_sign(
+        &mut self,
+        _key: &russh::keys::agent::AgentIdentity,
+        _hash_alg: Option<russh::keys::HashAlg>,
+        mut to_sign: Vec<u8>,
+    ) -> Result<Vec<u8>, Self::Error> {
+        fn put(out: &mut Vec<u8>, bytes: &[u8]) {
+            out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            out.extend_from_slice(bytes);
+        }
+        if self.remove {
+            write_private(&self.key_file, "");
+        }
+        let signature: russh::keys::ssh_key::Signature =
+            russh::keys::signature::Signer::sign(&*self.key, &to_sign);
+        let mut blob = Vec::new();
+        put(&mut blob, b"ssh-ed25519");
+        put(&mut blob, signature.as_bytes());
+        put(&mut to_sign, &blob);
+        Ok(to_sign)
+    }
+}
+
+#[test]
+fn a_key_removed_between_offer_and_signature_does_not_authenticate() {
+    let fixture = Fixture::start();
+    let key = std::sync::Arc::new(russh::keys::load_secret_key(&fixture.identity, None).unwrap());
+    block_on(async {
+        // The signer must work, or the rejection below would prove nothing.
+        for remove in [false, true] {
+            let mut session = fixture.unauthenticated().await;
+            let mut signer = SlowSigner {
+                key: key.clone(),
+                key_file: fixture.root.join("authorized_keys.motor"),
+                remove,
+            };
+            let result = session
+                .authenticate_publickey_with("motor", key.public_key().clone(), None, &mut signer)
+                .await
+                .unwrap();
+            assert_eq!(result.success(), !remove, "remove = {remove}");
+        }
+    });
+}
+
+/// A new identity, as its private key's path and its public line.
+fn new_identity(fixture: &Fixture, name: &str) -> (PathBuf, String) {
+    let key =
+        russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::ssh_key::Algorithm::Ed25519)
+            .unwrap();
+    let path = fixture.root.join(name);
+    let text = key
+        .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+        .unwrap();
+    write_private(&path, &text);
+    let public = key.public_key().to_openssh().unwrap();
+    write_private(&path.with_extension("pub"), &format!("{public}\n"));
+    (path, public)
+}
+
+fn copy_id(fixture: &Fixture, key: &Path, target: &str) -> Output {
+    fixture.run(
+        &[
+            "--motor-applet=ssh-copy-id".to_owned(),
+            "-F".to_owned(),
+            "none".to_owned(),
+            "-p".to_owned(),
+            fixture.port.to_string(),
+            "-o".to_owned(),
+            format!("IdentityFile={}", fixture.identity.display()),
+            "-o".to_owned(),
+            "IdentitiesOnly=yes".to_owned(),
+            "-o".to_owned(),
+            "BatchMode=yes".to_owned(),
+            "-o".to_owned(),
+            "StrictHostKeyChecking=accept-new".to_owned(),
+            "-o".to_owned(),
+            format!("UserKnownHostsFile={}", fixture.known_hosts.display()),
+            "-i".to_owned(),
+            key.with_extension("pub").display().to_string(),
+            "-t".to_owned(),
+            target.to_owned(),
+            "motor@127.0.0.1".to_owned(),
+        ],
+        b"",
+    )
+}
+
+#[test]
+fn copy_id_writes_only_the_named_list() {
+    let fixture = Fixture::start();
+    let (key, public) = new_identity(&fixture, "alice");
+    let (_, other) = new_identity(&fixture, "other");
+    let path = fixture.root.join("list");
+    let target = path.to_str().unwrap();
+    let default_list = fixture.root.join(".ssh");
+    let succeeds = |expected: &str| {
+        let output = copy_id(&fixture, &key, target);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+    };
+
+    // A missing file, an empty file, and each repeat of an installation.
+    let installed = format!("{public}\n");
+    succeeds(&installed);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    succeeds(&installed);
+    std::fs::write(&path, "").unwrap();
+    succeeds(&installed);
+
+    // Comments survive, a commented-out key is not a key, and neither a CRLF
+    // nor a missing final newline hides what is there.
+    let start = format!("# {public}\n# note\n{other}");
+    std::fs::write(&path, &start).unwrap();
+    let appended = format!("{start}\n{public}\n");
+    succeeds(&appended);
+    succeeds(&appended);
+    let crlf = format!("{public}\r\n# note\r\n");
+    std::fs::write(&path, &crlf).unwrap();
+    succeeds(&crlf);
+    let renamed = format!("{public} another comment");
+    std::fs::write(&path, &renamed).unwrap();
+    succeeds(&renamed);
+
+    assert!(!default_list.exists(), "-t must leave .ssh alone");
+}
+
+#[test]
+fn copy_id_refuses_to_widen_a_restricted_key() {
+    let fixture = Fixture::start();
+    let (key, public) = new_identity(&fixture, "alice");
+    let (_, other) = new_identity(&fixture, "other");
+    let path = fixture.root.join("list");
+    let target = path.to_str().unwrap();
+    let blob = public.split_whitespace().nth(1).unwrap();
+    let mut non_utf8 = format!("from=\"10.0.0.1\" {public} caf").into_bytes();
+    non_utf8.extend_from_slice(b"\xe9\n");
+    for restricted in [
+        format!("from=\"10.0.0.1\" {public}\n").into_bytes(),
+        format!("command=\"echo not {other}\" {public}\n").into_bytes(),
+        format!("restrict {public} comment\n").into_bytes(),
+        non_utf8,
+        format!("from=\"10.0.0.1\" rsa-sha2-256 {blob}\n").into_bytes(),
+    ] {
+        std::fs::write(&path, &restricted).unwrap();
+        let output = copy_id(&fixture, &key, target);
+        assert!(!output.status.success(), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("not as a plain record"), "{stderr}");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("installed"));
+        assert_eq!(std::fs::read(&path).unwrap(), restricted);
+    }
+
+    // A plain record alongside it means the key is already installed.
+    let both = format!("from=\"10.0.0.1\" {public}\n{public}\n");
+    std::fs::write(&path, &both).unwrap();
+    let output = copy_id(&fixture, &key, target);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), both);
+
+    // A restriction on another key, in any encoding, is no reason to refuse.
+    let mut unrelated = format!("from=\"10.0.0.1\" {other} caf").into_bytes();
+    unrelated.extend_from_slice(b"\xe9\n");
+    std::fs::write(&path, &unrelated).unwrap();
+    let output = copy_id(&fixture, &key, target);
+    assert!(output.status.success(), "{output:?}");
+    unrelated.extend_from_slice(format!("{public}\n").as_bytes());
+    assert_eq!(std::fs::read(&path).unwrap(), unrelated);
+}
+
+#[test]
+fn copy_id_needs_the_parent_and_resolves_relative_targets() {
+    let fixture = Fixture::start();
+    let (key, public) = new_identity(&fixture, "alice");
+    let missing = fixture.root.join("missing/list");
+    let output = copy_id(&fixture, &key, missing.to_str().unwrap());
+    assert!(!output.status.success(), "{output:?}");
+    assert!(!missing.parent().unwrap().exists());
+
+    let output = copy_id(&fixture, &key, "relative-list");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("relative-list")).unwrap(),
+        format!("{public}\n")
+    );
+}
+
+#[test]
+fn a_key_installed_by_copy_id_logs_in_on_its_own() {
+    let fixture = Fixture::start();
+    let (key, _) = new_identity(&fixture, "alice");
+    let list = fixture.root.join("authorized_keys.motor");
+    let output = copy_id(&fixture, &key, list.to_str().unwrap());
+    assert!(output.status.success(), "{output:?}");
+
+    let mut args = fixture.ssh_args();
+    let identity = args.iter().position(|arg| arg == "-i").unwrap() + 1;
+    args[identity] = key.display().to_string();
+    args.extend([
+        "motor@127.0.0.1".to_owned(),
+        "printf".to_owned(),
+        "ok".to_owned(),
+    ]);
+    let output = fixture.run(&args, b"");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"ok");
 }

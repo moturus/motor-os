@@ -486,12 +486,16 @@ command execution without one (<code>ssh host command</code>), and the SFTP subs
 <code>scp</code> and <code>sftp</code> work for copying files in and out.</p>
 <pre><code>ssh -p 2222 -o IdentitiesOnly=yes -i test.key motor@192.168.4.2
 scp -P 2222 -o IdentitiesOnly=yes -i test.key ./hello motor@192.168.4.2:/user/bin/</code></pre>
-<p>The shipped <code>sshd.toml</code> contains a test host key, a test user, and a test
-password; regenerate all of them before any deployment that is reachable from a network
-you do not control.</p>
-<p>Use <a href="imager.html#replace-credentials">imager's credential commands</a>
-on the host to replace the password, login public key, and server private host key
-in a stopped VM's image. The same interface can install a TLS certificate and key.</p>
+<p>The shipped <code>sshd.toml</code> contains a test host key, and the name <code>motor</code>
+comes with a test password in <code>/user/cfg/russhd/users.toml</code> and a test key in
+<code>/user/cfg/ssh/authorized_keys.motor</code>; regenerate all of them before any
+deployment that is reachable from a network you do not control.</p>
+<p>A login name selects credentials, and each can have a password and several keys; see
+<a href="commands.html#log-in-to-a-motor-os-server">Log in to a Motor OS server</a>. All
+of them act as the one Interactive user. Use
+<a href="imager.html#replace-credentials">imager's credential commands</a>
+on the host to create names and to replace passwords, login keys, and the server private
+host key in a stopped VM's image. The same interface can install a TLS certificate and key.</p>
 
 <h2>Networking from the VM</h2>
 <p>Every image configures its network from <code>/system/cfg/sys-net.toml</code>;

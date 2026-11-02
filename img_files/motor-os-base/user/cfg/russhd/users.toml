@@ -1,0 +1,17 @@
+# Note: this is a test file. Its password verifier is for the test password.
+# Replace it before any deployment: see `imager set --ssh-password`.
+#
+# One [users.NAME] table per login name. A name is 1 to 64 ASCII letters,
+# digits, `_` or `-`. Login names select credentials: they are not OS users.
+# An absent or empty password_hash disables password authentication. Public
+# keys are in /user/cfg/ssh/authorized_keys.NAME.
+#
+# password_hash is the hex SHA-256 of the salt's bytes followed by the password.
+# Replace this file atomically: a partly written one denies new logins.
+
+version = 1
+
+# the default/test user: username: motor, password: vroomvroom
+[users.motor]
+salt = 'd6973342749609329b41f52d390fcd0a4732df20e15dc6766d37f09ac8f129a1'
+password_hash = '37a651a4c34e3738af54c29d1cf7b1d46fc893440797a3b72b578ec151df0d41'

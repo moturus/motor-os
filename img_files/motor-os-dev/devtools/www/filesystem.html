@@ -437,7 +437,7 @@ with the permission model below showing through <code>Permissions</code>.</p>
   <tr><td><code>/system/logs</code></td><td>Service logs written by strobe. Interactive may read them; None cannot enter the directory.</td></tr>
   <tr><td><code>/system/tmp</code></td><td>System scratch, closed to other roles.</td></tr>
   <tr><td><code>/user/bin</code></td><td>User programs: red, rmux, kibim, httpd, httpd-axum. Interactive may install programs here.</td></tr>
-  <tr><td><code>/user/cfg</code></td><td>Interactive configuration and credentials (red, rmux, kibim, lorry). Hidden from None.</td></tr>
+  <tr><td><code>/user/cfg</code></td><td>Interactive configuration and credentials (red, rmux, kibim, lorry, <code>ssh/</code> keys, and <code>russhd/users.toml</code>). Hidden from None.</td></tr>
   <tr><td><code>/user/tmp</code></td><td>Interactive scratch, closed to None.</td></tr>
   <tr><td><code>/none</code></td><td>The None role's home: <code>cfg</code> for its configuration and <code>tmp</code> for its scratch, both writable by None.</td></tr>
   <tr><td><code>/devtools</code></td><td>Developer image only: <code>bin</code>, <code>llvm</code>, <code>rust</code>, <code>lorry</code>, <code>tests</code>, <code>www</code>, and the writable <code>src</code> tree.</td></tr>
@@ -491,7 +491,9 @@ for two secrets. Smaller images omit trees; they never relax a mode. The main ru
 </div>
 <p><code>/system/cfg/sshd.toml</code> and <code>/system/cfg/ssl/ssl-key.pem</code> are
 <code>rw-r-----</code>: readable by the Interactive services that need them, invisible to
-None. With the initial modes, Interactive cannot create a new top-level directory or
+None. <code>/user/cfg/russhd/users.toml</code> and <code>/user/cfg/ssh/authorized_keys.motor</code>
+are <code>rwxrw----</code>, the mode SFTP gives a new file, so that shipped and installed
+credentials match. With the initial modes, Interactive cannot create a new top-level directory or
 replace <code>/system</code>; it owns <code>/devtools</code>, so a user can install a newer
 toolchain there; only System can create or rotate files in <code>/system/logs</code>.</p>
 <p>The <a href="imager.html">imager</a> classifies each source file by its host execute bit (a host-executable file

@@ -15,10 +15,17 @@ pub const SSH: &str = "/system/cfg/sshd.toml";
 pub const CERT: &str = "/system/cfg/ssl/ssl-cert.pem";
 pub const KEY: &str = "/system/cfg/ssl/ssl-key.pem";
 pub const CA: &str = "/system/cfg/ssl/ca-certificates.crt";
+pub const USERS: &str = "/user/cfg/russhd/users.toml";
+pub const MOTOR_KEYS: &str = "/user/cfg/ssh/authorized_keys.motor";
+pub const CLIENT_KEY: &str = "/user/cfg/ssh/id_ed25519";
 pub const OFFSET: u64 = 4096;
 pub const BLOCKS: u64 = 256;
 pub const BASE: &str = include_str!("../../../../img_files/motor-os-base/system/cfg/sshd.toml");
 pub const DEV: &str = include_str!("../../../../img_files/motor-os-dev/system/cfg/sshd.toml");
+pub const SHIPPED_USERS: &str =
+    include_str!("../../../../img_files/motor-os-base/user/cfg/russhd/users.toml");
+pub const SHIPPED_KEYS: &str =
+    include_str!("../../../../img_files/motor-os-base/user/cfg/ssh/authorized_keys.motor");
 pub const NEW_CERT: &[u8] = include_bytes!("../../../bin/httpd-axum/tests/fixtures/cert.pem");
 pub const NEW_KEY: &[u8] = include_bytes!("../../../bin/httpd-axum/tests/fixtures/key.pem");
 
@@ -26,6 +33,14 @@ pub type Fs = motor_fs::MotorFs<AsyncFileBlockDevice>;
 
 pub fn secret_permissions() -> RolePermissions {
     RolePermissions::new(Access::Rw, Access::R, Access::None)
+}
+
+pub fn credential_permissions() -> RolePermissions {
+    RolePermissions::new(Access::Rwx, Access::Rw, Access::None)
+}
+
+fn private_directory() -> RolePermissions {
+    RolePermissions::new(Access::Rwx, Access::Rwx, Access::None)
 }
 
 pub fn with_fs<T>(raw: &Path, operation: impl AsyncFnOnce(&mut Fs) -> io::Result<T>) -> T {
@@ -94,7 +109,18 @@ impl Fixture {
                         .await?;
                 let mut fs = Fs::format(Box::new(device)).await?;
                 let mut dirs = BTreeMap::from([(String::new(), motor_fs::ROOT_DIR_ID)]);
-                for directory in ["/system", "/system/cfg", "/system/cfg/ssl"] {
+                for (directory, permissions) in [
+                    ("/system", RolePermissions::all(Access::Rwx)),
+                    ("/system/cfg", RolePermissions::all(Access::Rwx)),
+                    ("/system/cfg/ssl", RolePermissions::all(Access::Rwx)),
+                    (
+                        "/user",
+                        RolePermissions::new(Access::Rwx, Access::Rwx, Access::Rx),
+                    ),
+                    ("/user/cfg", private_directory()),
+                    ("/user/cfg/russhd", private_directory()),
+                    ("/user/cfg/ssh", private_directory()),
+                ] {
                     let (parent, name) = directory.rsplit_once('/').unwrap();
                     let id = fs
                         .create_entry(
@@ -102,7 +128,7 @@ impl Fixture {
                             dirs[parent],
                             EntryKind::Directory,
                             name,
-                            RolePermissions::all(Access::Rwx),
+                            permissions,
                         )
                         .await?;
                     dirs.insert(directory.into(), id);
@@ -119,6 +145,17 @@ impl Fixture {
                         CA,
                         &b"unchanged trust store"[..],
                         RolePermissions::all(Access::R),
+                    ),
+                    (USERS, SHIPPED_USERS.as_bytes(), credential_permissions()),
+                    (
+                        MOTOR_KEYS,
+                        SHIPPED_KEYS.as_bytes(),
+                        credential_permissions(),
+                    ),
+                    (
+                        CLIENT_KEY,
+                        &b"client private key"[..],
+                        RolePermissions::new(Access::Rwx, Access::Rw, Access::None),
                     ),
                 ] {
                     let (parent, name) = path.rsplit_once('/').unwrap();
@@ -187,8 +224,45 @@ impl Fixture {
         raw
     }
 
+    /// Edits the image's filesystem, whatever the image's format.
+    pub fn edit(&self, operation: impl AsyncFnOnce(&mut Fs) -> io::Result<()>) {
+        let raw = self.raw();
+        with_fs(&raw, operation);
+        if self.qcow2 {
+            fs::remove_file(&self.image).unwrap();
+            convert(&raw, &self.image, "raw", "qcow2");
+            fs::set_permissions(&self.image, fs::Permissions::from_mode(0o640)).unwrap();
+        }
+    }
+
+    /// Replaces a file in the image, as a change made in the guest would.
+    pub fn set_file(&self, path: &str, bytes: &[u8]) {
+        self.edit(async |fs| {
+            let id = resolve(fs, path).await?;
+            let metadata = fs.metadata(Role::System, id).await?;
+            let permissions = metadata.permissions()?;
+            let writable = RolePermissions::new(Access::Rw, Access::R, Access::None);
+            fs.set_all_permissions_image_admin(Role::System, id, writable)
+                .await?;
+            fs.resize(Role::System, id, 0).await?;
+            for (index, chunk) in bytes.chunks(4096).enumerate() {
+                assert_eq!(
+                    fs.write(Role::System, id, (index * 4096) as u64, chunk)
+                        .await?,
+                    chunk.len()
+                );
+            }
+            fs.set_all_permissions_image_admin(Role::System, id, permissions)
+                .await
+        });
+    }
+
     pub fn run(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_imager"))
+        // Unit tests share this fixture, and never run the binary.
+        let Some(imager) = option_env!("CARGO_BIN_EXE_imager") else {
+            panic!("imager's unit tests have no binary to run");
+        };
+        Command::new(imager)
             .arg("set")
             .args(args)
             .arg("-i")

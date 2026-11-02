@@ -1,35 +1,50 @@
-//! russhd config. See the test below on how to add users.
-use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc};
+//! russhd's service configuration. Login credentials have their own files; see
+//! `auth_store`.
+use std::{net::SocketAddr, path::Path, str::FromStr, sync::Arc};
 
 use serde::Deserialize;
 
-#[derive(Clone, Deserialize, Debug, PartialEq, Eq)]
-struct UserCfgV1 {
-    #[serde(default)]
-    salt: String, // hex string
-    #[serde(default)]
-    password_hash: String, // hex string
-    #[serde(default)]
-    authorized_key: String, // openssh pub key
-}
+use crate::auth_store::{self, AuthStore};
 
-#[derive(Clone, Deserialize, Debug, PartialEq, Eq)]
-struct ConfigV1 {
-    version: u32,      // Must be 1
+const CONFIG_VERSION: u32 = 2;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceConfig {
+    version: u32,      // Must be 2
     listen_on: String, // e.g. '0.0.0.0:2222'
     host_key: String,  // openssh host key (private)
 
     #[serde(default)]
     path: String,
 
-    users: HashMap<String, UserCfgV1>,
+    users_file: String,          // absolute path
+    authorized_keys_dir: String, // absolute path
 }
 
 pub struct Config {
-    users: HashMap<String, User>,
     listen_on: SocketAddr,
     host_key: russh::keys::PrivateKey,
     path: String,
+    auth_store: Arc<AuthStore>,
+}
+
+fn invalid(message: String) -> russh::Error {
+    russh::Error::InvalidConfig(message)
+}
+
+/// Absolute and without empty, `.` or `..` components: the path checks walk
+/// them. `Path::components` would hide a `.`, so this looks at the text.
+fn credential_path<'a>(field: &str, value: &'a str) -> Result<&'a Path, russh::Error> {
+    let normalized = value
+        .strip_prefix('/')
+        .is_some_and(|rest| rest.split('/').all(|part| !matches!(part, "" | "." | "..")));
+    if !normalized {
+        return Err(invalid(format!(
+            "{field} must be a normalized absolute path"
+        )));
+    }
+    Ok(Path::new(value))
 }
 
 impl Config {
@@ -41,74 +56,28 @@ AAAEAIyXvYqbau3uMgFiaVFLN+W1NGPW6XNXNfGKiRpyUXW44vmwh+7C/lNpLiI15zZOU8
 nl+jD/WcRBBUjL54uT3TAAAAAAECAwQF
 -----END OPENSSH PRIVATE KEY-----"#;
 
-    const DEFAULT_PWD: &str = "vroomvroom";
-    const DEFAULT_USER_PUBKEY: &str =
-        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMqjlUjeBcqvHyy+RvVL54pfyK7vj5kAkJRt+qLlZWPH";
-
+    /// Whether the host key is the shipped test key. Shipped login credentials
+    /// are reported per connection, when they are loaded.
     pub fn is_default(&self) -> bool {
         let default_host_key =
             russh::keys::PrivateKey::from_openssh(Self::DEFAULT_HOST_KEY).unwrap();
-        if default_host_key == *self.host_key() {
-            return true;
-        }
-
-        let default_pubkey =
-            russh::keys::PublicKey::from_openssh(Self::DEFAULT_USER_PUBKEY).unwrap();
-
-        for username in self.users.keys() {
-            if self.authenticate_pwd(username, Self::DEFAULT_PWD).is_ok() {
-                return true;
-            }
-
-            if self.authenticate_pubkey(username, &default_pubkey).is_ok() {
-                return true;
-            };
-        }
-
-        false
+        default_host_key == *self.host_key()
     }
 
-    fn new(conf: ConfigV1) -> Result<Arc<Self>, russh::Error> {
-        let listen_on = SocketAddr::from_str(&conf.listen_on).map_err(|e| {
-            russh::Error::InvalidConfig(format!("Error parsing {}: {e:?}", conf.listen_on))
-        })?;
+    fn new(conf: ServiceConfig) -> Result<Arc<Self>, russh::Error> {
+        let listen_on = SocketAddr::from_str(&conf.listen_on)
+            .map_err(|e| invalid(format!("Error parsing {}: {e:?}", conf.listen_on)))?;
         let host_key = russh::keys::PrivateKey::from_openssh(&conf.host_key)?;
-
-        let mut users = HashMap::new();
-        for (username, user_cfg) in &conf.users {
-            let salt = hex::decode(&user_cfg.salt).map_err(|e| {
-                russh::Error::InvalidConfig(format!("Bad salt {}: {e:?}", user_cfg.salt))
-            })?;
-            let password_hash = hex::decode(&user_cfg.password_hash).map_err(|e| {
-                russh::Error::InvalidConfig(format!(
-                    "Bad password hash {}: {e:?}",
-                    user_cfg.password_hash
-                ))
-            })?;
-            let pub_key = if user_cfg.authorized_key.is_empty() {
-                None
-            } else {
-                Some(russh::keys::PublicKey::from_openssh(
-                    &user_cfg.authorized_key,
-                )?)
-            };
-
-            users.insert(
-                username.clone(),
-                User {
-                    username: username.clone(),
-                    salt,
-                    password_hash,
-                    pubkey: pub_key,
-                },
-            );
-        }
+        let auth_store = AuthStore::new(
+            credential_path("users_file", &conf.users_file)?,
+            credential_path("authorized_keys_dir", &conf.authorized_keys_dir)?,
+        );
 
         Ok(Arc::new(Self {
-            users,
             listen_on,
             host_key,
             path: conf.path,
+            auth_store: Arc::new(auth_store),
         }))
     }
 
@@ -124,90 +93,23 @@ nl+jD/WcRBBUjL54uT3TAAAAAAECAwQF
         &self.path
     }
 
-    pub fn authenticate_pwd(&self, username: &str, password: &str) -> Result<(), russh::Error> {
-        let Some(user) = self.users.get(username) else {
-            return Err(russh::Error::NotAuthenticated);
-        };
-
-        user.autenticate_pwd(password)
-    }
-
-    pub fn authenticate_pubkey(
-        &self,
-        username: &str,
-        key: &russh::keys::PublicKey,
-    ) -> Result<(), russh::Error> {
-        let Some(user) = self.users.get(username) else {
-            return Err(russh::Error::NotAuthenticated);
-        };
-
-        user.autenticate_pubkey(key)
-    }
-
-    pub fn can_auth_pwd(&self, username: &str) -> bool {
-        let Some(user) = self.users.get(username) else {
-            return false;
-        };
-
-        !user.password_hash.is_empty()
-    }
-
-    pub fn can_auth_pubkey(&self, username: &str) -> bool {
-        let Some(user) = self.users.get(username) else {
-            return false;
-        };
-
-        user.pubkey.is_some()
-    }
-}
-
-pub struct User {
-    #[allow(unused)]
-    username: String,
-    salt: Vec<u8>,
-    password_hash: Vec<u8>,
-    pubkey: Option<russh::keys::PublicKey>,
-}
-
-impl User {
-    fn autenticate_pwd(&self, password: &str) -> Result<(), russh::Error> {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(&self.salt);
-        hasher.update(password.as_bytes());
-        let password_hash = hasher.finalize();
-
-        if !self.password_hash.eq(password_hash.as_slice()) {
-            return Err(russh::Error::NotAuthenticated);
-        }
-
-        Ok(())
-    }
-
-    fn autenticate_pubkey(&self, key: &russh::keys::PublicKey) -> Result<(), russh::Error> {
-        let Some(pubkey) = self.pubkey.as_ref() else {
-            return Err(russh::Error::NotAuthenticated);
-        };
-
-        // PublicKey equality includes the comment, which clients never send.
-        if pubkey.key_data() == key.key_data() {
-            Ok(())
-        } else {
-            Err(russh::Error::NotAuthenticated)
-        }
+    pub fn auth_store(&self) -> &Arc<AuthStore> {
+        &self.auth_store
     }
 }
 
 pub fn read_from_file(path: &str) -> Result<Arc<Config>, russh::Error> {
-    let toml_str = std::fs::read_to_string(path)?;
-    let config_v1 = toml::from_str::<ConfigV1>(&toml_str)
-        .map_err(|e| russh::Error::InvalidConfig(format!("Error parsing config toml: {e:?}.")))?;
-    if config_v1.version != 1 {
-        return Err(russh::Error::InvalidConfig(format!(
-            "Unsupported config version {}.",
-            config_v1.version
+    let text = std::fs::read_to_string(path)?;
+    let config = toml::from_str::<ServiceConfig>(&text).map_err(|error| {
+        let line = auth_store::toml_error_line(&text, &error).unwrap_or_default();
+        invalid(format!("malformed or unknown entry at line {line}"))
+    })?;
+    if config.version != CONFIG_VERSION {
+        return Err(invalid(format!(
+            "unsupported config version {}",
+            config.version
         )));
     }
 
-    Config::new(config_v1)
+    Config::new(config)
 }

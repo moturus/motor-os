@@ -354,6 +354,18 @@ else
   FULL_TEST_IMAGE_PREBUILT=1 "$WD/test-terminal-size.sh" --vmm "$VMM"
 fi
 
+# Several SSH keys per login name, and remote key installation. It provisions a
+# disposable image and reboots it, so it boots its own VM, for the same reason.
+# Credentials are the same on every image, and a staged update of the developer
+# image would copy all 16 GiB of it, so this runs in the standard phase only.
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
+  if [ "$BUILD" = "release" ]; then
+    FULL_TEST_IMAGE_PREBUILT=1 "$WD/test-sshd-keys.sh" --release --vmm "$VMM"
+  else
+    FULL_TEST_IMAGE_PREBUILT=1 "$WD/test-sshd-keys.sh" --vmm "$VMM"
+  fi
+fi
+
 # motor-fs's own tests: the filesystem's B+tree, transaction log, resize and
 # readdir paths are covered here and nowhere else, against a host file-backed
 # block device, in about a second. Must run from the crate directory --

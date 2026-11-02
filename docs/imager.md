@@ -11,8 +11,8 @@ imager <REPO ROOT> debug|release <CONFIG YAML>
 imager <REPO ROOT> debug|release <CONFIG YAML> --raw-output <FILENAME>
 imager chmod <MODE> <IMAGE> <GUEST PATH>
 imager resize -i <INPUT IMAGE> -o <OUTPUT IMAGE> --size <SIZE>
-imager set --ssh-password <PASSWORD> -i <IMAGE>
-imager set --ssh-key <PUBLIC KEY FILE> -i <IMAGE>
+imager set [--ssh-user <NAME> | --ssh-new-user <NAME>] --ssh-password <PASSWORD> -i <IMAGE>
+imager set [--ssh-user <NAME> | --ssh-new-user <NAME>] --ssh-key <PUBLIC KEY FILE> -i <IMAGE>
 imager set --ssh-server-key <PRIVATE KEY FILE> -i <IMAGE>
 imager set --ssl-keys <DIRECTORY> -i <IMAGE>
 imager publish-www <SITE DIRECTORY> --ssh-password <PASSWORD> \
@@ -194,20 +194,47 @@ and content checks succeed. A failure before publication leaves the original
 image unchanged, including a failure during the second TLS file write.
 Allow space beside the image for a copy and, with qcow2, its raw intermediate.
 
-The image must be a regular file, not a symlink. Destination files must
-already exist, and their contents and each input artifact are limited to
-1 MiB. Artifact input files must be nonempty regular files. Secret destinations
-(`sshd.toml` and `ssl-key.pem`) must have permissions no broader than
-`rw-r-----`; use `chmod` to correct a permissive image before installing
-secrets. All command arguments must be UTF-8.
+The image must be a regular file, not a symlink. Destination files other than
+a login name's key file must already exist, and their contents and each input
+artifact are limited to 1 MiB. Artifact input files must be nonempty regular
+files. Secret destinations (`sshd.toml` and `ssl-key.pem`) must have permissions
+no broader than `rw-r-----`; use `chmod` to correct a permissive image before
+installing secrets. All command arguments must be UTF-8.
 
-SSH edits require version 1 `/system/cfg/sshd.toml`, using the shipped layout
-with bare table names and existing scalar fields. Unsupported layouts,
-such as inline tables or dotted assignments, duplicate fields, and missing
-targets are rejected. Other fields and comments are preserved. Key strings
-are escaped when inserted into TOML. Imager does not validate SSH keys,
-parse TLS certificates, or check that a TLS key matches its certificate;
-the caller supplies artifacts that the guest services can use.
+Login credentials live in `/user/cfg/russhd/users.toml` and
+`/user/cfg/ssh/authorized_keys.NAME` (see
+[SSH client](ssh-client.md#log-in-to-a-motor-os-server)). Imager writes both with
+mode `rwxrw----`, the mode SFTP gives a new file, even when the contents stay the
+same. It refuses them, before changing anything, unless each is a regular file
+and None can neither write it nor replace any directory up to `/user`, and None
+cannot read `users.toml`. A file that an update only consults keeps its mode.
+
+SSH edits require version 2 `/system/cfg/sshd.toml` with the standard
+`users_file` and `authorized_keys_dir` values and no user credentials, and a
+`users.toml` in the shipped layout, with bare `[users.NAME]` tables. Credential
+paths read from inside an image are never followed. Unsupported layouts, such
+as inline tables or dotted assignments, duplicate fields, and unknown fields are
+rejected. Other fields and comments are preserved. Key strings are escaped when
+inserted into TOML. Imager does not validate SSH keys, parse TLS certificates,
+or check that a TLS key matches its certificate; the caller supplies artifacts
+that the guest services can use.
+
+### Select a login name
+
+`--ssh-password` and `--ssh-key` apply to the name `motor` unless a selector says
+otherwise. `--ssh-user NAME` selects a name that has a record.
+`--ssh-new-user NAME` creates one, and requires that neither the record nor its
+key file exists, so orphaned keys are not reactivated. `--ssh-server-key` and
+`--ssl-keys` take no selector.
+
+```sh
+imager set --ssh-new-user alice --ssh-password 'new-password' -i image.qcow2
+imager set --ssh-user alice --ssh-key alice.pub -i image.qcow2
+```
+
+A name is 1 to 64 ASCII letters, digits, `_`, or `-`. Imager refuses a 1,025th
+name, and any edit of a registry already past that limit, because `russhd`
+denies every login with such a registry.
 
 ### Set the login password
 
@@ -215,15 +242,16 @@ the caller supplies artifacts that the guest services can use.
 imager set --ssh-password 'your-new-password' -i image.qcow2
 ```
 
-The password is one literal argument for the existing `motor` account.
-It must be nonempty, at most 1 MiB, and contain no CR, LF, or U+FEFF byte-order
+The password is one literal argument for the selected name. It must be
+nonempty, at most 1 MiB, and contain no CR, LF, or U+FEFF byte-order
 mark. Spaces and other Unicode characters are preserved. It is never read
 as a filename. The argument may appear in shell history or process listings.
 
 Imager generates a fresh 32-byte salt from the host's `/dev/urandom` and sets
-`users.motor.salt` and `users.motor.password_hash` to hexadecimal values for
-`SHA-256(salt_bytes || password_utf8_bytes)`, matching russhd's login check.
-The plaintext password is not stored in the image.
+that name's `salt` and `password_hash` in `users.toml` to hexadecimal values for
+`SHA-256(salt_bytes || password_utf8_bytes)`, matching russhd's login check,
+adding the fields to a record that lacks them. The plaintext password is not
+stored in the image.
 
 ### Set the login public key
 
@@ -232,10 +260,11 @@ imager set --ssh-key /path/to/id_ed25519.pub -i image.qcow2
 ```
 
 Reads one UTF-8 public-key line, strips its final LF/CRLF line ending if
-present, and replaces `users.motor.authorized_key`. An optional key comment
-is retained. Multiple lines are rejected. The field contains a single key;
-the command does not append to an `authorized_keys` file. The user's private
-login key stays on the client.
+present, and replaces the selected name's whole key file, creating it if
+missing. An optional key comment is retained. Multiple lines, and a line over
+16 KiB or containing NUL, are rejected. To add a key to a list, use
+[`ssh-copy-id`](ssh-client.md#log-in-to-a-motor-os-server) on a running system.
+The user's private login key stays on the client.
 
 ### Set the SSH server private key
 
@@ -264,11 +293,11 @@ Both files are required and copied byte-for-byte in one image update. Supply
 a PEM certificate chain (leaf first) and its matching unencrypted private
 key. Extra files are ignored; `ca-certificates.crt` is not replaced.
 
-Each setter changes only its selected credentials. Changing the password
-leaves the login public key and server host key unchanged. To replace all
-bundled credentials, set the password, login key, server key, and TLS pair.
-These operations do not erase old secrets from freed filesystem blocks,
-snapshots, or backups, and do not change other accounts or disable unused
+Each setter changes only its selected credentials. Changing a password
+leaves the login's keys, every other name, and the server host key unchanged.
+To replace all bundled credentials, set the password, login key, server key,
+and TLS pair. These operations do not erase old secrets from freed filesystem
+blocks, snapshots, or backups, and do not change other names or disable unused
 authentication methods.
 
 ## Publish a website
@@ -279,8 +308,8 @@ imager publish-www /path/to/site --ssh-password 'your-new-password' \
 ```
 
 All options are required, each exactly once, in any order after the site
-directory. They mean the same as for `imager set`. In one staged update,
-the command:
+directory. They mean the same as for `imager set`, for the name `motor`. In one
+staged update, the command:
 
 - replaces `/user/www-home` with a copy of the site directory;
 - writes `/user/bin/www`, a rush script that runs `httpd-axum` on

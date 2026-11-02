@@ -48,4 +48,12 @@ Examples:
   ssh -i /user/cfg/ssh/id_ed25519 -o BatchMode=yes motor@host command
   ssh -J motor@gateway motor@private-host
 
+Key installation:
+  ssh-copy-id -i key.pub user@host
+                       Install a key for a server that reads .ssh/authorized_keys
+  ssh-copy-id -t PATH -i key.pub user@host
+                       Install a key into the file PATH. Required for Motor OS
+                       servers, where PATH is /user/cfg/ssh/authorized_keys.NAME
+                       for login name NAME
+
 Related commands: scp, sftp, ssh-keygen, ssh-copy-id.

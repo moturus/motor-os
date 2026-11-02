@@ -566,7 +566,8 @@ with literal paths and no wildcard expansion.</p>
 
 <pre><code>ssh-keygen -t ed25519 -C motor-client
 ssh-keygen -y -f /user/cfg/ssh/id_ed25519
-ssh-copy-id -i /user/cfg/ssh/id_ed25519.pub user@host</code></pre>
+ssh-copy-id -i /user/cfg/ssh/id_ed25519.pub user@host
+ssh-copy-id -t /user/cfg/ssh/authorized_keys.alice -i key.pub -p 2222 alice@motor-host</code></pre>
 
 <p><code>ssh-keygen</code> generates Ed25519 OpenSSH keys, defaulting to
 <code>/user/cfg/ssh/id_ed25519</code> and a matching <code>.pub</code> file. <code>-f FILE</code> selects a
@@ -579,19 +580,106 @@ Generation supports only <code>-t ed25519</code>.</p>
 
 <p><code>ssh-copy-id</code> reads exactly one OpenSSH public-key line (default
 <code>/user/cfg/ssh/id_ed25519.pub</code>), authenticates using existing credentials,
-and installs it through SFTP into <code>.ssh/authorized_keys</code> under the remote
-SFTP home directory. It keeps existing content and skips keys with the
-same type and key data, regardless of comments. It sets <code>.ssh</code> to 0700
-and creates/appends the key file with mode 0600. Use <code>-p PORT</code> for a custom
-port and <code>-o IdentityFile=PATH</code> to select an existing authentication key;
-<code>-i</code> selects the public key being installed.</p>
+and installs it through SFTP. By default it targets servers that read
+<code>.ssh/authorized_keys</code> under the SFTP start directory: it sets <code>.ssh</code> to 0700
+and creates or appends the key file with mode 0600.</p>
 
-<p>This installation targets servers that read <code>.ssh/authorized_keys</code>.
-Motor OS's own <code>russhd</code> instead loads a single <code>authorized_key</code> per user
-from <code>/system/cfg/sshd.toml</code> at startup; copying an <code>authorized_keys</code> file
-does not authorize logins there. Edit that configuration and restart the
-server, or provision <code>users.motor.authorized_key</code> in an image with
-<code>imager set --ssh-key FILE -i IMAGE</code> (see <a href="imager.html">imager</a>).</p>
+<p><code>-t PATH</code> names the key file instead, and is required for a Motor OS server.
+<code>PATH</code> is absolute or relative to the SFTP start directory. Its parent must
+exist; <code>ssh-copy-id</code> neither creates nor changes it. It keeps existing content,
+including comments and a missing final newline, and skips a key already listed
+as a plain record with the same type and key data, regardless of comments. If
+the key's base64 is on any other line outside a comment, as in a record with
+options such as <code>from=</code> or <code>command=</code>, it reports an error and leaves the file
+unchanged rather than adding an unrestricted copy. Use
+<code>-p PORT</code> for a custom port and <code>-o IdentityFile=PATH</code> to select an existing
+authentication key; <code>-i</code> selects the public key being installed.</p>
+
+<h3 id="log-in-to-a-motor-os-server">Log in to a Motor OS server</h3>
+
+<p>Motor OS has one Interactive user. An SSH login name selects credentials: it
+creates no OS user and changes nothing a session may do. Every authenticated
+session can edit every credential file, so the lists below select credentials
+rather than separate names from each other. Each name has an optional password
+and any number of public keys:</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>File</th><th>Holds</th></tr>
+  <tr><td><code>/user/cfg/russhd/users.toml</code></td><td>The login names and their password verifiers</td></tr>
+  <tr><td><code>/user/cfg/ssh/authorized_keys.NAME</code></td><td>The public keys of login name <code>NAME</code></td></tr>
+</table>
+</div>
+
+<pre><code>version = 1
+
+[users.alice]
+salt = '...hex...'
+password_hash = '...hex SHA-256 of the salt bytes followed by the password...'
+
+[users.deploy]</code></pre>
+
+<p>A name is 1 to 64 ASCII letters, digits, <code>_</code>, or <code>-</code>. A record with an absent
+or empty <code>password_hash</code>, like <code>deploy</code> above, has no password. <code>russhd</code> reads
+both files at every authentication, so a change applies to the next login with
+no restart; sessions already established stay logged in. Every username is
+offered the same methods, whether or not it exists.</p>
+
+<p>A key file holds <code>KEYTYPE BASE64 [COMMENT]</code> lines, blank lines, and <code>#</code>
+comments. A key listed for two names is listed in both files. A record with
+options (<code>command=</code>, <code>from=</code>, <code>restrict</code>, and so on), a certificate, or a
+<code>cert-authority</code> entry authorizes nothing; <code>russhd</code> never strips options to
+recover a key. A key file alone creates no login name, and removing a record
+disables its name at the next authentication, whatever key files remain.</p>
+
+<p>To add a key to a running system, name its file on the client:</p>
+
+<pre><code># Motor OS client
+ssh-copy-id -t /user/cfg/ssh/authorized_keys.alice -i key.pub -p 2222 alice@host
+# OpenSSH 9.4 or newer
+ssh-copy-id -s -t /user/cfg/ssh/authorized_keys.alice -i key.pub -p 2222 alice@host
+# Older OpenSSH
+ssh -p 2222 alice@host 'cat &gt;&gt; /user/cfg/ssh/authorized_keys.alice' &lt; key.pub</code></pre>
+
+<p>A name with a password but no key can install its first key this way. Other
+forms fail without installing a key: without <code>-t</code> the SFTP installers try <code>/.ssh</code>
+and get <code>Permission denied</code>, and OpenSSH's shell installer (no <code>-s</code>) stops at
+<code>dirname</code>, which Motor OS does not have. Installers do not coordinate, so
+serialize updates to one list. OpenSSH's <code>-s</code> mode rewrites the whole file, and
+its <code>chmod 700</code> of the parent leaves <code>/user/cfg/ssh</code> at <code>rwxrwx---</code>.</p>
+
+<p>To add a name, create its key file first and its record second. Replace the
+registry atomically, because <code>russhd</code> denies all new logins while it is
+incomplete. A file created from a shell starts readable by None, which <code>russhd</code>
+refuses in a registry, so narrow it before renaming it into place:</p>
+
+<pre><code>cp /user/cfg/russhd/users.toml /user/cfg/russhd/users.new
+# ...edit users.new...
+chmod rwxrw---- /user/cfg/russhd/users.new
+mv /user/cfg/russhd/users.new /user/cfg/russhd/users.toml</code></pre>
+
+<p><code>russhd</code> fails closed. Nothing is cached, so there is no last-known-good copy:</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>Problem</th><th>Effect</th></tr>
+  <tr><td>Registry missing, unreadable, unsafe, oversized, or malformed</td><td>All new logins are denied</td></tr>
+  <tr><td>The same with a key file</td><td>That name's keys are denied; its password still works</td></tr>
+  <tr><td>Key file missing or empty</td><td>The name has no keys; its password still works</td></tr>
+</table>
+</div>
+
+<p>A credential file must be a regular file. None must not be able to write it, or
+to replace any directory above it up to <code>/user</code> (through <code>/</code> for a location
+outside <code>/user</code>), and must not be able to read the registry. Limits are 1 MiB per
+file, 1,024 users, 1,024 keys per file, and 16 KiB per key line.</p>
+
+<p>If no usable credential is left, recover through the VM console, or stop the VM
+and use <code>imager set</code> (see <a href="imager.html#select-a-login-name">imager</a>), which also creates names and
+replaces whole key lists in a stopped image. <code>/system/cfg/sshd.toml</code> holds the
+listen address, command path, and host key, and names the two credential
+locations with <code>users_file</code> and <code>authorized_keys_dir</code>. Version 1 configurations
+are rejected.</p>
 
 <h3 id="host-configuration-and-jump-hosts">Host configuration and jump hosts</h3>
 
@@ -674,7 +762,8 @@ a missing file explicitly selected with <code>-F</code> is an error.</p>
   <tr><th>File</th><th>Used by</th></tr>
   <tr><td><code>/system/cfg/sys-init.cfg</code></td><td>sys-init: the console program and role, strobe, and the services with their capability masks.</td></tr>
   <tr><td><code>/system/cfg/sys-net.toml</code></td><td>sys-io: network devices, addresses, routes, DNS servers, and limits.</td></tr>
-  <tr><td><code>/system/cfg/sshd.toml</code></td><td>russhd: listen address, host key, users, passwords, and authorized keys.</td></tr>
+  <tr><td><code>/system/cfg/sshd.toml</code></td><td>russhd: listen address, command path, host key, and where the credentials below are.</td></tr>
+  <tr><td><code>/user/cfg/russhd/users.toml</code>, <code>/user/cfg/ssh/authorized_keys.NAME</code></td><td>russhd: login names, password verifiers, and each name's public keys; see <a href="#log-in-to-a-motor-os-server">Log in to a Motor OS server</a>.</td></tr>
   <tr><td><code>/user/cfg/ssh/config</code>, <code>id_ed25519</code>, <code>known_hosts</code></td><td>SSH clients: host configuration, default private identity, and trusted server keys; see <a href="#ssh-client">SSH clients</a>.</td></tr>
   <tr><td><code>/system/cfg/sys-tty.cfg</code>, <code>/system/cfg/rush.cfg</code></td><td>The console shell's environment and startup file.</td></tr>
   <tr><td><code>/system/cfg/libc/hosts</code>, <code>resolv.conf</code></td><td>The DNS resolver and the C library. <code>resolv.conf</code> is written by sys-io.</td></tr>

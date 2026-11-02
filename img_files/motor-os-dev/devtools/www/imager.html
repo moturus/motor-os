@@ -408,8 +408,8 @@ credentials. It operates on image files while the VM is stopped.</p>
 imager &lt;REPO ROOT&gt; debug|release &lt;CONFIG YAML&gt; --raw-output &lt;FILENAME&gt;
 imager chmod &lt;MODE&gt; &lt;IMAGE&gt; &lt;GUEST PATH&gt;
 imager resize -i &lt;INPUT IMAGE&gt; -o &lt;OUTPUT IMAGE&gt; --size &lt;SIZE&gt;
-imager set --ssh-password &lt;PASSWORD&gt; -i &lt;IMAGE&gt;
-imager set --ssh-key &lt;PUBLIC KEY FILE&gt; -i &lt;IMAGE&gt;
+imager set [--ssh-user &lt;NAME&gt; | --ssh-new-user &lt;NAME&gt;] --ssh-password &lt;PASSWORD&gt; -i &lt;IMAGE&gt;
+imager set [--ssh-user &lt;NAME&gt; | --ssh-new-user &lt;NAME&gt;] --ssh-key &lt;PUBLIC KEY FILE&gt; -i &lt;IMAGE&gt;
 imager set --ssh-server-key &lt;PRIVATE KEY FILE&gt; -i &lt;IMAGE&gt;
 imager set --ssl-keys &lt;DIRECTORY&gt; -i &lt;IMAGE&gt;
 imager publish-www &lt;SITE DIRECTORY&gt; --ssh-password &lt;PASSWORD&gt; \
@@ -588,41 +588,69 @@ private staged copy and publish it only after the update and content checks succ
 before publication leaves the original image unchanged, including a failure during the second TLS
 file write. Allow space beside the image for a copy and, with qcow2, its raw intermediate.</p>
 
-<p>The image must be a regular file, not a symlink. Destination files must already exist, and their
-contents and each input artifact are limited to 1 MiB. Artifact input files must be nonempty regular
-files. Secret destinations (<code>sshd.toml</code> and <code>ssl-key.pem</code>) must have
-permissions no broader than <code>rw-r-----</code>; use <code>chmod</code> to correct a permissive
-image before installing secrets. All command arguments must be UTF-8.</p>
+<p>The image must be a regular file, not a symlink. Destination files other than a login name's key
+file must already exist, and their contents and each input artifact are limited to 1 MiB. Artifact
+input files must be nonempty regular files. Secret destinations (<code>sshd.toml</code> and
+<code>ssl-key.pem</code>) must have permissions no broader than <code>rw-r-----</code>; use
+<code>chmod</code> to correct a permissive image before installing secrets. All command arguments
+must be UTF-8.</p>
 
-<p>SSH edits require version 1 <code>/system/cfg/sshd.toml</code>, using the shipped layout with
-bare table names and existing scalar fields. Unsupported layouts, such as inline tables or dotted
-assignments, duplicate fields, and missing targets are rejected. Other fields and comments are
+<p>Login credentials live in <code>/user/cfg/russhd/users.toml</code> and
+<code>/user/cfg/ssh/authorized_keys.NAME</code> (see
+<a href="commands.html#log-in-to-a-motor-os-server">Log in to a Motor OS server</a>). Imager writes
+both with mode <code>rwxrw----</code>, the mode SFTP gives a new file, even when the contents stay
+the same. It refuses them, before changing anything, unless each is a regular file and None can
+neither write it nor replace any directory up to <code>/user</code>, and None cannot read
+<code>users.toml</code>. A file that an update only consults keeps its mode.</p>
+
+<p>SSH edits require version 2 <code>/system/cfg/sshd.toml</code> with the standard
+<code>users_file</code> and <code>authorized_keys_dir</code> values and no user credentials, and a
+<code>users.toml</code> in the shipped layout, with bare <code>[users.NAME]</code> tables. Credential
+paths read from inside an image are never followed. Unsupported layouts, such as inline tables or
+dotted assignments, duplicate fields, and unknown fields are rejected. Other fields and comments are
 preserved. Key strings are escaped when inserted into TOML. Imager does not validate SSH keys, parse
 TLS certificates, or check that a TLS key matches its certificate; the caller supplies artifacts
 that the guest services can use.</p>
+
+<h3 id="select-a-login-name">Select a login name</h3>
+
+<p><code>--ssh-password</code> and <code>--ssh-key</code> apply to the name <code>motor</code> unless
+a selector says otherwise. <code>--ssh-user NAME</code> selects a name that has a record.
+<code>--ssh-new-user NAME</code> creates one, and requires that neither the record nor its key file
+exists, so orphaned keys are not reactivated. <code>--ssh-server-key</code> and
+<code>--ssl-keys</code> take no selector.</p>
+
+<pre><code>imager set --ssh-new-user alice --ssh-password &#x27;new-password&#x27; -i image.qcow2
+imager set --ssh-user alice --ssh-key alice.pub -i image.qcow2</code></pre>
+
+<p>A name is 1 to 64 ASCII letters, digits, <code>_</code>, or <code>-</code>. Imager refuses a
+1,025th name, and any edit of a registry already past that limit, because <code>russhd</code> denies
+every login with such a registry.</p>
 
 <h3 id="set-the-login-password">Set the login password</h3>
 
 <pre><code>imager set --ssh-password &#x27;your-new-password&#x27; -i image.qcow2</code></pre>
 
-<p>The password is one literal argument for the existing <code>motor</code> account. It must be
+<p>The password is one literal argument for the selected name. It must be
 nonempty, at most 1 MiB, and contain no CR, LF, or U+FEFF byte-order mark. Spaces and other Unicode
 characters are preserved. It is never read as a filename. The argument may appear in shell history
 or process listings.</p>
 
 <p>Imager generates a fresh 32-byte salt from the host&#x27;s <code>/dev/urandom</code> and sets
-<code>users.motor.salt</code> and <code>users.motor.password_hash</code> to hexadecimal values for
-<code>SHA-256(salt_bytes || password_utf8_bytes)</code>, matching russhd&#x27;s login check. The
-plaintext password is not stored in the image.</p>
+that name&#x27;s <code>salt</code> and <code>password_hash</code> in <code>users.toml</code> to
+hexadecimal values for <code>SHA-256(salt_bytes || password_utf8_bytes)</code>, matching
+russhd&#x27;s login check, adding the fields to a record that lacks them. The plaintext password is
+not stored in the image.</p>
 
 <h3 id="set-the-login-public-key">Set the login public key</h3>
 
 <pre><code>imager set --ssh-key /path/to/id_ed25519.pub -i image.qcow2</code></pre>
 
 <p>Reads one UTF-8 public-key line, strips its final LF/CRLF line ending if present, and replaces
-<code>users.motor.authorized_key</code>. An optional key comment is retained. Multiple lines are
-rejected. The field contains a single key; the command does not append to an
-<code>authorized_keys</code> file. The user&#x27;s private login key stays on the client.</p>
+the selected name&#x27;s whole key file, creating it if missing. An optional key comment is retained.
+Multiple lines, and a line over 16 KiB or containing NUL, are rejected. To add a key to a list, use
+<a href="commands.html#log-in-to-a-motor-os-server"><code>ssh-copy-id</code></a> on a running system.
+The user&#x27;s private login key stays on the client.</p>
 
 <h3 id="set-the-ssh-server-private-key">Set the SSH server private key</h3>
 
@@ -649,16 +677,17 @@ verify and trust the replacement host identity when connecting again.</p>
 chain (leaf first) and its matching unencrypted private key. Extra files are ignored;
 <code>ca-certificates.crt</code> is not replaced.</p>
 
-<p>Each setter changes only its selected credentials. Changing the password leaves the login public
-key and server host key unchanged. To replace all bundled credentials, set the password, login key,
-server key, and TLS pair. These operations do not erase old secrets from freed filesystem blocks,
-snapshots, or backups, and do not change other accounts or disable unused authentication
-methods.</p>
+<p>Each setter changes only its selected credentials. Changing a password leaves the login&#x27;s
+keys, every other name, and the server host key unchanged. To replace all bundled credentials, set
+the password, login key, server key, and TLS pair. These operations do not erase old secrets from
+freed filesystem blocks, snapshots, or backups, and do not change other names or disable unused
+authentication methods.</p>
 <h2 id="publish-a-website">Publish a website</h2>
 <pre><code>imager publish-www /path/to/site --ssh-password &#x27;your-new-password&#x27; \
     --ssh-key /path/to/id_ed25519.pub --ssl-keys /path/to/tls -i image.qcow2</code></pre>
 <p>All options are required, each exactly once, in any order after the site directory. They mean
-the same as for <code>imager set</code>. In one staged update, the command:</p>
+the same as for <code>imager set</code>, for the name <code>motor</code>. In one staged update, the
+command:</p>
 <ul>
 <li>replaces <code>/user/www-home</code> with a copy of the site directory;</li>
 <li>writes <code>/user/bin/www</code>, a rush script that runs <code>httpd-axum</code> on

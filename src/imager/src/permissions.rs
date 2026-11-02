@@ -368,11 +368,9 @@ fn validate_entry_mode(kind: ImageEntryKind, mode: RolePermissions) -> Result<()
             Err("directory modes must grant System rwx")
         }
         ImageEntryKind::File(FileClass::Regular)
-            if [mode.system, mode.interactive, mode.none]
-                .into_iter()
-                .any(AccessPermissions::can_execute) =>
+            if mode.interactive.can_execute() || mode.none.can_execute() =>
         {
-            Err("regular-file modes may not grant execute")
+            Err("regular-file modes may grant execute to System alone")
         }
         ImageEntryKind::File(FileClass::Script) if !mode.system.can_execute() => {
             Err("script modes must grant System execute")
@@ -527,6 +525,20 @@ trees:
             ),
             "rw-r-----"
         );
+        // What SFTP gives a new file, so that shipped and installed key lists match.
+        for path in [
+            "/user/cfg/russhd/users.toml",
+            "/user/cfg/ssh/authorized_keys.motor",
+        ] {
+            assert_eq!(
+                mode_string(policy.file_permissions(Path::new(path), FileClass::Regular)),
+                "rwxrw----"
+            );
+        }
+        assert_eq!(
+            mode_string(policy.directory_permissions(Path::new("/user/cfg/ssh"))),
+            "rwxrwx---"
+        );
         assert_eq!(
             mode_string(policy.directory_permissions(Path::new("/system/logs"))),
             "rwxr-x---"
@@ -562,6 +574,14 @@ trees:
             ImageEntry {
                 path: PathBuf::from("/system/logs/not-a-log"),
                 kind: ImageEntryKind::File(FileClass::Script),
+            },
+            ImageEntry {
+                path: PathBuf::from("/user/cfg/russhd/users.toml"),
+                kind: ImageEntryKind::File(FileClass::Regular),
+            },
+            ImageEntry {
+                path: PathBuf::from("/user/cfg/ssh/authorized_keys.motor"),
+                kind: ImageEntryKind::File(FileClass::Regular),
             },
         ];
         for class in [FileClass::Script, FileClass::Elf] {
@@ -706,6 +726,22 @@ trees:
             .validate_image(&entries)
             .unwrap_err()
             .contains("regular-file"));
+    }
+
+    #[test]
+    fn only_system_may_hold_execute_on_a_regular_file() {
+        let regular = ImageEntryKind::File(FileClass::Regular);
+        for (mode, allowed) in [
+            ("rwxrw----", true),
+            ("rwxr--r--", true),
+            ("rw-rw----", true),
+            ("rwxrwx---", false),
+            ("r-xr-x---", false),
+            ("rwxrwxrwx", false),
+        ] {
+            let mode = crate::chmod::parse_mode(mode).unwrap();
+            assert_eq!(validate_entry_mode(regular, mode).is_ok(), allowed);
+        }
     }
 
     #[test]
