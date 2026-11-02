@@ -413,10 +413,7 @@ impl Process {
             detached,
             url,
         )
-        .map_err(|_| {
-            address_space.release_claim();
-            moto_rt::E_INTERNAL_ERROR
-        })?;
+        .inspect_err(|_| address_space.release_claim())?;
 
         Ok((object, requester))
     }

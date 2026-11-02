@@ -317,7 +317,12 @@ allocating virtual memory never allocates from the heap. `Page` and
 
 A map of zero pages is refused at the syscall entry with
 `E_INVALID_ARGUMENT`: every mapping path builds a segment, and an empty
-segment is a kernel assertion.
+segment is a kernel assertion. So is a size that overflows, and a size
+above a terabyte is refused there as `E_OUT_OF_MEMORY`. Past the entry
+checks of flags and addresses, the syscall layer returns the memory
+manager's code unchanged: a bad fixed address or an overlap is
+`E_INVALID_ARGUMENT`, a closed space `E_BAD_HANDLE`, and only a shortage,
+of address space included, `E_OUT_OF_MEMORY`.
 
 A `Page`'s kind is derived from its `Frame`; a page without a frame is a
 small guard page or unmapped reservation. Lookup finds the greatest page

@@ -288,11 +288,12 @@ fn shared_alloc_rollback_race(check_recovery: bool) {
             ready.wait();
             go.wait();
             let (mut strays, mut stray_count) = ([0_u64; MAX_STRAYS], 0_usize);
-            let mut refused = 0_u32;
+            let (mut undone, mut occupied) = (0_u32, 0_u32);
             for _ in 0..ROUNDS {
                 // The target side takes the hole, the caller's side finds
-                // no room, and the whole call is undone; or the hole is the
-                // mapper's for the moment and the call is refused at once.
+                // no room, and the whole call is undone as out of memory;
+                // or the hole is the mapper's for the moment and the fixed
+                // address is refused at once as invalid.
                 match SysMem::map2(
                     target,
                     SysMem::F_SHARE_SELF | SysMem::F_READABLE | SysMem::F_WRITABLE,
@@ -301,7 +302,8 @@ fn shared_alloc_rollback_race(check_recovery: bool) {
                     PAGE_SIZE_SMALL,
                     PAGES,
                 ) {
-                    Err(moto_rt::E_OUT_OF_MEMORY) => refused += 1,
+                    Err(moto_rt::E_OUT_OF_MEMORY) => undone += 1,
+                    Err(moto_rt::E_INVALID_ARGUMENT) => occupied += 1,
                     // The caller's side found a gap the runtime freed: keep
                     // it, so the next call fails again. The mapper takes
                     // the hole back, as it does with anything there.
@@ -315,7 +317,7 @@ fn shared_alloc_rollback_race(check_recovery: bool) {
                 }
             }
             done.store(true, Ordering::Release);
-            (refused, strays, stray_count)
+            (undone, occupied, strays, stray_count)
         })
     };
     let mapper = {
@@ -361,7 +363,7 @@ fn shared_alloc_rollback_race(check_recovery: bool) {
     }
 
     go.wait();
-    let (refused, strays, stray_count) = sharer.join().unwrap();
+    let (undone, occupied, strays, stray_count) = sharer.join().unwrap();
     let (rounds, misses) = mapper.join().unwrap();
     let _ = SysMem::unmap(target, 0, u64::MAX, HOLE);
     for addr in strays.iter().take(stray_count).chain(fillers.iter()) {
@@ -370,7 +372,7 @@ fn shared_alloc_rollback_race(check_recovery: bool) {
     SysMem::free(source).unwrap();
     SysObj::put(target).unwrap();
     assert!(rounds > 0, "the mapper never mapped");
-    assert!(refused > 0, "no shared allocation was ever undone");
+    assert!(undone > 0, "no shared allocation was ever undone");
     // The hole is taken at the mapper's map only by what a stray success
     // left there, once each. A rollback that reaches the mapper's
     // half-built mapping, as it could when the locks were released in
@@ -384,7 +386,8 @@ fn shared_alloc_rollback_race(check_recovery: bool) {
     }
     println!(
         "test_sparse_shared_alloc_rollback_race PASS: {rounds} maps and {misses} misses \
-         against {refused} refused shared allocations, {stray_count} stray gaps"
+         against {undone} undone and {occupied} refused shared allocations, \
+         {stray_count} stray gaps"
     );
 }
 

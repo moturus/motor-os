@@ -74,10 +74,12 @@ fn expect_failure(output: &Output, stdout: &str, stderr: &str) {
 }
 
 /// What the command itself wrote to stderr: in a debug build, the runtime
-/// writes its log records ("12:345: DEBUG ...") there, too.
+/// writes its log records ("12:345: DEBUG ...", the seconds padded with
+/// spaces to three places) there, too.
 fn messages(stderr: &[u8]) -> String {
     let is_log_record = |line: &str| {
         line.split_once(": ").is_some_and(|(stamp, _)| {
+            let stamp = stamp.trim_start();
             stamp.split(':').count() == 2
                 && stamp
                     .split(':')

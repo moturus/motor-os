@@ -17,11 +17,11 @@ As of 2026-11-02:
 | 2a   | Live `free_pages` count, no pressure flag (proposal 5)    | Committed, `2e9c6a64`                   |
 | 3    | Release user memory at process exit                       | Committed, `cda3c9d3`                   |
 | 4a   | Fallible MM core, boot exhaustion self-test               | Committed, `3780bce0`                   |
-| 4b   | Fallible frame-descriptor slab growth                     | Working tree, awaiting review           |
-| 4c   | Real error codes in the syscall and process layers        | Not started                             |
+| 4b   | Fallible frame-descriptor slab growth                     | Committed, `56eedffb`                   |
+| 4c   | Real error codes in the syscall and process layers        | Working tree, awaiting review           |
 | 5    | Allocation gates, OOM jobs, waiters, recovery             | Not started                             |
 
-What the committed steps and 4b provide is described in
+What the committed steps and 4c provide is described in
 [docs/oom-handling.md](../oom-handling.md) and
 [docs/kernel-mm.md](../kernel-mm.md). In short: admission, floors,
 reservations, commitments and `AdmissionStats` are gone; spawns are refused
@@ -29,21 +29,16 @@ below 4 MiB by sys-io and by the kernel at creation and at the first `Created`
 to `Running` transition; memfs refuses allocating mutations below 4 MiB;
 `free_pages` is the allocator's live count; every process has a monotonic
 `kernel_pid` beside its `user_pid`; a process's user memory goes back at exit
-and an address space hosts one process; and every page acquired for a
+and an address space hosts one process; every page acquired for a
 process's mappings is acquired fallibly, with the partial mapping unwound,
 through frames, the per-space descriptor slabs, page-table growth, eager
 mappings, lazy faults, pager fills, sharing, construction, both stacks and
-the frame-descriptor slab's growth. The kernel heap stays outside the
-guarantee by design.
+the frame-descriptor slab's growth; and the memory syscalls and process
+creation answer with the memory manager's own codes. The kernel heap stays
+outside the guarantee by design.
 
 Left to do:
 
-- **4c.** `sys_mem.rs` answers every mapping failure, invalid arguments
-  included, with `E_OUT_OF_MEMORY`, and `Process::new_child` turns any
-  construction failure into `E_INTERNAL_ERROR`. Propagate the real codes and
-  add systest coverage of exact codes. Thread spawning, `SysObj` address-space
-  creation, shared-page connection and the pager already pass
-  `E_OUT_OF_MEMORY` through.
 - **5.** The gates and waits in "Fallible user-page allocation" from the
   paragraph on pausing at syscall entry onward, the 2 MiB and 512 KiB rules,
   "OOM jobs" in full, and the validation items for boundaries, victims,
@@ -152,10 +147,9 @@ The main changes are in `uspace/process.rs` and `xray/stats.rs` under
 
 ## Fallible user-page allocation
 
-The audit list below is done through the MM core in steps 4a and 4b, except
-the error codes of `sys_mem.rs` and `process.rs` (4c). The gates, waits and
-fault parking from the paragraph on pausing at syscall entry onward are
-step 5.
+The audit list below is done: the MM core in steps 4a and 4b, the error
+codes of `sys_mem.rs` and `process.rs` in 4c. The gates, waits and fault
+parking from the paragraph on pausing at syscall entry onward are step 5.
 
 Audit the complete mapping path, not just data-frame allocation. Relevant
 kernel code:
@@ -384,9 +378,9 @@ All work stays in the main repository.
 3. Clear user memory during process exit. *Done, `cda3c9d3`.*
 4. Make user-page allocation fallible, splitting the MM changes into small
    patches with their tests. *In progress: 4a, the MM core with a boot
-   exhaustion self-test, is done (`3780bce0`); 4b, frame-descriptor slab
-   growth, is in the working tree; 4c, real error codes in the syscall and
-   process layers with systest coverage, follows.*
+   exhaustion self-test (`3780bce0`), and 4b, frame-descriptor slab growth
+   (`56eedffb`), are done; 4c, real error codes in the syscall and process
+   layers with systest coverage, is in the working tree.*
 5. Implement the 2 MiB and 512 KiB allocation gates, OOM jobs, and scheduler
    integration together, with the new pressure, blocking, and recovery tests.
    *Not started.*
@@ -399,9 +393,9 @@ normally 100–300 lines including tests.
 Covered so far: the PID items; allocation failure and rollback at every
 boundary that returns an error, by the debug boot exhaustion self-test, with
 contiguous failure and huge-page fallback (immediate rejection of large
-allocations belongs to step 5, exact syscall codes to 4c); exit and kill
-releasing memory with handles held; the FS, networking, logging and spawn
-items; and the quiescent `free_pages` comparisons. The boundary, victim,
+allocations belongs to step 5), and the exact syscall codes by systest; exit
+and kill releasing memory with handles held; the FS, networking, logging and
+spawn items; and the quiescent `free_pages` comparisons. The boundary, victim,
 episode, waiter and parked-allocation items are step 5.
 
 Run kernel tests inside Motor OS and include regressions in

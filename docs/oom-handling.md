@@ -9,10 +9,14 @@ and ordinary backpressure remain independent.
 The replacement OOM killer is a later step. The kernel's mapping paths are
 fallible: physical exhaustion answers `E_OUT_OF_MEMORY` at every frame,
 descriptor and page-table allocation made for a process and unwinds the
-partial mapping (see [kernel-mm.md](kernel-mm.md)). `SysMem::map` still
-reports every mapping failure as `E_OUT_OF_MEMORY`, and a fault that cannot
-get a frame kills the faulting thread until the OOM gates park it. The
-kernel heap still panics on exhaustion.
+partial mapping (see [kernel-mm.md](kernel-mm.md)). `SysMem::map`,
+`SysMem::unmap` and process creation answer with the memory manager's own
+code: `E_OUT_OF_MEMORY` for a shortage of frames, page-table pages,
+descriptors or address space, `E_INVALID_ARGUMENT` for an address, size or
+flag the caller got wrong, `E_NOT_ALLOWED` for a missing capability or an
+entry point outside user space, `E_ALREADY_IN_USE` for a second process on
+an address space. A fault that cannot get a frame kills the faulting thread
+until the OOM gates park it. The kernel heap still panics on exhaustion.
 
 ## Process identities
 

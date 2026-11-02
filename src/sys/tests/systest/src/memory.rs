@@ -87,9 +87,82 @@ fn test_mapping_boundaries() {
     println!("test_mapping_boundaries PASS");
 }
 
+/// The codes behind `SysMem::map` and `SysMem::unmap` are the memory
+/// manager's own: an address, size or flag the caller got wrong is
+/// `E_INVALID_ARGUMENT`, and only what it cannot have is `E_OUT_OF_MEMORY`.
+pub(crate) fn test_map_error_codes() {
+    use moto_sys::{SysHandle, SysObj};
+
+    const RW: u32 = SysMem::F_READABLE | SysMem::F_WRITABLE;
+    let map = |space, flags, virt_addr, num_pages| {
+        SysMem::map(
+            space,
+            flags,
+            u64::MAX,
+            virt_addr,
+            PAGE_SIZE_SMALL,
+            num_pages,
+        )
+    };
+    let invalid: Result<u64, moto_rt::ErrorCode> = Err(moto_rt::E_INVALID_ARGUMENT);
+    let oom: Result<u64, moto_rt::ErrorCode> = Err(moto_rt::E_OUT_OF_MEMORY);
+
+    // A size that overflows is malformed; one above the kernel's terabyte
+    // cap is refused as unsatisfiable. A fixed address needs the custom
+    // region's flag, and no page size but 4 KiB exists.
+    assert_eq!(map(SysHandle::SELF, RW, u64::MAX, u64::MAX), invalid);
+    assert_eq!(map(SysHandle::SELF, RW, u64::MAX, (1 << 28) + 1), oom);
+    assert_eq!(map(SysHandle::SELF, RW, 1 << 30, 1), invalid);
+    assert_eq!(
+        SysMem::map(
+            SysHandle::SELF,
+            RW,
+            u64::MAX,
+            u64::MAX,
+            2 * PAGE_SIZE_SMALL,
+            1
+        ),
+        invalid
+    );
+
+    // A share into another space at an address the kernel cannot use, not
+    // page-aligned or in no user region, and an unmap of what was never
+    // mapped: the caller's error, not a shortage.
+    let space = SysObj::create(SysHandle::NONE, 0, "address_space:debug_name=map-errors").unwrap();
+    let share = SysMem::F_SHARE_SELF | RW;
+    assert_eq!(map(space, share, PAGE_SIZE_SMALL + 8, 1), invalid);
+    assert_eq!(map(space, share, 1 << 50, 1), invalid);
+    SysObj::put(space).unwrap();
+    assert_eq!(
+        SysMem::unmap(SysHandle::SELF, 0, u64::MAX, 1 << 40),
+        Err(moto_rt::E_INVALID_ARGUMENT)
+    );
+
+    // Running out of address space is a shortage. A lazy reservation costs
+    // one segment node whatever its size, so terabyte ones exhaust the
+    // 32 TiB region in at most 32 calls and no page, and the refusal is the
+    // allocator's, past the size cap.
+    let mut reserved = vec![];
+    loop {
+        match map(SysHandle::SELF, RW | SysMem::F_LAZY, u64::MAX, 1 << 28) {
+            Ok(addr) => reserved.push(addr),
+            Err(err) => {
+                assert_eq!(err, moto_rt::E_OUT_OF_MEMORY);
+                break;
+            }
+        }
+    }
+    assert!((16..=32).contains(&reserved.len()), "{}", reserved.len());
+    for addr in reserved {
+        SysMem::free(addr).unwrap();
+    }
+    println!("test_map_error_codes PASS");
+}
+
 pub fn run_all_tests() {
     test_mapping_boundaries();
     test_frame_churn();
+    test_map_error_codes();
 }
 /// Concurrent alloc/touch/free churn: several threads drive the kernel frame
 /// slab across the full<->partial boundary at once. Regression for

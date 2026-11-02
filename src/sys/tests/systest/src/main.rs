@@ -756,9 +756,10 @@ fn test_fixed_memory_map_overlap() {
         (1, 8), // Contains both mappings.
         (3, 3), // Ends at the next mapping's start; still overlaps the first.
     ] {
-        assert!(
-            map(offset, pages).is_err(),
-            "overlap accepted: offset {offset}, pages {pages}"
+        assert_eq!(
+            map(offset, pages),
+            Err(moto_rt::E_INVALID_ARGUMENT),
+            "overlap: offset {offset}, pages {pages}"
         );
     }
     // Half-open boundaries: touching on either side and an exact gap are valid.
@@ -1349,6 +1350,12 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "raw-spawn" {
         raw_spawn::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "mem-error-codes" {
+        memory::test_map_error_codes();
+        test_invalid_memory_map_options();
+        test_fixed_memory_map_overlap();
         return;
     }
     if args.get(1).map(String::as_str) == Some("process-permissions-child") {
