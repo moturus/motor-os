@@ -150,6 +150,12 @@ pub fn phys_allocate_frameless_run(pages: u16) -> Result<u64, ErrorCode> {
     PhysicalMemory::inst().allocate_frameless_run(pages)
 }
 
+// The pages one frame-descriptor slab takes, for the boot self-tests.
+#[cfg(debug_assertions)]
+pub fn frame_slab_pages() -> u64 {
+    MMSlab::<Frame>::backing_pages(true)
+}
+
 // The caller has validated the whole MMIO range. Only the descriptor is owned.
 pub(super) fn mmio_frame(phys_addr: u64) -> Result<SlabArc<Frame>, ErrorCode> {
     let frame = PhysicalMemory::inst().slab.alloc_arc()?;

@@ -16,12 +16,12 @@ As of 2026-11-02:
 | 2    | Two process IDs, statistics maps and lookups              | Committed, `02e9c17b`                   |
 | 2a   | Live `free_pages` count, no pressure flag (proposal 5)    | Committed, `2e9c6a64`                   |
 | 3    | Release user memory at process exit                       | Committed, `cda3c9d3`                   |
-| 4a   | Fallible MM core, boot exhaustion self-test               | Working tree, reviewed, awaiting commit |
-| 4b   | Fallible frame-descriptor slab growth                     | Not started                             |
+| 4a   | Fallible MM core, boot exhaustion self-test               | Committed, `3780bce0`                   |
+| 4b   | Fallible frame-descriptor slab growth                     | Working tree, awaiting review           |
 | 4c   | Real error codes in the syscall and process layers        | Not started                             |
 | 5    | Allocation gates, OOM jobs, waiters, recovery             | Not started                             |
 
-What the committed steps and 4a provide is described in
+What the committed steps and 4b provide is described in
 [docs/oom-handling.md](../oom-handling.md) and
 [docs/kernel-mm.md](../kernel-mm.md). In short: admission, floors,
 reservations, commitments and `AdmissionStats` are gone; spawns are refused
@@ -32,13 +32,12 @@ to `Running` transition; memfs refuses allocating mutations below 4 MiB;
 and an address space hosts one process; and every page acquired for a
 process's mappings is acquired fallibly, with the partial mapping unwound,
 through frames, the per-space descriptor slabs, page-table growth, eager
-mappings, lazy faults, pager fills, sharing, construction and both stacks.
+mappings, lazy faults, pager fills, sharing, construction, both stacks and
+the frame-descriptor slab's growth. The kernel heap stays outside the
+guarantee by design.
 
 Left to do:
 
-- **4b.** The frame-descriptor slab's own growth (`raw_alloc_for_slab` in
-  `mm/mod.rs`) still panics on exhaustion. The kernel heap stays outside the
-  guarantee by design.
 - **4c.** `sys_mem.rs` answers every mapping failure, invalid arguments
   included, with `E_OUT_OF_MEMORY`, and `Process::new_child` turns any
   construction failure into `E_INTERNAL_ERROR`. Propagate the real codes and
@@ -153,10 +152,10 @@ The main changes are in `uspace/process.rs` and `xray/stats.rs` under
 
 ## Fallible user-page allocation
 
-The audit list below is done through the MM core in step 4a, except the
-frame-descriptor slab's growth (4b) and the error codes of `sys_mem.rs` and
-`process.rs` (4c). The gates, waits and fault parking from the paragraph on
-pausing at syscall entry onward are step 5.
+The audit list below is done through the MM core in steps 4a and 4b, except
+the error codes of `sys_mem.rs` and `process.rs` (4c). The gates, waits and
+fault parking from the paragraph on pausing at syscall entry onward are
+step 5.
 
 Audit the complete mapping path, not just data-frame allocation. Relevant
 kernel code:
@@ -385,9 +384,9 @@ All work stays in the main repository.
 3. Clear user memory during process exit. *Done, `cda3c9d3`.*
 4. Make user-page allocation fallible, splitting the MM changes into small
    patches with their tests. *In progress: 4a, the MM core with a boot
-   exhaustion self-test, is in the working tree; 4b, frame-descriptor slab
-   growth, and 4c, real error codes in the syscall and process layers with
-   systest coverage, follow.*
+   exhaustion self-test, is done (`3780bce0`); 4b, frame-descriptor slab
+   growth, is in the working tree; 4c, real error codes in the syscall and
+   process layers with systest coverage, follows.*
 5. Implement the 2 MiB and 512 KiB allocation gates, OOM jobs, and scheduler
    integration together, with the new pressure, blocking, and recovery tests.
    *Not started.*

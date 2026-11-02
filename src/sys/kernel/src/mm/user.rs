@@ -1474,12 +1474,13 @@ pub fn exit_release_self_test() {
 // statistics come back exact.
 #[cfg(debug_assertions)]
 pub fn exhaustion_self_test() {
+    use super::phys::Frame;
     use super::phys::{allocate_huge_frame, available_small_pages, block_metrics};
-    use super::phys::{
-        phys_allocate_frameless, phys_allocate_frameless_run, phys_deallocate_frameless,
-    };
-    use super::virt::HUGE_FALLBACKS;
-    use super::{PageType, PAGING_DIRECT_MAP_OFFSET};
+    use super::phys::{frame_slab_pages, mmio_frame, phys_allocate_frameless};
+    use super::phys::{phys_allocate_frameless_run, phys_deallocate_frameless};
+    use super::slab::SlabArc;
+    use super::virt::{HUGE_FALLBACKS, KERNEL_ADDRESS_SPACE};
+    use super::{align_up, PageType, PAGE_SIZE_LARGE_LOG2, PAGING_DIRECT_MAP_OFFSET};
 
     const HUGE_PAGES: u64 = PAGE_SIZE_MID >> PAGE_SIZE_SMALL_LOG2;
     const FILE_ADDR: u64 = 1 << 30;
@@ -1539,10 +1540,37 @@ pub fn exhaustion_self_test() {
             Err(_) => break,
         }
     }
+    let run_pages = runs.len() as u64 * HUGE_PAGES;
     let free_run = |start: u64| {
         for page in 0..HUGE_PAGES {
             phys_deallocate_frameless(start + (page << PAGE_SIZE_SMALL_LOG2), PageType::SmallPage);
         }
+    };
+    // The frames that fill the frame-descriptor slab below live in a run of
+    // their own, 170 to a page: the pool has nothing to spare for them.
+    struct Frames {
+        base: *mut SlabArc<Frame>,
+        len: usize,
+    }
+    const STORE_CAP: usize = PAGE_SIZE_MID as usize / size_of::<SlabArc<Frame>>();
+    impl Frames {
+        fn push(&mut self, frame: SlabArc<Frame>) {
+            assert!(self.len < STORE_CAP);
+            unsafe { self.base.add(self.len).write(frame) };
+            self.len += 1;
+        }
+    }
+    impl Drop for Frames {
+        fn drop(&mut self) {
+            for idx in 0..self.len {
+                drop(unsafe { self.base.add(idx).read() });
+            }
+        }
+    }
+    let store = runs.pop().unwrap();
+    let mut frames = Frames {
+        base: (store + PAGING_DIRECT_MAP_OFFSET) as *mut SlabArc<Frame>,
+        len: 0,
     };
     // Warm up what must not be allocated while the pool is empty: the heap
     // behind address-space objects, a 4 MiB mapping's frame descriptors and
@@ -1621,6 +1649,73 @@ pub fn exhaustion_self_test() {
     assert_eq!(UserAddressSpace::new().map(|_| ()), Err(oom));
     check(descriptors, 0);
     assert_eq!(available_small_pages(), 0);
+
+    // The frame-descriptor slab grows by `slab_pages` mapped pages once
+    // every slab is full. MMIO frames own no page, so filling the slabs
+    // with them costs the pool nothing and finds that boundary: the frame
+    // that needs the growth is refused with the pool empty. The growth under
+    // test straddles a page-table boundary: the region's cursor is moved to
+    // `prefix` pages short of the next 2 MiB boundary, which is no 1 GiB
+    // one; the addresses skipped stay unused, which costs the sparse region
+    // nothing. Every growth short of a page gives all its pages back, the
+    // cursor unmoved and nothing left mapped, the one with the slab's pages
+    // but not the page-table page too, after mapping the prefix. One more
+    // succeeds.
+    let cursor = || *KERNEL_ADDRESS_SPACE.next_slab_addr.lock(line!());
+    let slab_pages = frame_slab_pages();
+    let prefix = slab_pages / 2;
+    assert!(prefix >= 1);
+    let boundary = align_up(cursor() + (prefix << PAGE_SIZE_SMALL_LOG2), PAGE_SIZE_MID);
+    assert_eq!(
+        cursor() >> PAGE_SIZE_LARGE_LOG2,
+        boundary >> PAGE_SIZE_LARGE_LOG2
+    );
+    let slab_start = boundary - (prefix << PAGE_SIZE_SMALL_LOG2);
+    *KERNEL_ADDRESS_SPACE.next_slab_addr.lock(line!()) = slab_start;
+    let kernel_table = &KERNEL_ADDRESS_SPACE.base.page_table;
+    let mapped = || {
+        (0..slab_pages)
+            .filter(|&page| {
+                kernel_table
+                    .virt_to_phys(slab_start + (page << PAGE_SIZE_SMALL_LOG2))
+                    .is_some()
+            })
+            .count() as u64
+    };
+    assert_eq!(mapped(), 0);
+    loop {
+        match mmio_frame(0) {
+            Ok(frame) => frames.push(frame),
+            Err(err) => {
+                assert_eq!(err, oom);
+                break;
+            }
+        }
+    }
+    assert_eq!(available_small_pages(), 0);
+    let mut grown = 0;
+    loop {
+        hoard.give_back(1);
+        grown += 1;
+        match mmio_frame(0) {
+            Ok(frame) => {
+                frames.push(frame);
+                break;
+            }
+            Err(err) => {
+                assert_eq!(err, oom);
+                assert!(grown <= slab_pages, "{grown}");
+                assert_eq!(available_small_pages(), grown);
+                assert_eq!(cursor(), slab_start);
+                assert_eq!(mapped(), 0);
+            }
+        }
+    }
+    assert_eq!(grown, slab_pages + 1);
+    assert_eq!(available_small_pages(), 0);
+    assert_eq!(cursor(), slab_start + (slab_pages << PAGE_SIZE_SMALL_LOG2));
+    assert_eq!(mapped(), slab_pages);
+    check(descriptors, 0);
 
     // A one-page heap at a fresh address takes four pages: the frame and
     // three page-table pages. One short, it fails and what it created is
@@ -1832,17 +1927,18 @@ pub fn exhaustion_self_test() {
     assert_eq!(available_small_pages(), 12);
     hoard.take_all();
 
-    // Teardown returns everything, the blocks included.
+    // Teardown returns everything but the grown slab, the blocks included.
     drop(space);
     drop(peer);
     let count = hoard.count;
     hoard.give_back(count);
-    assert_eq!(available_small_pages(), free_held);
-    let run_pages = runs.len() as u64 * HUGE_PAGES;
+    assert_eq!(available_small_pages(), free_held - grown);
+    drop(frames);
+    free_run(store);
     for start in runs {
         free_run(start);
     }
-    assert_eq!(available_small_pages(), free_held + run_pages);
+    assert_eq!(available_small_pages(), free_held - grown + run_pages);
     drop(held);
     assert_eq!(block_metrics().taken, taken_before);
     crate::raw_log!("exhaustion tests PASS");

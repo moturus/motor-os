@@ -106,28 +106,63 @@ pub fn init() {
     super::phys::publish_free_pages(&get_kernel_static_page_mut().free_pages);
 }
 
-/// # Safety
-///
-/// Assumes addresses are properly initialized.
-pub unsafe fn map_page(phys_addr: u64, virt_addr: u64, kind: PageType, options: MappingOptions) {
-    KERNEL_ADDRESS_SPACE
-        .base
-        .page_table
-        .map_page(phys_addr, virt_addr, kind, options)
-        .expect("kernel mapping failed: bad options or out of memory");
-}
-
 pub fn get_kernel_static_page_mut() -> &'static mut moto_sys::KernelStaticPage {
     KERNEL_ADDRESS_SPACE.get_static_shared_page_mut()
 }
 
-pub(super) fn reserve_pages_for_slabs(num_pages: u64) -> u64 {
-    let sz = num_pages << PAGE_SIZE_SMALL_LOG2;
-    let result = KERNEL_ADDRESS_SPACE
-        .next_slabs_addr
-        .fetch_add(sz, Ordering::Relaxed);
-    assert!(result + sz <= VMEM_K_SLABS_END);
-    result
+// The most pages one slab takes; a `Frame` slab with its refcounts takes 21.
+pub(super) const MAX_SLAB_PAGES: usize = 32;
+
+/// The backing of one kernel slab: `num_pages` fresh pages mapped at the
+/// next slab address, or `E_OUT_OF_MEMORY` with every page given back, also
+/// once the region, which holds the descriptors of over a terabyte, is full.
+/// The cursor lock is held across the mapping and the cursor advances only
+/// on success, so a failed growth leaves no gap in the region.
+pub(super) fn map_slab_pages(num_pages: u64) -> Result<u64, ErrorCode> {
+    let num_pages = num_pages as usize;
+    assert!(num_pages <= MAX_SLAB_PAGES);
+    let mut cursor = KERNEL_ADDRESS_SPACE.next_slab_addr.lock(line!());
+    let start = *cursor;
+    let size = (num_pages as u64) << PAGE_SIZE_SMALL_LOG2;
+    if start + size > VMEM_K_SLABS_END {
+        return Err(moto_rt::E_OUT_OF_MEMORY);
+    }
+    let vaddr = |idx: usize| start + ((idx as u64) << PAGE_SIZE_SMALL_LOG2);
+
+    // The pages first, so that running short of them, the usual failure,
+    // costs no TLB shootdown.
+    let mut pages = [0_u64; MAX_SLAB_PAGES];
+    for taken in 0..num_pages {
+        match super::phys::phys_allocate_frameless(PageType::SmallPage) {
+            Ok(phys) => pages[taken] = phys,
+            Err(err) => {
+                free_slab_pages(&pages[..taken]);
+                return Err(err);
+            }
+        }
+    }
+    let table = &KERNEL_ADDRESS_SPACE.base.page_table;
+    let options = MappingOptions::READABLE | MappingOptions::WRITABLE;
+    for (idx, phys) in pages[..num_pages].iter().enumerate() {
+        if let Err(err) = table.map_page(*phys, vaddr(idx), PageType::SmallPage, options) {
+            for (done, phys) in pages[..idx].iter().enumerate() {
+                table.unmap_page_no_flush(*phys, vaddr(done), PageType::SmallPage);
+            }
+            if idx > 0 {
+                table.flush_pages(start, idx as u64);
+            }
+            free_slab_pages(&pages[..num_pages]);
+            return Err(err);
+        }
+    }
+    *cursor = start + size;
+    Ok(start)
+}
+
+fn free_slab_pages(pages: &[u64]) {
+    for phys in pages {
+        super::phys::phys_deallocate_frameless(*phys, PageType::SmallPage);
+    }
 }
 
 #[derive(Debug, PartialEq, Copy, Clone)]
@@ -698,7 +733,7 @@ impl AddressSpaceBase {
 }
 
 pub struct KernelAddressSpace {
-    base: AddressSpaceBase,
+    pub(super) base: AddressSpaceBase,
 
     kernel_static: VmemRegion,
     kernel_stacks: VmemRegion,
@@ -706,7 +741,8 @@ pub struct KernelAddressSpace {
     kernel_mmio: VmemRegion,
 
     static_shared_page: UnsafeRef<moto_sys::KernelStaticPage>,
-    next_slabs_addr: AtomicU64,
+    // The next free address in the slab region; see `map_slab_pages`.
+    pub(super) next_slab_addr: SpinLock<u64>,
     /// The executable pager's registry; see `uspace::pager`.
     pager: crate::uspace::pager::PagerRegistry,
 
@@ -745,7 +781,7 @@ impl KernelAddressSpace {
             base: AddressSpaceBase::new(true).unwrap(),
 
             static_shared_page: UnsafeRef::const_default(),
-            next_slabs_addr: AtomicU64::new(VMEM_K_SLABS_START),
+            next_slab_addr: SpinLock::new(VMEM_K_SLABS_START),
             pager: crate::uspace::pager::PagerRegistry::new(),
 
             _pin: PhantomPinned,

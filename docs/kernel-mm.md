@@ -342,9 +342,12 @@ in full before the first destination page changes.
 Every page acquired for a process's mappings is acquired fallibly and
 answers `E_OUT_OF_MEMORY`: data frames, page and segment descriptors (their
 slabs grow one frame at a time, and a segment node is secured before its
-segment is built), page-table pages and the process static page. The
-exceptions are the frame-descriptor slab's own growth and the kernel heap,
-which still panic on exhaustion. The allocator logs nothing on exhaustion;
+segment is built), page-table pages, the process static page and the
+frame-descriptor slab's growth, which takes all its pages before mapping
+any and gives them all back on failure, under a lock that also keeps a
+failed growth from consuming the slab region, and which refuses the same
+way once that region is full. The exception is the kernel heap, which
+still panics on exhaustion. The allocator logs nothing on exhaustion;
 a process can provoke it at will. `PageTable::map_page` retires the
 page-table pages it created before it failed, as it retires emptied ones,
 so a failed mapping leaves no trace once flushed. Eager construction rolls
@@ -528,7 +531,11 @@ including after partial progress: a fill that installed its first page, a
 contiguous run found before its page tables, a share that mapped its first
 page, a kernel stack half built. Each then succeeds with exactly the pages
 it needs, and a 4 MiB fallback mapping that runs out midway returns every
-page it mapped.
+page it mapped. The frame-descriptor slab is filled to its boundary, with
+the growth placed across a page-table boundary: every growth short of a
+page returns its pages and leaves the cursor in place and nothing mapped,
+the one that had mapped its prefix included, and the full growth takes
+exactly the slab's pages and the one page-table page.
 
 Systest (`mem_blocks.rs`, reached by full-test.sh) covers placement of fresh
 1 MiB pieces within `10 + 2 * CPUs` blocks on the plain 1 GiB guest, mixed

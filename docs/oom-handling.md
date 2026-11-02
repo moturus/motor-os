@@ -12,8 +12,7 @@ descriptor and page-table allocation made for a process and unwinds the
 partial mapping (see [kernel-mm.md](kernel-mm.md)). `SysMem::map` still
 reports every mapping failure as `E_OUT_OF_MEMORY`, and a fault that cannot
 get a frame kills the faulting thread until the OOM gates park it. The
-frame-descriptor slab's own growth and the kernel heap still panic on
-exhaustion.
+kernel heap still panics on exhaustion.
 
 ## Process identities
 

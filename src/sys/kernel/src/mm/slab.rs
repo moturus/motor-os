@@ -1,3 +1,4 @@
+use crate::mm::{align_up, PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
 use crate::util::SpinLock;
 use core::sync::atomic::*;
 use moto_rt::ErrorCode;
@@ -251,21 +252,40 @@ pub struct MMSlab<T: Slabbable> {
     // Protects partial, partial_next, and in_list. A leaf lock: nothing is
     // allocated and no other lock is taken while it is held.
     list_lock: SpinLock<()>,
+    // Serializes slab creation; see alloc(). Taken before any mm lock.
+    growth_lock: SpinLock<()>,
     // Whether slabs are shared (have refcounts). Stored at construction so
     // that lazy slab creation doesn't need to inspect an existing slab.
     shared: bool,
 }
 
 impl<T: Slabbable> MMSlab<T> {
-    unsafe fn new_pslab(shared: bool, owner: *const MMSlab<T>) -> *mut Slab4096<T> {
-        let pslab = crate::mm::raw_alloc_for_slab::<Slab4096<T>>();
+    // The pages behind one slab: the slab, then its refcounts when shared.
+    pub(super) fn backing_pages(shared: bool) -> u64 {
+        const { assert!(align_of::<Slab4096<T>>() <= PAGE_SIZE_SMALL as usize) };
+        let refs = if shared {
+            size_of::<[AtomicU32; 4096]>()
+        } else {
+            0
+        };
+        align_up((size_of::<Slab4096<T>>() + refs) as u64, PAGE_SIZE_SMALL) >> PAGE_SIZE_SMALL_LOG2
+    }
+
+    unsafe fn new_pslab(
+        shared: bool,
+        owner: *const MMSlab<T>,
+    ) -> Result<*mut Slab4096<T>, ErrorCode> {
+        let mem = crate::mm::raw_alloc_for_slab(Self::backing_pages(shared))?;
+        let pslab = mem as *mut Slab4096<T>;
+        // The refcounts follow the slab, whose size is a multiple of its
+        // alignment, which covers theirs.
         let prefs = if shared {
-            crate::mm::raw_alloc_for_slab::<[AtomicU32; 4096]>()
+            mem.add(size_of::<Slab4096<T>>()) as *const [AtomicU32; 4096]
         } else {
             core::ptr::null()
         };
-        let _init = Slab4096::<T>::from_uninit(pslab, prefs, owner);
-        pslab
+        Slab4096::<T>::from_uninit(pslab, prefs, owner);
+        Ok(pslab)
     }
 
     pub fn new(shared: bool) -> Self {
@@ -275,6 +295,7 @@ impl<T: Slabbable> MMSlab<T> {
         Self {
             partial: AtomicPtr::new(core::ptr::null_mut()),
             list_lock: SpinLock::new(()),
+            growth_lock: SpinLock::new(()),
             shared,
         }
     }
@@ -335,11 +356,18 @@ impl<T: Slabbable> MMSlab<T> {
             let pslab = self.partial.load(Ordering::Acquire);
 
             if pslab.is_null() {
-                // No partial slabs. Create one before taking list_lock, as
-                // raw_alloc_for_slab() takes mm locks and list_lock must stay
-                // a leaf lock. Concurrent callers may each push a slab; the
-                // extra slabs are used later, not leaked.
-                let new = unsafe { Self::new_pslab(self.shared, self as *const Self) };
+                // No partial slabs: create one, under the growth lock and
+                // after a re-check, so that callers that found the list
+                // empty together take the slab the first of them creates,
+                // rather than each creating one or, short of the memory for
+                // a second, failing with the first's slots free. The
+                // list_lock stays a leaf lock: raw_alloc_for_slab() takes
+                // mm locks, so it is taken only after that.
+                let _growth = self.growth_lock.lock(line!());
+                if !self.partial.load(Ordering::Acquire).is_null() {
+                    continue;
+                }
+                let new = unsafe { Self::new_pslab(self.shared, self as *const Self)? };
                 self.push_partial(new);
                 continue;
             }
