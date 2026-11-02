@@ -1,8 +1,57 @@
 # Replace memory admission control with kernel OOM killing
 
-Draft for review. Replace reservation-based admission with simple physical-memory
-limits, fallible user-page allocation, and kernel OOM jobs. Kill recent None-role
-processes first, then Interactive processes if needed.
+Adopted plan, in progress on branch `oom-handling`. Replace reservation-based
+admission with simple physical-memory limits, fallible user-page allocation,
+and kernel OOM jobs. Kill recent None-role processes first, then Interactive
+processes if needed. The status section records what has landed; the sections
+after it are the specification, each opening with its own state.
+
+## Status
+
+As of 2026-11-02:
+
+| Step | Work                                                      | State                                   |
+|------|-----------------------------------------------------------|-----------------------------------------|
+| 1    | Admission cleanup, 4 MiB spawn and memfs checks           | Committed, `60c5cd09`                   |
+| 2    | Two process IDs, statistics maps and lookups              | Committed, `02e9c17b`                   |
+| 2a   | Live `free_pages` count, no pressure flag (proposal 5)    | Committed, `2e9c6a64`                   |
+| 3    | Release user memory at process exit                       | Committed, `cda3c9d3`                   |
+| 4a   | Fallible MM core, boot exhaustion self-test               | Working tree, reviewed, awaiting commit |
+| 4b   | Fallible frame-descriptor slab growth                     | Not started                             |
+| 4c   | Real error codes in the syscall and process layers        | Not started                             |
+| 5    | Allocation gates, OOM jobs, waiters, recovery             | Not started                             |
+
+What the committed steps and 4a provide is described in
+[docs/oom-handling.md](../oom-handling.md) and
+[docs/kernel-mm.md](../kernel-mm.md). In short: admission, floors,
+reservations, commitments and `AdmissionStats` are gone; spawns are refused
+below 4 MiB by sys-io and by the kernel at creation and at the first `Created`
+to `Running` transition; memfs refuses allocating mutations below 4 MiB;
+`free_pages` is the allocator's live count; every process has a monotonic
+`kernel_pid` beside its `user_pid`; a process's user memory goes back at exit
+and an address space hosts one process; and every page acquired for a
+process's mappings is acquired fallibly, with the partial mapping unwound,
+through frames, the per-space descriptor slabs, page-table growth, eager
+mappings, lazy faults, pager fills, sharing, construction and both stacks.
+
+Left to do:
+
+- **4b.** The frame-descriptor slab's own growth (`raw_alloc_for_slab` in
+  `mm/mod.rs`) still panics on exhaustion. The kernel heap stays outside the
+  guarantee by design.
+- **4c.** `sys_mem.rs` answers every mapping failure, invalid arguments
+  included, with `E_OUT_OF_MEMORY`, and `Process::new_child` turns any
+  construction failure into `E_INTERNAL_ERROR`. Propagate the real codes and
+  add systest coverage of exact codes. Thread spawning, `SysObj` address-space
+  creation, shared-page connection and the pager already pass
+  `E_OUT_OF_MEMORY` through.
+- **5.** The gates and waits in "Fallible user-page allocation" from the
+  paragraph on pausing at syscall entry onward, the 2 MiB and 512 KiB rules,
+  "OOM jobs" in full, and the validation items for boundaries, victims,
+  episodes and waiters. Until then a fault that cannot get a frame kills the
+  faulting thread.
+- The `full-test-dev.sh --release` run of the completed transition, and the
+  three deferred issues at the end of this document.
 
 ## Intended behavior
 
@@ -66,6 +115,8 @@ low-memory reclamation of unused allocator/cache memory.
 
 ## Process IDs and lookup
 
+Done in `02e9c17b`.
+
 Each process has two IDs:
 
 - `kernel_pid`: a monotonically increasing `u64`, never reused or wrapped.
@@ -101,6 +152,11 @@ The main changes are in `uspace/process.rs` and `xray/stats.rs` under
 `src/sys/kernel/src`. No new registry abstraction or intrusive index is needed.
 
 ## Fallible user-page allocation
+
+The audit list below is done through the MM core in step 4a, except the
+frame-descriptor slab's growth (4b) and the error codes of `sys_mem.rs` and
+`process.rs` (4c). The gates, waits and fault parking from the paragraph on
+pausing at syscall entry onward are step 5.
 
 Audit the complete mapping path, not just data-frame allocation. Relevant
 kernel code:
@@ -180,6 +236,8 @@ itself runs out of memory, its existing OOM failure is accepted.
 
 ## Release user memory on exit
 
+Done in `cda3c9d3`, including the one-process claim on an address space.
+
 Add an explicit, idempotent user-memory clear operation to
 `UserAddressSpace`. Call it from normal process exit completion, and retain
 final-drop cleanup for unused or partially constructed address spaces.
@@ -202,6 +260,8 @@ not free pages twice. Keep kernel mappings and the page-table root alive for
 as long as the remaining address-space object requires them.
 
 ## OOM jobs
+
+Not started (step 5).
 
 Use posted jobs on the existing scheduler. **Do not create a worker thread.**
 Keep an episode ID, a run-active flag, and the 512 KiB block in the existing
@@ -272,6 +332,9 @@ memory remains between 2 and 3 MiB.
 
 ## One admission-cleanup patch
 
+Done in `60c5cd09`; `2e9c6a64` then replaced the retained pressure flag with
+the live `free_pages` count.
+
 The first patch removes the old admission policy across the repository while
 retaining the pressure flag, sys-io's spawn refusal, and the replacement memfs
 check. Fallible allocation, exit reclamation, and the new kernel limits and OOM
@@ -315,20 +378,32 @@ All work stays in the main repository.
 1. Land the large admission-cleanup patch above, including removal of
    obsolete admission tests and documentation updates. Keep the pressure flag
    and spawn refusals in sys-io and the kernel. Publish `free_pages` and replace
-   the old memfs reserve with the 4 MiB check.
+   the old memfs reserve with the 4 MiB check. *Done, `60c5cd09`.*
 2. Add the two process IDs and update the statistics maps/lookups. A
    follow-up patch then replaced the published pressure flag with the live
-   `free_pages` count (proposal 5 below).
-3. Clear user memory during process exit.
+   `free_pages` count (proposal 5 below). *Done, `02e9c17b` and `2e9c6a64`.*
+3. Clear user memory during process exit. *Done, `cda3c9d3`.*
 4. Make user-page allocation fallible, splitting the MM changes into small
-   patches with their tests.
+   patches with their tests. *In progress: 4a, the MM core with a boot
+   exhaustion self-test, is in the working tree; 4b, frame-descriptor slab
+   growth, and 4c, real error codes in the syscall and process layers with
+   systest coverage, follow.*
 5. Implement the 2 MiB and 512 KiB allocation gates, OOM jobs, and scheduler
    integration together, with the new pressure, blocking, and recovery tests.
+   *Not started.*
 
 Step 1 is the single large cleanup patch. Keep subsequent patches small,
 normally 100–300 lines including tests.
 
 ## Validation
+
+Covered so far: the PID items; allocation failure and rollback at every
+boundary that returns an error, by the debug boot exhaustion self-test, with
+contiguous failure and huge-page fallback (immediate rejection of large
+allocations belongs to step 5, exact syscall codes to 4c); exit and kill
+releasing memory with handles held; the FS, networking, logging and spawn
+items; and the quiescent `free_pages` comparisons. The boundary, victim,
+episode, waiter and parked-allocation items are step 5.
 
 Run kernel tests inside Motor OS and include regressions in
 `src/tests/full-test.sh`, directly or through systest:

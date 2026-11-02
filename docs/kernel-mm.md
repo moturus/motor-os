@@ -339,13 +339,28 @@ sharing into a lazy segment is refused. A lazy segment can be a share source
 once every page of the shared range has been touched; a share is validated
 in full before the first destination page changes.
 
-Frame allocation and page-table growth are not yet fallible throughout:
-`phys::allocate_frame` and the page-table allocator panic on exhaustion.
-`PageTable::map_page`
-fails only for mapping options it does not accept; eager construction rolls
-a segment back at its boundary on that error, and a fault that meets it
-leaves its fresh descriptor frameless, which is a hole. Nothing in the
-mapping paths has an allocation failure branch.
+Every page acquired for a process's mappings is acquired fallibly and
+answers `E_OUT_OF_MEMORY`: data frames, page and segment descriptors (their
+slabs grow one frame at a time, and a segment node is secured before its
+segment is built), page-table pages and the process static page. The
+exceptions are the frame-descriptor slab's own growth and the kernel heap,
+which still panic on exhaustion. The allocator logs nothing on exhaustion;
+a process can provoke it at will. `PageTable::map_page` retires the
+page-table pages it created before it failed, as it retires emptied ones,
+so a failed mapping leaves no trace once flushed. Eager construction rolls
+the whole segment back at its boundary; a refused fault leaves a sparse
+segment without the descriptor, so every descriptor of a sparse segment
+carries a frame, and leaves a dense page's descriptor as it was; a pager
+fill reports the pages it did install; a stack whose first page cannot be
+faulted in is unmapped again; address-space construction maps its static
+pages before the space exists and undoes them on failure. A share first
+maps the source frames behind the destination pages that have none, the
+only step that needs page-table pages, and unmaps them again if one cannot
+be had; the pages that had frames are then switched in place by
+`PageTable::remap_page`, which keeps the tables and so needs no memory. A
+failed share leaves the destination as it was. Until the OOM gates park it,
+a fault that cannot get a frame kills the faulting thread, as an invalid
+fault does.
 
 `VmemKind` distinguishes boot, MM slab, MMIO, heap, stack, static, user,
 user-stack and unmapped segments. `VaddrMapStatus` reports unallocated,
@@ -501,7 +516,19 @@ and checks that sharing is refused at either eligible endpoint. A
 guarded-heap self-test checks the exact shape of both kinds, including the
 one-page minimum and a size an ordinary heap would round, guard refusals,
 share refusal at either end with the refused destination intact, and
-teardown.
+teardown. An exhaustion self-test holds every whole block, dual-purpose
+ones as huge frames and small-only ones as untouched runs, drains the
+remaining free pages into a list threaded through the pages themselves,
+and checks at exact page counts that a heap, a fault, a pager fill, a
+contiguous request, a share, both stacks and a new address space refuse
+with `E_OUT_OF_MEMORY` and leave nothing behind, in page descriptors,
+resident and reserved pages and the process charge, when the frame, a
+page-table page or, in a fresh space, a descriptor slab is missing,
+including after partial progress: a fill that installed its first page, a
+contiguous run found before its page tables, a share that mapped its first
+page, a kernel stack half built. Each then succeeds with exactly the pages
+it needs, and a 4 MiB fallback mapping that runs out midway returns every
+page it mapped.
 
 Systest (`mem_blocks.rs`, reached by full-test.sh) covers placement of fresh
 1 MiB pieces within `10 + 2 * CPUs` blocks on the plain 1 GiB guest, mixed

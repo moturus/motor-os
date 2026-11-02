@@ -366,6 +366,8 @@ fn cpu_main(this_cpu: u64) -> ! {
         crate::mm::user::exit_release_self_test();
         #[cfg(debug_assertions)]
         crate::arch::paging::retired_tables_self_test();
+        #[cfg(debug_assertions)]
+        crate::mm::user::exhaustion_self_test();
         crate::uspace::init();
 
         // If we print the boot logo before init_clock(), KVM in the host misbehaves and

@@ -166,20 +166,22 @@ impl HwPageTable {
         }
     }
 
-    fn get_or_create(&mut self, idx: u64, pde_flags: u64) -> &'static mut Self {
+    // The table under entry `idx`, created if the entry is empty: the flag
+    // says so, and a caller that fails afterwards unwinds it.
+    fn get_or_create(
+        &mut self,
+        idx: u64,
+        pde_flags: u64,
+    ) -> Result<(&'static mut Self, bool), ErrorCode> {
         let pte = self.get(idx);
         if !pte.is_empty() {
             assert!(!pte.is_huge_page());
-            return Self::from_pte(pte);
+            return Ok((Self::from_pte(pte), false));
         }
 
-        let frame = phys_allocate_frameless(PageType::SmallPage).unwrap();
-        zero_page(frame + PAGING_DIRECT_MAP_OFFSET, PageType::SmallPage);
-
-        let pte = PTE::from_u64(frame | pde_flags);
-        self.entries[idx as usize] = pte;
-
-        Self::from_pte(pte)
+        let table = Self::alloc()?;
+        self.entries[idx as usize] = PTE::from_u64(table.self_phys_addr() | pde_flags);
+        Ok((table, true))
     }
 
     fn alloc() -> Result<&'static mut Self, ErrorCode> {
@@ -332,18 +334,31 @@ impl PageTableImpl {
         self.table_l4.set(idx_l4, PTE::empty());
     }
 
-    fn map_page(&mut self, phys_addr: u64, virt_addr: u64, kind: PageType, pte_flags: u64) {
-        assert_eq!(0, phys_addr & (kind.page_size() - 1));
-        assert_eq!(0, virt_addr & (kind.page_size() - 1));
-
-        // Kernel leaves are GLOBAL (W6a). Only in the kernel page table: a
-        // global leaf in a user table would be invalidated via that table's
-        // shootdown, which is skipped on CPUs with a different CR3.
-        let pte_flags = if !self.userspace && (pte_flags & PTE::USER) == 0 {
+    // Kernel leaves are GLOBAL (W6a). Only in the kernel page table: a
+    // global leaf in a user table would be invalidated via that table's
+    // shootdown, which is skipped on CPUs with a different CR3.
+    fn leaf_flags(&self, pte_flags: u64) -> u64 {
+        if !self.userspace && (pte_flags & PTE::USER) == 0 {
             pte_flags | PTE::GLOBAL
         } else {
             pte_flags
-        };
+        }
+    }
+
+    // Fails only for lack of memory for page-table pages. The pages this
+    // call created are then retired, like emptied ones: a CPU may have
+    // cached the new directory entries during a concurrent walk (see
+    // retire_table), so a failed mapping leaves no trace once flushed.
+    fn map_page(
+        &mut self,
+        phys_addr: u64,
+        virt_addr: u64,
+        kind: PageType,
+        pte_flags: u64,
+    ) -> Result<(), ErrorCode> {
+        assert_eq!(0, phys_addr & (kind.page_size() - 1));
+        assert_eq!(0, virt_addr & (kind.page_size() - 1));
+        let pte_flags = self.leaf_flags(pte_flags);
 
         let page_directory_flags = if (pte_flags & PTE::USER) != 0 {
             // TODO: maybe this is too permissive?
@@ -353,28 +368,54 @@ impl PageTableImpl {
         };
 
         let idx_l4 = PageTableImpl::idx_l4(virt_addr);
-        let table_l3 = self.table_l4.get_or_create(idx_l4, page_directory_flags);
+        let (table_l3, new_l3) = self.table_l4.get_or_create(idx_l4, page_directory_flags)?;
 
         let idx_l3 = PageTableImpl::idx_l3(virt_addr);
         if kind == PageType::LargePage {
             assert!(table_l3.get(idx_l3).is_empty());
             let pte = PTE::from_u64(phys_addr | pte_flags);
             table_l3.set(idx_l3, pte);
-            return;
+            return Ok(());
         }
 
-        let table_l2 = table_l3.get_or_create(idx_l3, page_directory_flags);
+        let (table_l2, new_l2) = match table_l3.get_or_create(idx_l3, page_directory_flags) {
+            Ok(table) => table,
+            Err(err) => {
+                if new_l3 {
+                    self.table_l4.set(idx_l4, PTE::empty());
+                    self.retire_table(table_l3.self_phys_addr());
+                    self.flush_virt_addr(virt_addr);
+                }
+                return Err(err);
+            }
+        };
 
         let idx_l2 = PageTableImpl::idx_l2(virt_addr);
         if kind == PageType::MidPage {
             assert!(table_l2.get(idx_l2).is_empty());
             let pte = PTE::from_u64(phys_addr | pte_flags);
             table_l2.set(idx_l2, pte);
-            return;
+            return Ok(());
         }
 
         assert_eq!(kind, PageType::SmallPage);
-        let table_l1 = table_l2.get_or_create(idx_l2, page_directory_flags);
+        let table_l1 = match table_l2.get_or_create(idx_l2, page_directory_flags) {
+            Ok((table, _)) => table,
+            Err(err) => {
+                if new_l2 {
+                    table_l3.set(idx_l3, PTE::empty());
+                    self.retire_table(table_l2.self_phys_addr());
+                }
+                if new_l3 {
+                    self.table_l4.set(idx_l4, PTE::empty());
+                    self.retire_table(table_l3.self_phys_addr());
+                }
+                if new_l2 || new_l3 {
+                    self.flush_virt_addr(virt_addr);
+                }
+                return Err(err);
+            }
+        };
 
         let idx_l1 = PageTableImpl::idx_l1(virt_addr);
 
@@ -387,6 +428,7 @@ impl PageTableImpl {
         assert!(table_l1.get(idx_l1).is_empty());
         let pte = PTE::from_u64(phys_addr | pte_flags);
         table_l1.set(idx_l1, pte);
+        Ok(())
     }
 
     // With `flush: false` the caller must flush the TLB (e.g. via
@@ -463,6 +505,25 @@ impl PageTableImpl {
         if flush {
             self.flush_virt_addr(virt_addr);
         }
+    }
+
+    // Points the present small-page PTE at `virt_addr` from `old_phys` to
+    // `new_phys` and flushes it. The page tables stay as they are, so this
+    // needs no memory, unlike an unmap and a map, where the unmap can retire
+    // the emptied table and the map then fail to recreate it.
+    fn remap_page(&mut self, old_phys: u64, new_phys: u64, virt_addr: u64, pte_flags: u64) {
+        assert_eq!(0, (old_phys | new_phys | virt_addr) & (PAGE_SIZE_SMALL - 1));
+        let pte_l4 = self.table_l4.get(PageTableImpl::idx_l4(virt_addr));
+        assert!(!pte_l4.is_empty());
+        let pte_l3 = HwPageTable::from_pte(pte_l4).get(PageTableImpl::idx_l3(virt_addr));
+        assert!(!pte_l3.is_empty() && !pte_l3.is_huge_page());
+        let pte_l2 = HwPageTable::from_pte(pte_l3).get(PageTableImpl::idx_l2(virt_addr));
+        assert!(!pte_l2.is_empty() && !pte_l2.is_huge_page());
+        let table_l1 = HwPageTable::from_pte(pte_l2);
+        let idx_l1 = PageTableImpl::idx_l1(virt_addr);
+        assert_eq!(table_l1.get(idx_l1).get_addr(), old_phys);
+        table_l1.set(idx_l1, PTE::from_u64(new_phys | self.leaf_flags(pte_flags)));
+        self.flush_virt_addr(virt_addr);
     }
 
     fn is_readable(&self, virt_addr: u64) -> bool {
@@ -807,13 +868,10 @@ impl PageTable {
         unsafe { self.inst.get().lock(line!()).dead }
     }
 
-    pub fn map_page(
-        &self,
-        phys_addr: u64,
-        virt_addr: u64,
-        kind: PageType,
-        options: MappingOptions,
-    ) -> Result<(), ErrorCode> {
+    // The PTE flags a `kind` leaf gets for `options`, and whether the frame
+    // is zeroed before the leaf is published; `E_INVALID_ARGUMENT` for
+    // options that map nothing.
+    fn pte_flags(kind: PageType, options: MappingOptions) -> Result<(u64, bool), ErrorCode> {
         let mut options = options;
         let dont_zero =
             options.contains(MappingOptions::DONT_ZERO) || options.contains(MappingOptions::MMIO);
@@ -843,12 +901,7 @@ impl PageTable {
         } else if options == (MappingOptions::READABLE) {
             PTE::PRESENT | PTE::ACCESSED
         } else {
-            log::error!(
-                "invalid mapping options: 0x{:x} 0x{:x} {:?}",
-                phys_addr,
-                virt_addr,
-                options
-            );
+            log::error!("invalid mapping options: {options:?}");
             return Err(moto_rt::E_INVALID_ARGUMENT);
         };
 
@@ -865,10 +918,26 @@ impl PageTable {
         if kind != PageType::SmallPage {
             pte_flags |= PTE::HUGE;
         }
+        Ok((pte_flags, !dont_zero))
+    }
+
+    /// `E_INVALID_ARGUMENT` unless `map_page` maps small pages with `options`.
+    pub fn check_options(options: MappingOptions) -> Result<(), ErrorCode> {
+        Self::pte_flags(PageType::SmallPage, options).map(|_| ())
+    }
+
+    pub fn map_page(
+        &self,
+        phys_addr: u64,
+        virt_addr: u64,
+        kind: PageType,
+        options: MappingOptions,
+    ) -> Result<(), ErrorCode> {
+        let (pte_flags, zero) = Self::pte_flags(kind, options)?;
 
         // Initialize the frame before publishing the PTE. Otherwise another
         // CPU can write through the new mapping while zero_page() erases it.
-        if !dont_zero {
+        if zero {
             zero_page(phys_addr + PAGING_DIRECT_MAP_OFFSET, kind);
         }
 
@@ -876,9 +945,29 @@ impl PageTable {
             self.inst
                 .get()
                 .lock(3)
-                .map_page(phys_addr, virt_addr, kind, pte_flags);
+                .map_page(phys_addr, virt_addr, kind, pte_flags)
         }
+    }
 
+    /// Points the present small page at `virt_addr`, backed by `old_phys`,
+    /// at `new_phys` with `options`, and flushes it. The page tables are
+    /// kept, so unlike an unmap and a map this needs no memory, and the
+    /// frame, in use elsewhere, is not zeroed. Fails only for options
+    /// `check_options` refuses, before changing anything.
+    pub fn remap_page(
+        &self,
+        old_phys: u64,
+        new_phys: u64,
+        virt_addr: u64,
+        options: MappingOptions,
+    ) -> Result<(), ErrorCode> {
+        let (pte_flags, _) = Self::pte_flags(PageType::SmallPage, options)?;
+        unsafe {
+            self.inst
+                .get()
+                .lock(line!())
+                .remap_page(old_phys, new_phys, virt_addr, pte_flags);
+        }
         Ok(())
     }
 

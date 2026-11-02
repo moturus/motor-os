@@ -99,12 +99,9 @@ fn assert_published_free_pages() {
     );
 }
 
-/// A frame of the given kind. Exhaustion currently panics.
-pub fn allocate_frame(kind: PageType) -> SlabArc<Frame> {
-    match PhysicalMemory::inst().allocate_frame(kind) {
-        Ok(frame) => frame,
-        Err(_) => panic!("OOM"),
-    }
+/// A frame of the given kind, or `E_OUT_OF_MEMORY`.
+pub fn allocate_frame(kind: PageType) -> Result<SlabArc<Frame>, ErrorCode> {
+    PhysicalMemory::inst().allocate_frame(kind)
 }
 
 /// A huge frame owning one whole dual-purpose block. Failure is the
@@ -139,21 +136,18 @@ pub fn adopt_frame(phys_addr: u64) -> Result<SlabArc<Frame>, ErrorCode> {
 // Allocate a physical page without allocating struct Frame.
 // Used internally in mm for page table and slab allocations.
 pub fn phys_allocate_frameless(kind: PageType) -> Result<u64, ErrorCode> {
-    #[cfg(debug_assertions)]
-    {
-        let res = PhysicalMemory::inst().allocate_frameless(kind);
-        if res.is_err() {
-            log::warn!("OOM!");
-            dump_serial();
-        }
-        res
-    }
-    #[cfg(not(debug_assertions))]
     PhysicalMemory::inst().allocate_frameless(kind)
 }
 
 pub fn phys_deallocate_frameless(phys_addr: u64, kind: PageType) {
     PhysicalMemory::inst().deallocate_frameless(phys_addr, kind);
+}
+
+// A run of `pages` small pages without frames, for the boot self-tests;
+// `phys_deallocate_frameless` frees it page by page.
+#[cfg(debug_assertions)]
+pub fn phys_allocate_frameless_run(pages: u16) -> Result<u64, ErrorCode> {
+    PhysicalMemory::inst().allocate_frameless_run(pages)
 }
 
 // The caller has validated the whole MMIO range. Only the descriptor is owned.
@@ -256,19 +250,21 @@ impl PhysicalMemory {
         }
     }
 
+    // Exhaustion is the caller's to handle, not an event to log: a process
+    // can provoke it at will.
     fn allocate_frameless(&'static self, kind: PageType) -> Result<u64, ErrorCode> {
-        let result = match kind {
-            PageType::SmallPage => self.blocks.alloc_small(1).ok_or_else(|| {
-                log::error!(
-                    "OOM: failed to allocate a small frame. Total pages: {}; used pages: {}.",
-                    self.blocks.total_pages(),
-                    self.blocks.used_pages()
-                );
-                moto_rt::E_OUT_OF_MEMORY
-            }),
+        match kind {
+            PageType::SmallPage => self.blocks.alloc_small(1).ok_or(moto_rt::E_OUT_OF_MEMORY),
             _ => panic!(),
-        };
-        result
+        }
+    }
+
+    // A run of `pages` small pages from one block's unused range; freed
+    // page by page like any small page.
+    fn allocate_frameless_run(&self, pages: u16) -> Result<u64, ErrorCode> {
+        self.blocks
+            .alloc_small(pages)
+            .ok_or(moto_rt::E_OUT_OF_MEMORY)
     }
 
     fn deallocate_frameless(&'static self, phys_addr: u64, kind: PageType) {
@@ -306,10 +302,7 @@ impl PhysicalMemory {
         assert!(num_frames <= 64);
         assert_eq!(kind, PageType::SmallPage);
 
-        let start = self
-            .blocks
-            .alloc_small(num_frames as u16)
-            .ok_or(moto_rt::E_OUT_OF_MEMORY)?;
+        let start = self.allocate_frameless_run(num_frames as u16)?;
         let mut result = Vec::with_capacity(num_frames as usize);
         for idx in 0..num_frames {
             let frame_start = start + (idx << PAGE_SIZE_SMALL_LOG2);

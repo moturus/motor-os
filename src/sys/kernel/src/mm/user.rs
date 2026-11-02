@@ -291,24 +291,20 @@ impl UserAddressSpace {
 
         // When dropping, we count the full segment, with guard pages, so when adding,
         // we need to do the same.
-        self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
+        let bytes = num_pages << PAGE_SIZE_SMALL_LOG2;
+        self.stats_user_add(bytes)?;
         let segment = self
             .inner
-            .vmem_allocate_pages(VmemKind::UserStack, num_pages, None);
-
-        if let Err(err) = segment {
-            self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
-            return Err(err);
-        }
-
-        let segment = segment.unwrap();
+            .vmem_allocate_pages(VmemKind::UserStack, num_pages, None)
+            .inspect_err(|_| self.stats_user_sub(bytes))?;
 
         // Map the top stack page: the kernel uses some of it for user TCB.
         if let Err(err) = self.fix_pagefault(
             segment.end() - PAGE_SIZE_SMALL - 4, // Adjust for the guard page.
             6,                                   /* #PF error code: user + write */
         ) {
-            self.stats_user_sub(num_pages << PAGE_SIZE_SMALL_LOG2);
+            // The unmap takes the statistics back.
+            self.unmap(segment.start).unwrap();
             return Err(err);
         }
 
@@ -390,7 +386,7 @@ impl UserAddressSpace {
         self.inner
             .vmem_allocate_pages(VmemKind::User, mapped, options)
             .inspect_err(|_| {
-                log::error!("failed to allocate {mapped} pages");
+                log::debug!("failed to allocate {mapped} pages");
                 self.stats_user_sub(mapped << PAGE_SIZE_SMALL_LOG2);
             })
     }
@@ -1468,4 +1464,386 @@ pub fn exit_release_self_test() {
     peer.unmap(dest.start).unwrap();
     assert_eq!(peer.user_mem_stats().total(), 0);
     crate::raw_log!("exit release tests PASS");
+}
+
+// Exhaustion is an error, not a panic. With the live pool drained on the BSP
+// alone, every path that acquires pages for a process refuses with
+// E_OUT_OF_MEMORY and leaves no trace, whether the frame, a descriptor slab
+// or a page-table page was what ran out and however far it had got, and
+// proceeds once exactly the pages it needs are back. The pool and the
+// statistics come back exact.
+#[cfg(debug_assertions)]
+pub fn exhaustion_self_test() {
+    use super::phys::{allocate_huge_frame, available_small_pages, block_metrics};
+    use super::phys::{
+        phys_allocate_frameless, phys_allocate_frameless_run, phys_deallocate_frameless,
+    };
+    use super::virt::HUGE_FALLBACKS;
+    use super::{PageType, PAGING_DIRECT_MAP_OFFSET};
+
+    const HUGE_PAGES: u64 = PAGE_SIZE_MID >> PAGE_SIZE_SMALL_LOG2;
+    const FILE_ADDR: u64 = 1 << 30;
+    const SHARE_ADDR: u64 = 3 * (1 << 30) - PAGE_SIZE_SMALL;
+    let oom = moto_rt::E_OUT_OF_MEMORY;
+    let options =
+        MappingOptions::READABLE | MappingOptions::WRITABLE | MappingOptions::USER_ACCESSIBLE;
+
+    // The pool's free small pages, threaded through the pages themselves:
+    // holding every page of the guest costs no memory.
+    #[derive(Default)]
+    struct Hoard {
+        head: u64,
+        count: u64,
+    }
+    impl Hoard {
+        fn push(&mut self, phys: u64) {
+            unsafe { *((phys + PAGING_DIRECT_MAP_OFFSET) as *mut u64) = self.head };
+            self.head = phys;
+            self.count += 1;
+        }
+        fn take(&mut self, pages: u64) {
+            for _ in 0..pages {
+                self.push(phys_allocate_frameless(PageType::SmallPage).unwrap());
+            }
+        }
+        fn take_all(&mut self) {
+            while let Ok(phys) = phys_allocate_frameless(PageType::SmallPage) {
+                self.push(phys);
+            }
+            assert_eq!(available_small_pages(), 0);
+        }
+        fn give_back(&mut self, pages: u64) {
+            for _ in 0..pages {
+                let phys = self.head;
+                self.head = unsafe { *((phys + PAGING_DIRECT_MAP_OFFSET) as *const u64) };
+                phys_deallocate_frameless(phys, PageType::SmallPage);
+                self.count -= 1;
+            }
+        }
+    }
+
+    // Whole blocks go first, so that every eligible request falls back to
+    // small pages and the drain below stays short: dual-purpose blocks as
+    // huge frames, the small-only region's as untouched runs. The drain
+    // writes into each page it takes, and a first touch costs a host page
+    // fault on VMMs that back the guest with 4 KiB pages.
+    let taken_before = block_metrics().taken;
+    let mut held = alloc::vec::Vec::with_capacity(block_metrics().total as usize);
+    while let Ok(frame) = allocate_huge_frame() {
+        held.push(frame);
+    }
+    let mut runs = alloc::vec::Vec::with_capacity(64);
+    while available_small_pages() > 4 * HUGE_PAGES {
+        match phys_allocate_frameless_run(HUGE_PAGES as u16) {
+            Ok(start) => runs.push(start),
+            Err(_) => break,
+        }
+    }
+    let free_run = |start: u64| {
+        for page in 0..HUGE_PAGES {
+            phys_deallocate_frameless(start + (page << PAGE_SIZE_SMALL_LOG2), PageType::SmallPage);
+        }
+    };
+    // Warm up what must not be allocated while the pool is empty: the heap
+    // behind address-space objects, a 4 MiB mapping's frame descriptors and
+    // the kernel-stack region's segment nodes.
+    for _ in 0..2 {
+        let space = UserAddressSpace::new().unwrap();
+        let warm = space.alloc_user_heap(2 * HUGE_PAGES).unwrap();
+        space.unmap(warm.start).unwrap();
+        let stack = space.alloc_kernel_stack(4).unwrap();
+        space.do_drop_kernel_stack(stack);
+    }
+    let free_held = available_small_pages();
+
+    // The space under test, with the page and segment descriptors of a
+    // 4 MiB small-page mapping already in its slabs, a lazy segment, a
+    // three-page file-paged reservation at 1 GiB and a two-page plain
+    // reservation across the 3 GiB boundary. A peer holds two touched pages
+    // to share and copy into it. A kernel stack is measured and freed: six
+    // frames and the page-table pages its slot needs.
+    let space = UserAddressSpace::new().unwrap();
+    let table = space.inner.page_table_ref();
+    let warm = space.alloc_user_heap(2 * HUGE_PAGES).unwrap();
+    assert_eq!(table.leaf_kind(warm.start), Some(PageType::SmallPage));
+    space.unmap(warm.start).unwrap();
+    let lazy = space.alloc_user_lazy(2).unwrap();
+    space.reserve_file(FILE_ADDR, 3, false, false).unwrap();
+    space
+        .allocate_user_fixed(SHARE_ADDR, 2, MappingOptions::empty())
+        .unwrap();
+    let peer = UserAddressSpace::new().unwrap();
+    let source = peer.alloc_user_lazy(2).unwrap();
+    for page in [source.start, source.start + PAGE_SIZE_SMALL] {
+        peer.fix_pagefault(page, 6).unwrap();
+    }
+    peer.copy_to_user(b"shared", source.start).unwrap();
+    let pinned = || {
+        peer.get_user_page_as_kernel(source.start, MappingOptions::READABLE)
+            .unwrap()
+    };
+    let share = || UserAddressSpace::map_shared(&space, SHARE_ADDR, &peer, source.start, options);
+    let before = available_small_pages();
+    let probe = space.alloc_kernel_stack(4).unwrap();
+    let kernel_stack_pages = before - available_small_pages();
+    assert!(kernel_stack_pages >= 6);
+    space.do_drop_kernel_stack(probe);
+    assert_eq!(available_small_pages(), before);
+
+    // The space as a failure must leave it: `descriptors` page descriptors
+    // and `resident` resident pages, nothing reserved or charged since.
+    let descriptors = space.inner.page_descriptors();
+    let usage = space.user_mem_stats().total();
+    let charged = space.total_usage.load(Ordering::Relaxed);
+    let check = |descriptors: u64, resident: u64| {
+        assert_eq!(space.inner.page_descriptors(), descriptors);
+        assert_eq!(space.user_mem_stats().total(), usage);
+        assert_eq!(
+            space.user_mem_stats().resident(),
+            resident << PAGE_SIZE_SMALL_LOG2
+        );
+        assert_eq!(space.total_usage.load(Ordering::Relaxed), charged);
+        assert_eq!(space.kernel_mem_stats().total(), 0);
+        assert_eq!(space.kernel_mem_stats().resident(), 0);
+    };
+    let mut hoard = Hoard::default();
+    hoard.take_all();
+
+    // Nothing to give: every path refuses and leaves no trace.
+    assert_eq!(space.alloc_user_heap(1).map(|_| ()), Err(oom));
+    assert_eq!(space.alloc_contiguous_pages(4).map(|_| ()), Err(oom));
+    assert_eq!(space.fix_pagefault(lazy.start, 6), Err(oom));
+    assert_eq!(space.fill_file_zero(FILE_ADDR), Err(oom));
+    assert_eq!(space.fill_file(FILE_ADDR, &[pinned()]), (0, Err(oom)));
+    assert_eq!(share(), Err(oom));
+    assert_eq!(space.alloc_user_stack(4).map(|_| ()), Err(oom));
+    assert_eq!(space.alloc_kernel_stack(4).map(|_| ()), Err(oom));
+    assert_eq!(UserAddressSpace::new().map(|_| ()), Err(oom));
+    check(descriptors, 0);
+    assert_eq!(available_small_pages(), 0);
+
+    // A one-page heap at a fresh address takes four pages: the frame and
+    // three page-table pages. One short, it fails and what it created is
+    // unwound; complete, it maps, and the unmap returns all four.
+    for short in 1..4 {
+        hoard.give_back(1);
+        assert_eq!(space.alloc_user_heap(1).map(|_| ()), Err(oom));
+        assert_eq!(available_small_pages(), short);
+        check(descriptors, 0);
+    }
+    hoard.give_back(1);
+    let heap = space.alloc_user_heap(1).unwrap();
+    assert_eq!(available_small_pages(), 0);
+    space.unmap(heap.start).unwrap();
+    assert_eq!(available_small_pages(), 4);
+    hoard.take_all();
+
+    // A fault on the untouched lazy segment: the same four pages, then one
+    // per page once its tables exist. A refused fault leaves no descriptor.
+    for short in 1..4 {
+        hoard.give_back(1);
+        assert_eq!(space.fix_pagefault(lazy.start, 6), Err(oom));
+        assert_eq!(available_small_pages(), short);
+        assert_eq!(table.virt_to_phys(lazy.start), None);
+        check(descriptors, 0);
+    }
+    hoard.give_back(1);
+    space.fix_pagefault(lazy.start, 6).unwrap();
+    assert_eq!(available_small_pages(), 0);
+    assert_eq!(
+        space.fix_pagefault(lazy.start + PAGE_SIZE_SMALL, 6),
+        Err(oom)
+    );
+    check(descriptors + 1, 1);
+    hoard.give_back(1);
+    space
+        .fix_pagefault(lazy.start + PAGE_SIZE_SMALL, 6)
+        .unwrap();
+    assert_eq!(available_small_pages(), 0);
+    check(descriptors + 2, 2);
+
+    // A pager fill at 1 GiB: the frame and two page-table pages under the
+    // L3 table the faults just created. Then a two-page fill with one page
+    // in hand installs its first page and reports the failure of the
+    // second; given that page, it installs the rest.
+    for short in 1..3 {
+        hoard.give_back(1);
+        assert_eq!(space.fill_file_zero(FILE_ADDR), Err(oom));
+        assert_eq!(available_small_pages(), short);
+        assert_eq!(table.virt_to_phys(FILE_ADDR), None);
+        check(descriptors + 2, 2);
+    }
+    hoard.give_back(1);
+    assert_eq!(space.fill_file_zero(FILE_ADDR), Ok(true));
+    assert_eq!(available_small_pages(), 0);
+    check(descriptors + 3, 3);
+    let rest = FILE_ADDR + PAGE_SIZE_SMALL;
+    hoard.give_back(1);
+    assert_eq!(space.fill_file(rest, &[pinned(), pinned()]), (1, Err(oom)));
+    assert_eq!(available_small_pages(), 0);
+    assert_eq!(table.virt_to_phys(rest + PAGE_SIZE_SMALL), None);
+    check(descriptors + 4, 4);
+    hoard.give_back(1);
+    assert_eq!(space.fill_file(rest, &[pinned(), pinned()]), (1, Ok(())));
+    assert_eq!(
+        space.read_from_user(rest + PAGE_SIZE_SMALL, 6).unwrap(),
+        b"shared"
+    );
+    check(descriptors + 5, 5);
+
+    // A user stack goes after the reservations, in a fresh 2 MiB: its first
+    // page needs the frame and two page-table pages. Short, the segment it
+    // had reserved is unmapped again; whole, it maps, and dropping it
+    // returns the three pages and the charge.
+    for short in 1..3 {
+        hoard.give_back(1);
+        assert_eq!(space.alloc_user_stack(4).map(|_| ()), Err(oom));
+        assert_eq!(available_small_pages(), short);
+        check(descriptors + 5, 5);
+    }
+    hoard.give_back(1);
+    let stack = space.alloc_user_stack(4).unwrap();
+    assert_eq!(available_small_pages(), 0);
+    assert_eq!(space.user_mem_stats().resident(), 6 << PAGE_SIZE_SMALL_LOG2);
+    space.drop_stacks(&stack, &None);
+    assert_eq!(available_small_pages(), 3);
+    check(descriptors + 5, 5);
+    hoard.take_all();
+
+    // A contiguous run comes from a block's unused range, never from pages
+    // freed one by one. With a whole block released and all but four of its
+    // pages taken, a request of four finds its run and not the first page's
+    // two page-table pages: the run goes back, to the block's list. With a
+    // second block released it maps, from that block; the unmap and the
+    // hoard then give both blocks back whole. Both are small-only blocks
+    // from `runs`: a guest under 128 MiB has no dual-purpose block.
+    assert!(runs.len() >= 2);
+    free_run(runs.pop().unwrap());
+    assert_eq!(available_small_pages(), HUGE_PAGES);
+    hoard.take(HUGE_PAGES - 4);
+    assert_eq!(space.alloc_contiguous_pages(4).map(|_| ()), Err(oom));
+    assert_eq!(available_small_pages(), 4);
+    check(descriptors + 5, 5);
+    free_run(runs.pop().unwrap());
+    let contiguous = space.alloc_contiguous_pages(4).unwrap();
+    assert_eq!(available_small_pages(), HUGE_PAGES - 2);
+    assert_eq!(space.inner.page_descriptors(), descriptors + 9);
+    assert_eq!(space.user_mem_stats().resident(), 9 << PAGE_SIZE_SMALL_LOG2);
+    space.unmap(contiguous.start).unwrap();
+    assert_eq!(available_small_pages(), HUGE_PAGES + 4);
+    check(descriptors + 5, 5);
+    hoard.give_back(HUGE_PAGES - 4);
+    for _ in 0..2 {
+        runs.push(phys_allocate_frameless_run(HUGE_PAGES as u16).unwrap());
+    }
+    assert_eq!(available_small_pages(), 0);
+
+    // Sharing the peer's pages into the reservation across the 3 GiB
+    // boundary needs two page-table pages per page and no frame. Short of
+    // any, the share fails and the page it had mapped, if any, is unmapped
+    // again: the reservation is as it was. Whole, both pages read the
+    // peer's frames.
+    for short in 1..4 {
+        hoard.give_back(1);
+        assert_eq!(share(), Err(oom));
+        assert_eq!(available_small_pages(), short);
+        assert_eq!(table.virt_to_phys(SHARE_ADDR), None);
+        assert_eq!(table.virt_to_phys(SHARE_ADDR + PAGE_SIZE_SMALL), None);
+        check(descriptors + 5, 5);
+    }
+    hoard.give_back(1);
+    share().unwrap();
+    assert_eq!(available_small_pages(), 0);
+    for idx in 0..2 {
+        assert_eq!(
+            table.virt_to_phys(SHARE_ADDR + idx * PAGE_SIZE_SMALL),
+            peer.virt_to_phys(source.start + idx * PAGE_SIZE_SMALL)
+        );
+    }
+    assert_eq!(space.read_from_user(SHARE_ADDR, 6).unwrap(), b"shared");
+    check(descriptors + 5, 7);
+
+    // A kernel stack takes its frames one by one, so short of any it is half
+    // built and torn down again, in the kernel's page table. Whole, it shows
+    // in the space's kernel statistics until it is freed.
+    for short in 1..kernel_stack_pages {
+        hoard.give_back(1);
+        assert_eq!(space.alloc_kernel_stack(4).map(|_| ()), Err(oom));
+        assert_eq!(available_small_pages(), short);
+        check(descriptors + 5, 7);
+    }
+    hoard.give_back(1);
+    let kernel_stack = space.alloc_kernel_stack(4).unwrap();
+    assert_eq!(available_small_pages(), 0);
+    assert_eq!(space.kernel_mem_stats().total(), 8 << PAGE_SIZE_SMALL_LOG2);
+    assert_eq!(
+        space.kernel_mem_stats().resident(),
+        6 << PAGE_SIZE_SMALL_LOG2
+    );
+    space.do_drop_kernel_stack(kernel_stack);
+    assert_eq!(available_small_pages(), kernel_stack_pages);
+    check(descriptors + 5, 7);
+    hoard.take_all();
+
+    // An eligible 4 MiB heap with no whole block to take falls back to
+    // small pages and, 600 pages in hand, runs out midway: every page it
+    // mapped comes back.
+    let fallbacks = HUGE_FALLBACKS.load(Ordering::Relaxed);
+    hoard.give_back(600);
+    assert_eq!(space.alloc_user_heap(2 * HUGE_PAGES).map(|_| ()), Err(oom));
+    assert_eq!(available_small_pages(), 600);
+    assert!(HUGE_FALLBACKS.load(Ordering::Relaxed) > fallbacks);
+    check(descriptors + 5, 7);
+    hoard.take_all();
+
+    // A new address space takes six pages: its root, three page-table pages
+    // for the kernel static page, one more for the process static page, and
+    // that page. Short of any of them, construction fails and gives back
+    // the rest.
+    for short in 1..6 {
+        hoard.give_back(1);
+        assert_eq!(UserAddressSpace::new().map(|_| ()), Err(oom));
+        assert_eq!(available_small_pages(), short);
+    }
+    hoard.give_back(1);
+    let built = UserAddressSpace::new().unwrap();
+    assert_eq!(available_small_pages(), 0);
+
+    // The new space has no descriptor slabs. Its first one-page heap needs
+    // a segment-node slab, the frame, a page-descriptor slab and the three
+    // page-table pages, in that order. The slabs stay with the space once
+    // allocated, so a failure past one leaves the pool a page lower than it
+    // found it, and the heap then needs a page less.
+    let built_charged = built.total_usage.load(Ordering::Relaxed);
+    for (give, left) in [(0, 0), (1, 0), (1, 1), (1, 1), (1, 2), (1, 3)] {
+        hoard.give_back(give);
+        assert_eq!(built.alloc_user_heap(1).map(|_| ()), Err(oom));
+        assert_eq!(available_small_pages(), left);
+        assert_eq!(built.inner.page_descriptors(), 0);
+        assert_eq!(built.user_mem_stats().total(), 0);
+        assert_eq!(built.total_usage.load(Ordering::Relaxed), built_charged);
+    }
+    hoard.give_back(1);
+    let heap = built.alloc_user_heap(1).unwrap();
+    assert_eq!(available_small_pages(), 0);
+    built.unmap(heap.start).unwrap();
+    assert_eq!(available_small_pages(), 4);
+    drop(built);
+    assert_eq!(available_small_pages(), 12);
+    hoard.take_all();
+
+    // Teardown returns everything, the blocks included.
+    drop(space);
+    drop(peer);
+    let count = hoard.count;
+    hoard.give_back(count);
+    assert_eq!(available_small_pages(), free_held);
+    let run_pages = runs.len() as u64 * HUGE_PAGES;
+    for start in runs {
+        free_run(start);
+    }
+    assert_eq!(available_small_pages(), free_held + run_pages);
+    drop(held);
+    assert_eq!(block_metrics().taken, taken_before);
+    crate::raw_log!("exhaustion tests PASS");
 }

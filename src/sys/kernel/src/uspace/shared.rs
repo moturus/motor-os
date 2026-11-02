@@ -266,10 +266,10 @@ pub(super) fn get(
             | MappingOptions::WRITABLE
             | MappingOptions::DONT_ZERO,
     );
-    if mapping_result.is_err() {
-        log::debug!("shared: get: failed to map.");
+    if let Err(err) = mapping_result {
+        log::debug!("shared: get: failed to map: {err:?}.");
         requeue(listener);
-        return Err(moto_rt::E_INVALID_ARGUMENT);
+        return Err(err);
     }
     let sharee = SysObject::new_owned(
         listener.url.clone(),

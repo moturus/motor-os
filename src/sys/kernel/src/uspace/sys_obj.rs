@@ -53,7 +53,7 @@ fn sys_handle_create(
                     return Err(moto_rt::E_INVALID_ARGUMENT);
                 };
 
-                let address_space = crate::mm::user::UserAddressSpace::new().unwrap();
+                let address_space = crate::mm::user::UserAddressSpace::new()?;
                 let sys_object = SysObject::new_owned(
                     Arc::new(moto_sys::url_decode(debug_name)),
                     address_space,

@@ -114,7 +114,7 @@ pub unsafe fn map_page(phys_addr: u64, virt_addr: u64, kind: PageType, options: 
         .base
         .page_table
         .map_page(phys_addr, virt_addr, kind, options)
-        .expect("invalid kernel mapping options");
+        .expect("kernel mapping failed: bad options or out of memory");
 }
 
 pub fn get_kernel_static_page_mut() -> &'static mut moto_sys::KernelStaticPage {
@@ -385,6 +385,7 @@ impl VmemRegion {
         if segments.is_closed() {
             return Err(moto_rt::E_BAD_HANDLE);
         }
+        segments.ensure_free_node()?;
         let size = num_pages << PAGE_SIZE_SMALL_LOG2;
         // Huge-eligible segments start on a 2 MiB boundary, whether or not
         // any candidate ends up huge.
@@ -609,6 +610,7 @@ impl VmemRegion {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
 
+        segments.ensure_free_node()?;
         let mut seg = VmemSegment::new(memory_segment, self, mapping_options);
         seg.allocate_pages()?;
         self.bytes_used.fetch_add(size, Ordering::Relaxed);
@@ -923,6 +925,20 @@ impl UserAddressSpaceBase {
         #[cfg(debug_assertions)]
         log::debug!("UserAddressSpaceBase::new()");
 
+        let mut base = AddressSpaceBase::new(false)?;
+        // We map kernel to user (with user accessible bit not set) for simplicity.
+        // We may need to harden this against speculative execution attacks.
+        base.page_table
+            .map_kernel_to_user(&KERNEL_ADDRESS_SPACE.base.page_table);
+        let process_static_page = match Self::map_static_pages(&base.page_table) {
+            Ok(phys_addr) => phys_addr,
+            Err(err) => {
+                // The table goes back empty; see PageTable::drop.
+                base.page_table.unmap_kernel_from_user();
+                return Err(err);
+            }
+        };
+
         Ok(UserAddressSpaceBase {
             normal_memory: VmemRegion::new(MemorySegment {
                 start: 0,
@@ -934,51 +950,55 @@ impl UserAddressSpaceBase {
                     - moto_sys::CUSTOM_USERSPACE_REGION_START,
             }),
 
-            base: AddressSpaceBase::new(false)?,
-            process_static_page_phys_addr: AtomicU64::new(0),
+            base,
+            process_static_page_phys_addr: AtomicU64::new(process_static_page),
         })
     }
 
+    /// Maps the kernel static page and a fresh process static page, whose
+    /// physical address is returned. A failure leaves nothing mapped.
+    fn map_static_pages(page_table: &PageTable) -> Result<u64, ErrorCode> {
+        const _: () = assert!(moto_sys::KernelStaticPage::PAGE_SIZE == PAGE_SIZE_SMALL);
+        let kernel_static = KERNEL_ADDRESS_SPACE.static_shared_phys_addr();
+        page_table.map_page(
+            kernel_static,
+            KERNEL_STATIC_SHARED_PAGE_USER_VADDR,
+            PageType::SmallPage,
+            MappingOptions::READABLE | MappingOptions::USER_ACCESSIBLE | MappingOptions::DONT_ZERO,
+        )?;
+        match Self::map_process_static_page(page_table) {
+            Ok(phys_addr) => Ok(phys_addr),
+            Err(err) => {
+                page_table.unmap_page(
+                    kernel_static,
+                    KERNEL_STATIC_SHARED_PAGE_USER_VADDR,
+                    PageType::SmallPage,
+                );
+                Err(err)
+            }
+        }
+    }
+
+    /// A fresh process static page, mapped; nothing on failure.
+    fn map_process_static_page(page_table: &PageTable) -> Result<u64, ErrorCode> {
+        let phys_addr = super::phys::phys_allocate_frameless(PageType::SmallPage)?;
+        if let Err(err) = page_table.map_page(
+            phys_addr,
+            PROCESS_STATIC_SHARED_PAGE_USER_VADDR,
+            PageType::SmallPage,
+            MappingOptions::READABLE | MappingOptions::USER_ACCESSIBLE,
+        ) {
+            super::phys::phys_deallocate_frameless(phys_addr, PageType::SmallPage);
+            return Err(err);
+        }
+        Ok(phys_addr)
+    }
+
+    /// Links the regions to the base, which has its final address now.
     pub(super) fn init(&mut self) {
         let space = UnsafeRef::from(&self.base);
-
-        let region = &mut self.normal_memory;
-        region.address_space.set_from(&space);
-        let region = &mut self.custom_memory;
-        region.address_space.set_from(&space);
-
-        // We map kernel to user (with user accessible bit not set) for simplicity.
-        // We may need to harden this against speculative execution attacks.
-        self.base
-            .page_table
-            .map_kernel_to_user(&KERNEL_ADDRESS_SPACE.base.page_table);
-
-        const _: () = assert!(moto_sys::KernelStaticPage::PAGE_SIZE == PAGE_SIZE_SMALL);
-
-        self.base
-            .page_table
-            .map_page(
-                KERNEL_ADDRESS_SPACE.static_shared_phys_addr(),
-                KERNEL_STATIC_SHARED_PAGE_USER_VADDR,
-                PageType::SmallPage,
-                MappingOptions::READABLE
-                    | MappingOptions::USER_ACCESSIBLE
-                    | MappingOptions::DONT_ZERO,
-            )
-            .expect("invalid kernel-static-page mapping options");
-
-        let phys_addr = super::phys::phys_allocate_frameless(PageType::SmallPage).unwrap();
-        self.base
-            .page_table
-            .map_page(
-                phys_addr,
-                PROCESS_STATIC_SHARED_PAGE_USER_VADDR,
-                PageType::SmallPage,
-                MappingOptions::READABLE | MappingOptions::USER_ACCESSIBLE,
-            )
-            .expect("invalid process-static-page mapping options");
-        self.process_static_page_phys_addr
-            .store(phys_addr, Ordering::Relaxed);
+        self.normal_memory.address_space.set_from(&space);
+        self.custom_memory.address_space.set_from(&space);
     }
 
     pub fn process_static_page_mut(&self) -> &'static mut moto_sys::ProcessStaticPage {
