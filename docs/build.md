@@ -269,7 +269,5 @@ once under Cloud Hypervisor and once under Firecracker when
 two boot checks are skipped, and the suite says so after its final `PASS` line.
 Selecting one of them with `--vmm chv` or `--vmm fc` requires its binary.
 
-The SSH tests run OpenSSH against Motor OS, so the host also needs an OpenSSH
-client, 9.4 or newer for `ssh-copy-id -t`, and the `sshd` program from
-`openssh-server`, which the build does not install. The tests start their own
-`sshd`, so the system service need not run.
+The SSH tests drive Motor OS with the host's OpenSSH client, and
+`ssh-copy-id -t` needs version 9.4 or newer. No test runs the host's `sshd`.

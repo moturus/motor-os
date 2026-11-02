@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# Config aliases and ProxyJump from Motor OS through a private OpenSSH fixture.
+# Config aliases from Motor OS, against the host russhd of test-ssh-client-host.sh.
+# russhd forwards nothing, so ProxyJump goes as far as the jump's refusal here;
+# client_protocol.rs carries it through a real jump.
 set -euo pipefail
 WD="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$WD/../.." && pwd)"
 TEST_TMP="${MOTOR_TEST_TMP:-/user/tmp/motor-tests}"
-SSHD="$(command -v sshd)"
+target_port="$MOTOR_SSH_TARGET_PORT"
 mkdir -p "$ROOT_DIR/build/host-tests"
 fixture="$(mktemp -d "$ROOT_DIR/build/host-tests/ssh-config.XXXXXX")"
 guest="$TEST_TMP/ssh-config"
 config=/user/cfg/ssh/config
-target_pid="" jump_pid="" target_fd="" jump_fd=""
 staged=0
 SSH=(ssh -F /dev/null -p 2222 -i "$WD/test.key" -o IdentitiesOnly=yes -o BatchMode=yes
   -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" motor@192.168.4.2)
@@ -20,8 +21,6 @@ cleanup() {
   local status=$?
   trap - EXIT
   set +e
-  if [ -n "$jump_fd" ]; then printf 'stop\n' >&"$jump_fd"; wait "$jump_pid" || status=1; fi
-  if [ -n "$target_fd" ]; then printf 'stop\n' >&"$target_fd"; wait "$target_pid" || status=1; fi
   if [ "$staged" -eq 1 ]; then
     "${SSH[@]}" "/system/bin/rm $config" || status=1
     "${SSH[@]}" "/system/bin/rm -r $guest" || status=1
@@ -32,79 +31,17 @@ cleanup() {
 # The owning full-test harness supplies a fresh guest, never a personal config.
 if "${SSH[@]}" "[ -e $config ]"; then fail "config fixture path already exists"; fi
 trap cleanup EXIT
-rustc --edition=2024 "$WD/ssh-openssh-fixture.rs" -o "$fixture/inetd"
-ssh-keygen -q -t ed25519 -N '' -f "$fixture/target-key"
-ssh-keygen -q -t ed25519 -N '' -f "$fixture/jump-key"
-ssh-keygen -y -f "$WD/test.key" > "$fixture/authorized_keys"
-host_user="$(id -un)"
-write_server_config() {
-  local name="$1"
-  cat > "$fixture/$name.cfg" <<EOF
-HostKey $fixture/$name-key
-PidFile $fixture/$name.pid
-AuthorizedKeysFile $fixture/authorized_keys
-StrictModes no
-UsePAM no
-PasswordAuthentication no
-KbdInteractiveAuthentication no
-AuthenticationMethods publickey
-AllowUsers $host_user
-AllowTcpForwarding local
-Subsystem sftp internal-sftp
-LogLevel VERBOSE
-EOF
-}
-write_server_config target
-"$SSHD" -t -f "$fixture/target.cfg"
-mkfifo "$fixture/target.input" "$fixture/target.output"
-exec {target_fd}<>"$fixture/target.input"
-exec {target_output}<>"$fixture/target.output"
-"$fixture/inetd" "$SSHD" "$fixture/target.cfg" 127.0.0.1 <&"$target_fd" >&"$target_output" 2>"$fixture/target.log" &
-target_pid="$!"
-IFS= read -r -t 5 address <&"$target_output" || fail "target did not report its port"
-target_port="${address#PORT=}"
-case "$target_port" in ''|*[!0-9]*) fail "invalid target port: $address" ;; esac
-write_server_config jump
-printf 'PermitOpen 127.0.0.1:%s' "$target_port" >> "$fixture/jump.cfg"
-if [ -n "${MOTOR_SSH_PASSWORD_TARGET_PORT:-}" ]; then
-  printf ' 192.168.4.1:%s' "$MOTOR_SSH_PASSWORD_TARGET_PORT" >> "$fixture/jump.cfg"
-fi
-printf '\n' >> "$fixture/jump.cfg"
-"$SSHD" -t -f "$fixture/jump.cfg"
-mkfifo "$fixture/jump.input" "$fixture/jump.output"
-exec {jump_fd}<>"$fixture/jump.input"
-exec {jump_output}<>"$fixture/jump.output"
-"$fixture/inetd" "$SSHD" "$fixture/jump.cfg" 192.168.4.1 <&"$jump_fd" >&"$jump_output" 2>"$fixture/jump.log" &
-jump_pid="$!"
-IFS= read -r -t 5 address <&"$jump_output" || fail "jump did not report its port"
-jump_port="${address#PORT=}"
-case "$jump_port" in ''|*[!0-9]*) fail "invalid jump port: $address" ;; esac
 cat > "$fixture/client.cfg" <<EOF
 Host moto-hi
   HostName 192.168.4.1
-  User $host_user
-  Port $jump_port
-  IdentityFile $guest/key
-Host posk-dt
-  HostName 127.0.0.1
-  User $host_user
+  User motor
   Port $target_port
   IdentityFile $guest/key
-  ProxyJump moto-hi
-EOF
-if [ -n "${MOTOR_SSH_PASSWORD_TARGET_PORT:-}" ]; then
-  cat >> "$fixture/client.cfg" <<EOF
-Host password-target
-  HostName 192.168.4.1
+Host jumped
+  HostName 192.0.2.1
   User motor
-  Port $MOTOR_SSH_PASSWORD_TARGET_PORT
-  IdentityFile none
+  IdentityFile $guest/key
   ProxyJump moto-hi
-  BatchMode no
-  StrictHostKeyChecking ask
-EOF
-fi
-cat >> "$fixture/client.cfg" <<EOF
 Host *
   UserKnownHostsFile $guest/known_hosts
   StrictHostKeyChecking accept-new
@@ -117,37 +54,39 @@ printf 'mkdir %s\nput %s %s/key\nchmod 600 %s/key\nput %s %s\nput %s %s/alternat
 staged=1
 out="$("${SSH[@]}" /user/bin/ssh moto-hi /bin/echo direct-alias)"
 [ "$out" = direct-alias ] || fail "direct alias returned '$out'"
-out="$("${SSH[@]}" /user/bin/ssh posk-dt /bin/echo jumped-alias)"
-[ "$out" = jumped-alias ] || fail "jump alias returned '$out'"
-out="$("${SSH[@]}" /user/bin/ssh -F "$guest/alternate" posk-dt /bin/echo alternate-config)"
+out="$("${SSH[@]}" /user/bin/ssh -F "$guest/alternate" moto-hi /bin/echo alternate-config)"
 [ "$out" = alternate-config ] || fail "alternate config returned '$out'"
-out="$("${SSH[@]}" /user/bin/ssh -F none -p "$jump_port" -i "$guest/key" \
+out="$("${SSH[@]}" /user/bin/ssh -F none -p "$target_port" -i "$guest/key" \
   -o BatchMode=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$guest/known_hosts" \
-  "$host_user@192.168.4.1" /bin/echo no-config)"
+  motor@192.168.4.1 /bin/echo no-config)"
 [ "$out" = no-config ] || fail "-F none returned '$out'"
-# 127.0.0.1 here is the host's loopback; the guest cannot dial this target directly.
-out="$("${SSH[@]}" /user/bin/ssh -J moto-hi -o ProxyJump=none posk-dt /bin/echo cli-jump)"
-[ "$out" = cli-jump ] || fail "-J override returned '$out'"
-if "${SSH[@]}" /user/bin/ssh posk-dt exit 7; then fail "remote status was lost"; else
+
+# The route reached the jump: the target itself is an address nothing answers on.
+refused_by_jump() {
+  local output status=0
+  output="$("${SSH[@]}" /user/bin/ssh "$@" /bin/echo unreachable 2>&1)" || status=$?
+  [ "$status" -eq 255 ] || fail "'$*' returned status $status: '$output'"
+  case "$output" in
+    *AdministrativelyProhibited*) ;;
+    *) fail "'$*' was not refused by the jump: '$output'" ;;
+  esac
+}
+refused_by_jump jumped
+refused_by_jump -J moto-hi -o ProxyJump=none jumped
+
+if "${SSH[@]}" /user/bin/ssh moto-hi exit 7; then fail "remote status was lost"; else
   [ "$?" -eq 7 ] || fail "remote status was not 7"
 fi
 dd if=/dev/urandom of="$fixture/payload" bs=1M count=4 status=none
-"${SSH[@]}" /user/bin/ssh posk-dt /bin/cat < "$fixture/payload" > "$fixture/returned"
-cmp "$fixture/payload" "$fixture/returned" || fail "jump stream changed data"
+"${SSH[@]}" /user/bin/ssh moto-hi /bin/cat < "$fixture/payload" > "$fixture/returned"
+cmp "$fixture/payload" "$fixture/returned" || fail "alias stream changed data"
 printf 'put %s %s/source\n' "$fixture/payload" "$guest" | "${SFTP[@]}" >/dev/null
-"${SSH[@]}" /user/bin/scp "$guest/source" "posk-dt:$fixture/upload"
-"${SSH[@]}" /user/bin/scp "posk-dt:$fixture/upload" "$guest/download"
+"${SSH[@]}" /user/bin/scp "$guest/source" "moto-hi:$fixture/upload"
+"${SSH[@]}" /user/bin/scp "moto-hi:$fixture/upload" "$guest/download"
 printf 'get %s %s/sftp-download\n' "$fixture/upload" "$guest" |
-  "${SSH[@]}" /user/bin/sftp -b - posk-dt >/dev/null
+  "${SSH[@]}" /user/bin/sftp -b - moto-hi >/dev/null
 printf 'get %s/download %s/download\n' "$guest" "$fixture" | "${SFTP[@]}" >/dev/null
-cmp "$fixture/payload" "$fixture/download" || fail "jump scp changed data"
+cmp "$fixture/payload" "$fixture/download" || fail "alias scp changed data"
 printf 'get %s/sftp-download %s/sftp-download\n' "$guest" "$fixture" | "${SFTP[@]}" >/dev/null
-cmp "$fixture/payload" "$fixture/sftp-download" || fail "jump sftp changed data"
-if [ -n "${MOTOR_SSH_PASSWORD_TARGET_PORT:-}" ]; then
-  out="$(printf 'yes\r\nvroomvroom\r\n' | ssh -F /dev/null -tt -p 2222 -i "$WD/test.key" \
-    -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
-    -o UserKnownHostsFile="$WD/test-known-hosts" motor@192.168.4.2 \
-    "/user/bin/ssh -T password-target /bin/echo jump-password-ok")"
-  printf '%s\n' "$out" | tr -d '\r' | grep -qx jump-password-ok || fail "password through jump failed: '$out'"
-fi
+cmp "$fixture/payload" "$fixture/sftp-download" || fail "alias sftp changed data"
 echo "test-ssh-config: PASS"

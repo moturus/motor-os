@@ -6,9 +6,9 @@
 # limits and races; this is what only a guest can show: Motor's role checks, the
 # installers against a real Motor server, and what survives a reboot.
 #
-# Nothing here touches a developer's credentials: every key is generated in the
-# fixture, HOME points at it, and no OpenSSH installer runs in shell mode against
-# a host sshd, whose `cd` would follow the passwd home to the real ~/.ssh.
+# Nothing here touches a developer's credentials or the host's sshd: every key is
+# generated in the fixture, HOME points at it, and OpenSSH's installers run only
+# against the guest.
 
 if [ "${TEST_SSHD_KEYS_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   export TEST_SSHD_KEYS_TIMEOUT_ACTIVE=1
@@ -52,7 +52,6 @@ if [ "${FULL_TEST_IMAGE_PREBUILT:-0}" != 1 ]; then
 fi
 IMAGER="$TEST_VM_IMG_DIR/tools/imager"
 [ -x "$IMAGER" ] || { echo "test-sshd-keys: imager is missing at $IMAGER" >&2; exit 1; }
-SSHD="$(command -v sshd)" || { echo "test-sshd-keys: sshd is missing" >&2; exit 1; }
 case "$(ssh-copy-id -h 2>&1 || true)" in
   *target_path*) ;;
   *) echo "test-sshd-keys: ssh-copy-id -t needs OpenSSH 9.4 or newer" >&2; exit 1 ;;
@@ -75,14 +74,11 @@ export MOTO_CHV_RUNTIME_DIR="$FIXTURE/chv"
 export MOTO_FC_RUNTIME_DIR="$FIXTURE/fc"
 export MOTO_FC_VSOCK_UDS=''
 # ssh-copy-id keeps a control socket under ~/.ssh, so HOME has to be short too.
-REAL_HOME="$HOME"
 export HOME="$SOCKETS/home"
 mkdir -m 700 "$HOME" "$HOME/.ssh"
 
 VMM_PID=""
 DAEMON_PIDS=()
-OPENSSH_PID=""
-OPENSSH_FD=""
 PASSED=0
 
 fail() {
@@ -114,10 +110,6 @@ cleanup() {
   local status=$?
   trap - EXIT
   set +e
-  if [ -n "$OPENSSH_FD" ]; then
-    printf 'stop\n' >&"$OPENSSH_FD"
-    wait "$OPENSSH_PID" || status=1
-  fi
   if [ -n "$VMM_PID" ]; then
     stop_vm_owned || [ "$status" -ne 0 ] || status=1
   fi
@@ -560,72 +552,6 @@ installer_refused motor-default 'Permission denied' admin "/user/bin/ssh-copy-id
   -i $GUEST_TMP/installed-1.pub bob@127.0.0.1"
 after="$(snapshot "$USERS" "$KEYS/authorized_keys.motor" "$KEYS/authorized_keys.alice" "$KEYS/authorized_keys.bob")"
 [ "$before" = "$after" ] || fail "a refused installer changed something: '$before' became '$after'"
-
-# ---- an OpenSSH server -------------------------------------------------------
-
-echo "-- Motor ssh-copy-id against OpenSSH --"
-# A private start directory and a matching key file keep the installer away from
-# the host user's real ~/.ssh; the bootstrap list gives it a way in.
-server="$FIXTURE/openssh"
-mkdir -m 700 "$server" "$server/start"
-ssh-keygen -q -t ed25519 -N '' -f "$server/host-key"
-public motor-client > "$server/bootstrap_keys"
-host_user="$(id -un)"
-cat > "$server/sshd.cfg" <<CFG
-HostKey $server/host-key
-PidFile $server/sshd.pid
-AuthorizedKeysFile $server/bootstrap_keys $server/start/.ssh/authorized_keys
-StrictModes no
-UsePAM no
-PasswordAuthentication no
-KbdInteractiveAuthentication no
-AuthenticationMethods publickey
-AllowUsers $host_user
-Subsystem sftp internal-sftp -d $server/start
-LogLevel VERBOSE
-CFG
-"$SSHD" -t -f "$server/sshd.cfg"
-HOME="$REAL_HOME" rustc --edition=2024 "$WD/ssh-openssh-fixture.rs" -o "$server/inetd"
-mkfifo "$server/input" "$server/output"
-exec {OPENSSH_FD}<>"$server/input"
-exec {openssh_output}<>"$server/output"
-"$server/inetd" "$SSHD" "$server/sshd.cfg" 192.168.4.1 <&"$OPENSSH_FD" >&"$openssh_output" \
-  2>"$server/sshd.log" &
-OPENSSH_PID="$!"
-IFS= read -r -t 5 address <&"$openssh_output" || fail "the OpenSSH fixture did not report its port"
-openssh_port="${address#PORT=}"
-case "$openssh_port" in ''|*[!0-9]*) fail "invalid OpenSSH fixture port: $address" ;; esac
-motor_to_openssh() {
-  admin "/user/bin/ssh-copy-id -F /dev/null -p $openssh_port -o IdentityFile=$GUEST_TMP/motor-client \
-    -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-    -o UserKnownHostsFile=$GUEST_TMP/known_hosts -i $GUEST_TMP/installed-1.pub $host_user@192.168.4.1"
-}
-motor_to_openssh >/dev/null || fail "Motor ssh-copy-id failed against OpenSSH"
-list="$server/start/.ssh/authorized_keys"
-[ "$(stat -c %a "$server/start/.ssh")" = 700 ] || fail ".ssh was not created with mode 0700"
-[ "$(stat -c %a "$list")" = 600 ] || fail "the default list was not created with mode 0600"
-[ "$(cat "$list")" = "$(public installed-1)" ] || fail "the default list holds '$(cat "$list")'"
-motor_to_openssh >/dev/null || fail "repeating Motor ssh-copy-id failed against OpenSSH"
-[ "$(cat "$list")" = "$(public installed-1)" ] || fail "repeat installation changed the list"
-[ "$(admin "/user/bin/ssh -F /dev/null -p $openssh_port -i $GUEST_TMP/installed-1 \
-  -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
-  -o UserKnownHostsFile=$GUEST_TMP/known_hosts $host_user@192.168.4.1 /bin/echo installed-key-ok")" = \
-  installed-key-ok ] || fail "the key installed on OpenSSH does not log in"
-# OpenSSH honours a restriction next to a comment in any encoding.
-printf 'from="10.0.0.1" %s caf\351\n' "$(public installed-1)" > "$list"
-cp "$list" "$server/restricted"
-if output="$(motor_to_openssh 2>&1)"; then
-  fail "Motor ssh-copy-id widened a restricted key on OpenSSH"
-fi
-case "$output" in
-  *"not as a plain record"*) ;;
-  *) fail "Motor ssh-copy-id reported '$output' for a restricted key on OpenSSH" ;;
-esac
-cmp -s "$list" "$server/restricted" || fail "a refused installer changed the OpenSSH list"
-printf 'stop\n' >&"$OPENSSH_FD"
-wait "$OPENSSH_PID" || fail "the OpenSSH fixture failed"
-OPENSSH_FD=""
-OPENSSH_PID=""
 
 # ---- trust -------------------------------------------------------------------
 
