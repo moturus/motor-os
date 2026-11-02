@@ -583,7 +583,7 @@ output. Allow space in both locations. Qcow2 conversion does not preserve contai
 <h2 id="replace-credentials">Replace credentials</h2>
 
 <p>All <code>set</code> commands replace the supplied image at the same path, preserving its
-raw/qcow2 format, virtual disk size, guest permissions, and host permission mode. They edit a
+raw/qcow2 format, virtual disk size, unrelated guest permissions, and host permission mode. They edit a
 private staged copy and publish it only after the update and content checks succeed. A failure
 before publication leaves the original image unchanged, including a failure during the second TLS
 file write. Allow space beside the image for a copy and, with qcow2, its raw intermediate.</p>
@@ -610,7 +610,8 @@ paths read from inside an image are never followed. Unsupported layouts, such as
 dotted assignments, duplicate fields, and unknown fields are rejected. Other fields and comments are
 preserved. Key strings are escaped when inserted into TOML. Imager does not validate SSH keys, parse
 TLS certificates, or check that a TLS key matches its certificate; the caller supplies artifacts
-that the guest services can use.</p>
+that the guest services can use. Nor does it check the salts and hashes it leaves in place, so it
+can report success on a registry that <code>russhd</code> refuses.</p>
 
 <h3 id="select-a-login-name">Select a login name</h3>
 

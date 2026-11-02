@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Acceptance for several SSH keys per login name and for remote key installation
-# (docs/plans/sshd-keys.md): russhd as shipped, on a disposable copy of the image
+# (docs/ssh-client.md): russhd as shipped, on a disposable copy of the image
 # that imager provisions and two boots use. russhd's host tests cover parsing,
 # limits and races; this is what only a guest can show: Motor's role checks, the
 # installers against a real Motor server, and what survives a reboot.

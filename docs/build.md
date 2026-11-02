@@ -268,3 +268,8 @@ once under Cloud Hypervisor and once under Firecracker when
 `cloud-hypervisor-static` and `firecracker` are on `PATH`. Without them those
 two boot checks are skipped, and the suite says so after its final `PASS` line.
 Selecting one of them with `--vmm chv` or `--vmm fc` requires its binary.
+
+The SSH tests run OpenSSH against Motor OS, so the host also needs an OpenSSH
+client, 9.4 or newer for `ssh-copy-id -t`, and the `sshd` program from
+`openssh-server`, which the build does not install. The tests start their own
+`sshd`, so the system service need not run.

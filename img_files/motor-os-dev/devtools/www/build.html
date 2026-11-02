@@ -588,7 +588,11 @@ C, C++, and Rust programs. The repository phase defaults to an 8 GiB VM and the
 developer-source phase to 4 GiB.
 The main suite also checks boot under Cloud Hypervisor and Firecracker when
 <code>cloud-hypervisor-static</code> and <code>firecracker</code> are on <code>PATH</code>;
-it reports skips when they are absent. <code>full-test-networking.sh</code> is the
+it reports skips when they are absent. The SSH tests run OpenSSH against Motor OS, so
+the host also needs an OpenSSH client, 9.4 or newer for <code>ssh-copy-id -t</code>, and the
+<code>sshd</code> program from <code>openssh-server</code>, which the build does not install.
+The tests start their own <code>sshd</code>, so the system service need not run.
+<code>full-test-networking.sh</code> is the
 networking subset with rnetbench throughput runs, and <code>stress-soak.sh</code> keeps one
 VM under concurrent load for as long as you ask, watching for crashes and stalls.</p>
 <p>On the developer image the same test programs are in <code>/devtools/tests</code> and can

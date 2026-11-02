@@ -188,9 +188,9 @@ does not preserve container snapshots.
 ## Replace credentials
 
 All `set` commands replace the supplied image at the same path, preserving
-its raw/qcow2 format, virtual disk size, guest permissions, and host permission
-mode. They edit a private staged copy and publish it only after the update
-and content checks succeed. A failure before publication leaves the original
+its raw/qcow2 format, virtual disk size, unrelated guest permissions, and host
+permission mode. They edit a private staged copy and publish it only after the
+update and content checks succeed. A failure before publication leaves the original
 image unchanged, including a failure during the second TLS file write.
 Allow space beside the image for a copy and, with qcow2, its raw intermediate.
 
@@ -217,7 +217,8 @@ as inline tables or dotted assignments, duplicate fields, and unknown fields are
 rejected. Other fields and comments are preserved. Key strings are escaped when
 inserted into TOML. Imager does not validate SSH keys, parse TLS certificates,
 or check that a TLS key matches its certificate; the caller supplies artifacts
-that the guest services can use.
+that the guest services can use. Nor does it check the salts and hashes it leaves
+in place, so it can report success on a registry that `russhd` refuses.
 
 ### Select a login name
 

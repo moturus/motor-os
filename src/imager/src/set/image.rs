@@ -267,8 +267,8 @@ impl Stage {
     }
 }
 
-/// Applies the "Filesystem trust" rules of docs/plans/sshd-keys.md to the
-/// directories above a credential file, and returns the file's parent.
+/// Applies the credential path rules of docs/ssh-client.md to the directories
+/// above a credential file, and returns the file's parent.
 async fn check_ancestors(fs: &Fs, path: &Path) -> io::Result<EntryId> {
     let parent = path
         .parent()

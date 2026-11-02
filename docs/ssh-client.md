@@ -123,8 +123,9 @@ and creates or appends the key file with mode 0600.
 
 `-t PATH` names the key file instead, and is required for a Motor OS server.
 `PATH` is absolute or relative to the SFTP start directory. Its parent must
-exist; `ssh-copy-id` neither creates nor changes it. It keeps existing content,
-including comments and a missing final newline, and skips a key already listed
+exist, as `/user/cfg/ssh` does on every Motor OS image; `ssh-copy-id` neither
+creates nor changes it. It keeps existing content, including comments and a
+missing final newline, and skips a key already listed
 as a plain record with the same type and key data, regardless of comments. If
 the key's base64 is on any other line outside a comment, as in a record with
 options such as `from=` or `command=`, it reports an error and leaves the file
@@ -135,10 +136,11 @@ authentication key; `-i` selects the public key being installed.
 ## Log in to a Motor OS server
 
 Motor OS has one Interactive user. An SSH login name selects credentials: it
-creates no OS user and changes nothing a session may do. Every authenticated
-session can edit every credential file, so the lists below select credentials
-rather than separate names from each other. Each name has an optional password
-and any number of public keys:
+creates no OS user and changes nothing a session may do. Shells and commands
+start in `/user`, which is also their `HOME`, under every name. Every
+authenticated session can edit every credential file, so the lists below select
+credentials rather than separate names from each other. Each name has an
+optional password and any number of public keys:
 
 | File | Holds |
 | --- | --- |
@@ -156,17 +158,24 @@ password_hash = '...hex SHA-256 of the salt bytes followed by the password...'
 ```
 
 A name is 1 to 64 ASCII letters, digits, `_`, or `-`. A record with an absent
-or empty `password_hash`, like `deploy` above, has no password. `russhd` reads
-both files at every authentication, so a change applies to the next login with
-no restart; sessions already established stay logged in. Every username is
-offered the same methods, whether or not it exists.
+or empty `password_hash`, like `deploy` above, has no password. Images ship one
+name, `motor`, with a test password and key, and a test host key; replace all
+three before any deployment that is reachable from a network you do not control.
+
+`russhd` reads both files at every authentication, so a change applies to the
+next login with no restart; sessions already established stay logged in. Every
+username is offered the same methods, whether or not it exists. A connection
+runs one channel at a time, so a multiplexing client's second session is refused
+until the first closes.
 
 A key file holds `KEYTYPE BASE64 [COMMENT]` lines, blank lines, and `#`
-comments. A key listed for two names is listed in both files. A record with
-options (`command=`, `from=`, `restrict`, and so on), a certificate, or a
-`cert-authority` entry authorizes nothing; `russhd` never strips options to
-recover a key. A key file alone creates no login name, and removing a record
-disables its name at the next authentication, whatever key files remain.
+comments, with LF or CRLF line endings. A key listed for two names is listed in
+both files. A record with options (`command=`, `from=`, `restrict`, and so on), a
+certificate, a `cert-authority` entry, or a malformed line authorizes nothing but
+costs only itself; `russhd` never strips options to recover a key. A NUL byte or
+non-UTF-8 text anywhere in the file, even in a comment, refuses the whole file.
+A key file alone creates no login name, and removing a record disables its name
+at the next authentication, whatever key files remain.
 
 To add a key to a running system, name its file on the client:
 
@@ -182,9 +191,10 @@ ssh -p 2222 alice@host 'cat >> /user/cfg/ssh/authorized_keys.alice' < key.pub
 A name with a password but no key can install its first key this way. Other
 forms fail without installing a key: without `-t` the SFTP installers try `/.ssh`
 and get `Permission denied`, and OpenSSH's shell installer (no `-s`) stops at
-`dirname`, which Motor OS does not have. Installers do not coordinate, so
-serialize updates to one list. OpenSSH's `-s` mode rewrites the whole file, and
-its `chmod 700` of the parent leaves `/user/cfg/ssh` at `rwxrwx---`.
+`dirname`, which Motor OS does not have. Installers do not coordinate and have
+no rollback, so serialize updates to one list. OpenSSH's `-s` mode rewrites the
+whole file, and its `chmod 700` of the parent leaves `/user/cfg/ssh` at
+`rwxrwx---`.
 
 To add a name, create its key file first and its record second. Replace the
 registry atomically, because `russhd` denies all new logins while it is
@@ -206,17 +216,35 @@ mv /user/cfg/russhd/users.new /user/cfg/russhd/users.toml
 | The same with a key file | That name's keys are denied; its password still works |
 | Key file missing or empty | The name has no keys; its password still works |
 
+Unlike a bad key record, one invalid record makes the whole registry malformed.
+`russhd` logs why it refused a file or skipped a record to
+`/system/logs/russhd.log`, with a line number where it has one, and never quotes
+the file.
+
 A credential file must be a regular file. None must not be able to write it, or
 to replace any directory above it up to `/user` (through `/` for a location
 outside `/user`), and must not be able to read the registry. Limits are 1 MiB per
-file, 1,024 users, 1,024 keys per file, and 16 KiB per key line.
+file, 1,024 users, 1,024 keys per file, and 16 KiB per key line; going past one
+refuses the whole file.
 
 If no usable credential is left, recover through the VM console, or stop the VM
 and use `imager set` (see [imager](imager.md)), which also creates names and
-replaces whole key lists in a stopped image. `/system/cfg/sshd.toml` holds the
-listen address, command path, and host key, and names the two credential
-locations with `users_file` and `authorized_keys_dir`. Version 1 configurations
-are rejected.
+replaces whole key lists in a stopped image.
+
+`/system/cfg/sshd.toml` holds the service settings and names the two credential
+locations, as normalized absolute paths:
+
+```toml
+version = 2
+listen_on = '0.0.0.0:2222'
+path = '/system/bin:/user/bin'
+host_key = '...OpenSSH private key...'
+users_file = '/user/cfg/russhd/users.toml'
+authorized_keys_dir = '/user/cfg/ssh'
+```
+
+Version 1 configurations, `[users]` sections, and unknown fields are rejected:
+this file holds no login credentials.
 
 ## Host configuration and jump hosts
 
