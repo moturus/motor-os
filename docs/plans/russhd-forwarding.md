@@ -16,7 +16,7 @@ Developer-image validation remains release-only.
 | Step | Progress | Remaining |
 |---|---|---|
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
-| 2 | External test signature fix `ac0e947`, approved compression fix `4fe78f9`, and peer-close fix `01d0391` committed; full fork suite passes; main-repo compression regression added | External local-close cleanup and live-transport tests, pin, relay, direct opens, configuration, authentication deadline, milestone gates |
+| 2 | External test signature fix `ac0e947`, approved compression fix `4fe78f9`, peer-close fix `01d0391`, and local-close cleanup `d758c92` committed; full fork suite passes; main-repo compression regression added | Live-transport close tests, pin, relay, direct opens, configuration, authentication deadline, milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
@@ -244,7 +244,24 @@ existing socket test reproduced `TcpListener::bind` failing with `PermissionDeni
 `russh-peer-close-suite-sandbox.log` and `russh-peer-close-sandbox-diagnostic.log`.
 Running the unchanged tests with loopback access passed. No test or assertion
 was weakened. Nothing has been pushed; the main repository's pin is unchanged.
-Local-close cleanup and live-transport regressions are next.
+External commit `d758c92` removes local channel references immediately, including
+the server's matching pending delivery. Outbound data-before-close ordering still
+uses the existing deferred close path. New tests check 256 closes with either
+side first, withheld replies, actual `Channel::wait()` termination, payload
+release, a full pending delivery, unrelated-channel preservation, and credit
+cleanup. The complete fork suite passes: 229 tests and the same eight ignored
+documentation examples (`russh-local-close-suite.log`). The commit is saved as
+`russh-local-close.patch`.
+
+The initial repeated-close tests incorrectly assumed one poll of a closed Tokio
+receiver must finish even after exhausting the runtime's cooperative budget.
+At cycle 42, both normal polls yielded while an immediate unconstrained poll
+returned `Some(None)`. This diagnosis is preserved in
+`russh-local-close-budget-diagnostic.log`; the original failures, including one
+socket test blocked by the sandbox, are in `russh-local-close-focused.log`.
+The final closure assertion checks readiness without the scheduling budget;
+it still fails immediately if any sender remains. Temporary diagnostics were
+removed before the passing full suite. Live-transport regressions are next.
 
 ## Goal and scope
 
