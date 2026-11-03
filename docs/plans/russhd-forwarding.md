@@ -1,6 +1,7 @@
 # TCP forwarding in russhd and ssh
 
-Status: v5, implementation in progress. No forwarding code has changed.
+Status: v5, stopped under AGENTS.md after diagnosing a preexisting russh compression
+failure. No forwarding code has changed.
 See "Implementation progress" below and "Decisions" at the end.
 
 ## Implementation progress
@@ -11,8 +12,8 @@ Developer-image validation remains release-only.
 
 | Step | Progress | Remaining |
 |---|---|---|
-| 1 | 224 MiB matrix removal committed in `dd716bf4`; complete-line wait fix implemented, with host regressions wired into `full-test.sh` | Three debug and three release main-image passes; complete `full-test-dev.sh --release` |
-| 2 | Not started | External russh close fixes and tests, pin, relay, direct opens, configuration, authentication deadline, milestone gates |
+| 1 | 224 MiB matrix removal committed in `dd716bf4`; complete-line wait fix committed in `0f419641`, with host regressions wired into `full-test.sh` | Main-image gates: 0/3 debug, 0/3 release; complete `full-test-dev.sh --release` |
+| 2 | Baseline preparation only; test-only callback signature fix committed in the external fork as `ac0e947`; blocked on the compression failure below | Review blocker; external russh close fixes and tests, pin, relay, direct opens, configuration, authentication deadline, milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
@@ -24,6 +25,61 @@ Step 1 focused checks: `cargo test` for `wasm-smoke-suite` (two tests),
 `test-wasm-selection.sh`, `test-full-test-size.sh`, and `test-dev-memory-contract.sh`
 pass. The regression checks every partial snapshot of an address diagnostic, including
 a complete-looking address without its terminating newline.
+
+### Stop condition: external russh baseline (2026-11-03)
+
+The external checkout is `/tmp/motor-russh-forwarding`, branch `server-window`, based
+on `042db50`. No changes were made to the Cargo cache checkout. The first baseline
+test build failed because `test_manual_receive_window.rs` still implemented
+`check_server_key(&PublicKey)` instead of the trait's `&PublicKeyOrCertificate`.
+AGENTS.md permits a small, obvious test-only correction; external commit
+`ac0e9479fa60120b2a09093bb704bc7b0ec7eac0` fixes it. Its four receive-window tests
+pass. A portable copy of this commit is saved at
+`build/forwarding-validation/russh-receive-window-test-fix.patch`. Nothing was pushed.
+
+After that correction, the baseline library tests reported **186 passed, 1 failed**:
+`compression::tests::partial_flush_packets_round_trip`. The freshly resolved
+dependencies include `flate2 1.1.10` and `miniz_oxide 0.9.1`. Packet 2455 contains
+2,455 uncompressed bytes but returns only 2,371. Running that existing test alone
+reproduces the failure, ruling out interference from concurrent tests.
+
+Temporary instrumentation showed that all 33 compressed bytes were consumed, but
+84 decoded bytes remained buffered. Calling the decoder again with empty input
+recovered exactly those 84 bytes. `Decompress::decompress` in the external
+`russh/src/compression.rs` stops when input is consumed and the output buffer is
+not full; that condition does not establish that this decoder has drained its
+output. This is a production compression-path compatibility defect, not an
+incorrect assertion in the test. The same existing test passes with Motor's
+currently pinned `flate2 1.1.1` and `miniz_oxide 0.8.8`; no failure of that pinned
+combination was observed. The dependency comparison is diagnostic evidence, not
+a dependency downgrade adopted to bypass the failure.
+
+Reproduce the original failing configuration from the external checkout, using
+`build/forwarding-validation/russh-baseline.Cargo.lock` as its `Cargo.lock`:
+
+```sh
+RUSTUP_TOOLCHAIN=x86_64-unknown-motor-1.99.1 cargo test --offline -p russh \
+  --no-default-features --features flate2,ring,rsa --lib \
+  compression::tests::partial_flush_packets_round_trip -- --exact --nocapture
+```
+
+Evidence is retained in `build/forwarding-validation/`:
+`russh-baseline-build-online.log` (original test compile failure),
+`russh-baseline-test.log` (original library failure),
+`russh-compression-diagnostic.log` (isolated failure),
+`russh-compression-instrumented.log` (buffered-byte diagnosis),
+`russh-compression-shipped-deps.log` (pinned-version comparison), and
+`russh-receive-window-test.log` (four passing tests after diagnostic removal).
+Both diagnostic lockfiles are saved there. All temporary instrumentation has
+been removed; the external checkout is clean and its original dependency set is
+restored. The main repository's russh pin is unchanged.
+
+The first main-image debug gate was deliberately stopped during preparation
+(exit 143), as required by the preexisting-bug stop rule; its log is
+`build/forwarding-validation/step1-debug-1.log`. It did not reach the timed tests,
+and no main-image pass is claimed. Release and developer-image gates have not run.
+No milestone is newly declared complete. Review and authorization for this
+additional external-fork compression work are needed before implementation resumes.
 
 ## Goal and scope
 
