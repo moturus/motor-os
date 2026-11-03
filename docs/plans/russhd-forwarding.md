@@ -16,7 +16,7 @@ Developer-image validation remains release-only.
 | Step | Progress | Remaining |
 |---|---|---|
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
-| 2 | Baseline preparation; external test signature fix `ac0e947` and approved compression fix `4fe78f9` committed; full fork suite passes; main-repo compression regression added | External russh close fixes and tests, pin, relay, direct opens, configuration, authentication deadline, milestone gates |
+| 2 | External test signature fix `ac0e947`, approved compression fix `4fe78f9`, and peer-close fix `01d0391` committed; full fork suite passes; main-repo compression regression added | External local-close cleanup and live-transport tests, pin, relay, direct opens, configuration, authentication deadline, milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
@@ -226,6 +226,25 @@ The third release gate (`step1-release-3.log`) passed with exit 0: preparation
 Step 1 is complete: debug testing times were 28.5, 28.6, and 28.6 minutes;
 release testing times were 13.8 minutes each. No assertions or coverage were
 weakened, and the original 1,500-second failure remains preserved.
+
+### Step 2: external channel-close fixes
+
+External commit `01d0391` adds the immediate peer-close path on both client and
+server. It discards unsent outbound data and deferred controls, replies without
+waiting for window credit, and preserves received-data-before-close delivery.
+Five regressions cover both handlers, duplicate closes, unconfirmed opens, and
+another channel's EOF after the pending-data stall is cleared. The complete fork
+suite passes: 224 tests, with eight preexisting ignored documentation examples.
+Logs are `russh-peer-close-focused.log` and `russh-peer-close-suite.log` in the
+evidence directory; `russh-peer-close.patch` preserves the external commit.
+
+The first full fork invocation lacked loopback access in the sandbox. An isolated
+existing socket test reproduced `TcpListener::bind` failing with `PermissionDenied`
+(`Operation not permitted`); the blocked run was stopped and preserved in
+`russh-peer-close-suite-sandbox.log` and `russh-peer-close-sandbox-diagnostic.log`.
+Running the unchanged tests with loopback access passed. No test or assertion
+was weakened. Nothing has been pushed; the main repository's pin is unchanged.
+Local-close cleanup and live-transport regressions are next.
 
 ## Goal and scope
 
