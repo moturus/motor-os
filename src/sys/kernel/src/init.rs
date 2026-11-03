@@ -315,6 +315,7 @@ fn copy_sys_io(sys_io_bytes: &[u8]) {
     let seg = crate::mm::virt::vmem_allocate_pages(
         crate::mm::virt::VmemKind::KernelStatic,
         crate::mm::align_up(sys_io_bytes.len() as u64, PAGE_SIZE_SMALL) >> PAGE_SIZE_SMALL_LOG2,
+        crate::mm::AllocationClass::Kernel,
     )
     .unwrap();
 
@@ -417,6 +418,10 @@ pub fn start_userspace_processes() {
         panic!("failed to load sys-io");
     }
     let entry_point = result.unwrap();
+
+    address_space
+        .claim_for_process(moto_sys::caps::ProcessRole::System)
+        .unwrap();
 
     let (process, _object) = crate::uspace::Process::new(
         crate::xray::stats::kernel_stats(),

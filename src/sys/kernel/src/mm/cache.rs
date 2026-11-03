@@ -1,4 +1,5 @@
 // Memory segment caching.
+use super::{AllocationClass, AllocationFailure};
 use crate::{mm::PAGE_SIZE_SMALL_LOG2, util::SpinLock};
 use core::sync::atomic::*;
 use moto_sys::ErrorCode;
@@ -46,10 +47,10 @@ impl CacheLine {
         // todo!("pop from prev")
     }
 
-    fn new() -> Result<*mut Self, ErrorCode> {
+    fn new(class: AllocationClass) -> Result<*mut Self, AllocationFailure> {
         // Allocate a page. Note that we don't need to map the frame/page here,
         // as all phys mem has been mapped at PAGING_DIRECT_MAP_OFFSET.
-        let phys_addr = super::phys::phys_allocate_frameless(super::PageType::SmallPage)?;
+        let phys_addr = super::phys::phys_allocate_frameless(super::PageType::SmallPage, class)?;
         let virt_addr = phys_addr + super::PAGING_DIRECT_MAP_OFFSET;
 
         let result = virt_addr as usize as *mut Self;
@@ -109,13 +110,18 @@ impl SegmentCache {
         self.counts[idx].load(Ordering::Relaxed)
     }
 
-    pub(super) fn push(&self, segment: MemorySegment, num_pages: usize) -> Result<(), ErrorCode> {
+    pub(super) fn push(
+        &self,
+        segment: MemorySegment,
+        num_pages: usize,
+        class: AllocationClass,
+    ) -> Result<(), AllocationFailure> {
         debug_assert!(num_pages.is_power_of_two());
         debug_assert_eq!(segment.size, (num_pages as u64) << PAGE_SIZE_SMALL_LOG2);
         let idx = num_pages.ilog2() as usize;
         debug_assert!(idx < CACHE_LINES);
 
-        self.push_at_line(idx, segment)
+        self.push_at_line(idx, segment, class)
     }
 
     pub(super) fn pop(&self, num_pages: usize) -> Option<MemorySegment> {
@@ -157,12 +163,17 @@ impl SegmentCache {
         }
     }
 
-    fn push_at_line(&self, idx: usize, segment: MemorySegment) -> Result<(), ErrorCode> {
+    fn push_at_line(
+        &self,
+        idx: usize,
+        segment: MemorySegment,
+        class: AllocationClass,
+    ) -> Result<(), AllocationFailure> {
         debug_assert!(idx < CACHE_LINES);
 
         let mut lock = self.caches[idx].lock(line!());
         if lock.is_null() {
-            *lock = CacheLine::new()?;
+            *lock = CacheLine::new(class)?;
         }
 
         let line = unsafe { (*lock).as_mut().unwrap() };

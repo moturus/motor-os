@@ -233,7 +233,7 @@ impl Process {
                 Ok(segment) => segment,
                 Err(err) => {
                     address_space.drop_stacks(&user_stack, &None);
-                    return Err(err);
+                    return Err(err.into());
                 }
             };
 
@@ -404,7 +404,7 @@ impl Process {
 
         // A space hosts one process in its lifetime; see
         // UserAddressSpace::claim_for_process.
-        address_space.claim_for_process()?;
+        address_space.claim_for_process(moto_sys::caps::ProcessRole::from_caps(capabilities))?;
         let (_process, object) = Self::new(
             parent.stats.clone(),
             address_space.clone(),
@@ -634,7 +634,7 @@ impl Process {
             Ok(segment) => segment,
             Err(err) => {
                 self.address_space.drop_stacks(&stack, &None);
-                return Err(err);
+                return Err(err.into());
             }
         };
 
@@ -2366,7 +2366,7 @@ impl Thread {
             match *status {
                 ThreadStatus::Live(LiveThreadStatus::Running) => {
                     let fixed = owner.address_space.fix_pagefault(pf_addr, error_code);
-                    if fixed == Err(moto_rt::E_NOT_READY) {
+                    if fixed == Err(moto_rt::E_NOT_READY.into()) {
                         // An absent file-paged page: parked without a resume
                         // job until the pager fills it (see pager::on_fault).
                         *status = ThreadStatus::Live(LiveThreadStatus::Preempted);

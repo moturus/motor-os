@@ -254,9 +254,12 @@ impl BlockPool {
         }
     }
 
-    pub(crate) fn alloc_small(&self, count: u16) -> Option<u64> {
-        self.allocate(count, cursor(), AllocationClass::Kernel)
-            .unwrap_or_else(|err| panic!("phys: corrupt allocator: {err:?} ({count} pages)"))
+    pub(crate) fn alloc_small(
+        &self,
+        count: u16,
+        class: AllocationClass,
+    ) -> Result<u64, crate::mm::AllocationFailure> {
+        self.allocation_result(self.allocate(count, cursor(), class), class)
     }
 
     pub(crate) fn free_small(&self, addr: u64) {
@@ -264,10 +267,12 @@ impl BlockPool {
             .unwrap_or_else(|err| panic!("phys: corrupt free of 0x{addr:x}: {err:?}"));
     }
 
-    // A whole dual-purpose block, or None: a recoverable fallback signal.
-    pub(crate) fn alloc_huge(&self) -> Option<u64> {
-        self.allocate_huge(AllocationClass::Kernel)
-            .unwrap_or_else(|err| panic!("phys: corrupt allocator: {err:?} (huge)"))
+    // A whole dual-purpose block, preserving the pressure refusal for fallback.
+    pub(crate) fn alloc_huge(
+        &self,
+        class: AllocationClass,
+    ) -> Result<u64, crate::mm::AllocationFailure> {
+        self.allocation_result(self.allocate_huge(class), class)
     }
 
     pub(crate) fn free_huge(&self, addr: u64) {

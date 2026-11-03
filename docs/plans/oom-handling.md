@@ -19,7 +19,9 @@ As of 2026-11-03:
 | 4a   | Fallible MM core, boot exhaustion self-test               | Committed, `3780bce0`                   |
 | 4b   | Fallible frame-descriptor slab growth                     | Committed, `56eedffb`                   |
 | 4c   | Real error codes in the syscall and process layers        | Committed, `b2dccf4e`                   |
-| 5    | Allocation gates, OOM jobs, waiters, recovery             | 5a implemented locally, awaiting review; [5b–5f planned](oom-handling-step5.md) |
+| 5a   | Packed accounting, physical charges and transition tests | Committed, `dcd36704`                  |
+| 5b   | Recipient classes and typed MM allocation failures       | Working tree, awaiting review         |
+| 5    | OOM jobs, waiters, recovery and activation                | [5c–5f planned](oom-handling-step5.md) |
 
 What the committed steps provide is described in
 [docs/oom-handling.md](../oom-handling.md) and
@@ -39,9 +41,9 @@ outside the guarantee by design.
 
 Left to do:
 
-- Review the uncommitted 5a packed accounting and class-aware physical charge
-  changes. Its scratch-pool tests run during debug guest boot; runtime policy
-  stays unarmed, with recipient propagation and scheduler work still pending.
+- Review the uncommitted 5b recipient-class and typed-failure propagation.
+  Its role, pressure-receipt and rollback tests run during debug guest boot;
+  runtime policy stays unarmed, with scheduler work and waits still pending.
 - **5.** The gates and waits in "Fallible user-page allocation" from the
   paragraph on pausing at syscall entry onward, the 2 MiB and 512 KiB rules,
   "OOM jobs" in full, and the validation items for boundaries, victims,
@@ -376,7 +378,7 @@ Each job:
    then by largest `kernel_pid`, skipping dead, already-exiting, and protected
    processes. Keep only the best candidate, not a snapshot of the list.
 3. Rechecks eligibility, generation, phase and count before committing the
-   pending victim with an atomic validation of that policy word. This is
+   pending victim with an atomic validation of that state word. This is
    the kill request's ordering point. Recovery before it cancels selection;
    recovery after it allows this committed kill to finish. Call the normal
    termination machinery only after releasing locks. Created and parked

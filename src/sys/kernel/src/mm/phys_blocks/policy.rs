@@ -21,6 +21,9 @@ const GENERATION_ONE: u64 = 1 << 29;
 
 const _: () = assert!((MAX_BLOCKS as u64) * (PAGES as u64) <= USED_MASK);
 
+/// Recipient of newly acquired physical pages. Kernel virtual placement does
+/// not grant Kernel class: process stacks and metadata use their recipient's
+/// class. User combines the None and Interactive process roles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AllocationClass {
     Kernel,
@@ -45,7 +48,8 @@ pub(crate) enum RefusalKind {
     Gate,
     /// The charge would leave fewer free pages than this class's floor.
     Floor,
-    /// The pool has fewer free pages than the requested charge.
+    /// The physical allocation is unavailable: insufficient pages or a
+    /// fragmented pool with no suitable contiguous/huge run.
     Capacity,
 }
 
@@ -96,7 +100,7 @@ impl From<Corruption> for AllocationError {
 /// use it to reject work from an obsolete run.
 ///
 /// Unarmed state disables floors, gates and OOM transitions while retaining
-/// accounting. The OS allocator remains unarmed during step 5a. Debug guest
+/// accounting. The OS allocator stays unarmed through the preparatory stages. Debug guest
 /// tests construct private `Pool` instances and exercise armed states there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct StateSnapshot(pub(super) u64);
@@ -114,6 +118,12 @@ impl StateSnapshot {
 
     fn phase(self) -> u64 {
         self.0 & PHASE_MASK
+    }
+
+    pub(super) fn gate_closed(self, class: AllocationClass) -> bool {
+        self.0 & ARMED != 0
+            && ((class == AllocationClass::User && self.phase() != IDLE)
+                || (class == AllocationClass::System && self.0 & SYSTEM_BLOCKED != 0))
     }
 
     fn next_generation(self) -> Option<Self> {
@@ -134,10 +144,7 @@ impl StateSnapshot {
             AllocationClass::System => 128,
             AllocationClass::User => 512,
         };
-        let refusal = if armed
-            && ((class == AllocationClass::User && self.phase() != IDLE)
-                || (class == AllocationClass::System && self.0 & SYSTEM_BLOCKED != 0))
-        {
+        let refusal = if self.gate_closed(class) {
             Some(RefusalKind::Gate)
         } else if free < u64::from(count) {
             Some(RefusalKind::Capacity)
@@ -189,6 +196,37 @@ impl StateSnapshot {
 }
 
 impl<L: PageLinks> Pool<'_, L> {
+    // A search miss still needs a pressure receipt. Recheck the gate so a
+    // fragmented contiguous/huge miss cannot hide a closed allocation gate.
+    pub(super) fn allocation_result(
+        &self,
+        result: Result<Option<u64>, AllocationError>,
+        class: AllocationClass,
+    ) -> Result<u64, crate::mm::AllocationFailure> {
+        let (kind, state) = match result {
+            Ok(Some(addr)) => return Ok(addr),
+            Ok(None) => {
+                let state = self.state_snapshot();
+                (
+                    if state.gate_closed(class) {
+                        RefusalKind::Gate
+                    } else {
+                        RefusalKind::Capacity
+                    },
+                    state,
+                )
+            }
+            Err(AllocationError::Refused { kind, state, .. }) => (kind, state),
+            Err(AllocationError::Corruption(err)) => panic!("phys: corrupt allocator: {err:?}"),
+        };
+        Err(crate::mm::AllocationFailure::Pressure {
+            class,
+            kind,
+            state,
+            free_pages: self.counters.total - state.used(),
+        })
+    }
+
     /// Read one consistent snapshot; another CPU may immediately supersede it.
     pub(super) fn state_snapshot(&self) -> StateSnapshot {
         StateSnapshot(self.counters.state.load(Ordering::Acquire))

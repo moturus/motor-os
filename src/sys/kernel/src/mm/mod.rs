@@ -2,6 +2,8 @@
 // Note: only kheap and virt_intrusive provide memory allocation facilities,
 //       other than some corner cases that do frameless allocations.
 
+mod allocation;
+pub(crate) use allocation::{AllocationClass, AllocationFailure};
 mod cache;
 pub mod kheap;
 pub mod mmio;
@@ -40,7 +42,10 @@ pub const fn kernel_offset_virt() -> u64 {
 
 // The backing of one slab: `num_pages` page-aligned pages, or
 // `E_OUT_OF_MEMORY` with nothing kept. Slabs are never freed.
-pub(super) fn raw_alloc_for_slab(num_pages: u64) -> Result<*mut u8, moto_rt::ErrorCode> {
+pub(super) fn raw_alloc_for_slab(
+    num_pages: u64,
+    class: AllocationClass,
+) -> Result<*mut u8, AllocationFailure> {
     if !memory_initialized() {
         // Bootup: the startup heap, which panics when exhausted.
         use core::alloc::GlobalAlloc;
@@ -51,7 +56,7 @@ pub(super) fn raw_alloc_for_slab(num_pages: u64) -> Result<*mut u8, moto_rt::Err
         .expect("Invalid layout");
         return Ok(unsafe { kheap::RAW_ALLOCATOR.alloc(layout) });
     }
-    virt::map_slab_pages(num_pages).map(|vaddr| vaddr as usize as *mut u8)
+    virt::map_slab_pages(num_pages, class).map(|vaddr| vaddr as usize as *mut u8)
 }
 
 #[cfg(debug_assertions)]
@@ -420,6 +425,7 @@ fn allocate_kernel_stack() -> u64 {
     let stack = virt::vmem_allocate_pages(
         virt::VmemKind::KernelStack,
         crate::config::KERNEL_STACK_PAGES + 2,
+        AllocationClass::Kernel,
     )
     .expect("OOM during kernel bootup.");
 

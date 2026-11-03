@@ -21,8 +21,12 @@ pub const CUSTOM_IRQ_IST_INDEX: u16 = 6;
 fn new_tss() -> &'static TaskStateSegment {
     let new_stack = || -> VirtAddr {
         const STACK_PAGES: u64 = 5;
-        let stack = mm::virt::vmem_allocate_pages(mm::virt::VmemKind::KernelStack, STACK_PAGES + 2)
-            .unwrap();
+        let stack = mm::virt::vmem_allocate_pages(
+            mm::virt::VmemKind::KernelStack,
+            STACK_PAGES + 2,
+            crate::mm::AllocationClass::Kernel,
+        )
+        .unwrap();
         let stack_end = stack.end() - PAGE_SIZE_SMALL; // Remove guard page.
         VirtAddr::new(stack_end)
     };

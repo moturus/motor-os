@@ -195,5 +195,71 @@ pub(crate) fn run() {
     boundaries();
     ownership_and_recovery();
     stale_charge_and_rejected_whole();
+    pressure_receipts();
     crate::raw_log!("phys_blocks policy tests PASS");
+}
+
+fn pressure_receipts() {
+    use crate::mm::AllocationFailure;
+    use AllocationClass::*;
+    let mut fixture = Fixture::new();
+    fixture.shape(HIGH, 0, PAGES);
+    let pool = fixture.pool();
+    pool.counters.state.store(ARMED, Ordering::Release);
+    let floor = pool
+        .allocation_result(pool.take_huge(HIGH, User), User)
+        .unwrap_err();
+    let state = pool.state_snapshot();
+    assert_eq!(
+        floor,
+        AllocationFailure::Pressure {
+            class: User,
+            kind: RefusalKind::Floor,
+            state,
+            free_pages: 512,
+        }
+    );
+    let gate = pool
+        .allocation_result(pool.allocate(1, None, User), User)
+        .unwrap_err();
+    assert_eq!(
+        gate,
+        AllocationFailure::Pressure {
+            class: User,
+            kind: RefusalKind::Gate,
+            state,
+            free_pages: 512,
+        }
+    );
+    assert_eq!(gate.retain_floor_refusal(Some(floor)), floor);
+    // A search miss must still observe a closed gate, including fragmentation.
+    assert_eq!(pool.allocation_result(Ok(None), User), Err(gate));
+    let new_gate = AllocationFailure::Pressure {
+        class: User,
+        kind: RefusalKind::Gate,
+        state: StateSnapshot(state.0 + 2 * GENERATION_ONE),
+        free_pages: 512,
+    };
+    assert_eq!(new_gate.retain_floor_refusal(Some(floor)), floor);
+    let capacity = pool.allocation_result(Ok(None), Kernel).unwrap_err();
+    assert!(matches!(
+        capacity,
+        AllocationFailure::Pressure {
+            kind: RefusalKind::Capacity,
+            ..
+        }
+    ));
+    for code in [
+        moto_rt::E_OUT_OF_MEMORY,
+        moto_rt::E_INVALID_ARGUMENT,
+        moto_rt::E_BAD_HANDLE,
+    ] {
+        let ordinary = AllocationFailure::from(code);
+        assert_eq!(ordinary, AllocationFailure::Code(code));
+        assert_eq!(ordinary.retain_floor_refusal(Some(floor)), ordinary);
+        assert_eq!(moto_sys::ErrorCode::from(ordinary), code);
+    }
+    assert_eq!(moto_sys::ErrorCode::from(floor), moto_rt::E_OUT_OF_MEMORY);
+    assert_eq!(moto_sys::ErrorCode::from(gate), moto_rt::E_OUT_OF_MEMORY);
+    check(&pool, 0);
 }

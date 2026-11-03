@@ -1,13 +1,13 @@
 use super::phys_blocks::{BlockPool, BootInputs};
 use super::slab::*;
 use super::*;
-use moto_sys::ErrorCode;
+use super::{AllocationClass, AllocationFailure};
 
 pub fn init(available: &[MemorySegment], initrd: MemorySegment, raw_ram: Vec<MemorySegment>) {
     PhysicalMemory::init(available, initrd, raw_ram);
 }
 
-pub(super) fn validate_mmio(phys_addr: u64, num_pages: u64) -> Result<(), ErrorCode> {
+pub(super) fn validate_mmio(phys_addr: u64, num_pages: u64) -> Result<(), moto_sys::ErrorCode> {
     let invalid = moto_rt::E_INVALID_ARGUMENT;
     if num_pages == 0 || phys_addr & (PAGE_SIZE_SMALL - 1) != 0 {
         return Err(invalid);
@@ -99,17 +99,24 @@ fn assert_published_free_pages() {
     );
 }
 
-/// A frame of the given kind, or `E_OUT_OF_MEMORY`.
-pub fn allocate_frame(kind: PageType) -> Result<SlabArc<Frame>, ErrorCode> {
-    PhysicalMemory::inst().allocate_frame(kind)
+/// A frame for this recipient. Data and any new frame-descriptor slab pages
+/// use the same class; failure releases the data allocation.
+pub(crate) fn allocate_frame(
+    kind: PageType,
+    class: AllocationClass,
+) -> Result<SlabArc<Frame>, AllocationFailure> {
+    PhysicalMemory::inst().allocate_frame(kind, class)
 }
 
-/// A huge frame owning one whole dual-purpose block. Failure is the
-/// recoverable fallback signal for huge candidates, not exhaustion.
-pub fn allocate_huge_frame() -> Result<SlabArc<Frame>, ErrorCode> {
+/// A huge frame owning one whole dual-purpose block. Callers may fall back
+/// to small pages on physical shortage, retaining a floor-refusal receipt;
+/// a closed gate must be propagated instead of being treated as fragmentation.
+pub(crate) fn allocate_huge_frame(
+    class: AllocationClass,
+) -> Result<SlabArc<Frame>, AllocationFailure> {
     let inst = PhysicalMemory::inst();
-    let start = inst.blocks.alloc_huge().ok_or(moto_rt::E_OUT_OF_MEMORY)?;
-    match inst.slab.alloc_arc() {
+    let start = inst.blocks.alloc_huge(class)?;
+    match inst.slab.alloc_arc(class) {
         Ok(frame) => {
             frame.get_mut().unwrap().start = start;
             frame.get_mut().unwrap().kind = PageType::MidPage;
@@ -125,9 +132,10 @@ pub fn allocate_huge_frame() -> Result<SlabArc<Frame>, ErrorCode> {
 /// A frame for a page the allocator already holds as used: boot-time
 /// reservations such as the initrd. Dropping it frees the page, so the
 /// owner must be something that lives as long as the reservation.
-pub fn adopt_frame(phys_addr: u64) -> Result<SlabArc<Frame>, ErrorCode> {
+pub(crate) fn adopt_frame(phys_addr: u64) -> Result<SlabArc<Frame>, AllocationFailure> {
+    let class = AllocationClass::Kernel;
     debug_assert_eq!(0, phys_addr & (PAGE_SIZE_SMALL - 1));
-    let frame = PhysicalMemory::inst().slab.alloc_arc()?;
+    let frame = PhysicalMemory::inst().slab.alloc_arc(class)?;
     frame.get_mut().unwrap().start = phys_addr;
     frame.get_mut().unwrap().kind = PageType::SmallPage;
     Ok(frame)
@@ -135,8 +143,11 @@ pub fn adopt_frame(phys_addr: u64) -> Result<SlabArc<Frame>, ErrorCode> {
 
 // Allocate a physical page without allocating struct Frame.
 // Used internally in mm for page table and slab allocations.
-pub fn phys_allocate_frameless(kind: PageType) -> Result<u64, ErrorCode> {
-    PhysicalMemory::inst().allocate_frameless(kind)
+pub(crate) fn phys_allocate_frameless(
+    kind: PageType,
+    class: AllocationClass,
+) -> Result<u64, AllocationFailure> {
+    PhysicalMemory::inst().allocate_frameless(kind, class)
 }
 
 pub fn phys_deallocate_frameless(phys_addr: u64, kind: PageType) {
@@ -146,8 +157,11 @@ pub fn phys_deallocate_frameless(phys_addr: u64, kind: PageType) {
 // A run of `pages` small pages without frames, for the boot self-tests;
 // `phys_deallocate_frameless` frees it page by page.
 #[cfg(debug_assertions)]
-pub fn phys_allocate_frameless_run(pages: u16) -> Result<u64, ErrorCode> {
-    PhysicalMemory::inst().allocate_frameless_run(pages)
+pub(crate) fn phys_allocate_frameless_run(
+    pages: u16,
+    class: AllocationClass,
+) -> Result<u64, AllocationFailure> {
+    PhysicalMemory::inst().allocate_frameless_run(pages, class)
 }
 
 // The pages one frame-descriptor slab takes, for the boot self-tests.
@@ -157,8 +171,11 @@ pub fn frame_slab_pages() -> u64 {
 }
 
 // The caller has validated the whole MMIO range. Only the descriptor is owned.
-pub(super) fn mmio_frame(phys_addr: u64) -> Result<SlabArc<Frame>, ErrorCode> {
-    let frame = PhysicalMemory::inst().slab.alloc_arc()?;
+pub(super) fn mmio_frame(
+    phys_addr: u64,
+    class: AllocationClass,
+) -> Result<SlabArc<Frame>, AllocationFailure> {
+    let frame = PhysicalMemory::inst().slab.alloc_arc(class)?;
     let inner = frame.get_mut().unwrap();
     inner.start = phys_addr;
     inner.kind = PageType::SmallPage;
@@ -166,11 +183,12 @@ pub(super) fn mmio_frame(phys_addr: u64) -> Result<SlabArc<Frame>, ErrorCode> {
     Ok(frame)
 }
 
-pub fn phys_allocate_contiguous_frames(
+pub(crate) fn phys_allocate_contiguous_frames(
     kind: PageType,
     num_frames: u64,
-) -> Result<Vec<SlabArc<Frame>>, ErrorCode> {
-    PhysicalMemory::inst().allocate_contiguous_frames(kind, num_frames)
+    class: AllocationClass,
+) -> Result<Vec<SlabArc<Frame>>, AllocationFailure> {
+    PhysicalMemory::inst().allocate_contiguous_frames(kind, num_frames, class)
 }
 
 // Stage 2: the RAM below the kernel that the bootloader used becomes
@@ -241,10 +259,14 @@ impl PhysicalMemory {
         unsafe { (addr as *const Self).as_ref().unwrap_unchecked() }
     }
 
-    fn allocate_frame(&'static self, kind: PageType) -> Result<SlabArc<Frame>, ErrorCode> {
-        let frame_start = self.allocate_frameless(kind)?;
+    fn allocate_frame(
+        &'static self,
+        kind: PageType,
+        class: AllocationClass,
+    ) -> Result<SlabArc<Frame>, AllocationFailure> {
+        let frame_start = self.allocate_frameless(kind, class)?;
 
-        let frame_result = self.slab.alloc_arc();
+        let frame_result = self.slab.alloc_arc(class);
 
         if let Ok(frame) = frame_result {
             frame.get_mut().unwrap().start = frame_start;
@@ -258,19 +280,25 @@ impl PhysicalMemory {
 
     // Exhaustion is the caller's to handle, not an event to log: a process
     // can provoke it at will.
-    fn allocate_frameless(&'static self, kind: PageType) -> Result<u64, ErrorCode> {
+    fn allocate_frameless(
+        &'static self,
+        kind: PageType,
+        class: AllocationClass,
+    ) -> Result<u64, AllocationFailure> {
         match kind {
-            PageType::SmallPage => self.blocks.alloc_small(1).ok_or(moto_rt::E_OUT_OF_MEMORY),
+            PageType::SmallPage => self.blocks.alloc_small(1, class),
             _ => panic!(),
         }
     }
 
     // A run of `pages` small pages from one block's unused range; freed
     // page by page like any small page.
-    fn allocate_frameless_run(&self, pages: u16) -> Result<u64, ErrorCode> {
-        self.blocks
-            .alloc_small(pages)
-            .ok_or(moto_rt::E_OUT_OF_MEMORY)
+    fn allocate_frameless_run(
+        &self,
+        pages: u16,
+        class: AllocationClass,
+    ) -> Result<u64, AllocationFailure> {
+        self.blocks.alloc_small(pages, class)
     }
 
     fn deallocate_frameless(&'static self, phys_addr: u64, kind: PageType) {
@@ -303,16 +331,17 @@ impl PhysicalMemory {
         &self,
         kind: PageType,
         num_frames: u64,
-    ) -> Result<Vec<SlabArc<Frame>>, ErrorCode> {
+        class: AllocationClass,
+    ) -> Result<Vec<SlabArc<Frame>>, AllocationFailure> {
         // The syscall caps contiguous requests at 64 small pages.
         assert!(num_frames <= 64);
         assert_eq!(kind, PageType::SmallPage);
 
-        let start = self.allocate_frameless_run(num_frames as u16)?;
+        let start = self.allocate_frameless_run(num_frames as u16, class)?;
         let mut result = Vec::with_capacity(num_frames as usize);
         for idx in 0..num_frames {
             let frame_start = start + (idx << PAGE_SIZE_SMALL_LOG2);
-            match self.slab.alloc_arc() {
+            match self.slab.alloc_arc(class) {
                 Ok(frame) => {
                     frame.get_mut().unwrap().start = frame_start;
                     frame.get_mut().unwrap().kind = kind;
@@ -422,22 +451,23 @@ pub fn dump_stats() {
 #[cfg(debug_assertions)]
 pub fn huge_frame_self_test() {
     assert_published_free_pages();
-    let small = phys_allocate_frameless(PageType::SmallPage).unwrap();
+    let small = phys_allocate_frameless(PageType::SmallPage, AllocationClass::Kernel).unwrap();
     assert_published_free_pages();
     phys_deallocate_frameless(small, PageType::SmallPage);
     assert_published_free_pages();
-    let contiguous = phys_allocate_contiguous_frames(PageType::SmallPage, 32).unwrap();
+    let contiguous =
+        phys_allocate_contiguous_frames(PageType::SmallPage, 32, AllocationClass::Kernel).unwrap();
     assert_published_free_pages();
     drop(contiguous);
     assert_published_free_pages();
     let inst = PhysicalMemory::inst();
     let before = block_metrics();
     let free_before = inst.blocks.free_pages();
-    let frame = match allocate_huge_frame() {
+    let frame = match allocate_huge_frame(AllocationClass::Kernel) {
         Ok(frame) => frame,
         Err(err) => {
             // Guests of 128 MiB or less have no dual-purpose block.
-            assert_eq!(err, moto_rt::E_OUT_OF_MEMORY);
+            assert_eq!(moto_sys::ErrorCode::from(err), moto_rt::E_OUT_OF_MEMORY);
             assert!(
                 before.total <= 64,
                 "huge frame refused with {} blocks",

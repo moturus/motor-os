@@ -523,7 +523,8 @@ impl<L: PageLinks> Pool<'_, L> {
 }
 
 mod policy;
-use policy::{AllocationClass, AllocationError, StateSnapshot};
+use policy::AllocationError;
+pub(crate) use policy::{AllocationClass, RefusalKind, StateSnapshot};
 
 mod layout;
 mod production;

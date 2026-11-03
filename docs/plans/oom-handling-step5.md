@@ -3,16 +3,21 @@
 Implementation plan for step 5 of [oom-handling.md](oom-handling.md), the
 specification. Revised on 2026-11-03 against `b2dccf4e`. This revision
 incorporates the readiness reviews; the separate review file is no longer
-needed. Step 5a is implemented locally and awaiting review; no commit has
-been made. Steps 5b–5f remain pending.
+needed. Step 5a is committed as `dcd36704`. Step 5b is implemented locally
+and awaiting review; steps 5c–5f remain pending.
 
-The 5a changes replace the pool's used counter with the packed policy word,
+The 5a changes replace the pool's used counter with the packed state word,
 perform class-aware charges before ownership changes, preserve refusal reasons
 inside the physical allocator, and test charge/release transitions in the
-existing debug guest scratch-pool suite. Production entries still supply Kernel
-and the production word stays unarmed. Recipient propagation belongs to 5b;
-worker request/latch operations, attention notifications and run metrics belong
-to 5c, before activation in 5e.
+existing debug guest scratch-pool suite. The 5b changes bind the recipient role
+atomically with the one-process claim in the address-space base and carry its
+allocation class through frames, both stacks, page tables and shared MM slabs.
+Internal `AllocationFailure` results distinguish ordinary codes from pressure
+receipts, including the original floor refusal through huge fallback. Current
+syscall boundaries still convert failures to the existing ABI codes; waiting
+arrives in 5d. The production word stays unarmed. Worker request/latch
+operations, attention notifications and run metrics belong to 5c, before
+activation in 5e.
 
 The accepted policy stays: None and Interactive allocations have a 2 MiB
 floor, System allocations a 512 KiB floor, and kernel allocations no floor.
@@ -95,7 +100,7 @@ All counts are 4 KiB pages. Before arming, every class uses floor 0 and all
 gates are open.
 
 Find and validate a usable block under its existing lock, then CAS the
-count/policy word **before** committing its page ownership changes. Retry
+count/state word **before** committing its page ownership changes. Retry
 that CAS against the complete word, recomputing the gate and floor each
 time. Once it succeeds, the block mutation must be infallible: all corruption,
 range and free-list checks precede the charge. This applies to `take_small`
@@ -214,7 +219,7 @@ fault_waiters: Vec<(Weak<Thread>, WaitReason)>
 ```
 
 `attend()` runs beside `process_wake_events()` in `sched_loop`, holding no
-other lock. It consumes attention, reads the authoritative policy word and
+other lock. It consumes attention, reads the authoritative state word and
 reconciles the bookkeeping. A generation change wakes the recovery object and
 rechecks fault waiters under the bookkeeping lock. Remove only satisfied/dead
 entries; retain blocked ones in the queue, so recovery cannot race a later
@@ -233,7 +238,7 @@ The job:
    Skip System, sys-io and its actual children/grandchildren, exiting/dead
    processes and debugger-paused processes. Keep only the best candidate.
 3. Rechecks eligibility, generation, phase and count before committing the
-   kill. Under the bookkeeping lock, use a validating CAS of the policy word
+   kill. Under the bookkeeping lock, use a validating CAS of the state word
    and record the pending identity. That successful validation is the kill
    request's ordering point. A recovery before it cancels the selection; a
    recovery after it permits this already-committed kill to finish. Release
@@ -284,7 +289,7 @@ alone does not prove a long wait. Add no test-only metrics or control hooks.
 Use one lazily created kernel-owned recovery `SysObject` and a non-NONE
 sentinel below `CUSTOM_HANDLE_OFFSET`. Register with `add_waiting_thread` and
 `add_wait_objects`, then recheck the **full wait reason** against the current
-policy word. If already satisfied, add the sentinel waker before `wait()`.
+state word. If already satisfied, add the sentinel waker before `wait()`.
 After every wake, recheck role, handles, target liveness and limits. Keep the
 object alive in kernel/thread-owned state; do not leave a local `Arc` across
 `Thread::wait()`.
@@ -325,7 +330,7 @@ fatal fault merely because a later sample is at least 768.
 
 For a pressure refusal, unwind MM work, set `Preempted` under the thread status
 lock, release that lock, then register `(Weak<Thread>, WaitReason)` under the
-OOM bookkeeping lock. Recheck the complete reason against the policy word
+OOM bookkeeping lock. Recheck the complete reason against the state word
 while registering. If recovery already permits retry, remove this entry and
 post one resume after unlocking. Otherwise the scheduler owns removal when
 processing a later transition. A valid fault whose physical shortage has
@@ -383,6 +388,16 @@ checks passed without warnings; repository-toolchain formatting checks passed.
 `src/tests/full-test.sh --release` passed once (10.6 minutes). The debug log
 includes `phys_blocks policy tests PASS`. These are the pre-review runs;
 the three-per-build gate below still applies before an authorized core commit.
+
+5b review validation on 2026-11-03: debug/release kernel builds and Clippy
+checks passed without warnings, and formatting checks passed. The debug full
+suite passed once (16.8 minutes). After the final refinement preserving the
+original floor receipt across recovery/new pressure, a fresh debug
+`src/tests/test-system-tty.sh` run passed, including `phys_blocks policy tests
+PASS` and `allocation role tests PASS` during guest boot. The final sources
+passed `src/tests/full-test.sh --release` once (10.6 minutes). Existing boot
+exhaustion/rollback coverage remains enabled; no live allocator arming or new
+drain was added. These changes are uncommitted.
 
 All new tests run inside Motor OS and are reached from `full-test.sh`, through
 existing kernel self-tests, systest or its console fixture. Keep pressure tests
@@ -464,7 +479,7 @@ before any authorized commit. Include at least one real one-vCPU run in each
 build's activation validation. Once the complete transition passes, run
 `src/tests/full-test-dev.sh --release`; its source phase remains release-only.
 Do not extend timeouts, weaken assertions or retry defects to obtain a pass.
-The current 5a changes remain uncommitted for review.
+The current 5b changes remain uncommitted for review.
 
 ## Decisions retained and implementation choices
 
@@ -473,7 +488,7 @@ spaces use None; at most three evidenced pressure-window attempts; role-based
 floors independent of request size; and refusal/recovery handling replaces the
 former immediate rejection rule for requests of at least 2 MiB.
 
-This revision chooses the atomic count/policy word, typed internal pressure
+This revision chooses the atomic count/state word, typed internal pressure
 results, post-rollback syscall sampling, explicit generation-dependent waits,
 and activation after all consumers are complete. It treats process-attributed
 MM metadata as part of the process allocation even in kernel virtual regions.

@@ -4,10 +4,10 @@
 // while allocating virtual memory, as it results in nasty recursion.
 use core::mem::MaybeUninit;
 
+use super::{AllocationClass, AllocationFailure};
 use intrusive_collections::{intrusive_adapter, Bound, UnsafeRef};
 use intrusive_collections::{KeyAdapter, RBTree, RBTreeLink};
 use intrusive_collections::{SinglyLinkedList, SinglyLinkedListLink};
-use moto_sys::ErrorCode;
 
 use crate::mm::{PageType, PAGE_SIZE_MID, PAGE_SIZE_SMALL_LOG2};
 use crate::util::SpinLock;
@@ -153,11 +153,11 @@ impl PageAllocatorInner {
         assert!(self.is_empty())
     }
 
-    fn alloc_page(&mut self) -> Result<*mut Page, ErrorCode> {
+    fn alloc_page(&mut self, class: AllocationClass) -> Result<*mut Page, AllocationFailure> {
         if self.free_list.is_empty() {
             debug_assert_eq!(0, self.free_page_count);
 
-            self.alloc_slab()?;
+            self.alloc_slab(class)?;
         }
 
         let page = self.free_list.pop_front().unwrap();
@@ -178,10 +178,10 @@ impl PageAllocatorInner {
         self.used_page_count -= 1;
     }
 
-    fn alloc_slab(&mut self) -> Result<(), ErrorCode> {
+    fn alloc_slab(&mut self, class: AllocationClass) -> Result<(), AllocationFailure> {
         // Allocate a page. Note that we don't need to map the frame/page here,
         // as all phys mem has been mapped at PAGING_DIRECT_MAP_OFFSET.
-        let frame = super::phys::allocate_frame(super::PageType::SmallPage)?;
+        let frame = super::phys::allocate_frame(super::PageType::SmallPage, class)?;
         let virt_addr = frame.get().unwrap().start() + super::PAGING_DIRECT_MAP_OFFSET;
 
         // Initialize pages to default.
@@ -232,8 +232,8 @@ pub(super) struct PageAllocator {
 }
 
 impl PageAllocator {
-    fn alloc_page(&self) -> Result<*mut Page, ErrorCode> {
-        self.inner.lock(line!()).alloc_page()
+    fn alloc_page(&self, class: AllocationClass) -> Result<*mut Page, AllocationFailure> {
+        self.inner.lock(line!()).alloc_page(class)
     }
 
     fn free_page(&self, page: *mut Page) {
@@ -257,6 +257,9 @@ pub(super) struct VmemSegment {
     pages: RBTree<PageTreeAdapter>,
     owner: crate::util::UnsafeRef<super::virt::VmemRegion>,
     mapping_options: MappingOptions,
+    // Kernel regions can serve a process (notably its kernel stack). User
+    // segments instead read their address space's current claimed role.
+    allocation_class: Option<AllocationClass>,
 }
 
 impl Drop for VmemSegment {
@@ -270,11 +273,13 @@ impl VmemSegment {
         segment: MemorySegment,
         owner: &super::virt::VmemRegion,
         mapping_options: MappingOptions,
+        allocation_class: Option<AllocationClass>,
     ) -> Self {
         Self {
             segment,
             owner: crate::util::UnsafeRef::from(owner),
             mapping_options,
+            allocation_class,
             pages: RBTree::new(PageTreeAdapter::new()),
         }
     }
@@ -428,6 +433,11 @@ impl VmemSegment {
         unsafe { self.owner.get().address_space.get() }
     }
 
+    pub(super) fn allocation_class(&self) -> AllocationClass {
+        self.allocation_class
+            .unwrap_or_else(|| self.address_space().allocation_class())
+    }
+
     pub(super) fn set_frame(&mut self, page: u64, frame: SlabArc<Frame>) {
         let backing = frame.get().unwrap();
         debug_assert!(!backing.is_mmio());
@@ -450,7 +460,7 @@ impl VmemSegment {
         }
     }
 
-    pub(super) fn allocate_pages(&mut self) -> Result<(), ErrorCode> {
+    pub(super) fn allocate_pages(&mut self) -> Result<(), AllocationFailure> {
         assert!(self.segment.size > 0);
         assert!(self.pages.is_empty());
 
@@ -472,22 +482,34 @@ impl VmemSegment {
     // Maps or reserves every page of the segment, in address order. Fails
     // when memory runs out, for a frame, a descriptor or a page-table page,
     // or when the page table refuses the mapping options.
-    fn construct(&mut self) -> Result<(), ErrorCode> {
+    fn construct(&mut self) -> Result<(), AllocationFailure> {
         let num_pages = self.segment.size >> PAGE_SIZE_SMALL_LOG2;
         let huge = self.huge_candidates();
         let mut start = self.segment.start;
         // Huge pages come first in the address order, and after the first
         // refusal every remaining candidate is served small without asking.
         let mut refused = false;
+        let mut huge_refusal = None;
         for _ in 0..huge {
             debug_assert_eq!(start & (PAGE_SIZE_MID - 1), 0);
             let options = page_mapping_options(self.mapping_options, 0, num_pages);
             let frame = if refused {
                 None
             } else {
-                super::phys::allocate_huge_frame()
-                    .inspect_err(|_| refused = true)
-                    .ok()
+                match super::phys::allocate_huge_frame(self.allocation_class()) {
+                    Ok(frame) => Some(frame),
+                    Err(
+                        failure @ AllocationFailure::Pressure {
+                            kind: super::phys_blocks::RefusalKind::Gate,
+                            ..
+                        },
+                    ) => return Err(failure),
+                    Err(failure) => {
+                        refused = true;
+                        huge_refusal = Some(failure);
+                        None
+                    }
+                }
             };
             match frame {
                 Some(frame) => {
@@ -498,7 +520,8 @@ impl VmemSegment {
                 None => {
                     super::virt::HUGE_FALLBACKS.fetch_add(1, Ordering::Relaxed);
                     for _ in 0..(PAGE_SIZE_MID / PAGE_SIZE_SMALL) {
-                        self.map_small(start, options)?;
+                        self.map_small(start, options)
+                            .map_err(|failure| failure.retain_floor_refusal(huge_refusal))?;
                         start += PAGE_SIZE_SMALL;
                     }
                 }
@@ -518,20 +541,27 @@ impl VmemSegment {
 
     // One small page at `start`, mapped now unless the options leave it
     // unmapped: a reservation, a guard page.
-    fn map_small(&mut self, start: u64, options: MappingOptions) -> Result<(), ErrorCode> {
+    fn map_small(&mut self, start: u64, options: MappingOptions) -> Result<(), AllocationFailure> {
         debug_assert!(!options.contains(MappingOptions::LAZY));
         if options.is_empty() {
             let page = self.new_page(start, options)?;
             self.pages.insert(unsafe { UnsafeRef::from_raw(page) });
             return Ok(());
         }
-        let frame = super::phys::allocate_frame(PageType::SmallPage)?;
+        let frame = super::phys::allocate_frame(PageType::SmallPage, self.allocation_class())?;
         self.map_frame(start, frame, options)
     }
 
     // A fresh descriptor for the page at `start`, not yet in the tree.
-    fn new_page(&mut self, start: u64, options: MappingOptions) -> Result<*mut Page, ErrorCode> {
-        let page = self.address_space().page_allocator.alloc_page()?;
+    fn new_page(
+        &mut self,
+        start: u64,
+        options: MappingOptions,
+    ) -> Result<*mut Page, AllocationFailure> {
+        let page = self
+            .address_space()
+            .page_allocator
+            .alloc_page(self.allocation_class())?;
         let page_mut = unsafe { page.as_mut() }.unwrap();
         debug_assert!(page_mut.is_empty());
         page_mut.start = start;
@@ -549,15 +579,17 @@ impl VmemSegment {
         start: u64,
         frame: SlabArc<Frame>,
         options: MappingOptions,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), AllocationFailure> {
         let page = self.new_page(start, options)?;
         let page_mut = unsafe { page.as_mut() }.unwrap();
         let (phys, kind) = (frame.get().unwrap().start(), frame.get().unwrap().kind());
-        if let Err(err) = self
-            .address_space()
-            .page_table
-            .map_page(phys, start, kind, options)
-        {
+        if let Err(err) = self.address_space().page_table.map_page(
+            phys,
+            start,
+            kind,
+            options,
+            self.allocation_class(),
+        ) {
             page_mut.clear();
             self.address_space().page_allocator.free_page(page);
             return Err(err);
@@ -570,7 +602,7 @@ impl VmemSegment {
         Ok(())
     }
 
-    pub fn mmio_map(&mut self, phys_addr: u64, user: bool) -> Result<(), ErrorCode> {
+    pub fn mmio_map(&mut self, phys_addr: u64, user: bool) -> Result<(), AllocationFailure> {
         let start = self.segment.start;
 
         assert!(!self.pages.is_empty());
@@ -587,12 +619,13 @@ impl VmemSegment {
 
         let mut offset = 0;
         for _idx in 0..num_pages {
-            let frame = super::phys::mmio_frame(phys_addr + offset)?;
+            let frame = super::phys::mmio_frame(phys_addr + offset, self.allocation_class())?;
             self.address_space().page_table.map_page(
                 phys_addr + offset,
                 start + offset,
                 PageType::SmallPage,
                 options,
+                self.allocation_class(),
             )?;
             let page = self.find_page_mut(start + offset).unwrap();
             debug_assert!(page.frame.is_null());
@@ -611,18 +644,18 @@ impl VmemSegment {
         &mut self,
         addr: u64,
         source: Option<&super::user::PinnedUserPage>,
-    ) -> Result<bool, ErrorCode> {
+    ) -> Result<bool, AllocationFailure> {
         if !self.mapping_options.contains(MappingOptions::FILE_PAGED)
             || !addr.is_multiple_of(PAGE_SIZE_SMALL)
             || !self.segment.contains(addr)
         {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
         if self.find_page(addr).is_some() {
             return Ok(false);
         }
         let mut options = self.mapping_options - MappingOptions::FILE_PAGED;
-        let frame = super::phys::allocate_frame(PageType::SmallPage)?;
+        let frame = super::phys::allocate_frame(PageType::SmallPage, self.allocation_class())?;
         if let Some(source) = source {
             let dst = frame.get().unwrap().start() + super::PAGING_DIRECT_MAP_OFFSET;
             unsafe {
@@ -659,7 +692,11 @@ impl VmemSegment {
         )
     }
 
-    pub(super) fn fix_pagefault(&mut self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
+    pub(super) fn fix_pagefault(
+        &mut self,
+        pf_addr: u64,
+        error_code: u64,
+    ) -> Result<(), AllocationFailure> {
         debug_assert!(self.segment.contains(pf_addr));
 
         // Note: this is run under spinlock on self.
@@ -674,12 +711,12 @@ impl VmemSegment {
                 || (code & 0x10 != 0 && !self.mapping_options.contains(MappingOptions::EXECUTABLE))
             {
                 log::debug!("#PF: file-paged protection violation: 0x{error_code:x}");
-                return Err(moto_rt::E_INVALID_ARGUMENT);
+                return Err(moto_rt::E_INVALID_ARGUMENT.into());
             }
             return if self.find_page(pf_addr).is_some() {
                 Ok(()) // A fill raced with the fault.
             } else {
-                Err(moto_rt::E_NOT_READY)
+                Err(moto_rt::E_NOT_READY.into())
             };
         }
 
@@ -688,7 +725,7 @@ impl VmemSegment {
             && self.mapping_options.contains(MappingOptions::GUARD)
         {
             log::debug!("#PF: guard page");
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
 
         debug_assert_eq!(error_code & 4, 4);
@@ -702,7 +739,7 @@ impl VmemSegment {
         // the concurrent-fault shortcut below and refault forever.
         if (error_code & (1 | 0x10)) != 0 {
             log::debug!("#PF: protection violation: 0x{:x}", error_code | 4);
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
 
         // A page of a sparse segment has a descriptor only once it has a
@@ -729,7 +766,7 @@ impl VmemSegment {
             // Read.
             if !page_options.contains(MappingOptions::USER_ACCESSIBLE) {
                 log::debug!("#PF: not readable");
-                return Err(moto_rt::E_INVALID_ARGUMENT);
+                return Err(moto_rt::E_INVALID_ARGUMENT.into());
             }
         } else if error_code == 2 {
             // Write.
@@ -737,17 +774,17 @@ impl VmemSegment {
                 || !page_options.contains(MappingOptions::WRITABLE)
             {
                 log::debug!("#PF: not writable");
-                return Err(moto_rt::E_INVALID_ARGUMENT);
+                return Err(moto_rt::E_INVALID_ARGUMENT.into());
             }
         } else {
             log::debug!("Unsupported #PF error code: 0x{:x}", error_code + 4);
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
 
         // The frame first: a refusal then leaves nothing behind. No TLB
         // flush either way: the PTE goes from non-present to present, and
         // x86 CPUs don't cache non-present translations.
-        let frame = super::phys::allocate_frame(PageType::SmallPage)?;
+        let frame = super::phys::allocate_frame(PageType::SmallPage, self.allocation_class())?;
         let mapping_options = page_options - (MappingOptions::LAZY | MappingOptions::GUARD);
         if dense_options.is_none() {
             // A sparse page: its descriptor comes with its frame, and goes
@@ -762,6 +799,7 @@ impl VmemSegment {
             start,
             PageType::SmallPage,
             mapping_options,
+            self.allocation_class(),
         )?;
         let page = self.find_page_mut(start).unwrap();
         page.frame = frame;
@@ -774,7 +812,7 @@ impl VmemSegment {
         &self,
         other: &mut Self,
         mapping_options: MappingOptions,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), AllocationFailure> {
         debug_assert_eq!(self.segment.size, other.segment.size);
         self.share_range_with(0, other, mapping_options)
     }
@@ -789,12 +827,12 @@ impl VmemSegment {
         first_page: u64,
         other: &mut Self,
         mapping_options: MappingOptions,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), AllocationFailure> {
         // The frames are the source's, holding its data.
         let mapping_options = mapping_options | MappingOptions::DONT_ZERO;
         let start = self.segment.start + (first_page << PAGE_SIZE_SMALL_LOG2);
         if start + other.segment.size > self.segment.end() {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
         crate::arch::paging::PageTable::check_options(mapping_options)?;
         // Segment provenance decides, whatever the actual backing: a huge
@@ -808,7 +846,7 @@ impl VmemSegment {
                 .mapping_options
                 .intersects(MappingOptions::LAZY | MappingOptions::GUARD)
         {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
         debug_assert!(!other.pages.is_empty());
 
@@ -826,10 +864,10 @@ impl VmemSegment {
                 .filter(|page| page.start == source_addr(dest.start))
                 .and_then(|page| page.frame.get())
             else {
-                return Err(moto_rt::E_INVALID_ARGUMENT);
+                return Err(moto_rt::E_INVALID_ARGUMENT.into());
             };
             if frame.is_mmio() || dest.frame.get().is_some_and(Frame::is_mmio) {
-                return Err(moto_rt::E_INVALID_ARGUMENT);
+                return Err(moto_rt::E_INVALID_ARGUMENT.into());
             }
             source.move_next();
         }
@@ -849,6 +887,7 @@ impl VmemSegment {
                     dest.start,
                     PageType::SmallPage,
                     mapping_options,
+                    other.allocation_class(),
                 ) {
                     let mut source = self.pages.find(&start);
                     for done in other
@@ -1109,9 +1148,9 @@ impl SegmentMap {
         self.segments.iter()
     }
 
-    fn alloc_slab(&mut self) -> Result<(), ErrorCode> {
+    fn alloc_slab(&mut self, class: AllocationClass) -> Result<(), AllocationFailure> {
         // Allocate a page.
-        let frame = super::phys::allocate_frame(super::PageType::SmallPage)?;
+        let frame = super::phys::allocate_frame(super::PageType::SmallPage, class)?;
         let virt_addr = frame.get().unwrap().start() + super::PAGING_DIRECT_MAP_OFFSET;
 
         // Initialize the slab page to default.
@@ -1170,9 +1209,12 @@ impl SegmentMap {
     /// Makes sure that insert() has a node without allocating, so that a
     /// segment is built only once its place is certain. A slab added here
     /// stays with the map like any other.
-    pub(super) fn ensure_free_node(&mut self) -> Result<(), ErrorCode> {
+    pub(super) fn ensure_free_node(
+        &mut self,
+        class: AllocationClass,
+    ) -> Result<(), AllocationFailure> {
         if self.free_list.is_empty() {
-            self.alloc_slab()?;
+            self.alloc_slab(class)?;
         }
         Ok(())
     }

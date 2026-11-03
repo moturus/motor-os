@@ -27,7 +27,7 @@ fn sys_mmio_map(
         Ok(virt_addr) => ResultBuilder::ok_1(virt_addr),
         Err(err) => {
             log::debug!("sys_mmio_map failed: {err:?}");
-            ResultBuilder::result(err)
+            ResultBuilder::result(err.into())
         }
     }
 }
@@ -95,7 +95,7 @@ fn sys_map(
 
         return match address_space.alloc_contiguous_pages(num_pages) {
             Ok(segment) => ResultBuilder::ok_2(segment.start, segment.size),
-            Err(err) => ResultBuilder::result(err),
+            Err(err) => ResultBuilder::result(err.into()),
         };
     }
 
@@ -143,7 +143,7 @@ fn sys_map(
 
         return match address_space.allocate_user_fixed(virt_addr, num_pages, mapping_options) {
             Ok(()) => ResultBuilder::ok_2(virt_addr, num_pages << sys_mem::PAGE_SIZE_SMALL_LOG2),
-            Err(err) => ResultBuilder::result(err),
+            Err(err) => ResultBuilder::result(err.into()),
         };
     }
 
@@ -152,7 +152,7 @@ fn sys_map(
             // This is a normal user heap allocation.
             return match address_space.alloc_user_heap(num_pages) {
                 Ok(segment) => ResultBuilder::ok_2(segment.start, segment.size),
-                Err(err) => ResultBuilder::result(err),
+                Err(err) => ResultBuilder::result(err.into()),
             };
         }
 
@@ -169,7 +169,7 @@ fn sys_map(
 
         return match address_space.alloc_user_lazy(num_pages) {
             Ok(segment) => ResultBuilder::ok_2(segment.start, segment.size),
-            Err(err) => ResultBuilder::result(err),
+            Err(err) => ResultBuilder::result(err.into()),
         };
     }
 
@@ -186,7 +186,7 @@ fn sys_map(
         let lazy = (flags & SysMem::F_LAZY) != 0;
         return match address_space.alloc_user_guarded(num_pages, lazy) {
             Ok(segment) => ResultBuilder::ok_2(segment.start, segment.size),
-            Err(err) => ResultBuilder::result(err),
+            Err(err) => ResultBuilder::result(err.into()),
         };
     }
 
@@ -203,7 +203,7 @@ fn sys_map(
                 debug_assert_eq!(page_size * num_pages, segment.size);
                 ResultBuilder::ok_2(segment.start, segment.size)
             }
-            Err(err) => ResultBuilder::result(err),
+            Err(err) => ResultBuilder::result(err.into()),
         };
     }
 
@@ -267,7 +267,7 @@ fn sys_map(
             curr_thread.owner().address_space(),
         ) {
             Ok((addr1, addr2)) => ResultBuilder::ok_2(addr1, addr2),
-            Err(err) => ResultBuilder::result(err),
+            Err(err) => ResultBuilder::result(err.into()),
         };
     }
 
@@ -305,7 +305,7 @@ fn sys_share_existing(
         opts,
     ) {
         Ok(()) => ResultBuilder::ok_2(virt_addr, num_pages << sys_mem::PAGE_SIZE_SMALL_LOG2),
-        Err(err) => ResultBuilder::result(err),
+        Err(err) => ResultBuilder::result(err.into()),
     }
 }
 

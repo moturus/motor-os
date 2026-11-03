@@ -269,7 +269,7 @@ pub(super) fn get(
     if let Err(err) = mapping_result {
         log::debug!("shared: get: failed to map: {err:?}.");
         requeue(listener);
-        return Err(err);
+        return Err(err.into());
     }
     let sharee = SysObject::new_owned(
         listener.url.clone(),

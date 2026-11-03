@@ -64,6 +64,7 @@ unsafe impl core::alloc::GlobalAlloc for RawAllocator {
         if let Ok(segment) = super::virt::vmem_allocate_pages(
             super::virt::VmemKind::KernelHeap,
             size >> PAGE_SIZE_SMALL_LOG2,
+            super::AllocationClass::Kernel,
         ) {
             self.allocated.fetch_add(size, Ordering::Relaxed);
             segment.start as usize as *mut u8

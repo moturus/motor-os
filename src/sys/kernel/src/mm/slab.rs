@@ -1,7 +1,7 @@
+use super::{AllocationClass, AllocationFailure};
 use crate::mm::{align_up, PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
 use crate::util::SpinLock;
 use core::sync::atomic::*;
-use moto_rt::ErrorCode;
 
 pub trait Slabbable: Sized + 'static + Send + Sync {
     // Initialize @self in place, assuming uninit.
@@ -274,8 +274,9 @@ impl<T: Slabbable> MMSlab<T> {
     unsafe fn new_pslab(
         shared: bool,
         owner: *const MMSlab<T>,
-    ) -> Result<*mut Slab4096<T>, ErrorCode> {
-        let mem = crate::mm::raw_alloc_for_slab(Self::backing_pages(shared))?;
+        class: AllocationClass,
+    ) -> Result<*mut Slab4096<T>, AllocationFailure> {
+        let mem = crate::mm::raw_alloc_for_slab(Self::backing_pages(shared), class)?;
         let pslab = mem as *mut Slab4096<T>;
         // The refcounts follow the slab, whose size is a multiple of its
         // alignment, which covers theirs.
@@ -300,8 +301,8 @@ impl<T: Slabbable> MMSlab<T> {
         }
     }
 
-    pub fn alloc_arc(&self) -> Result<SlabArc<T>, ErrorCode> {
-        let ((data, idx), slab) = self.alloc()?;
+    pub fn alloc_arc(&self, class: AllocationClass) -> Result<SlabArc<T>, AllocationFailure> {
+        let ((data, idx), slab) = self.alloc(class)?;
 
         let refs = unsafe { (*slab).refs };
         assert!(!refs.is_null());
@@ -351,7 +352,10 @@ impl<T: Slabbable> MMSlab<T> {
             .store(core::ptr::null_mut(), Ordering::Relaxed);
     }
 
-    fn alloc(&self) -> Result<((*mut T, usize), *const Slab4096<T>), ErrorCode> {
+    fn alloc(
+        &self,
+        class: AllocationClass,
+    ) -> Result<((*mut T, usize), *const Slab4096<T>), AllocationFailure> {
         loop {
             let pslab = self.partial.load(Ordering::Acquire);
 
@@ -367,7 +371,7 @@ impl<T: Slabbable> MMSlab<T> {
                 if !self.partial.load(Ordering::Acquire).is_null() {
                     continue;
                 }
-                let new = unsafe { Self::new_pslab(self.shared, self as *const Self)? };
+                let new = unsafe { Self::new_pslab(self.shared, self as *const Self, class)? };
                 self.push_partial(new);
                 continue;
             }

@@ -4,6 +4,7 @@ use crate::{mm::phys::*, util::SpinLock};
 use core::{arch::asm, sync::atomic::AtomicBool};
 
 use crate::mm::user_copy::UserCopyError;
+use crate::mm::{AllocationClass, AllocationFailure};
 use moto_sys::ErrorCode;
 
 // The full physical memory is mapped to [DIRECT_MAP_OFFSET, *)
@@ -172,20 +173,21 @@ impl HwPageTable {
         &mut self,
         idx: u64,
         pde_flags: u64,
-    ) -> Result<(&'static mut Self, bool), ErrorCode> {
+        class: AllocationClass,
+    ) -> Result<(&'static mut Self, bool), AllocationFailure> {
         let pte = self.get(idx);
         if !pte.is_empty() {
             assert!(!pte.is_huge_page());
             return Ok((Self::from_pte(pte), false));
         }
 
-        let table = Self::alloc()?;
+        let table = Self::alloc(class)?;
         self.entries[idx as usize] = PTE::from_u64(table.self_phys_addr() | pde_flags);
         Ok((table, true))
     }
 
-    fn alloc() -> Result<&'static mut Self, ErrorCode> {
-        let frame = phys_allocate_frameless(PageType::SmallPage)?;
+    fn alloc(class: AllocationClass) -> Result<&'static mut Self, AllocationFailure> {
+        let frame = phys_allocate_frameless(PageType::SmallPage, class)?;
         zero_page(frame + PAGING_DIRECT_MAP_OFFSET, PageType::SmallPage);
         Ok(Self::from_pte(PTE::from_u64(frame)))
     }
@@ -355,7 +357,8 @@ impl PageTableImpl {
         virt_addr: u64,
         kind: PageType,
         pte_flags: u64,
-    ) -> Result<(), ErrorCode> {
+        class: AllocationClass,
+    ) -> Result<(), AllocationFailure> {
         assert_eq!(0, phys_addr & (kind.page_size() - 1));
         assert_eq!(0, virt_addr & (kind.page_size() - 1));
         let pte_flags = self.leaf_flags(pte_flags);
@@ -368,7 +371,9 @@ impl PageTableImpl {
         };
 
         let idx_l4 = PageTableImpl::idx_l4(virt_addr);
-        let (table_l3, new_l3) = self.table_l4.get_or_create(idx_l4, page_directory_flags)?;
+        let (table_l3, new_l3) =
+            self.table_l4
+                .get_or_create(idx_l4, page_directory_flags, class)?;
 
         let idx_l3 = PageTableImpl::idx_l3(virt_addr);
         if kind == PageType::LargePage {
@@ -378,7 +383,7 @@ impl PageTableImpl {
             return Ok(());
         }
 
-        let (table_l2, new_l2) = match table_l3.get_or_create(idx_l3, page_directory_flags) {
+        let (table_l2, new_l2) = match table_l3.get_or_create(idx_l3, page_directory_flags, class) {
             Ok(table) => table,
             Err(err) => {
                 if new_l3 {
@@ -399,7 +404,7 @@ impl PageTableImpl {
         }
 
         assert_eq!(kind, PageType::SmallPage);
-        let table_l1 = match table_l2.get_or_create(idx_l2, page_directory_flags) {
+        let table_l1 = match table_l2.get_or_create(idx_l2, page_directory_flags, class) {
             Ok((table, _)) => table,
             Err(err) => {
                 if new_l2 {
@@ -840,10 +845,10 @@ impl PageTable {
         }
     }
 
-    pub fn new_user_page_table() -> Result<Self, ErrorCode> {
+    pub(crate) fn new_user_page_table() -> Result<Self, AllocationFailure> {
         use alloc::boxed::Box;
 
-        let hw_page = HwPageTable::alloc()?;
+        let hw_page = HwPageTable::alloc(AllocationClass::User)?;
         log::trace!("new user page table: 0x{:x}", hw_page as *const _ as usize);
 
         let inst = PageTableImpl {
@@ -926,13 +931,14 @@ impl PageTable {
         Self::pte_flags(PageType::SmallPage, options).map(|_| ())
     }
 
-    pub fn map_page(
+    pub(crate) fn map_page(
         &self,
         phys_addr: u64,
         virt_addr: u64,
         kind: PageType,
         options: MappingOptions,
-    ) -> Result<(), ErrorCode> {
+        class: AllocationClass,
+    ) -> Result<(), AllocationFailure> {
         let (pte_flags, zero) = Self::pte_flags(kind, options)?;
 
         // Initialize the frame before publishing the PTE. Otherwise another
@@ -945,7 +951,7 @@ impl PageTable {
             self.inst
                 .get()
                 .lock(3)
-                .map_page(phys_addr, virt_addr, kind, pte_flags)
+                .map_page(phys_addr, virt_addr, kind, pte_flags, class)
         }
     }
 
@@ -1105,14 +1111,21 @@ impl PageTable {
 pub fn retired_tables_self_test() {
     let table = PageTable::new_user_page_table().unwrap();
     let vaddrs = [PAGE_SIZE_LARGE, PAGE_SIZE_LARGE + PAGE_SIZE_MID];
-    let frames = vaddrs.map(|_| phys_allocate_frameless(PageType::SmallPage).unwrap());
+    let frames = vaddrs
+        .map(|_| phys_allocate_frameless(PageType::SmallPage, AllocationClass::Kernel).unwrap());
     let options =
         MappingOptions::READABLE | MappingOptions::WRITABLE | MappingOptions::USER_ACCESSIBLE;
     let free_before = available_small_pages();
     let map_both = || {
         for (vaddr, phys) in vaddrs.into_iter().zip(frames) {
             table
-                .map_page(phys, vaddr, PageType::SmallPage, options)
+                .map_page(
+                    phys,
+                    vaddr,
+                    PageType::SmallPage,
+                    options,
+                    AllocationClass::User,
+                )
                 .unwrap();
         }
         assert_eq!(available_small_pages(), free_before - 4);

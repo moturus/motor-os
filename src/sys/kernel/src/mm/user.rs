@@ -4,9 +4,9 @@ use alloc::sync::Arc;
 
 use super::user_copy::UserCopyError;
 use super::{virt::*, PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
+use super::{AllocationClass, AllocationFailure};
 use crate::mm::{MappingOptions, PAGE_SIZE_MID};
 use crate::xray::stats::MemStats;
-use moto_sys::ErrorCode;
 
 // A direct-map address is usable only while its backing frame is owned.
 pub struct PinnedUserPage {
@@ -56,8 +56,6 @@ pub struct UserAddressSpace {
 
     kernel_stacks: super::cache::SegmentCache,
     // user_stacks: super::cache::SegmentCache,
-    /// Set once a process is built on this space; see claim_for_process().
-    hosts_process: AtomicBool,
 }
 
 unsafe impl Send for UserAddressSpace {}
@@ -73,6 +71,10 @@ impl Drop for UserAddressSpace {
 }
 
 impl UserAddressSpace {
+    pub(crate) fn allocation_class(&self) -> AllocationClass {
+        self.inner.allocation_class()
+    }
+
     /// Releases the process's memory: every user segment with its private
     /// frames, the page descriptors, the process static page and the cached
     /// kernel stacks with their cache pages; shared frames live on in their
@@ -110,19 +112,19 @@ impl UserAddressSpace {
     /// hosts one process in its lifetime: the process's exit releases the
     /// space (see Process::on_thread_exited), so a second process on it
     /// would run on freed memory.
-    pub fn claim_for_process(&self) -> Result<(), ErrorCode> {
-        self.hosts_process
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map(|_| ())
-            .map_err(|_| moto_rt::E_ALREADY_IN_USE)
+    pub(crate) fn claim_for_process(
+        &self,
+        role: moto_sys::caps::ProcessRole,
+    ) -> Result<(), AllocationFailure> {
+        self.inner.claim_for_process(role)
     }
 
     /// Undoes claim_for_process() for a process that could not be built.
     pub fn release_claim(&self) {
-        self.hosts_process.store(false, Ordering::Release);
+        self.inner.release_claim();
     }
 
-    pub fn new() -> Result<Arc<Self>, ErrorCode> {
+    pub(crate) fn new() -> Result<Arc<Self>, AllocationFailure> {
         log::debug!("UserAddressSpace::new()");
 
         let self_ = Arc::new(Self {
@@ -137,7 +139,6 @@ impl UserAddressSpace {
             kernel_mem_stats: Arc::new(MemStats::new_kernel()),
 
             kernel_stacks: super::cache::SegmentCache::new(),
-            hosts_process: AtomicBool::new(false),
             //
             // NOTE: commit c090f671a26b193dd6b1c4d36ab5669539d88d7a
             // added several fields to userspace TCB, and httpd started
@@ -187,7 +188,7 @@ impl UserAddressSpace {
         &self.kernel_mem_stats
     }
 
-    fn stats_user_add(&self, bytes: u64) -> Result<(), ErrorCode> {
+    fn stats_user_add(&self, bytes: u64) -> Result<(), AllocationFailure> {
         let new_total = bytes + self.total_usage.fetch_add(bytes, Ordering::AcqRel);
         if new_total > self.max_memory.load(Ordering::Relaxed) {
             #[cfg(debug_assertions)]
@@ -196,7 +197,7 @@ impl UserAddressSpace {
                 crate::arch::log_backtrace("user OOM");
             }
             self.total_usage.fetch_sub(bytes, Ordering::Relaxed);
-            Err(moto_rt::E_OUT_OF_MEMORY)
+            Err(moto_rt::E_OUT_OF_MEMORY.into())
         } else {
             Ok(())
         }
@@ -206,10 +207,10 @@ impl UserAddressSpace {
         self.total_usage.fetch_sub(bytes, Ordering::Relaxed);
     }
 
-    fn stats_kernel_add(&self, num_pages: u64) -> Result<(), ErrorCode> {
+    fn stats_kernel_add(&self, num_pages: u64) -> Result<(), AllocationFailure> {
         // TODO: replace the magic constant below with something more intelligent.
         if num_pages >= 65536 {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
         let bytes = num_pages << PAGE_SIZE_SMALL_LOG2;
         let new_total = bytes + self.total_usage.fetch_add(bytes, Ordering::AcqRel);
@@ -217,7 +218,7 @@ impl UserAddressSpace {
             #[cfg(debug_assertions)]
             log::info!("user OOM: user usage {new_total} when allocating {bytes}");
             self.total_usage.fetch_sub(bytes, Ordering::Relaxed);
-            Err(moto_rt::E_OUT_OF_MEMORY)
+            Err(moto_rt::E_OUT_OF_MEMORY.into())
         } else {
             self.kernel_mem_stats.add(num_pages);
             Ok(())
@@ -230,43 +231,43 @@ impl UserAddressSpace {
         self.kernel_mem_stats.sub(num_pages);
     }
 
-    pub fn allocate_user_fixed(
+    pub(crate) fn allocate_user_fixed(
         &self,
         vaddr: u64,
         num_pages: u64,
         mapping_options: super::MappingOptions,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), AllocationFailure> {
         self.inner
             .vmem_allocate_user_fixed(vaddr, num_pages, mapping_options)?;
         Ok(())
     }
 
-    pub fn map_shared(
+    pub(crate) fn map_shared(
         map_to: &Self,
         map_to_addr: u64,
         map_from: &Self,
         map_from_addr: u64,
         mapping_options: super::MappingOptions,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), AllocationFailure> {
         map_from
             .inner
             .share_with(map_from_addr, &map_to.inner, map_to_addr, mapping_options)
     }
 
-    pub fn alloc_user_shared(
+    pub(crate) fn alloc_user_shared(
         &self,
         vaddr: u64,
         num_pages: u64,
         mapping_options: super::MappingOptions,
         other: &UserAddressSpace,
-    ) -> Result<(u64, u64), ErrorCode> {
+    ) -> Result<(u64, u64), AllocationFailure> {
         log::trace!("alloc_user_shared: 0x{vaddr:x}");
         let bytes = num_pages << PAGE_SIZE_SMALL_LOG2;
         self.stats_user_add(bytes)?;
         if other.stats_user_add(bytes).is_err() {
             log::debug!("other OOM.");
             self.stats_user_sub(bytes);
-            return Err(moto_rt::E_OUT_OF_MEMORY);
+            return Err(moto_rt::E_OUT_OF_MEMORY.into());
         }
         // Both reservations, the share and any rollback happen under the
         // region locks; each side's charge stays until its own unmap.
@@ -282,7 +283,7 @@ impl UserAddressSpace {
         self.inner.page_table()
     }
 
-    pub fn alloc_user_stack(&self, num_pages: u64) -> Result<UserStack, ErrorCode> {
+    pub(crate) fn alloc_user_stack(&self, num_pages: u64) -> Result<UserStack, AllocationFailure> {
         let num_pages = (num_pages + 2).next_power_of_two();
 
         // if let Some(segment) = self.user_stacks.pop(num_pages as usize) {
@@ -311,7 +312,10 @@ impl UserAddressSpace {
         Ok(UserStack { segment })
     }
 
-    pub fn alloc_kernel_stack(&self, num_pages: u64) -> Result<super::MemorySegment, ErrorCode> {
+    pub(crate) fn alloc_kernel_stack(
+        &self,
+        num_pages: u64,
+    ) -> Result<super::MemorySegment, AllocationFailure> {
         let num_pages = (num_pages + 2).next_power_of_two();
 
         if let Some(segment) = self.kernel_stacks.pop(num_pages as usize) {
@@ -321,11 +325,15 @@ impl UserAddressSpace {
         // When dropping, we count the full segment, with guard pages, so when adding,
         // we need to do the same.
         self.stats_kernel_add(num_pages)?;
-        super::virt::vmem_allocate_pages(super::virt::VmemKind::KernelStack, num_pages)
-            .inspect(|_| self.kernel_mem_stats.add_resident(num_pages - 2))
-            .inspect_err(|_| {
-                self.stats_kernel_sub(num_pages);
-            })
+        super::virt::vmem_allocate_pages(
+            super::virt::VmemKind::KernelStack,
+            num_pages,
+            self.allocation_class(),
+        )
+        .inspect(|_| self.kernel_mem_stats.add_resident(num_pages - 2))
+        .inspect_err(|_| {
+            self.stats_kernel_sub(num_pages);
+        })
     }
 
     fn do_drop_user_stack(&self, user_stack: super::MemorySegment) {
@@ -361,6 +369,7 @@ impl UserAddressSpace {
                 .push(
                     kernel_segment,
                     (kernel_stack.size as usize) >> PAGE_SIZE_SMALL_LOG2,
+                    self.allocation_class(),
                 )
                 .is_err()
             {
@@ -369,7 +378,10 @@ impl UserAddressSpace {
         }
     }
 
-    pub fn alloc_user_heap(&self, num_pages: u64) -> Result<super::MemorySegment, ErrorCode> {
+    pub(crate) fn alloc_user_heap(
+        &self,
+        num_pages: u64,
+    ) -> Result<super::MemorySegment, AllocationFailure> {
         // Ordinary eager private heap above 1 MiB may map huge pages; the
         // policy is the segment's, not inferred from anything else. Its
         // mapping never covers less than requested; the rounded size is
@@ -394,14 +406,14 @@ impl UserAddressSpace {
     /// Maps `source`'s segment at `source_addr` into this address space at
     /// `vaddr`, sharing its frames. The segments must be the same size, and
     /// nothing may be mapped at `vaddr` yet.
-    pub fn share_from(
+    pub(crate) fn share_from(
         &self,
         source: &UserAddressSpace,
         source_addr: u64,
         vaddr: u64,
         num_pages: u64,
         mapping_options: super::MappingOptions,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), AllocationFailure> {
         let bytes = num_pages << PAGE_SIZE_SMALL_LOG2;
         self.stats_user_add(bytes)?;
         self.inner
@@ -418,13 +430,13 @@ impl UserAddressSpace {
     /// Maps `num_pages` of kernel-static memory at `kernel_vaddr` into this
     /// address space at `vaddr`, sharing the frames (read-only or
     /// read+execute: the ELF loader's in-place text and rodata).
-    pub fn map_kernel_static(
+    pub(crate) fn map_kernel_static(
         &self,
         vaddr: u64,
         kernel_vaddr: u64,
         num_pages: u64,
         mapping_options: super::MappingOptions,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), AllocationFailure> {
         debug_assert!(!mapping_options.contains(super::MappingOptions::WRITABLE));
         let bytes = num_pages << PAGE_SIZE_SMALL_LOG2;
         self.stats_user_add(bytes)?;
@@ -433,7 +445,10 @@ impl UserAddressSpace {
             .inspect_err(|_| self.stats_user_sub(bytes))
     }
 
-    pub fn alloc_user_lazy(&self, num_pages: u64) -> Result<super::MemorySegment, ErrorCode> {
+    pub(crate) fn alloc_user_lazy(
+        &self,
+        num_pages: u64,
+    ) -> Result<super::MemorySegment, AllocationFailure> {
         self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
 
         self.inner
@@ -456,11 +471,11 @@ impl UserAddressSpace {
     /// mapped, eager or lazy. The segment is `num_pages + 2` pages, guards
     /// included and nothing rounded: that is what the caller sees, is
     /// charged for and unmaps.
-    pub fn alloc_user_guarded(
+    pub(crate) fn alloc_user_guarded(
         &self,
         num_pages: u64,
         lazy: bool,
-    ) -> Result<super::MemorySegment, ErrorCode> {
+    ) -> Result<super::MemorySegment, AllocationFailure> {
         let num_pages = num_pages
             .checked_add(2)
             .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
@@ -478,7 +493,10 @@ impl UserAddressSpace {
             .inspect_err(|_| self.stats_user_sub(bytes))
     }
 
-    pub fn alloc_user_unmapped(&self, num_pages: u64) -> Result<super::MemorySegment, ErrorCode> {
+    pub(crate) fn alloc_user_unmapped(
+        &self,
+        num_pages: u64,
+    ) -> Result<super::MemorySegment, AllocationFailure> {
         // Stats have to be increased, otherwise:
         // - process A gets unmapped, no stats change
         // - process B gets mapped, accounted
@@ -494,10 +512,10 @@ impl UserAddressSpace {
             })
     }
 
-    pub fn alloc_contiguous_pages(
+    pub(crate) fn alloc_contiguous_pages(
         &self,
         num_pages: u64,
-    ) -> Result<super::MemorySegment, ErrorCode> {
+    ) -> Result<super::MemorySegment, AllocationFailure> {
         self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
         self.inner
             .vmem_allocate_contiguous_pages(VmemKind::User, num_pages)
@@ -506,7 +524,7 @@ impl UserAddressSpace {
             })
     }
 
-    pub fn unmap(&self, addr: u64) -> Result<(), ErrorCode> {
+    pub fn unmap(&self, addr: u64) -> Result<(), moto_sys::ErrorCode> {
         crate::uspace::pager::unmap(self, addr, || {
             self.inner.normal_memory.free(addr).map_or_else(
                 |_| {
@@ -522,7 +540,11 @@ impl UserAddressSpace {
         })
     }
 
-    pub fn mmio_map(&self, phys_addr: u64, num_pages: u64) -> Result<u64, ErrorCode> {
+    pub(crate) fn mmio_map(
+        &self,
+        phys_addr: u64,
+        num_pages: u64,
+    ) -> Result<u64, AllocationFailure> {
         super::phys::validate_mmio(phys_addr, num_pages)?;
 
         self.stats_user_add(num_pages << PAGE_SIZE_SMALL_LOG2)?;
@@ -544,9 +566,9 @@ impl UserAddressSpace {
         num_pages: u64,
         writable: bool,
         executable: bool,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), AllocationFailure> {
         if writable && executable {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
         let mut options =
             MappingOptions::READABLE | MappingOptions::USER_ACCESSIBLE | MappingOptions::FILE_PAGED;
@@ -571,7 +593,7 @@ impl UserAddressSpace {
         &self,
         start: u64,
         sources: &[PinnedUserPage],
-    ) -> (u64, Result<(), ErrorCode>) {
+    ) -> (u64, Result<(), AllocationFailure>) {
         let mut installed = 0;
         let result = self.inner.with_file_segment(start, |segment| {
             let end = (sources.len() as u64)
@@ -579,7 +601,7 @@ impl UserAddressSpace {
                 .and_then(|bytes| start.checked_add(bytes))
                 .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
             if !start.is_multiple_of(PAGE_SIZE_SMALL) || end > segment.segment().end() {
-                return Err(moto_rt::E_INVALID_ARGUMENT);
+                return Err(moto_rt::E_INVALID_ARGUMENT.into());
             }
             for (idx, source) in sources.iter().enumerate() {
                 let addr = start + ((idx as u64) << PAGE_SIZE_SMALL_LOG2);
@@ -594,12 +616,16 @@ impl UserAddressSpace {
 
     /// Installs a zeroed page in a file-paged segment unless one is present.
     /// The caller holds `pager`, as for `fill_file`.
-    pub(crate) fn fill_file_zero(&self, page: u64) -> Result<bool, ErrorCode> {
+    pub(crate) fn fill_file_zero(&self, page: u64) -> Result<bool, AllocationFailure> {
         self.inner
             .with_file_segment(page, |segment| segment.fill_file_page(page, None))
     }
 
-    pub fn fix_pagefault(&self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
+    pub(crate) fn fix_pagefault(
+        &self,
+        pf_addr: u64,
+        error_code: u64,
+    ) -> Result<(), AllocationFailure> {
         self.inner.fix_pagefault(pf_addr, error_code)
     }
 
@@ -616,7 +642,7 @@ impl UserAddressSpace {
         &self,
         bytes: &[u8],
         user_vaddr_start: u64,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), moto_sys::ErrorCode> {
         self.copy_to_user_impl(bytes, user_vaddr_start, MappingOptions::READABLE)
             .map_err(Into::into)
     }
@@ -799,12 +825,12 @@ pub fn huge_mapping_self_test() {
     );
     let options =
         MappingOptions::READABLE | MappingOptions::WRITABLE | MappingOptions::USER_ACCESSIBLE;
-    let refused: Result<(), ErrorCode> = Err(moto_rt::E_INVALID_ARGUMENT);
+    let refused: Result<(), AllocationFailure> = Err(moto_rt::E_INVALID_ARGUMENT.into());
 
     // Hold every whole dual-purpose block: the pool has no huge page to give
     // until one is released.
     let mut held = alloc::vec::Vec::new();
-    while let Ok(frame) = allocate_huge_frame() {
+    while let Ok(frame) = allocate_huge_frame(AllocationClass::Kernel) {
         held.push(frame);
     }
     if held.is_empty() {
@@ -997,7 +1023,7 @@ pub fn share_validation_self_test() {
     let dest_space = UserAddressSpace::new().unwrap();
     let options =
         MappingOptions::READABLE | MappingOptions::WRITABLE | MappingOptions::USER_ACCESSIBLE;
-    let refused: Result<(), ErrorCode> = Err(moto_rt::E_INVALID_ARGUMENT);
+    let refused: Result<(), AllocationFailure> = Err(moto_rt::E_INVALID_ARGUMENT.into());
     let page = |segment: super::MemorySegment, idx: u64| segment.start + idx * PAGE_SIZE_SMALL;
     let share = |dest: super::MemorySegment, source: super::MemorySegment| {
         UserAddressSpace::map_shared(
@@ -1105,7 +1131,7 @@ pub fn sparse_lazy_self_test() {
     let resident = || space.user_mem_stats().resident();
     let table = space.inner.page_table_ref();
     let (descriptors_before, accounted_before) = (descriptors(), accounted());
-    let refused: Result<(), ErrorCode> = Err(moto_rt::E_INVALID_ARGUMENT);
+    let refused: Result<(), AllocationFailure> = Err(moto_rt::E_INVALID_ARGUMENT.into());
 
     // 4 GiB, untouched: nothing but the segment node.
     let lazy = space.alloc_user_lazy(1 << 20).unwrap();
@@ -1188,7 +1214,7 @@ pub fn guarded_heap_self_test() {
     let table = space.inner.page_table_ref();
     let (descriptors_before, accounted_before, resident_before) =
         (descriptors(), accounted(), resident());
-    let refused: Result<(), ErrorCode> = Err(moto_rt::E_INVALID_ARGUMENT);
+    let refused: Result<(), AllocationFailure> = Err(moto_rt::E_INVALID_ARGUMENT.into());
     let options =
         MappingOptions::READABLE | MappingOptions::WRITABLE | MappingOptions::USER_ACCESSIBLE;
 
@@ -1341,7 +1367,7 @@ pub fn shared_alloc_cleanup_self_test() {
     // The first refused call may grow kernel slabs that are never given
     // back; the second must leave the pool exactly where it found it.
     let peer_full = usage(&peer);
-    let refused = Err(moto_rt::E_OUT_OF_MEMORY);
+    let refused = Err(moto_rt::E_OUT_OF_MEMORY.into());
     assert_eq!(
         space.alloc_user_shared(u64::MAX, 16, options, &peer),
         refused
@@ -1373,7 +1399,7 @@ pub fn shared_alloc_cleanup_self_test() {
     let readable = MappingOptions::READABLE | MappingOptions::USER_ACCESSIBLE;
     assert_eq!(
         space.share_from(&other, untouched.start, FIXED, 16, readable),
-        Err(moto_rt::E_INVALID_ARGUMENT)
+        Err(moto_rt::E_INVALID_ARGUMENT.into())
     );
     assert_eq!(usage(&space), space_before);
     for idx in 0..16 {
@@ -1406,7 +1432,7 @@ pub fn exit_release_self_test() {
     let peer = UserAddressSpace::new().unwrap();
     let options =
         MappingOptions::READABLE | MappingOptions::WRITABLE | MappingOptions::USER_ACCESSIBLE;
-    let refused: Result<(), ErrorCode> = Err(moto_rt::E_BAD_HANDLE);
+    let refused: Result<(), AllocationFailure> = Err(moto_rt::E_BAD_HANDLE.into());
 
     let heap = space.alloc_user_heap(PAGES).unwrap();
     space.copy_to_user(b"shared", heap.start).unwrap();
@@ -1452,7 +1478,7 @@ pub fn exit_release_self_test() {
     );
     assert_eq!(
         space.fix_pagefault(lazy.start + PAGE_SIZE_SMALL, 6),
-        Err(moto_rt::E_INVALID_ARGUMENT)
+        Err(moto_rt::E_INVALID_ARGUMENT.into())
     );
     assert_eq!(space.user_mem_stats().total(), 0);
     assert_eq!(peer.user_mem_stats().total(), peer_usage);
@@ -1474,6 +1500,16 @@ pub fn exit_release_self_test() {
 // statistics come back exact.
 #[cfg(debug_assertions)]
 pub fn exhaustion_self_test() {
+    {
+        let space = UserAddressSpace::new().unwrap();
+        super::virt::allocation_role_self_test(&space, &space.inner);
+        let limit = space.max_memory.swap(0, Ordering::Relaxed);
+        assert_eq!(
+            space.stats_kernel_add(1),
+            Err(AllocationFailure::Code(moto_rt::E_OUT_OF_MEMORY))
+        );
+        space.max_memory.store(limit, Ordering::Relaxed);
+    }
     use super::phys::Frame;
     use super::phys::{allocate_huge_frame, available_small_pages, block_metrics};
     use super::phys::{frame_slab_pages, mmio_frame, phys_allocate_frameless};
@@ -1504,11 +1540,15 @@ pub fn exhaustion_self_test() {
         }
         fn take(&mut self, pages: u64) {
             for _ in 0..pages {
-                self.push(phys_allocate_frameless(PageType::SmallPage).unwrap());
+                self.push(
+                    phys_allocate_frameless(PageType::SmallPage, AllocationClass::Kernel).unwrap(),
+                );
             }
         }
         fn take_all(&mut self) {
-            while let Ok(phys) = phys_allocate_frameless(PageType::SmallPage) {
+            while let Ok(phys) =
+                phys_allocate_frameless(PageType::SmallPage, AllocationClass::Kernel)
+            {
                 self.push(phys);
             }
             assert_eq!(available_small_pages(), 0);
@@ -1530,12 +1570,12 @@ pub fn exhaustion_self_test() {
     // fault on VMMs that back the guest with 4 KiB pages.
     let taken_before = block_metrics().taken;
     let mut held = alloc::vec::Vec::with_capacity(block_metrics().total as usize);
-    while let Ok(frame) = allocate_huge_frame() {
+    while let Ok(frame) = allocate_huge_frame(AllocationClass::Kernel) {
         held.push(frame);
     }
     let mut runs = alloc::vec::Vec::with_capacity(64);
     while available_small_pages() > 4 * HUGE_PAGES {
-        match phys_allocate_frameless_run(HUGE_PAGES as u16) {
+        match phys_allocate_frameless_run(HUGE_PAGES as u16, AllocationClass::Kernel) {
             Ok(start) => runs.push(start),
             Err(_) => break,
         }
@@ -1638,15 +1678,58 @@ pub fn exhaustion_self_test() {
     hoard.take_all();
 
     // Nothing to give: every path refuses and leaves no trace.
-    assert_eq!(space.alloc_user_heap(1).map(|_| ()), Err(oom));
-    assert_eq!(space.alloc_contiguous_pages(4).map(|_| ()), Err(oom));
-    assert_eq!(space.fix_pagefault(lazy.start, 6), Err(oom));
-    assert_eq!(space.fill_file_zero(FILE_ADDR), Err(oom));
-    assert_eq!(space.fill_file(FILE_ADDR, &[pinned()]), (0, Err(oom)));
-    assert_eq!(share(), Err(oom));
-    assert_eq!(space.alloc_user_stack(4).map(|_| ()), Err(oom));
-    assert_eq!(space.alloc_kernel_stack(4).map(|_| ()), Err(oom));
-    assert_eq!(UserAddressSpace::new().map(|_| ()), Err(oom));
+    assert_eq!(
+        space
+            .alloc_user_heap(1)
+            .map(|_| ())
+            .map_err(moto_sys::ErrorCode::from),
+        Err(oom)
+    );
+    assert_eq!(
+        space
+            .alloc_contiguous_pages(4)
+            .map(|_| ())
+            .map_err(moto_sys::ErrorCode::from),
+        Err(oom)
+    );
+    assert_eq!(
+        space
+            .fix_pagefault(lazy.start, 6)
+            .map_err(moto_sys::ErrorCode::from),
+        Err(oom)
+    );
+    assert_eq!(
+        space
+            .fill_file_zero(FILE_ADDR)
+            .map_err(moto_sys::ErrorCode::from),
+        Err(oom)
+    );
+    let (installed, result) = space.fill_file(FILE_ADDR, &[pinned()]);
+    assert_eq!(
+        (installed, result.map_err(moto_sys::ErrorCode::from)),
+        (0, Err(oom))
+    );
+    assert_eq!(share().map_err(moto_sys::ErrorCode::from), Err(oom));
+    assert_eq!(
+        space
+            .alloc_user_stack(4)
+            .map(|_| ())
+            .map_err(moto_sys::ErrorCode::from),
+        Err(oom)
+    );
+    assert_eq!(
+        space
+            .alloc_kernel_stack(4)
+            .map(|_| ())
+            .map_err(moto_sys::ErrorCode::from),
+        Err(oom)
+    );
+    assert_eq!(
+        UserAddressSpace::new()
+            .map(|_| ())
+            .map_err(moto_sys::ErrorCode::from),
+        Err(oom)
+    );
     check(descriptors, 0);
     assert_eq!(available_small_pages(), 0);
 
@@ -1684,10 +1767,10 @@ pub fn exhaustion_self_test() {
     };
     assert_eq!(mapped(), 0);
     loop {
-        match mmio_frame(0) {
+        match mmio_frame(0, AllocationClass::Kernel) {
             Ok(frame) => frames.push(frame),
             Err(err) => {
-                assert_eq!(err, oom);
+                assert_eq!(moto_sys::ErrorCode::from(err), oom);
                 break;
             }
         }
@@ -1697,13 +1780,13 @@ pub fn exhaustion_self_test() {
     loop {
         hoard.give_back(1);
         grown += 1;
-        match mmio_frame(0) {
+        match mmio_frame(0, AllocationClass::Kernel) {
             Ok(frame) => {
                 frames.push(frame);
                 break;
             }
             Err(err) => {
-                assert_eq!(err, oom);
+                assert_eq!(moto_sys::ErrorCode::from(err), oom);
                 assert!(grown <= slab_pages, "{grown}");
                 assert_eq!(available_small_pages(), grown);
                 assert_eq!(cursor(), slab_start);
@@ -1722,7 +1805,13 @@ pub fn exhaustion_self_test() {
     // unwound; complete, it maps, and the unmap returns all four.
     for short in 1..4 {
         hoard.give_back(1);
-        assert_eq!(space.alloc_user_heap(1).map(|_| ()), Err(oom));
+        assert_eq!(
+            space
+                .alloc_user_heap(1)
+                .map(|_| ())
+                .map_err(moto_sys::ErrorCode::from),
+            Err(oom)
+        );
         assert_eq!(available_small_pages(), short);
         check(descriptors, 0);
     }
@@ -1737,7 +1826,12 @@ pub fn exhaustion_self_test() {
     // per page once its tables exist. A refused fault leaves no descriptor.
     for short in 1..4 {
         hoard.give_back(1);
-        assert_eq!(space.fix_pagefault(lazy.start, 6), Err(oom));
+        assert_eq!(
+            space
+                .fix_pagefault(lazy.start, 6)
+                .map_err(moto_sys::ErrorCode::from),
+            Err(oom)
+        );
         assert_eq!(available_small_pages(), short);
         assert_eq!(table.virt_to_phys(lazy.start), None);
         check(descriptors, 0);
@@ -1746,7 +1840,9 @@ pub fn exhaustion_self_test() {
     space.fix_pagefault(lazy.start, 6).unwrap();
     assert_eq!(available_small_pages(), 0);
     assert_eq!(
-        space.fix_pagefault(lazy.start + PAGE_SIZE_SMALL, 6),
+        space
+            .fix_pagefault(lazy.start + PAGE_SIZE_SMALL, 6)
+            .map_err(moto_sys::ErrorCode::from),
         Err(oom)
     );
     check(descriptors + 1, 1);
@@ -1763,7 +1859,12 @@ pub fn exhaustion_self_test() {
     // second; given that page, it installs the rest.
     for short in 1..3 {
         hoard.give_back(1);
-        assert_eq!(space.fill_file_zero(FILE_ADDR), Err(oom));
+        assert_eq!(
+            space
+                .fill_file_zero(FILE_ADDR)
+                .map_err(moto_sys::ErrorCode::from),
+            Err(oom)
+        );
         assert_eq!(available_small_pages(), short);
         assert_eq!(table.virt_to_phys(FILE_ADDR), None);
         check(descriptors + 2, 2);
@@ -1774,7 +1875,11 @@ pub fn exhaustion_self_test() {
     check(descriptors + 3, 3);
     let rest = FILE_ADDR + PAGE_SIZE_SMALL;
     hoard.give_back(1);
-    assert_eq!(space.fill_file(rest, &[pinned(), pinned()]), (1, Err(oom)));
+    let (installed, result) = space.fill_file(rest, &[pinned(), pinned()]);
+    assert_eq!(
+        (installed, result.map_err(moto_sys::ErrorCode::from)),
+        (1, Err(oom))
+    );
     assert_eq!(available_small_pages(), 0);
     assert_eq!(table.virt_to_phys(rest + PAGE_SIZE_SMALL), None);
     check(descriptors + 4, 4);
@@ -1792,7 +1897,13 @@ pub fn exhaustion_self_test() {
     // returns the three pages and the charge.
     for short in 1..3 {
         hoard.give_back(1);
-        assert_eq!(space.alloc_user_stack(4).map(|_| ()), Err(oom));
+        assert_eq!(
+            space
+                .alloc_user_stack(4)
+                .map(|_| ())
+                .map_err(moto_sys::ErrorCode::from),
+            Err(oom)
+        );
         assert_eq!(available_small_pages(), short);
         check(descriptors + 5, 5);
     }
@@ -1816,7 +1927,13 @@ pub fn exhaustion_self_test() {
     free_run(runs.pop().unwrap());
     assert_eq!(available_small_pages(), HUGE_PAGES);
     hoard.take(HUGE_PAGES - 4);
-    assert_eq!(space.alloc_contiguous_pages(4).map(|_| ()), Err(oom));
+    assert_eq!(
+        space
+            .alloc_contiguous_pages(4)
+            .map(|_| ())
+            .map_err(moto_sys::ErrorCode::from),
+        Err(oom)
+    );
     assert_eq!(available_small_pages(), 4);
     check(descriptors + 5, 5);
     free_run(runs.pop().unwrap());
@@ -1829,7 +1946,7 @@ pub fn exhaustion_self_test() {
     check(descriptors + 5, 5);
     hoard.give_back(HUGE_PAGES - 4);
     for _ in 0..2 {
-        runs.push(phys_allocate_frameless_run(HUGE_PAGES as u16).unwrap());
+        runs.push(phys_allocate_frameless_run(HUGE_PAGES as u16, AllocationClass::Kernel).unwrap());
     }
     assert_eq!(available_small_pages(), 0);
 
@@ -1840,7 +1957,7 @@ pub fn exhaustion_self_test() {
     // peer's frames.
     for short in 1..4 {
         hoard.give_back(1);
-        assert_eq!(share(), Err(oom));
+        assert_eq!(share().map_err(moto_sys::ErrorCode::from), Err(oom));
         assert_eq!(available_small_pages(), short);
         assert_eq!(table.virt_to_phys(SHARE_ADDR), None);
         assert_eq!(table.virt_to_phys(SHARE_ADDR + PAGE_SIZE_SMALL), None);
@@ -1863,7 +1980,13 @@ pub fn exhaustion_self_test() {
     // in the space's kernel statistics until it is freed.
     for short in 1..kernel_stack_pages {
         hoard.give_back(1);
-        assert_eq!(space.alloc_kernel_stack(4).map(|_| ()), Err(oom));
+        assert_eq!(
+            space
+                .alloc_kernel_stack(4)
+                .map(|_| ())
+                .map_err(moto_sys::ErrorCode::from),
+            Err(oom)
+        );
         assert_eq!(available_small_pages(), short);
         check(descriptors + 5, 7);
     }
@@ -1885,7 +2008,13 @@ pub fn exhaustion_self_test() {
     // mapped comes back.
     let fallbacks = HUGE_FALLBACKS.load(Ordering::Relaxed);
     hoard.give_back(600);
-    assert_eq!(space.alloc_user_heap(2 * HUGE_PAGES).map(|_| ()), Err(oom));
+    assert_eq!(
+        space
+            .alloc_user_heap(2 * HUGE_PAGES)
+            .map(|_| ())
+            .map_err(moto_sys::ErrorCode::from),
+        Err(oom)
+    );
     assert_eq!(available_small_pages(), 600);
     assert!(HUGE_FALLBACKS.load(Ordering::Relaxed) > fallbacks);
     check(descriptors + 5, 7);
@@ -1897,7 +2026,12 @@ pub fn exhaustion_self_test() {
     // the rest.
     for short in 1..6 {
         hoard.give_back(1);
-        assert_eq!(UserAddressSpace::new().map(|_| ()), Err(oom));
+        assert_eq!(
+            UserAddressSpace::new()
+                .map(|_| ())
+                .map_err(moto_sys::ErrorCode::from),
+            Err(oom)
+        );
         assert_eq!(available_small_pages(), short);
     }
     hoard.give_back(1);
@@ -1912,7 +2046,13 @@ pub fn exhaustion_self_test() {
     let built_charged = built.total_usage.load(Ordering::Relaxed);
     for (give, left) in [(0, 0), (1, 0), (1, 1), (1, 1), (1, 2), (1, 3)] {
         hoard.give_back(give);
-        assert_eq!(built.alloc_user_heap(1).map(|_| ()), Err(oom));
+        assert_eq!(
+            built
+                .alloc_user_heap(1)
+                .map(|_| ())
+                .map_err(moto_sys::ErrorCode::from),
+            Err(oom)
+        );
         assert_eq!(available_small_pages(), left);
         assert_eq!(built.inner.page_descriptors(), 0);
         assert_eq!(built.user_mem_stats().total(), 0);
