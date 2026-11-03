@@ -27,10 +27,52 @@ Developer-image validation remains release-only.
 | 7 | Not started | Server remote listeners, credit handoff, `gateway_ports`, host/guest coverage, milestone gates |
 | 8 | Not started | Client remote-forward authorization and ordering, `-R` integration and guest coverage, milestone gates |
 
+### Commit count and delivered functionality
+
+At checkpoint `fea26785`, the Motor OS branch has 17 commits after the original
+plan commit `be3e43b7`. They represent:
+
+| Repository and kind | Commits | Delivered work |
+|---|---:|---|
+| Motor OS: tests and test harness | 4 | `dd716bf4`: remove the 224 MiB tier; `0f419641`: wait for complete diagnostic lines and wire regressions into the gate; `d80f90b5`: compression regression; `1d4694e8`: approved 30-minute debug/developer-image budget |
+| Motor OS: plan only | 13 | Failure diagnosis, test evidence and pass counts, external-fork progress, and the review/push handoff |
+| External russh checkout | 5, separate from those 17 | Baseline test signature correction, approved compression fix, peer-close fix, local-close cleanup, and live-transport regressions |
+
+The completed main-repository work is the prerequisite test/harness milestone.
+Milestone 2 has completed its external-fork prerequisite; forwarding integration
+in `russhd` remains. Milestones 3–8 have not started. The test totals above include
+existing tests; they are not counts of newly added tests.
+
+### Milestone 2 checklist
+
+- [x] Repair the baseline fork test signature and the separately approved
+  compression defect (`ac0e947`, `4fe78f9`).
+- [x] Fix peer-close stalls and local-close retention at both ends, with direct
+  queue, ordering, pending-delivery, and credit cleanup checks (`01d0391`, `d758c92`).
+- [x] Add live-transport stall regressions and prove they fail with the old
+  peer-close behavior (`c016ea8`); pass the complete fork suite (231 total tests).
+- [x] Prepare the main pin/contract-test patch and pass 145 total main russhd
+  tests against the local fork, including the draft regressions.
+- [ ] User reviews and pushes the five fork commits. The remote `server-window`
+  branch was verified still at `042db50` during this progress audit.
+- [ ] Update the actual git pin with Cargo, restore and commit the main contract
+  tests, and validate against the published revision.
+- [ ] Implement the bounded block queue and event-driven relay, including credit,
+  half-close, peer-close draining, pressure shedding, and cancellation tests.
+- [ ] Integrate task ownership/reaping, direct opens, admission limits and host
+  validation, handler isolation, and configuration with the imager field.
+- [ ] Add the authentication deadline and its tests, then remove the application
+  idle timeout in the same patch.
+- [ ] Pass the integrated milestone's three debug and three release main-image
+  gates. No milestone-2 main-image gate pass is claimed yet.
+
 Step 1 focused checks: `cargo test` for `wasm-smoke-suite` (two tests),
 `test-wasm-selection.sh`, `test-full-test-size.sh`, and `test-dev-memory-contract.sh`
 pass. The regression checks every partial snapshot of an address diagnostic, including
 a complete-looking address without its terminating newline.
+
+The following diagnosis sections preserve earlier checkpoints and original
+failures. Their historical stop states do not replace the current status above.
 
 ### Resolved stop: external russh baseline (2026-11-03)
 
