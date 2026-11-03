@@ -2,7 +2,7 @@
 
 Status: v5, implementation resumed with the user-approved 30-minute full-test
 budget. The first debug and release runs passed in 28.5 and 13.8 minutes;
-the complete developer-image release gate is running.
+the complete developer-image release gate passed, including both 256 MiB Wasm VMs.
 The approved external compression fix is committed and tested. No forwarding code
 has changed.
 See "Implementation progress" below and "Decisions" at the end.
@@ -15,7 +15,7 @@ Developer-image validation remains release-only.
 
 | Step | Progress | Remaining |
 |---|---|---|
-| 1 | 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8` committed; first debug/release passes complete; developer-image release gate running | Main-image gates: 1/3 debug, 1/3 release; complete `full-test-dev.sh --release` |
+| 1 | 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8` committed; first debug/release passes and complete developer-image release gate passed | Main-image gates: 1/3 debug, 1/3 release; two further passes of each profile |
 | 2 | Baseline preparation; external test signature fix `ac0e947` and approved compression fix `4fe78f9` committed; full fork suite passes; main-repo compression regression added | External russh close fixes and tests, pin, relay, direct opens, configuration, authentication deadline, milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
@@ -208,9 +208,13 @@ committing the timeout extension and counts as step 1's first debug pass.
 Guest logs are preserved in `step1-debug-30m-1-evidence/`. The original failure
 is retained separately. The first release run (`step1-release-1.log`) also
 passed with exit 0: preparation 1.0 minutes, testing 13.8 minutes. Its guest
-logs are in `step1-release-1-evidence/`. Developer-image validation is next,
-followed by the remaining consistency runs to reach 3+3.
-The complete developer-image release log is `step1-dev-release-1.log`.
+logs are in `step1-release-1-evidence/`.
+The complete developer-image release gate (`step1-dev-release-1.log`) reached
+`full-test-dev.sh ALL PASS`. Its inner full suite took 18.7 minutes, followed by
+passing httpd-axum, developer-source, native toolchain install, bounded Lorry,
+ordinary Javy/Wasmtime, Linux-identity, and Wasmtime-service checks on both
+`wasm:256` and `dev:256`. Guest logs are in `step1-dev-release-1-evidence/`.
+Two more standard debug and two more standard release passes remain for 3+3.
 
 ## Goal and scope
 
