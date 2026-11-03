@@ -1,11 +1,10 @@
 # TCP forwarding in russhd and ssh
 
-Status: v5, implementation resumed with the user-approved 30-minute full-test
-budget. Three debug runs passed in 28.5, 28.6, and 28.6 minutes, and two release
-runs passed in 13.8 minutes each;
-the complete developer-image release gate passed, including both 256 MiB Wasm VMs.
+Status: v5, milestone 1 complete with three debug and three release passes and
+the complete developer-image release gate, including both 256 MiB Wasm VMs.
+Milestone 2 is starting with the approved external russh channel-close fixes.
 The approved external compression fix is committed and tested. No forwarding code
-has changed.
+has changed yet.
 See "Implementation progress" below and "Decisions" at the end.
 
 ## Implementation progress
@@ -16,7 +15,7 @@ Developer-image validation remains release-only.
 
 | Step | Progress | Remaining |
 |---|---|---|
-| 1 | 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8` committed; three debug passes, two release passes, and complete developer-image release gate passed | Main-image gates: 3/3 debug, 2/3 release; one release pass remains |
+| 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
 | 2 | Baseline preparation; external test signature fix `ac0e947` and approved compression fix `4fe78f9` committed; full fork suite passes; main-repo compression regression added | External russh close fixes and tests, pin, relay, direct opens, configuration, authentication deadline, milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
@@ -222,7 +221,11 @@ passed with exit 0: preparation 1.0 minutes, testing 13.8 minutes. Guest logs
 are in `step1-release-2-evidence/`. The third debug gate
 (`step1-debug-30m-3.log`) passed with exit 0: preparation 0.2 minutes, testing
 28.6 minutes. Guest logs are in `step1-debug-30m-3-evidence/`.
-One standard release pass remains for 3+3.
+The third release gate (`step1-release-3.log`) passed with exit 0: preparation
+0.9 minutes, testing 13.8 minutes. Guest logs are in `step1-release-3-evidence/`.
+Step 1 is complete: debug testing times were 28.5, 28.6, and 28.6 minutes;
+release testing times were 13.8 minutes each. No assertions or coverage were
+weakened, and the original 1,500-second failure remains preserved.
 
 ## Goal and scope
 
@@ -755,8 +758,8 @@ On existing images, `test-wasm.sh` already passes at both 256 MiB VMs, with
 without the 224 MiB tier.
 
 Gate steps 5 to 8 with host tests and `full-test.sh --release`. The time budgets are tight:
-debug diagnosis estimates about 1,674 seconds against the newly approved 1,800-second
-budget (see progress above). The user requires 3+3 main-image passes for every milestone,
+step 1's slowest complete debug runs took 28.6 minutes against the newly approved
+30-minute budget (see progress above). The user requires 3+3 main-image passes for every milestone,
 superseding the lighter gates here. New guest checks must stay small, with negative cases
 in host tests.
 
