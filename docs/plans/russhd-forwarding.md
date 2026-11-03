@@ -1,6 +1,7 @@
 # TCP forwarding in russhd and ssh
 
-Status: v5, stopped for review after diagnosing step 1's debug-gate timeout.
+Status: v5, timeout diagnosis is complete: the existing debug suite exceeds its
+1,500-second budget while making progress. Repair of that gate remains pending.
 The approved external compression fix is committed and tested. No forwarding code
 has changed.
 See "Implementation progress" below and "Decisions" at the end.
@@ -13,7 +14,7 @@ Developer-image validation remains release-only.
 
 | Step | Progress | Remaining |
 |---|---|---|
-| 1 | 224 MiB matrix removal `dd716bf4` and complete-line wait fix `0f419641` committed; debug gate timed out after 1,500 s; phase-timing diagnosis complete (see below) | Review existing gate runtime; main-image gates: 0/3 debug, 0/3 release; complete `full-test-dev.sh --release` |
+| 1 | 224 MiB matrix removal `dd716bf4` and complete-line wait fix `0f419641` committed; debug timeout diagnosed as aggregate runtime overrun; original failure and diagnostic evidence preserved | Repair existing gate runtime; main-image gates: 0/3 debug, 0/3 release; complete `full-test-dev.sh --release` |
 | 2 | Baseline preparation; external test signature fix `ac0e947` and approved compression fix `4fe78f9` committed; full fork suite passes; main-repo compression regression added | External russh close fixes and tests, pin, relay, direct opens, configuration, authentication deadline, milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
@@ -142,6 +143,59 @@ guidance; silently increasing the timeout, omitting checks, or repeating runs
 until one fits would violate the stated constraints. Forwarding work stops
 here pending that guidance. The 3+3 main-image gate and developer-image release
 gate remain outstanding; the main repository's russh pin is still unchanged.
+
+The user subsequently requested further timeout diagnosis. A fresh 4-vCPU,
+1,024-MiB debug guest ran the existing `full-test.sh` tail, from the stdio-route
+checks through the final SSH/SFTP, mio, and Tokio tests. This diagnostic subset
+passed in **181.0 seconds**, with the original assertions unchanged. Comparing
+the extracted body with `full-test.sh` confirms they are identical. It does not
+count as a gate pass, since the earlier tests did not run on that guest.
+
+| Tail work | Seconds |
+|---|---:|
+| stdio routes, rmux, terminal/crossterm checks | 115.3 |
+| Motor SSH client against guest loopback | 22.2 |
+| SFTP integration | 26.5 |
+| mio tests | 9.8 |
+| Tokio tests | 7.2 |
+| Total | 181.0 |
+
+The original run first opened the simple-route fixture at guest uptime
+797.154 seconds and expired about four seconds later. The composite estimate
+is therefore about **696 + 797 + 181 = 1,674 seconds (27.9 minutes)**, roughly
+174 seconds beyond the budget, before allowing for teardown and variability.
+This combines separate measured runs; it is not an exact complete-suite time
+or evidence of a full-suite pass. It does establish a substantial shortfall,
+rather than an isolated stdio-route hang. The original complete `systest`
+itself took about 460 seconds, based on its guest timestamps.
+
+Commit `06ded43d` added the credential suite to the timed standard-image gate
+on November 2 while leaving `TIMEOUT=1500` unchanged. That suite now measures
+210 seconds. It is a concrete added cost that exceeds the plan's previously
+reported 110-second margin (1,390 of 1,500 seconds). This task's retained
+evidence does not include that older run, so its exact workload and machine
+conditions cannot be verified; the new phase is a significant contributor,
+not a proven explanation of every second of the difference.
+
+The two `pressure::run_all_tests()` calls in `systest` date to separate August
+commits, one before filesystem tests and one after networking. Their episodes
+take approximately 14 and 12 seconds in the original log. Removing one would
+not recover the measured shortfall, and its coverage under a different system
+state has not been treated as disposable. No system code was changed.
+
+Evidence is in `build/forwarding-validation/tail-diagnostic*`,
+`original-systest-timeline.txt`, and `timeout-diagnosis-totals.txt`. The temporary
+driver was removed after saving a copy; its VM and processes have exited.
+The original failure logs remain intact. No production code, timeout, or test
+coverage was changed during diagnosis.
+
+The next repair should target test synchronization costs, especially fixed
+settling delays in `test-terminal-size.sh` and the terminal checks in
+`full-test.sh`. Event-based waits must keep the existing per-check deadlines,
+assertions, and deliberate quiet windows that detect unwanted terminal probes.
+That repair needs its own review and measurement; simply extending the budget
+or deleting checks is not the proposed fix. Forwarding and the 3+3 gates remain
+pending while this preexisting harness issue is addressed.
 
 ## Goal and scope
 
