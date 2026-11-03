@@ -606,6 +606,37 @@ impl Process {
     pub fn status(&self) -> ProcessStatus {
         *self.status.lock(line!())
     }
+
+    pub(super) fn oom_disposition(&self) -> super::oom::Disposition {
+        let (status, paused, empty) = {
+            let status = self.status.lock(line!());
+            (
+                *status,
+                self.paused_debuggee.load(Ordering::Acquire),
+                self.threads.is_empty(),
+            )
+        };
+        // Actual immutable parentage, which remains available after a parent
+        // dies. SYSTEM_STATS' flat child index is not the ancestry tree.
+        let parent = self.stats.parent();
+        let grandparent = parent.as_ref().and_then(|p| p.parent());
+        super::oom::classify(
+            self.pid().as_u64(),
+            parent.as_ref().map(|p| p.pid().as_u64()),
+            grandparent.as_ref().map(|p| p.pid().as_u64()),
+            moto_sys::caps::ProcessRole::from_caps(self.capabilities()),
+            status,
+            paused,
+            empty,
+        )
+    }
+
+    pub(super) fn oom_exit_complete(&self) -> bool {
+        matches!(
+            self.status(),
+            ProcessStatus::Exited(_) | ProcessStatus::Killed | ProcessStatus::Error(_)
+        )
+    }
     pub fn address_space(&self) -> &Arc<UserAddressSpace> {
         &self.address_space
     }
@@ -934,6 +965,7 @@ impl Process {
             };
             self_obj.mark_done();
             SysObject::wake(&self_obj, false);
+            super::oom::on_process_exited(self.kernel_pid());
 
             if self.pid().as_u64() == moto_sys::stats::PID_SYS_IO {
                 crate::init::init_exited(self);

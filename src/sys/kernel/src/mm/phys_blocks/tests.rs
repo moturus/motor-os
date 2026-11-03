@@ -137,6 +137,8 @@ impl Fixture {
             counters: Counters {
                 total,
                 state: AtomicU64::new(StateSnapshot::new(0).0),
+                attention: core::sync::atomic::AtomicBool::new(false),
+                oom_runs: AtomicU64::new(0),
                 high_water: AtomicU64::new(0),
                 reserved: AtomicU64::new(0),
                 discarded: AtomicU64::new(0),

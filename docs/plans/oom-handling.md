@@ -20,8 +20,9 @@ As of 2026-11-03:
 | 4b   | Fallible frame-descriptor slab growth                     | Committed, `56eedffb`                   |
 | 4c   | Real error codes in the syscall and process layers        | Committed, `b2dccf4e`                   |
 | 5a   | Packed accounting, physical charges and transition tests | Committed, `dcd36704`                  |
-| 5b   | Recipient classes and typed MM allocation failures       | Working tree, awaiting review         |
-| 5    | OOM jobs, waiters, recovery and activation                | [5c–5f planned](oom-handling-step5.md) |
+| 5b   | Recipient classes and typed MM allocation failures       | Committed, `b71cad30`                  |
+| 5c   | Scheduler dispatch, victim cleanup and OOM diagnostics   | Working tree, awaiting review         |
+| 5    | Waiters, recovery and activation                        | [5d–5f planned](oom-handling-step5.md) |
 
 What the committed steps provide is described in
 [docs/oom-handling.md](../oom-handling.md) and
@@ -41,12 +42,14 @@ outside the guarantee by design.
 
 Left to do:
 
-- Review the uncommitted 5b recipient-class and typed-failure propagation.
-  Its role, pressure-receipt and rollback tests run during debug guest boot;
-  runtime policy stays unarmed, with scheduler work and waits still pending.
+- Review the uncommitted 5c scheduler dispatch, victim selection, exit
+  continuations, latch/abort and diagnostics. Its scalar dispatch tests and
+  scratch-pool transition tests run during debug guest boot; runtime policy
+  stays unarmed. The recovery object, fault queue and waiter-counter producers
+  arrive with their consumers in 5d.
 - **5.** The gates and waits in "Fallible user-page allocation" from the
   paragraph on pausing at syscall entry onward, the 2 MiB and 512 KiB rules,
-  "OOM jobs" in full, and the validation items for boundaries, victims,
+  OOM activation, and the remaining runtime validation for boundaries, victims,
   episodes and waiters, staged in
   [oom-handling-step5.md](oom-handling-step5.md). Runtime floors and gates
   remain unarmed until syscall waiting, fault waiting and scheduler dispatch
@@ -328,7 +331,9 @@ as long as the remaining address-space object requires them.
 
 ## OOM jobs
 
-Not started (step 5).
+Worker and exit-continuation machinery implemented locally in 5c, awaiting
+review. Runtime policy remains unarmed; waiter integration follows in 5d and
+activation in 5e. The rest of this section specifies the completed behavior.
 
 Use posted jobs on the existing scheduler. **Do not create a worker thread.**
 The pool's atomic word contains the count, armed flag, Idle/Killing/Latched
@@ -345,7 +350,8 @@ Use actual parentage to protect sys-io and its direct children and
 grandchildren, not `SYSTEM_STATS`' aggregate child index. This protects DNS
 (None) and russhd (Interactive), both launched by sys-init, a child of sys-io.
 More distant descendants, such as their user sessions, remain eligible unless
-they have the System role.
+they have the System role. Identify sys-io by its public `PID_SYS_IO` in the
+process-stat entries; victim ordering still uses monotonic kernel PIDs.
 
 Charge/release and refusal transitions change policy and count together,
 covering small, huge and contiguous paths. A drop below 2 MiB from Idle or
@@ -373,15 +379,17 @@ sampling only the latest count is insufficient.
 
 Each job:
 
-1. Checks the authoritative generation, Killing phase and count below 3 MiB.
+1. Checks the authoritative generation and Killing phase, which guarantees
+   fewer than 3 MiB free.
 2. Scans for the eligible live process ranked first by None before Interactive,
    then by largest `kernel_pid`, skipping dead, already-exiting, and protected
    processes. Keep only the best candidate, not a snapshot of the list.
-3. Rechecks eligibility, generation, phase and count before committing the
-   pending victim with an atomic validation of that state word. This is
-   the kill request's ordering point. Recovery before it cancels selection;
-   recovery after it allows this committed kill to finish. Call the normal
-   termination machinery only after releasing locks. Created and parked
+3. Rechecks eligibility, then loads the state word with Acquire ordering under
+   the bookkeeping lock to validate Killing and the generation before recording
+   the pending victim. This load is the kill request's ordering point. Count
+   changes within the run do not cancel a kill. Recovery before the load cancels
+   selection; recovery after it allows this committed kill to finish. Call the
+   normal termination machinery only after releasing locks. Created and parked
    threads use their existing exit paths; paused debuggees are skipped as
    described under deferred issue 2.
 4. Waits for kernel exit cleanup. The completion hook and post-kill completion
@@ -412,7 +420,10 @@ completed, atomically recheck generation, phase and free memory:
 - Below 2 MiB: print physical free memory and every remaining process's name,
   both PIDs, and existing user/kernel memory counters to the console, then abort
   the kernel. Use direct output without allocating a process-list snapshot or
-  relying on userspace services.
+  relying on userspace services. After reporting, load a fresh snapshot
+  and abort only if the generation still matches, the phase is Killing, and
+  the count remains below 2 MiB. The count can rise to 2 MiB within the same
+  generation, so the count check remains necessary.
 - At least 2 MiB but below 3 MiB: log the free memory and that OOM could not reach
   3 MiB, then finish the run. CAS to Latched and increment the generation
   (kernel-internal state; nothing is published), clear the System block and
@@ -500,7 +511,8 @@ All work stays in the main repository.
    scheduler jobs, and both syscall and fault waits while runtime policy
    remains unarmed. Enable the complete mechanism only after all consumers
    are present, then complete pressure, blocking, recovery and abort coverage.
-   *Planned in [oom-handling-step5.md](oom-handling-step5.md), stages 5a–5f.*
+   *5a–5b committed; 5c awaiting review; 5d–5f planned in
+   [oom-handling-step5.md](oom-handling-step5.md).*
 
 Step 1 is the single large cleanup patch. Keep subsequent patches small,
 normally 100–300 changed lines including tests; split dependency stages

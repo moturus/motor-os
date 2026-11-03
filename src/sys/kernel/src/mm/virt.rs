@@ -790,6 +790,7 @@ pub struct KernelAddressSpace {
     pub(super) next_slab_addr: SpinLock<u64>,
     /// The executable pager's registry; see `uspace::pager`.
     pager: crate::uspace::pager::PagerRegistry,
+    oom: crate::uspace::oom::OomState,
 
     _pin: PhantomPinned,
 }
@@ -828,6 +829,7 @@ impl KernelAddressSpace {
             static_shared_page: UnsafeRef::const_default(),
             next_slab_addr: SpinLock::new(VMEM_K_SLABS_START),
             pager: crate::uspace::pager::PagerRegistry::new(),
+            oom: crate::uspace::oom::OomState::new(),
 
             _pin: PhantomPinned,
         }));
@@ -940,6 +942,10 @@ pub(super) static KERNEL_ADDRESS_SPACE: StaticRef<KernelAddressSpace> = StaticRe
 
 pub(crate) fn pager_registry() -> &'static crate::uspace::pager::PagerRegistry {
     &KERNEL_ADDRESS_SPACE.pager
+}
+
+pub(crate) fn oom_state() -> &'static crate::uspace::oom::OomState {
+    &KERNEL_ADDRESS_SPACE.oom
 }
 
 // Uses the existing boot-test path, before pressure is armed. Existing user

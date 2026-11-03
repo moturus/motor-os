@@ -130,6 +130,8 @@ impl BlockPool {
             counters: Counters {
                 total,
                 state: AtomicU64::new(StateSnapshot::new(used).0),
+                attention: core::sync::atomic::AtomicBool::new(false),
+                oom_runs: AtomicU64::new(0),
                 high_water: AtomicU64::new(used),
                 reserved: AtomicU64::new(reserved),
                 discarded: AtomicU64::new(discarded),

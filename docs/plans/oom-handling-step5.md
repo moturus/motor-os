@@ -3,8 +3,8 @@
 Implementation plan for step 5 of [oom-handling.md](oom-handling.md), the
 specification. Revised on 2026-11-03 against `b2dccf4e`. This revision
 incorporates the readiness reviews; the separate review file is no longer
-needed. Step 5a is committed as `dcd36704`. Step 5b is implemented locally
-and awaiting review; steps 5c–5f remain pending.
+needed. Step 5a is committed as `dcd36704`, and 5b as `b71cad30`. Step 5c
+is implemented locally and awaiting review; steps 5d–5f remain pending.
 
 The 5a changes replace the pool's used counter with the packed state word,
 perform class-aware charges before ownership changes, preserve refusal reasons
@@ -15,9 +15,12 @@ allocation class through frames, both stacks, page tables and shared MM slabs.
 Internal `AllocationFailure` results distinguish ordinary codes from pressure
 receipts, including the original floor refusal through huge fallback. Current
 syscall boundaries still convert failures to the existing ABI codes; waiting
-arrives in 5d. The production word stays unarmed. Worker request/latch
-operations, attention notifications and run metrics belong to 5c, before
-activation in 5e.
+arrives in 5d. The production word stays unarmed. The 5c changes add atomic
+request/latch operations, scheduler attention, generation-checked selection,
+exit continuations and victimless reporting. Run starts are counted in the
+physical pool; committed kill requests are counted by the worker. All four
+production metric names are registered, with waiter-counter producers still
+pending in 5d. Activation remains in 5e.
 
 The accepted policy stays: None and Interactive allocations have a 2 MiB
 floor, System allocations a 512 KiB floor, and kernel allocations no floor.
@@ -175,14 +178,16 @@ Then the outer loop applies these rules:
    A gate refusal is never converted to a permanent error by a later count.
 2. After a physical shortage, sample the count **after rollback**. At 768 or
    more free pages, return `E_OUT_OF_MEMORY` for the failed syscall. Below 768,
-   join the current run or request one from Idle using a CAS that rechecks the
-   count; if recovery wins that race, re-evaluate instead of starting a stale
-   run. Preserve an already-observed end of the refusal's run: if its generation
-   changed, recheck the gate and retry when allowed, rather than replacing that
-   completed wait with the new generation. Otherwise wait for that attempt's
-   run to end and for the role gate to permit retry. A refusal that had no run
-   takes the generation returned by joining/requesting one. A System waiter
-   cannot wake itself merely because its role ordinarily has allocation privilege.
+   join the generation from the current atomic load, or request one from Idle
+   using a CAS that rechecks the count. If recovery wins that CAS, re-evaluate
+   instead of starting a stale run. Joining an existing run needs no write;
+   wait registration rechecks its generation. Preserve an already-observed end
+   of the refusal's run: if its generation changed, recheck the gate and retry
+   when allowed, rather than replacing that completed wait with the new
+   generation. Otherwise wait for that attempt's run to end and for the role
+   gate to permit retry. A refusal that had no run takes the generation returned
+   by joining/requesting one. A System waiter cannot wake itself merely because
+   its role ordinarily has allocation privilege.
 3. If already Latched, an unsatisfied System request waits for a later state
    change; it must not repeatedly rescan an unchanged victimless process set.
    System requests that fit may still proceed. User gates remain closed.
@@ -218,6 +223,11 @@ recovered: Option<Arc<SysObject>>
 fault_waiters: Vec<(Weak<Thread>, WaitReason)>
 ```
 
+The 5c implementation installs the generation, job and exit bookkeeping in
+`uspace::oom`. It also tracks the last dispatched run for start/end logs.
+The recovery object and fault queue are added with their consumers in 5d;
+5c does not allocate a recovery object or implement waiter wakeups.
+
 `attend()` runs beside `process_wake_events()` in `sched_loop`, holding no
 other lock. It consumes attention, reads the authoritative state word and
 reconciles the bookkeeping. A generation change wakes the recovery object and
@@ -231,18 +241,22 @@ producer must leave work for this or a later iteration.
 
 The job:
 
-1. Checks Killing, its generation and the count below 768 before scanning.
+1. Checks Killing and its generation before scanning. Killing guarantees that
+   the count is below 768; a release reaching recovery changes the generation.
 2. Uses `KProcessStats::for_each_child` to select the newest eligible None
    process, otherwise the newest eligible Interactive process. Upgrade weak
    references under the map lock; compare and drop candidates after it.
    Skip System, sys-io and its actual children/grandchildren, exiting/dead
-   processes and debugger-paused processes. Keep only the best candidate.
-3. Rechecks eligibility, generation, phase and count before committing the
-   kill. Under the bookkeeping lock, use a validating CAS of the state word
-   and record the pending identity. That successful validation is the kill
-   request's ordering point. A recovery before it cancels the selection; a
-   recovery after it permits this already-committed kill to finish. Release
-   all locks before logging or calling the normal termination machinery.
+   processes and debugger-paused processes. Identify sys-io using the public
+   PIDs in its ancestry; rank victims using kernel PIDs. Keep only the best
+   candidate.
+3. Rechecks eligibility before committing the kill. Under the bookkeeping
+   lock, load the state word with Acquire ordering, validate Killing and the
+   generation, and record the pending identity. This load is the kill request's
+   ordering point. Count changes within the run do not cancel it or require
+   another scan. Recovery before the load cancels selection; recovery after it
+   permits the committed kill to finish. Release all locks before logging or
+   calling the normal termination machinery.
 4. Waits for that victim's exit cleanup. The post-kill completion check and
    `on_process_exited(kernel_pid)` atomically claim the pending record under
    the bookkeeping lock; exactly one clears it and requests attention.
@@ -273,6 +287,10 @@ below 512, report all remaining processes and abort; at 512..768, latch and
 wake waiters to recheck; at 768 or above, recovery has already cancelled this
 job. Console reporting uses direct output and the existing traversal, without
 allocating a process-list snapshot or depending on userspace services.
+After reporting, load a fresh snapshot and abort only if it still shows the
+same Killing generation and fewer than 512 free pages. A rise to 512 can
+cancel an abort without changing the generation; count changes below 512
+do not invalidate the decision or force another report.
 
 Keep diagnostics small: record dispatched run starts/ends and committed
 selections with generation, free pages, name and both victim PIDs as applicable.
@@ -397,7 +415,24 @@ original floor receipt across recovery/new pressure, a fresh debug
 PASS` and `allocation role tests PASS` during guest boot. The final sources
 passed `src/tests/full-test.sh --release` once (10.6 minutes). Existing boot
 exhaustion/rollback coverage remains enabled; no live allocator arming or new
-drain was added. These changes are uncommitted.
+drain was added. These changes are committed as `b71cad30`.
+
+5c review validation on 2026-11-03, after the review corrections: debug/release
+kernel builds and Clippy checks passed without warnings; formatting checks
+passed. `src/tests/full-test.sh` passed once (16.9 minutes of testing), and
+`src/tests/full-test.sh --release` passed once (10.6 minutes), both on the
+corrected sources. Debug guest boot reported `phys_blocks policy tests PASS`,
+`OOM dispatch tests PASS` and `allocation role tests PASS`. These are review
+runs; the three-per-build gate still applies before committing.
+
+The added cases exercise request/latch boundaries, unarmed attention, count
+changes within one Killing generation, the 511/512 boundary within that same
+generation, exact run counts despite coalesced dispatch, recovery/new pressure
+before validation, role/ancestry selection, retained victim cleanup, duplicate
+completion claims, out-of-order scheduler observations, stale exit-interest
+registration and exit notification during a final scan. These use private
+scratch pools and the worker's production bookkeeping; actual pressure kills
+and the disposable-guest abort gate remain for 5e–5f.
 
 All new tests run inside Motor OS and are reached from `full-test.sh`, through
 existing kernel self-tests, systest or its console fixture. Keep pressure tests
@@ -479,7 +514,7 @@ before any authorized commit. Include at least one real one-vCPU run in each
 build's activation validation. Once the complete transition passes, run
 `src/tests/full-test-dev.sh --release`; its source phase remains release-only.
 Do not extend timeouts, weaken assertions or retry defects to obtain a pass.
-The current 5b changes remain uncommitted for review.
+The current 5c changes remain uncommitted for review.
 
 ## Decisions retained and implementation choices
 

@@ -174,7 +174,11 @@ pub enum MetricType {
     /// RAM backing tracked mappings, in bytes; shared pages count per mapping.
     MemoryResident = 72,
 
-    TotalMetricTypes = 73,
+    OomRuns = 73,
+    OomKills = 74,
+    OomParkedSyscalls = 75,
+    OomParkedFaults = 76,
+    TotalMetricTypes = 77,
 }
 
 impl MetricType {
@@ -270,6 +274,10 @@ impl MetricType {
             MetricType::SchedSyscallExitYields => "sched.syscall_exit_yields",
             MetricType::FilePagedSyscallMisses => "mem.file_paged_syscall_misses",
             MetricType::MemoryResident => "memory_resident",
+            MetricType::OomRuns => "mem.oom_runs",
+            MetricType::OomKills => "mem.oom_kills",
+            MetricType::OomParkedSyscalls => "mem.oom_parked_syscalls",
+            MetricType::OomParkedFaults => "mem.oom_parked_faults",
             MetricType::TotalMetricTypes => "total_metric_types",
         }
     }
@@ -510,6 +518,20 @@ impl Drop for KProcessStats {
 }
 
 impl KProcessStats {
+    /// Global process-stat entries in kernel-PID order. The callback and all
+    /// Arc drops run outside the map lock; no list snapshot is allocated.
+    pub(crate) fn for_each_process(mut func: impl FnMut(Arc<Self>)) {
+        Self::for_each_child(&SYSTEM_STATS.children, 0, line!(), |_, child| {
+            if let Some(child) = child {
+                func(child);
+            }
+            true
+        });
+    }
+
+    pub(crate) fn memory_usage(&self) -> (u64, u64) {
+        (self.mem_stats_user.total(), self.mem_stats_kernel.total())
+    }
     pub fn new(
         parent: Arc<KProcessStats>,
         pids: (u64, ProcessId),
@@ -788,6 +810,7 @@ impl KProcessStats {
 
         // System-wide memory metrics live at the aggregate (PID_SYSTEM) scope.
         if self.user_pid.as_u64() == PID_SYSTEM {
+            vals[MetricType::OomRuns as usize] = crate::mm::phys::oom_runs();
             let phys = crate::mm::phys::PhysStats::get();
             vals[MetricType::MemAvailable as usize] = phys.total_size;
             vals[MetricType::MemUsed as usize] = phys.small_pages_used << small_log2;

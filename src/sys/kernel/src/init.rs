@@ -350,6 +350,8 @@ fn cpu_main(this_cpu: u64) -> ! {
         #[cfg(debug_assertions)]
         crate::mm::phys_blocks::test();
         #[cfg(debug_assertions)]
+        crate::uspace::oom::test();
+        #[cfg(debug_assertions)]
         crate::mm::virt::self_test();
         #[cfg(debug_assertions)]
         crate::mm::phys::huge_frame_self_test();

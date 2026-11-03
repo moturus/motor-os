@@ -106,6 +106,51 @@ impl From<Corruption> for AllocationError {
 pub(crate) struct StateSnapshot(pub(super) u64);
 
 impl StateSnapshot {
+    pub(crate) fn armed(self) -> bool {
+        self.0 & ARMED != 0
+    }
+    pub(crate) fn generation(self) -> u64 {
+        self.0 / GENERATION_ONE
+    }
+    pub(crate) fn killing(self) -> bool {
+        self.armed() && self.phase() == KILLING
+    }
+    pub(crate) fn free_pages(self, total: u64) -> u64 {
+        total - self.used()
+    }
+
+    fn request(self, total: u64) -> Self {
+        if !self.armed() || self.free_pages(total) >= 768 {
+            return self;
+        }
+        // A charge below 512 already changes Latched to Killing.
+        debug_assert!(self.phase() != LATCHED || self.free_pages(total) >= 512);
+        if self.phase() == IDLE {
+            let mut next = Self((self.0 & !PHASE_MASK) | KILLING)
+                .next_generation()
+                .expect("phys: OOM generation exhausted");
+            if self.free_pages(total) < 128 {
+                next.0 |= SYSTEM_BLOCKED;
+            }
+            next
+        } else {
+            self
+        }
+    }
+
+    fn latch(self, total: u64, generation: u64) -> Option<Self> {
+        if !self.killing()
+            || self.generation() != generation
+            || !(512..768).contains(&self.free_pages(total))
+        {
+            return None;
+        }
+        Some(
+            Self((self.0 & !(PHASE_MASK | SYSTEM_BLOCKED)) | LATCHED)
+                .next_generation()
+                .expect("phys: OOM generation exhausted"),
+        )
+    }
     /// Initial accounting only: Idle, unarmed, generation zero, System open.
     pub(super) fn new(used: u64) -> Self {
         assert!(used <= USED_MASK);
@@ -196,6 +241,89 @@ impl StateSnapshot {
 }
 
 impl<L: PageLinks> Pool<'_, L> {
+    // Called under allocation callers' locks: no OOM lock, posting, allocation
+    // or logging here. Scratch pools record attention without touching CPUs.
+    pub(crate) fn request_oom_attention(&self) {
+        if !self.state_snapshot().armed() {
+            return;
+        }
+        self.counters.attention.store(true, Ordering::Release);
+        if L::NOTIFY_SCHEDULER {
+            crate::sched::poke_cpu(u32::from(crate::arch::current_cpu()));
+        }
+    }
+
+    fn publish_transition(&self, old: StateSnapshot, next: StateSnapshot) {
+        if old.generation() != next.generation() && next.killing() {
+            self.counters.oom_runs.fetch_add(1, Ordering::Relaxed);
+        }
+        if (old.0 ^ next.0) & !USED_MASK != 0 {
+            self.request_oom_attention();
+        }
+    }
+
+    pub(crate) fn take_oom_attention(&self) -> bool {
+        self.counters.attention.load(Ordering::Acquire)
+            && self.counters.attention.swap(false, Ordering::AcqRel)
+    }
+
+    pub(crate) fn oom_runs(&self) -> u64 {
+        self.counters.oom_runs.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn request_oom(&self) -> Option<u64> {
+        let mut old = self.state_snapshot();
+        loop {
+            if !old.armed() || old.free_pages(self.counters.total) >= 768 {
+                return None;
+            }
+            let next = old.request(self.counters.total);
+            if next == old {
+                return Some(old.generation());
+            }
+            match self.counters.state.compare_exchange_weak(
+                old.0,
+                next.0,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    self.publish_transition(old, next);
+                    return Some(next.generation());
+                }
+                Err(current) => old = StateSnapshot(current),
+            }
+        }
+    }
+
+    pub(crate) fn latch_oom(&self, generation: u64) -> bool {
+        let mut old = self.state_snapshot();
+        loop {
+            let Some(next) = old.latch(self.counters.total, generation) else {
+                return false;
+            };
+            match self.counters.state.compare_exchange_weak(
+                old.0,
+                next.0,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    self.publish_transition(old, next);
+                    return true;
+                }
+                Err(current) => old = StateSnapshot(current),
+            }
+        }
+    }
+
+    /// Order a kill decision at this load. Count changes within the run do not
+    /// cancel it; recovery or latching changes the generation. Killing itself
+    /// guarantees fewer than 768 free pages.
+    pub(crate) fn still_killing(&self, generation: u64) -> bool {
+        let state = self.state_snapshot();
+        state.killing() && state.generation() == generation
+    }
     // A search miss still needs a pressure receipt. Recheck the gate so a
     // fragmented contiguous/huge miss cannot hide a closed allocation gate.
     pub(super) fn allocation_result(
@@ -228,7 +356,7 @@ impl<L: PageLinks> Pool<'_, L> {
     }
 
     /// Read one consistent snapshot; another CPU may immediately supersede it.
-    pub(super) fn state_snapshot(&self) -> StateSnapshot {
+    pub(crate) fn state_snapshot(&self) -> StateSnapshot {
         StateSnapshot(self.counters.state.load(Ordering::Acquire))
     }
 
@@ -245,6 +373,7 @@ impl<L: PageLinks> Pool<'_, L> {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
+                    self.publish_transition(old, next);
                     if let Some(kind) = refusal {
                         return Err(AllocationError::Refused {
                             class,
@@ -271,7 +400,7 @@ impl<L: PageLinks> Pool<'_, L> {
 
     pub(super) fn release(&self, count: u16) {
         let mut old = self.state_snapshot();
-        loop {
+        let next = loop {
             let next = old.release(self.counters.total, count);
             match self.counters.state.compare_exchange_weak(
                 old.0,
@@ -279,10 +408,11 @@ impl<L: PageLinks> Pool<'_, L> {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => break,
+                Ok(_) => break next,
                 Err(current) => old = StateSnapshot(current),
             }
-        }
+        };
+        self.publish_transition(old, next);
         if let Some(published) = self.counters.published.get() {
             published.fetch_add(u64::from(count), Ordering::Relaxed);
         }

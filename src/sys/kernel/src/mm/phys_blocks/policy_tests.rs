@@ -196,7 +196,94 @@ pub(crate) fn run() {
     ownership_and_recovery();
     stale_charge_and_rejected_whole();
     pressure_receipts();
+    worker_transitions();
     crate::raw_log!("phys_blocks policy tests PASS");
+}
+
+fn worker_transitions() {
+    use AllocationClass::Kernel;
+    let mut fixture = Fixture::new();
+    fixture.shape(0, 0, PAGES);
+    fixture.shape(HIGH, 0, PAGES);
+    let pool = fixture.pool();
+    pool.request_oom_attention();
+    assert!(!pool.take_oom_attention());
+    assert!(!pool.still_killing(0));
+    assert_eq!(pool.request_oom(), None);
+    assert_eq!(pool.oom_runs(), 0);
+    pool.counters.state.store(ARMED, Ordering::Release);
+    assert_eq!(pool.request_oom(), None); // Recovery wins over a stale request.
+    let first = pool.allocate(257, None, Kernel).unwrap().unwrap();
+    assert_eq!(pool.request_oom(), Some(1)); // Actual shortage at 767 pages.
+    assert!(pool.take_oom_attention());
+    assert!(!pool.take_oom_attention());
+    let running_generation = pool.state_snapshot().generation();
+    assert!(pool.still_killing(running_generation));
+    assert!(!pool.latch_oom(0));
+    assert!(pool.latch_oom(1));
+    assert!(!pool.still_killing(running_generation));
+    assert!(!pool.still_killing(2));
+    assert!(pool.take_oom_attention());
+    assert_eq!(pool.request_oom(), Some(2)); // Joining Latched never restarts.
+    assert!(!pool.take_oom_attention());
+    assert_eq!(pool.oom_runs(), 1);
+    pool.allocate(256, None, Kernel).unwrap().unwrap();
+    let before_recovery = pool.state_snapshot();
+    assert_eq!(before_recovery.generation(), 3);
+    assert!(!pool.still_killing(running_generation));
+    assert!(!pool.latch_oom(3)); // At 511 the victimless rule is abort, not latch.
+    assert!(pool.take_oom_attention());
+
+    // System activity changes the count without cancelling a kill/abort check
+    // for this generation. Joining it needs no transition or extra attention.
+    let page = pool
+        .allocate(1, None, AllocationClass::System)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pool.state_snapshot().free_pages(1024), 510);
+    assert!(pool.still_killing(3));
+    assert_eq!(pool.request_oom(), Some(3));
+    pool.push(page).unwrap();
+    assert_eq!(pool.state_snapshot().free_pages(1024), 511);
+    assert!(pool.still_killing(3));
+    assert!(!pool.take_oom_attention());
+
+    // Reaching 512 cancels the abort decision but does not end Killing: the
+    // post-report check must sample both the generation and the current count.
+    pool.push(first).unwrap();
+    assert_eq!(pool.state_snapshot().free_pages(1024), 512);
+    assert!(pool.still_killing(3));
+    for page in 1..257 {
+        pool.push(first + page * 4096).unwrap();
+    }
+    assert_eq!(pool.state_snapshot().generation(), 4);
+    assert!(!pool.still_killing(3));
+    assert_eq!(pool.request_oom(), None);
+    pool.allocate(257, None, Kernel).unwrap().unwrap();
+    let renewed = pool.state_snapshot();
+    // Same count and phase, but recovery/new pressure without a dispatch must
+    // invalidate the old kill, and count BOTH starts despite coalesced attention.
+    assert_eq!(renewed.used(), before_recovery.used());
+    assert_eq!(renewed.generation(), 5);
+    assert!(!pool.still_killing(before_recovery.generation()));
+    assert!(pool.still_killing(renewed.generation()));
+    assert_eq!(pool.oom_runs(), 3);
+    assert!(pool.take_oom_attention());
+    assert!(!pool.take_oom_attention());
+    check(&pool, 513);
+    for free in [512, 767] {
+        let state =
+            StateSnapshot(ARMED | KILLING | SYSTEM_BLOCKED | GENERATION_ONE | (2048 - free));
+        let stopped = state.latch(2048, 1).unwrap();
+        assert_eq!(stopped.phase(), LATCHED);
+        assert_eq!(stopped.0 & SYSTEM_BLOCKED, 0);
+        assert_eq!(stopped.generation(), 2);
+        assert_eq!(stopped.request(2048), stopped);
+    }
+    for free in [511, 768] {
+        let state = StateSnapshot(ARMED | KILLING | GENERATION_ONE | (2048 - free));
+        assert_eq!(state.latch(2048, 1), None);
+    }
 }
 
 fn pressure_receipts() {

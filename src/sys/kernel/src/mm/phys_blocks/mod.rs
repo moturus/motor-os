@@ -232,6 +232,9 @@ impl Inner {
 // Only free, validated pages reach this interface. The scratch implementation
 // stores one word per page and never dereferences its synthetic addresses.
 pub(crate) trait PageLinks {
+    // This implementation also distinguishes the production pool from scratch
+    // pools, which record attention but must never notify the live scheduler.
+    const NOTIFY_SCHEDULER: bool = false;
     fn read(&self, addr: u64) -> u64;
     fn write(&self, addr: u64, word: u64);
 }
@@ -239,6 +242,7 @@ pub(crate) trait PageLinks {
 pub(crate) struct DirectLinks;
 
 impl PageLinks for DirectLinks {
+    const NOTIFY_SCHEDULER: bool = true;
     fn read(&self, addr: u64) -> u64 {
         unsafe { *((super::PAGING_DIRECT_MAP_OFFSET + addr) as *const u64) }
     }
@@ -263,6 +267,8 @@ enum Publication {
 struct Counters {
     total: u64,
     state: AtomicU64,
+    attention: core::sync::atomic::AtomicBool,
+    oom_runs: AtomicU64,
     high_water: AtomicU64,
     reserved: AtomicU64,
     discarded: AtomicU64,

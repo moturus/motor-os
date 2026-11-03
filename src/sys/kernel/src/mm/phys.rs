@@ -88,6 +88,33 @@ pub fn low_memory() -> bool {
     available_small_pages() < moto_sys::LOW_MEMORY_PAGES
 }
 
+/// Request reclamation after rollback, only if the current count still needs
+/// it. None means unarmed or recovered. Joining Latched does not restart it.
+pub fn request_oom() -> Option<u64> {
+    PhysicalMemory::inst().blocks.request_oom()
+}
+
+pub(crate) fn oom_snapshot() -> (super::phys_blocks::StateSnapshot, u64) {
+    let blocks = &PhysicalMemory::inst().blocks;
+    let state = blocks.state_snapshot();
+    (state, state.free_pages(blocks.total_pages()))
+}
+pub(crate) fn take_oom_attention() -> bool {
+    PhysicalMemory::inst().blocks.take_oom_attention()
+}
+pub(crate) fn request_oom_attention() {
+    PhysicalMemory::inst().blocks.request_oom_attention();
+}
+pub(crate) fn still_killing(generation: u64) -> bool {
+    PhysicalMemory::inst().blocks.still_killing(generation)
+}
+pub(crate) fn latch_oom(generation: u64) -> bool {
+    PhysicalMemory::inst().blocks.latch_oom(generation)
+}
+pub(crate) fn oom_runs() -> u64 {
+    PhysicalMemory::inst().blocks.oom_runs()
+}
+
 // The shared count equals the allocator's at quiescent boot checkpoints.
 #[cfg(debug_assertions)]
 fn assert_published_free_pages() {
