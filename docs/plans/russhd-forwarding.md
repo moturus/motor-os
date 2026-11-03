@@ -1,7 +1,7 @@
 # TCP forwarding in russhd and ssh
 
-Status: v5, stopped under AGENTS.md after diagnosing a preexisting russh compression
-failure. No forwarding code has changed.
+Status: v5, implementation resumed after approval to fix the preexisting russh
+compression failure. No forwarding code has changed.
 See "Implementation progress" below and "Decisions" at the end.
 
 ## Implementation progress
@@ -12,8 +12,8 @@ Developer-image validation remains release-only.
 
 | Step | Progress | Remaining |
 |---|---|---|
-| 1 | 224 MiB matrix removal committed in `dd716bf4`; complete-line wait fix committed in `0f419641`, with host regressions wired into `full-test.sh` | Main-image gates: 0/3 debug, 0/3 release; complete `full-test-dev.sh --release` |
-| 2 | Baseline preparation only; test-only callback signature fix committed in the external fork as `ac0e947`; blocked on the compression failure below | Review blocker; external russh close fixes and tests, pin, relay, direct opens, configuration, authentication deadline, milestone gates |
+| 1 | 224 MiB matrix removal committed in `dd716bf4`; complete-line wait fix committed in `0f419641`, with host regressions wired into `full-test.sh`; debug gate running (attempt 2) | Main-image gates: 0/3 debug, 0/3 release; complete `full-test-dev.sh --release` |
+| 2 | Baseline preparation; external test signature fix `ac0e947` and approved compression fix `4fe78f9` committed; full fork suite passes; main-repo compression regression added | External russh close fixes and tests, pin, relay, direct opens, configuration, authentication deadline, milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
@@ -70,16 +70,29 @@ Evidence is retained in `build/forwarding-validation/`:
 `russh-compression-instrumented.log` (buffered-byte diagnosis),
 `russh-compression-shipped-deps.log` (pinned-version comparison), and
 `russh-receive-window-test.log` (four passing tests after diagnostic removal).
-Both diagnostic lockfiles are saved there. All temporary instrumentation has
-been removed; the external checkout is clean and its original dependency set is
-restored. The main repository's russh pin is unchanged.
+Both diagnostic lockfiles are saved there. At this stop, all temporary
+instrumentation had been removed, the external checkout was clean, and its
+original dependency set was restored. The main repository's russh pin is unchanged.
 
 The first main-image debug gate was deliberately stopped during preparation
 (exit 143), as required by the preexisting-bug stop rule; its log is
 `build/forwarding-validation/step1-debug-1.log`. It did not reach the timed tests,
 and no main-image pass is claimed. Release and developer-image gates have not run.
 No milestone is newly declared complete. Review and authorization for this
-additional external-fork compression work are needed before implementation resumes.
+additional external-fork compression work were requested before resuming.
+
+The user subsequently approved fixing this defect and resuming implementation.
+External commit `4fe78f985942d5b271ebb29d2aa34052a118f487` makes the decompressor
+continue until neither input nor output advances, including calls with empty
+input. Its output-size bound is unchanged. All six compression tests pass with
+both dependency sets, including new partial-flush packet-limit and next-packet
+checks. The full fork suite passes: 219 tests, plus eight preexisting ignored
+documentation examples. Logs are `russh-compression-fixed.log`,
+`russh-compression-full-suite.log`, and `russh-compression-fixed-shipped-deps.log`;
+the commit is also saved as `russh-compression-fix.patch` in the evidence directory.
+The main-repo `src/bin/russhd/tests/compression.rs` regression runs transitively
+from `full-test.sh` and covers changing packet sizes on the wire compression path.
+The main-image debug gate has resumed in `step1-debug-2.log`.
 
 ## Goal and scope
 
@@ -791,6 +804,9 @@ in `src/tests`.
 7. **Remove Wasm tests on 224 MiB VMs as step 1.** Retain both images and all checks at
    256 MiB, then require the complete developer-image release gate to pass. This supersedes
    v3's known-failure exception and manual service-only follow-up.
+8. **The additional external russh compression fix is approved.** Drain buffered
+   decoder output after compressed input is exhausted, preserving packet-size limits,
+   then resume the forwarding implementation. Preserve the original failure evidence.
 
 These differences from OpenSSH remain:
 
