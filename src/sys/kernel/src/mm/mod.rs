@@ -3,7 +3,9 @@
 //       other than some corner cases that do frameless allocations.
 
 mod allocation;
-pub(crate) use allocation::{AllocationClass, AllocationFailure};
+pub(crate) use allocation::{
+    AllocationClass, AllocationFailure, RefusalKind, RetryDecision, StateSnapshot, WaitReason,
+};
 mod cache;
 pub mod kheap;
 pub mod mmio;

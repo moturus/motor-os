@@ -21,8 +21,9 @@ As of 2026-11-03:
 | 4c   | Real error codes in the syscall and process layers        | Committed, `b2dccf4e`                   |
 | 5a   | Packed accounting, physical charges and transition tests | Committed, `dcd36704`                  |
 | 5b   | Recipient classes and typed MM allocation failures       | Committed, `b71cad30`                  |
-| 5c   | Scheduler dispatch, victim cleanup and OOM diagnostics   | Working tree, awaiting review         |
-| 5    | Waiters, recovery and activation                        | [5d–5f planned](oom-handling-step5.md) |
+| 5c   | Scheduler dispatch, victim cleanup and OOM diagnostics   | Committed, `8c3a0b6f`                  |
+| 5d   | Syscall retries, fault waiters and pager partial progress | Working tree, awaiting review        |
+| 5    | Activation and runtime validation                       | [5e–5f planned](oom-handling-step5.md) |
 
 What the committed steps provide is described in
 [docs/oom-handling.md](../oom-handling.md) and
@@ -42,14 +43,13 @@ outside the guarantee by design.
 
 Left to do:
 
-- Review the uncommitted 5c scheduler dispatch, victim selection, exit
-  continuations, latch/abort and diagnostics. Its scalar dispatch tests and
-  scratch-pool transition tests run during debug guest boot; runtime policy
-  stays unarmed. The recovery object, fault queue and waiter-counter producers
-  arrive with their consumers in 5d.
-- **5.** The gates and waits in "Fallible user-page allocation" from the
-  paragraph on pausing at syscall entry onward, the 2 MiB and 512 KiB rules,
-  OOM activation, and the remaining runtime validation for boundaries, victims,
+- Review the uncommitted 5d syscall retries, syscall waits, fault
+  registration and partial pager-fill handling. Bounded native tests cover
+  retry decisions and queue ownership; existing exhaustion coverage now also
+  checks the completed prefix separately from newly installed pages. The
+  production policy stays unarmed.
+- **5.** Activation of the 2 MiB and 512 KiB rules and the installed waits,
+  and the remaining runtime validation for boundaries, victims,
   episodes and waiters, staged in
   [oom-handling-step5.md](oom-handling-step5.md). Runtime floors and gates
   remain unarmed until syscall waiting, fault waiting and scheduler dispatch
@@ -230,6 +230,10 @@ preserve that completion and recheck the gate; do not retag its wait with a
 new generation. A refusal that had no run uses the generation returned by
 joining/requesting one.
 
+A retry still blocked after a spurious wake carries its existing wait reason,
+not a new physical-shortage receipt. Recovery racing this recheck permits a
+retry; it cannot return permanent OOM without a new allocation attempt.
+
 Thus a large eager request that restores at least 3 MiB by rolling itself back
 returns OOM. A request whose post-rollback count remains below 3 MiB waits,
 regardless of size. In an unchanged Latched state, an unsatisfied System
@@ -256,17 +260,18 @@ constructs its stacks: that path bypasses `new_child` and its runtime claim.
 For now, a sys-io caller may pause on a user target's allocation. Let OOM run and
 then resume sys-io; add no separate deferred-request or service-progress machinery.
 
-Reuse the kernel-internal wait used by `sys_kill` for allocation syscalls. Keep
-one lazily created, kernel-owned "memory recovered" `SysObject` beside the pager
-registry in `KernelAddressSpace`; add no static. Register with `add_waiting_thread`
-and `add_wait_objects`, recheck the complete wait condition, then call
-`Thread::wait()`. Use a non-NONE internal sentinel handle so a wake before
-the pause remains pending. If the
-recheck already permits retry, add that sentinel as a waker before waiting;
-the existing wake path then clears registration and resumes the call. After any
-wake, recheck the recipient gate and any refused-attempt generation, and
-register again if still blocked. Keep the recovery object's ownership in
-kernel/thread-owned state, not a local `Arc` across the wait.
+Park allocating syscalls the way faults are parked: a kernel-owned vector of
+weak thread references and copyable wait reasons beside the fault queue in
+`KernelAddressSpace`; add no static. Register under the waiter lock, recheck
+the complete wait condition under that same lock, and return at once if it is
+already satisfied. Otherwise pause with `Thread::oom_wait()`, not
+`Thread::wait()`: the latter drains the thread's pending-wake latch, which the
+userspace wait after the syscall still needs. The pause sleeps only while the
+queue still owns the thread's resume; whoever removes the entry resumes the
+thread with `Thread::oom_resume()`, which only moves an InWait thread to
+Runnable. After any wake, recheck the recipient gate and any refused-attempt
+generation, and register again if still blocked. Nothing is owned across the
+pause.
 
 Faults use the pager's existing park state: `Preempted` with no resume job.
 Keep a vector of weak thread references and copyable wait reasons in the same
@@ -331,9 +336,9 @@ as long as the remaining address-space object requires them.
 
 ## OOM jobs
 
-Worker and exit-continuation machinery implemented locally in 5c, awaiting
-review. Runtime policy remains unarmed; waiter integration follows in 5d and
-activation in 5e. The rest of this section specifies the completed behavior.
+Worker and exit-continuation machinery committed in 5c (`8c3a0b6f`); waiter
+integration implemented locally in 5d, awaiting review. Runtime policy remains
+unarmed until activation in 5e. This section specifies the completed behavior.
 
 Use posted jobs on the existing scheduler. **Do not create a worker thread.**
 The pool's atomic word contains the count, armed flag, Idle/Killing/Latched
@@ -511,7 +516,7 @@ All work stays in the main repository.
    scheduler jobs, and both syscall and fault waits while runtime policy
    remains unarmed. Enable the complete mechanism only after all consumers
    are present, then complete pressure, blocking, recovery and abort coverage.
-   *5a–5b committed; 5c awaiting review; 5d–5f planned in
+   *5a–5c committed; 5d awaiting review; 5e–5f planned in
    [oom-handling-step5.md](oom-handling-step5.md).*
 
 Step 1 is the single large cleanup patch. Keep subsequent patches small,
@@ -621,13 +626,14 @@ allocation and victim policies remain.
    Restart triggers are still required when pressure rises or drops below
    2 MiB after a run stopped short of 3 MiB.
 
-2. **Adopted: reuse existing waits.** Use the kernel-owned memory-recovery
-   object and `Thread::wait()` for syscalls, and the pager's park/resume pattern
-   plus weak references for faults. Keep register/recheck ordering, a non-NONE
-   sentinel, cleanup on all cancellation paths, sole ownership of each fault
-   resume and status checks before resume. Recheck the complete wait reason,
+2. **Adopted, then revised in the 5d review: the pager's park pattern for
+   both.** Weak references and copyable wait reasons for faults and syscalls
+   alike. `Thread::wait()` was rejected for syscalls because it consumes wakes
+   latched for the thread's next userspace wait. Keep register/recheck
+   ordering, cleanup on all cancellation paths, sole ownership of each resume
+   and status checks before resume. Recheck the complete wait reason,
    including the generation after a physical refusal, not merely the role gate.
-   Initialize the object on demand; keep its state in `KernelAddressSpace`.
+   Keep both queues in `KernelAddressSpace`.
 
 3. **Adopted with a correction: enforce spawn refusal in the kernel.** The
    `Process::new_child` check and sys-io's cheap early refusal are useful, but

@@ -7,7 +7,7 @@ pub fn init(available: &[MemorySegment], initrd: MemorySegment, raw_ram: Vec<Mem
     PhysicalMemory::init(available, initrd, raw_ram);
 }
 
-pub(super) fn validate_mmio(phys_addr: u64, num_pages: u64) -> Result<(), moto_sys::ErrorCode> {
+pub(crate) fn validate_mmio(phys_addr: u64, num_pages: u64) -> Result<(), moto_sys::ErrorCode> {
     let invalid = moto_rt::E_INVALID_ARGUMENT;
     if num_pages == 0 || phys_addr & (PAGE_SIZE_SMALL - 1) != 0 {
         return Err(invalid);

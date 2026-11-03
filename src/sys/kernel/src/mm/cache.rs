@@ -102,7 +102,7 @@ impl SegmentCache {
         }
     }
 
-    pub(super) fn _count(&self, num_pages: usize) -> u64 {
+    pub(super) fn count(&self, num_pages: usize) -> u64 {
         debug_assert!(num_pages.is_power_of_two());
         let idx = num_pages.ilog2() as usize;
         debug_assert!(idx < CACHE_LINES);

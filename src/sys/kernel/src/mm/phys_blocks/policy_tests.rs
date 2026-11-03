@@ -197,7 +197,125 @@ pub(crate) fn run() {
     stale_charge_and_rejected_whole();
     pressure_receipts();
     worker_transitions();
+    retry_decisions();
     crate::raw_log!("phys_blocks policy tests PASS");
+}
+
+fn retry_decisions() {
+    use crate::mm::{AllocationFailure, RetryDecision as D, WaitReason};
+    use AllocationClass::{System, User};
+    use RefusalKind::{Capacity, Floor, Gate};
+    let total = 2048;
+    let idle = StateSnapshot(ARMED | (total - 600));
+    let killing = idle.request(total);
+    let blocked = StateSnapshot(killing.0 | SYSTEM_BLOCKED);
+    let latched = blocked.latch(total, blocked.generation()).unwrap();
+    let recovered = killing.release(total, 168);
+    let (renewed, _) = recovered.charge(total, 257, System);
+    let receipt = |class, kind, state: StateSnapshot| AllocationFailure::Pressure {
+        class,
+        kind,
+        state,
+        free_pages: state.free_pages(total),
+    };
+    let decide = |failure: AllocationFailure, state: StateSnapshot, fault| {
+        failure.retry_decision(state, state.free_pages(total), fault)
+    };
+    for class in [System, User] {
+        for fault in [false, true] {
+            let gate = receipt(class, Gate, blocked);
+            assert_eq!(decide(gate, recovered, fault), D::Retry);
+            assert_eq!(
+                decide(gate, blocked, fault),
+                D::Wait(WaitReason::gate(class))
+            );
+            for kind in [Floor, Capacity] {
+                let shortage = receipt(class, kind, killing);
+                let waiting = WaitReason::shortage(class, killing.generation());
+                assert_eq!(decide(shortage, killing, fault), D::Wait(waiting));
+                assert!(!waiting.ready(killing)); // Open System gate is insufficient.
+                assert!(!waiting.ready(blocked));
+                assert!(waiting.ready(recovered));
+                assert_eq!(
+                    decide(shortage, recovered, fault),
+                    if fault {
+                        D::Retry
+                    } else {
+                        D::Error(moto_rt::E_OUT_OF_MEMORY)
+                    }
+                );
+                // A completed generation survives new pressure before dispatch.
+                assert_eq!(
+                    decide(shortage, renewed, fault),
+                    if class == System {
+                        D::Retry
+                    } else {
+                        D::Wait(WaitReason::gate(User))
+                    }
+                );
+                assert_eq!(
+                    decide(shortage, latched, fault),
+                    if class == System {
+                        D::Retry
+                    } else {
+                        D::Wait(WaitReason::gate(User))
+                    }
+                );
+                assert_eq!(
+                    decide(receipt(class, kind, idle), idle, fault),
+                    D::Request(class)
+                );
+                assert_eq!(
+                    decide(receipt(class, kind, idle), killing, fault),
+                    D::Wait(waiting)
+                );
+            }
+        }
+    }
+    // A large eager allocation rolled back above recovery returns OOM; its
+    // gate-only counterpart retries. Faults retry both recovered refusals.
+    let large = receipt(User, Floor, StateSnapshot(ARMED | (total - 1000)));
+    assert_eq!(
+        decide(large, recovered, false),
+        D::Error(moto_rt::E_OUT_OF_MEMORY)
+    );
+    assert_eq!(decide(large, recovered, true), D::Retry);
+    // An unchanged victimless latch cannot make a System shortage spin.
+    let shortage = receipt(System, Floor, latched);
+    let wait = WaitReason::shortage(System, latched.generation());
+    assert_eq!(decide(shortage, latched, false), D::Wait(wait));
+    assert!(!wait.ready(latched));
+    assert!(!latched.gate_closed(System)); // Smaller System requests can proceed.
+    let later_recovery = latched.release(total, 168);
+    assert!(wait.ready(later_recovery));
+    // A spurious wake revalidated the syscall but did not attempt allocation.
+    // Recovery racing that recheck permits a retry even above 768 pages.
+    let pending = AllocationFailure::Waiting(wait);
+    assert_eq!(decide(pending, latched, false), D::Wait(wait));
+    assert_eq!(decide(pending, later_recovery, false), D::Retry);
+    assert_eq!(decide(pending, renewed, false), D::Retry);
+    let user_wait = wait.with_class(User);
+    assert_eq!(
+        decide(AllocationFailure::Waiting(user_wait), latched, false),
+        D::Wait(user_wait)
+    );
+    for code in [
+        moto_rt::E_OUT_OF_MEMORY,
+        moto_rt::E_INVALID_ARGUMENT,
+        moto_rt::E_BAD_HANDLE,
+    ] {
+        assert_eq!(
+            decide(AllocationFailure::Code(code), blocked, false),
+            D::Error(code)
+        );
+    }
+    let unarmed = StateSnapshot::new(total);
+    for fault in [false, true] {
+        assert_eq!(
+            decide(receipt(User, Capacity, unarmed), unarmed, fault),
+            D::Error(moto_rt::E_OUT_OF_MEMORY)
+        );
+    }
 }
 
 fn worker_transitions() {

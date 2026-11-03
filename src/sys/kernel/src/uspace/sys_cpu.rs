@@ -626,13 +626,25 @@ fn sys_spawn_impl(thread: &super::process::Thread, args: &SyscallArgs) -> Syscal
     let thread_fn = args.args[2];
     let thread_arg = args.args[3];
 
-    match thread
-        .owner()
-        .spawn_thread(stack_size, thread_fn, thread_arg)
-    {
-        Ok(handle) => ResultBuilder::ok_1(handle.as_u64()),
-        Err(moto_rt::E_OUT_OF_MEMORY) => ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY),
-        Err(_) => ResultBuilder::invalid_argument(),
+    let mut retry = super::oom::wait::Retry::default();
+    loop {
+        // End the owner's temporary lifetime before inspecting the result:
+        // an if/match scrutinee temporary would live across the wait arm.
+        let result = thread
+            .owner()
+            .spawn_thread(&retry, stack_size, thread_fn, thread_arg);
+        match result {
+            Ok(handle) => return ResultBuilder::ok_1(handle.as_u64()),
+            Err(failure) => {
+                if let Err(code) = retry.after_failure(thread, failure) {
+                    return if code == moto_rt::E_OUT_OF_MEMORY {
+                        ResultBuilder::result(code)
+                    } else {
+                        ResultBuilder::invalid_argument()
+                    };
+                }
+            }
+        }
     }
 }
 

@@ -1,6 +1,7 @@
 //! This module handles SysObj syscalls. For SysObject, go to sysobject.rs.
+use super::oom::wait::Retry;
 use crate::mm::user_copy::UserCopyError;
-use crate::mm::PageType;
+use crate::mm::{AllocationFailure, PageType};
 
 use super::syscall::*;
 use super::SysObject;
@@ -27,32 +28,34 @@ fn get_url(
 }
 
 fn sys_handle_create(
+    retry: &Retry,
     thread: &super::process::Thread,
     parent: SysHandle,
     url: &str,
-) -> Result<(SysHandle, u64), ErrorCode> {
+) -> Result<(SysHandle, u64), AllocationFailure> {
     if let Some((prefix, suffix)) = url.split_once(':') {
         match prefix {
             "address_space" => {
                 if parent != SysHandle::NONE {
-                    return Err(moto_rt::E_INVALID_ARGUMENT);
+                    return Err(moto_rt::E_INVALID_ARGUMENT.into());
                 }
                 if thread.capabilities() & moto_sys::caps::CAP_SPAWN == 0 {
-                    return Err(moto_rt::E_NOT_ALLOWED);
+                    return Err(moto_rt::E_NOT_ALLOWED.into());
                 }
 
                 if !suffix.starts_with("debug_name=") {
                     log::debug!("SysHandle::create: bad url: '{url}'");
-                    return Err(moto_rt::E_INVALID_ARGUMENT);
+                    return Err(moto_rt::E_INVALID_ARGUMENT.into());
                 }
 
                 let debug_name = if let Some((_, s)) = suffix.split_once('=') {
                     s
                 } else {
                     log::debug!("SysHandle::create: bad url: '{url}'");
-                    return Err(moto_rt::E_INVALID_ARGUMENT);
+                    return Err(moto_rt::E_INVALID_ARGUMENT.into());
                 };
 
+                retry.check(crate::mm::AllocationClass::User)?;
                 let address_space = crate::mm::user::UserAddressSpace::new()?;
                 let sys_object = SysObject::new_owned(
                     Arc::new(moto_sys::url_decode(debug_name)),
@@ -83,29 +86,30 @@ fn sys_handle_create(
                         // detached spawn without CAP_SPAWN_DETACHED) rather than
                         // flattening every failure to E_INVALID_ARGUMENT.
                         log::debug!("Error creating process '{url}': {err:?}");
-                        return Err(err);
+                        return Err(err.into());
                     }
                 }
             }
             "shared" => {
-                return sys_handle_shared(SysObj::OP_CREATE, thread, parent, suffix)
+                return sys_handle_shared(retry, SysObj::OP_CREATE, thread, parent, suffix)
                     .map(|handle| (handle, 0));
             }
             _ => {}
         }
     }
     log::debug!("SysHandle::CREATE: bad url: '{url}'");
-    Err(moto_rt::E_INVALID_ARGUMENT)
+    Err(moto_rt::E_INVALID_ARGUMENT.into())
 }
 
 fn sys_handle_shared(
+    retry: &Retry,
     op: u8,
     thread: &super::process::Thread,
     parent: SysHandle,
     args: &str,
-) -> Result<SysHandle, ErrorCode> {
+) -> Result<SysHandle, AllocationFailure> {
     if parent != SysHandle::SELF {
-        return Err(moto_rt::E_INVALID_ARGUMENT);
+        return Err(moto_rt::E_INVALID_ARGUMENT.into());
     }
 
     let mut url = None;
@@ -122,7 +126,7 @@ fn sys_handle_shared(
                         address = Some(num);
                     } else {
                         log::debug!("SysHandle::CREATE shared: bad argument: {entry}");
-                        return Err(moto_rt::E_INVALID_ARGUMENT);
+                        return Err(moto_rt::E_INVALID_ARGUMENT.into());
                     }
                 }
                 "page_type" => match suffix {
@@ -130,7 +134,7 @@ fn sys_handle_shared(
                     "mid" => page_type = Some(PageType::MidPage),
                     _ => {
                         log::debug!("SysHandle::CREATE shared: bad argument: {entry}");
-                        return Err(moto_rt::E_INVALID_ARGUMENT);
+                        return Err(moto_rt::E_INVALID_ARGUMENT.into());
                     }
                 },
                 "page_num" => {
@@ -138,23 +142,23 @@ fn sys_handle_shared(
                         page_num = Some(num);
                     } else {
                         log::debug!("SysHandle::CREATE shared: bad argument: {entry}");
-                        return Err(moto_rt::E_INVALID_ARGUMENT);
+                        return Err(moto_rt::E_INVALID_ARGUMENT.into());
                     }
                 }
                 _ => {
                     log::debug!("SysHandle::CREATE shared: bad argument: {entry}");
-                    return Err(moto_rt::E_INVALID_ARGUMENT);
+                    return Err(moto_rt::E_INVALID_ARGUMENT.into());
                 }
             }
         } else {
             log::debug!("SysHandle::CREATE shared: bad argument: {entry}");
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
     }
 
     if url.is_none() || address.is_none() || page_type.is_none() || page_num.is_none() {
         log::debug!("sys_handle_shared: bad arguments: {args}");
-        return Err(moto_rt::E_INVALID_ARGUMENT);
+        return Err(moto_rt::E_INVALID_ARGUMENT.into());
     }
 
     let obj = match op {
@@ -166,6 +170,7 @@ fn sys_handle_shared(
             page_num.unwrap(),
         )?,
         SysObj::OP_GET => super::shared::get(
+            retry,
             thread.owner(),
             url.unwrap(),
             address.unwrap(),
@@ -178,17 +183,18 @@ fn sys_handle_shared(
 }
 
 fn sys_handle_get(
+    retry: &Retry,
     thread: &super::process::Thread,
     parent: SysHandle,
     url: &str,
-) -> Result<SysHandle, ErrorCode> {
+) -> Result<SysHandle, AllocationFailure> {
     match url {
         "capabilities" => {
             if parent == SysHandle::SELF {
                 Ok(SysHandle::from_u64(thread.owner().capabilities()))
             } else {
                 log::error!("Implement gettings caps for !SELF.");
-                Err(moto_rt::E_NOT_IMPLEMENTED)
+                Err(moto_rt::E_NOT_IMPLEMENTED.into())
             }
         }
         "main_thread" => {
@@ -197,15 +203,15 @@ fn sys_handle_get(
                 parent,
             ) {
                 match process.main_thread() {
-                    None => Err(moto_rt::E_INVALID_ARGUMENT),
+                    None => Err(moto_rt::E_INVALID_ARGUMENT.into()),
                     Some(mt) => match mt.self_object() {
-                        None => Err(moto_rt::E_INVALID_ARGUMENT),
+                        None => Err(moto_rt::E_INVALID_ARGUMENT.into()),
                         Some(obj) => Ok(thread.owner().add_object(obj)),
                     },
                 }
             } else {
                 log::error!("bad handle");
-                Err(moto_rt::E_INVALID_ARGUMENT)
+                Err(moto_rt::E_INVALID_ARGUMENT.into())
             }
         }
         _ => {
@@ -213,7 +219,7 @@ fn sys_handle_get(
                 match prefix {
                     "irq_wait" => {
                         if parent != SysHandle::KERNEL {
-                            return Err(moto_rt::E_INVALID_ARGUMENT);
+                            return Err(moto_rt::E_INVALID_ARGUMENT.into());
                         }
                         if let Ok(irq) = suffix.parse::<u8>() {
                             let res = crate::sched::get_irq_wait_handle(&thread.owner(), irq)?;
@@ -228,11 +234,11 @@ fn sys_handle_get(
                         }
                     }
                     "shared" => {
-                        return sys_handle_shared(SysObj::OP_GET, thread, parent, suffix);
+                        return sys_handle_shared(retry, SysObj::OP_GET, thread, parent, suffix);
                     }
                     "serial_console" => {
                         if parent != SysHandle::KERNEL {
-                            return Err(moto_rt::E_INVALID_ARGUMENT);
+                            return Err(moto_rt::E_INVALID_ARGUMENT.into());
                         }
                         let res = super::serial_console::get_for_process(&thread.owner(), suffix)?;
 
@@ -244,7 +250,7 @@ fn sys_handle_get(
                 }
             }
             log::debug!("SysHandle::GET: bad url: '{url}'");
-            Err(moto_rt::E_INVALID_ARGUMENT)
+            Err(moto_rt::E_INVALID_ARGUMENT.into())
         }
     }
 }
@@ -373,23 +379,43 @@ fn sys_query_handle(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
 }
 
 pub(super) fn sys_obj_impl(thread: &super::process::Thread, args: &SyscallArgs) -> SyscallResult {
+    let mut retry = Retry::default();
+    loop {
+        match try_sys_obj(thread, args, &retry) {
+            Ok(result) => return result,
+            Err(failure) => {
+                if let Err(code) = retry.after_failure(thread, failure) {
+                    return ResultBuilder::result(code);
+                }
+            }
+        }
+    }
+}
+
+// URL strings (including decoded shared URLs) and connection/construction
+// references belong to this attempt, never to the suspended syscall frame.
+fn try_sys_obj(
+    thread: &super::process::Thread,
+    args: &SyscallArgs,
+    retry: &Retry,
+) -> Result<SyscallResult, AllocationFailure> {
     let parent = SysHandle::from_u64(args.args[0]);
 
     match args.operation {
         SysObj::OP_CREATE => {
             if args.version > 0 {
-                return ResultBuilder::version_too_high();
+                return Ok(ResultBuilder::version_too_high());
             }
 
             if args.flags != 0 {
-                return ResultBuilder::invalid_argument();
+                return Ok(ResultBuilder::invalid_argument());
             }
 
             let url = match get_url(thread.owner().as_ref(), args.args[1], args.args[2]) {
                 Ok(url) => url,
                 Err(err) => {
                     log::debug!("SysHandle::GET: failed to parse URL");
-                    return err.into_syscall_result(thread.owner().address_space());
+                    return Ok(err.into_syscall_result(thread.owner().address_space()));
                 }
             };
 
@@ -399,19 +425,19 @@ pub(super) fn sys_obj_impl(thread: &super::process::Thread, args: &SyscallArgs) 
                     parent,
                     SysHandle::from_u64(args.args[3]),
                 ) {
-                    Ok((h1, h2)) => return ResultBuilder::ok_2(h1.as_u64(), h2.as_u64()),
-                    Err(err) => return ResultBuilder::result(err),
+                    Ok((h1, h2)) => return Ok(ResultBuilder::ok_2(h1.as_u64(), h2.as_u64())),
+                    Err(err) => return Ok(ResultBuilder::result(err)),
                 }
             }
 
-            match sys_handle_create(thread, parent, &url) {
-                Ok((handle, extra)) => ResultBuilder::ok_2(handle.as_u64(), extra),
-                Err(err) => ResultBuilder::result(err),
+            match sys_handle_create(retry, thread, parent, &url) {
+                Ok((handle, extra)) => Ok(ResultBuilder::ok_2(handle.as_u64(), extra)),
+                Err(err) => Err(err),
             }
         }
         SysObj::OP_GET => {
             if args.version > 0 {
-                return ResultBuilder::version_too_high();
+                return Ok(ResultBuilder::version_too_high());
             }
 
             let mut flags = args.flags;
@@ -421,18 +447,18 @@ pub(super) fn sys_obj_impl(thread: &super::process::Thread, args: &SyscallArgs) 
             }
 
             if flags != 0 {
-                return ResultBuilder::invalid_argument();
+                return Ok(ResultBuilder::invalid_argument());
             }
 
             let url = match get_url(thread.owner().as_ref(), args.args[1], args.args[2]) {
                 Ok(url) => url,
                 Err(err) => {
                     log::debug!("SysHandle::GET: failed to parse URL");
-                    return err.into_syscall_result(thread.owner().address_space());
+                    return Ok(err.into_syscall_result(thread.owner().address_space()));
                 }
             };
 
-            match sys_handle_get(thread, parent, &url) {
+            match sys_handle_get(retry, thread, parent, &url) {
                 Ok(handle) => {
                     // A silent client still consumes a listener. Always notify
                     // shared servers so they can authenticate it and refill.
@@ -445,20 +471,20 @@ pub(super) fn sys_obj_impl(thread: &super::process::Thread, args: &SyscallArgs) 
                             url
                         );
                         sys_handle_put(thread, SysHandle::SELF, handle, 0).unwrap();
-                        return ResultBuilder::invalid_argument();
+                        return Ok(ResultBuilder::invalid_argument());
                     }
-                    ResultBuilder::ok_1(handle.as_u64())
+                    Ok(ResultBuilder::ok_1(handle.as_u64()))
                 }
-                Err(err) => ResultBuilder::result(err),
+                Err(err) => Err(err),
             }
         }
         SysObj::OP_PUT => {
             if args.version > 0 {
-                return ResultBuilder::version_too_high();
+                return Ok(ResultBuilder::version_too_high());
             }
 
             if args.flags != 0 {
-                return ResultBuilder::invalid_argument();
+                return Ok(ResultBuilder::invalid_argument());
             }
 
             match sys_handle_put(
@@ -467,19 +493,19 @@ pub(super) fn sys_obj_impl(thread: &super::process::Thread, args: &SyscallArgs) 
                 SysHandle::from_u64(args.args[1]),
                 args.args[2],
             ) {
-                Ok(()) => ResultBuilder::ok(),
-                Err(err) => ResultBuilder::result(err),
+                Ok(()) => Ok(ResultBuilder::ok()),
+                Err(err) => Ok(ResultBuilder::result(err)),
             }
         }
-        SysObj::OP_QUERY_HANDLE => sys_query_handle(thread, args),
+        SysObj::OP_QUERY_HANDLE => Ok(sys_query_handle(thread, args)),
 
         SysObj::OP_DUP => {
             if args.version > 0 {
-                return ResultBuilder::version_too_high();
+                return Ok(ResultBuilder::version_too_high());
             }
 
             if args.flags != 0 {
-                return ResultBuilder::invalid_argument();
+                return Ok(ResultBuilder::invalid_argument());
             }
 
             // The new handle gets its own missed-wake latch
@@ -487,11 +513,11 @@ pub(super) fn sys_obj_impl(thread: &super::process::Thread, args: &SyscallArgs) 
             // cannot consume each other's pending wakes.
             let handle = SysHandle::from_u64(args.args[0]);
             match thread.owner().dup_object(&handle) {
-                Some(dup) => ResultBuilder::ok_1(dup.as_u64()),
-                None => ResultBuilder::bad_handle(handle),
+                Some(dup) => Ok(ResultBuilder::ok_1(dup.as_u64())),
+                None => Ok(ResultBuilder::bad_handle(handle)),
             }
         }
 
-        _ => ResultBuilder::invalid_argument(),
+        _ => Ok(ResultBuilder::invalid_argument()),
     }
 }

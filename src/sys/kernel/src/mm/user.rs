@@ -41,6 +41,24 @@ impl UserStack {
     }
 }
 
+pub(crate) fn heap_allocation_bytes(num_pages: u64) -> u64 {
+    HeapSizing::new(num_pages).mapped_pages << PAGE_SIZE_SMALL_LOG2
+}
+
+/// A stack segment holds the requested pages plus two guard pages, rounded up
+/// to a power of two for the segment cache. Charges and preflight share this.
+fn stack_segment_pages(num_pages: u64) -> u64 {
+    (num_pages + 2).next_power_of_two()
+}
+
+/// A fill can encounter pages another fill already installed. `completed`
+/// advances over those too; `installed` counts only this request's new pages.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FillProgress {
+    pub(crate) completed: u64,
+    pub(crate) installed: u64,
+}
+
 pub struct UserAddressSpace {
     inner: UserAddressSpaceBase,
     pub(crate) pager: crate::util::SpinLock<crate::uspace::pager::MappingState>,
@@ -73,6 +91,42 @@ impl Drop for UserAddressSpace {
 impl UserAddressSpace {
     pub(crate) fn allocation_class(&self) -> AllocationClass {
         self.inner.allocation_class()
+    }
+
+    /// Nonmutating preflight for an outer syscall retry. Re-resolved handles
+    /// may refer to a retired space or one whose memory limit changed while
+    /// asleep. The actual charge still checks the limit atomically below.
+    pub(crate) fn check_allocation(&self, bytes: u64) -> Result<(), AllocationFailure> {
+        if self.inner.page_table_ref().is_dead() {
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
+        }
+        if bytes != 0
+            && self
+                .total_usage
+                .load(Ordering::Acquire)
+                .checked_add(bytes)
+                .is_none_or(|total| total > self.max_memory.load(Ordering::Relaxed))
+        {
+            return Err(moto_rt::E_OUT_OF_MEMORY.into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check_stack_allocation(
+        &self,
+        user_pages: u64,
+        kernel_pages: u64,
+    ) -> Result<(), AllocationFailure> {
+        let user_pages = stack_segment_pages(user_pages);
+        let kernel_pages = stack_segment_pages(kernel_pages);
+        // Cached stacks are already charged. This is only a preflight: if a
+        // concurrent spawn takes the cache entry, the actual charge rechecks.
+        let kernel_charge = if self.kernel_stacks.count(kernel_pages as usize) == 0 {
+            kernel_pages
+        } else {
+            0
+        };
+        self.check_allocation((user_pages + kernel_charge) << PAGE_SIZE_SMALL_LOG2)
     }
 
     /// Releases the process's memory: every user segment with its private
@@ -284,7 +338,7 @@ impl UserAddressSpace {
     }
 
     pub(crate) fn alloc_user_stack(&self, num_pages: u64) -> Result<UserStack, AllocationFailure> {
-        let num_pages = (num_pages + 2).next_power_of_two();
+        let num_pages = stack_segment_pages(num_pages);
 
         // if let Some(segment) = self.user_stacks.pop(num_pages as usize) {
         //     return Ok(UserStack { segment });
@@ -316,7 +370,7 @@ impl UserAddressSpace {
         &self,
         num_pages: u64,
     ) -> Result<super::MemorySegment, AllocationFailure> {
-        let num_pages = (num_pages + 2).next_power_of_two();
+        let num_pages = stack_segment_pages(num_pages);
 
         if let Some(segment) = self.kernel_stacks.pop(num_pages as usize) {
             return Ok(segment);
@@ -587,14 +641,14 @@ impl UserAddressSpace {
 
     /// Copies each source page into a fresh frame and installs the copies
     /// from `start` on, keeping pages that are already present. Returns the
-    /// number of pages installed even if a later page fails. The caller holds
+    /// completed prefix and new-page count even if a later page fails. The caller holds
     /// `pager` through validation and installation.
     pub(crate) fn fill_file(
         &self,
         start: u64,
         sources: &[PinnedUserPage],
-    ) -> (u64, Result<(), AllocationFailure>) {
-        let mut installed = 0;
+    ) -> (FillProgress, Result<(), AllocationFailure>) {
+        let mut progress = FillProgress::default();
         let result = self.inner.with_file_segment(start, |segment| {
             let end = (sources.len() as u64)
                 .checked_mul(PAGE_SIZE_SMALL)
@@ -606,12 +660,13 @@ impl UserAddressSpace {
             for (idx, source) in sources.iter().enumerate() {
                 let addr = start + ((idx as u64) << PAGE_SIZE_SMALL_LOG2);
                 if segment.fill_file_page(addr, Some(source))? {
-                    installed += 1;
+                    progress.installed += 1;
                 }
+                progress.completed += 1;
             }
             Ok(())
         });
-        (installed, result)
+        (progress, result)
     }
 
     /// Installs a zeroed page in a file-paged segment unless one is present.
@@ -1508,6 +1563,22 @@ pub fn exhaustion_self_test() {
             space.stats_kernel_add(1),
             Err(AllocationFailure::Code(moto_rt::E_OUT_OF_MEMORY))
         );
+        assert_eq!(
+            space.check_allocation(PAGE_SIZE_SMALL),
+            Err(AllocationFailure::Code(moto_rt::E_OUT_OF_MEMORY))
+        );
+        space.max_memory.store(
+            space.total_usage.load(Ordering::Relaxed) + 8 * PAGE_SIZE_SMALL,
+            Ordering::Relaxed,
+        );
+        assert!(space.check_allocation(8 * PAGE_SIZE_SMALL).is_ok());
+        // The role fixture retained a lazy page and an eight-page cached
+        // kernel stack. Reusing that stack fits; a larger uncached one does not.
+        assert!(space.check_stack_allocation(4, 4).is_ok());
+        assert_eq!(
+            space.check_stack_allocation(4, 8),
+            Err(AllocationFailure::Code(moto_rt::E_OUT_OF_MEMORY))
+        );
         space.max_memory.store(limit, Ordering::Relaxed);
     }
     use super::phys::Frame;
@@ -1707,7 +1778,7 @@ pub fn exhaustion_self_test() {
     let (installed, result) = space.fill_file(FILE_ADDR, &[pinned()]);
     assert_eq!(
         (installed, result.map_err(moto_sys::ErrorCode::from)),
-        (0, Err(oom))
+        (FillProgress::default(), Err(oom))
     );
     assert_eq!(share().map_err(moto_sys::ErrorCode::from), Err(oom));
     assert_eq!(
@@ -1878,13 +1949,28 @@ pub fn exhaustion_self_test() {
     let (installed, result) = space.fill_file(rest, &[pinned(), pinned()]);
     assert_eq!(
         (installed, result.map_err(moto_sys::ErrorCode::from)),
-        (1, Err(oom))
+        (
+            FillProgress {
+                completed: 1,
+                installed: 1
+            },
+            Err(oom)
+        )
     );
     assert_eq!(available_small_pages(), 0);
     assert_eq!(table.virt_to_phys(rest + PAGE_SIZE_SMALL), None);
     check(descriptors + 4, 4);
     hoard.give_back(1);
-    assert_eq!(space.fill_file(rest, &[pinned(), pinned()]), (1, Ok(())));
+    assert_eq!(
+        space.fill_file(rest, &[pinned(), pinned()]),
+        (
+            FillProgress {
+                completed: 2,
+                installed: 1
+            },
+            Ok(())
+        )
+    );
     assert_eq!(
         space.read_from_user(rest + PAGE_SIZE_SMALL, 6).unwrap(),
         b"shared"

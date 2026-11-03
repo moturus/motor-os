@@ -3,13 +3,15 @@
 //! parks the faulting thread and queues one request per page; sys-io reads
 //! the page, the fill installs a private copy, and the waiters resume. When
 //! the address space exits, is dropped, or unmaps such a segment, the
-//! mappings are retired and sys-io is told through the same queue; nothing
-//! here waits for sys-io.
+//! mappings are retired and sys-io is told through the same queue. Allocating
+//! pager syscalls and zero-fill faults also participate in OOM recovery waits.
 
+use super::oom::wait::Retry;
 use super::process::Thread;
 use super::syscall::{ResultBuilder, SyscallArgs};
 use super::SysObject;
-use crate::mm::user::UserAddressSpace;
+use crate::mm::user::{FillProgress, UserAddressSpace};
+use crate::mm::AllocationFailure;
 use crate::util::SpinLock;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::sync::{Arc, Weak};
@@ -34,6 +36,11 @@ pub(crate) struct MappingState {
 }
 
 impl MappingState {
+    fn retire(&mut self) -> BTreeMap<u64, Mapping> {
+        self.retired = true;
+        core::mem::take(&mut self.mappings)
+    }
+
     fn get_mut(&mut self, start: u64, id: u64) -> Result<&mut Mapping, ErrorCode> {
         // An ID lookup may have raced with unmap and replacement at `start`.
         self.mappings
@@ -82,23 +89,45 @@ fn lookup(id: u64) -> Result<(Arc<UserAddressSpace>, u64), ErrorCode> {
 }
 
 pub(super) fn sys_pager(thread: &Thread, args: &SyscallArgs) -> SyscallResult {
+    let mut retry = Retry::default();
+    let mut progress = FillProgress::default();
+    loop {
+        match try_sys_pager(thread, args, &retry, &mut progress) {
+            Ok(value) => return ResultBuilder::ok_1(value),
+            Err(failure) => {
+                if let Err(code) = retry.after_failure(thread, failure) {
+                    return ResultBuilder::result(code);
+                }
+            }
+        }
+    }
+}
+
+// Caller/target Arcs, mapping guards and pinned source vectors all unwind to
+// this boundary. Only the copyable fill prefix survives in the outer loop.
+fn try_sys_pager(
+    thread: &Thread,
+    args: &SyscallArgs,
+    retry: &Retry,
+    progress: &mut FillProgress,
+) -> Result<u64, AllocationFailure> {
     let caller = thread.owner();
     if caller.pid() != super::process::SYS_IO_PID {
-        return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
+        return Err(moto_rt::E_NOT_ALLOWED.into());
     }
     // sys-io has no file-paged segments, so its buffers need no page-fault retry.
-    let result = match args.flags {
-        SysMem::F_PAGER_INIT => init(&caller),
-        SysMem::F_PAGER_RESERVE => reserve(&caller, args),
-        SysMem::F_PAGER_DEQUEUE => dequeue(&caller, args.args[1], args.args[2]),
-        SysMem::F_PAGER_FILL => fill(&caller, args),
-        SysMem::F_PAGER_FAIL => fail(args.args[1], args.args[2]).map(|_| 0),
-        SysMem::F_PAGER_ZERO_FROM => zero_from(args.args[1], args.args[2]).map(|_| 0),
-        _ => Err(moto_rt::E_INVALID_ARGUMENT),
-    };
-    match result {
-        Ok(value) => ResultBuilder::ok_1(value),
-        Err(err) => ResultBuilder::result(err),
+    match args.flags {
+        SysMem::F_PAGER_INIT => init(&caller).map_err(Into::into),
+        SysMem::F_PAGER_RESERVE => reserve(&caller, args, retry),
+        SysMem::F_PAGER_DEQUEUE => dequeue(&caller, args.args[1], args.args[2]).map_err(Into::into),
+        SysMem::F_PAGER_FILL => fill(&caller, args, retry, progress),
+        SysMem::F_PAGER_FAIL => fail(args.args[1], args.args[2])
+            .map(|_| 0)
+            .map_err(Into::into),
+        SysMem::F_PAGER_ZERO_FROM => zero_from(args.args[1], args.args[2])
+            .map(|_| 0)
+            .map_err(Into::into),
+        _ => Err(moto_rt::E_INVALID_ARGUMENT.into()),
     }
 }
 
@@ -113,7 +142,11 @@ fn init(caller: &Arc<super::Process>) -> Result<u64, ErrorCode> {
     Ok(handle.as_u64())
 }
 
-fn reserve(caller: &Arc<super::Process>, args: &SyscallArgs) -> Result<u64, ErrorCode> {
+fn reserve(
+    caller: &Arc<super::Process>,
+    args: &SyscallArgs,
+    retry: &Retry,
+) -> Result<u64, AllocationFailure> {
     let space = super::sysobject::object_from_handle::<UserAddressSpace>(
         caller,
         SysHandle::from_u64(args.args[0]),
@@ -124,20 +157,21 @@ fn reserve(caller: &Arc<super::Process>, args: &SyscallArgs) -> Result<u64, Erro
         .checked_mul(PAGE)
         .and_then(|len| start.checked_add(len))
         .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
-    if !start.is_multiple_of(PAGE) || pages == 0 || prot & !3 != 0 {
-        return Err(moto_rt::E_INVALID_ARGUMENT);
+    if !start.is_multiple_of(PAGE) || pages == 0 || prot & !3 != 0 || prot == 3 {
+        return Err(moto_rt::E_INVALID_ARGUMENT.into());
     }
     let mut state = space.pager.lock(line!());
     if state.retired {
-        return Err(moto_rt::E_BAD_HANDLE);
+        return Err(moto_rt::E_BAD_HANDLE.into());
     }
     // The registry is taken twice on purpose: every check that can fail
     // precedes `reserve_file`, so nothing needs rolling back.
     let id = {
         let mut pager = registry().lock(line!());
         if pager.notify.is_none() {
-            return Err(moto_rt::E_NOT_READY);
+            return Err(moto_rt::E_NOT_READY.into());
         }
+        retry.check_space(&space, end - start)?;
         let id = pager.next_id;
         pager.next_id = id.checked_add(1).ok_or(moto_rt::E_OUT_OF_MEMORY)?;
         id
@@ -201,14 +235,22 @@ fn resume(waiters: Vec<Waiter>, success: bool) {
 
 /// Installs private copies of `count` contiguous caller pages at `source`
 /// from `dest` on; returns how many pages were installed.
-fn fill(caller: &Arc<super::Process>, args: &SyscallArgs) -> Result<u64, ErrorCode> {
+fn fill(
+    caller: &Arc<super::Process>,
+    args: &SyscallArgs,
+    retry: &Retry,
+    progress: &mut FillProgress,
+) -> Result<u64, AllocationFailure> {
     let (id, dest, source, count) = (args.args[1], args.args[2], args.args[3], args.args[4]);
     if count == 0 || count > MAX_FILL_PAGES || !dest.is_multiple_of(PAGE) {
-        return Err(moto_rt::E_INVALID_ARGUMENT);
+        return Err(moto_rt::E_INVALID_ARGUMENT.into());
     }
     let len = count * PAGE;
     let dest_end = dest.checked_add(len).ok_or(moto_rt::E_INVALID_ARGUMENT)?;
     source.checked_add(len).ok_or(moto_rt::E_INVALID_ARGUMENT)?;
+    let dest = dest + progress.completed * PAGE;
+    let source = source + progress.completed * PAGE;
+    let count = count - progress.completed;
     let (space, start) = lookup(id)?;
     // Pin all caller pages before locking the destination, including when
     // source and destination are in the same address space.
@@ -218,25 +260,30 @@ fn fill(caller: &Arc<super::Process>, args: &SyscallArgs) -> Result<u64, ErrorCo
         .map_err(|_| moto_rt::E_OUT_OF_MEMORY)?;
     for idx in 0..count {
         sources.push(
-            caller.address_space().get_user_page_as_kernel(
-                source + idx * PAGE,
-                crate::mm::MappingOptions::READABLE,
-            )?,
+            caller
+                .address_space()
+                .get_user_page_as_kernel(source + idx * PAGE, crate::mm::MappingOptions::READABLE)
+                .map_err(ErrorCode::from)?,
         );
     }
-    let (installed, waiters) = {
+    let (filled, result, waiters) = {
         let mut state = space.pager.lock(line!());
         let mapping = state.get_mut(start, id)?;
         if dest < mapping.start || dest_end > mapping.end {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
-        let (installed, result) = space.fill_file(dest, &sources);
-        // A failed fill may still have installed a prefix of the window.
-        result?;
-        (installed, mapping.take_waiters(dest, dest_end))
+        retry.check_space(&space, 0)?;
+        let (filled, result) = space.fill_file(dest, &sources);
+        let waiters = mapping.take_waiters(dest, dest + filled.completed * PAGE);
+        (filled, result, waiters)
     };
+    progress.completed += filled.completed;
+    progress.installed += filled.installed;
+    drop(sources);
+    // Wake the completed prefix even if a later page refused allocation.
     resume(waiters, true);
-    Ok(installed)
+    result?;
+    Ok(progress.installed)
 }
 
 fn fail(id: u64, page: u64) -> Result<(), ErrorCode> {
@@ -266,6 +313,7 @@ enum Next {
     Resume(bool),
     /// Queued for sys-io; wake it.
     Request(Arc<SysObject>),
+    Pressure(AllocationFailure),
 }
 
 /// Called for a not-present fault in a file-paged segment, after the thread
@@ -286,8 +334,11 @@ pub(super) fn on_fault(thread: &Thread, addr: u64) -> bool {
         if space.virt_to_phys(page).is_some() {
             Next::Resume(true)
         } else if page >= mapping.zero_from {
-            let filled = space.fill_file_zero(page);
-            Next::Resume(filled.is_ok())
+            match space.fill_file_zero(page) {
+                Ok(_) => Next::Resume(true),
+                Err(failure @ AllocationFailure::Pressure { .. }) => Next::Pressure(failure),
+                Err(_) => Next::Resume(false),
+            }
         } else {
             mapping.waiters.push(Waiter {
                 page,
@@ -306,6 +357,11 @@ pub(super) fn on_fault(thread: &Thread, addr: u64) -> bool {
     match next {
         Next::Resume(success) => thread.resume_file_fault(true, success),
         Next::Request(notify) => notify.wake(false),
+        Next::Pressure(failure) => {
+            if !super::oom::on_fault(thread, failure) {
+                thread.resume_file_fault(true, false);
+            }
+        }
     }
     true
 }
@@ -315,8 +371,7 @@ pub(super) fn on_fault(thread: &Thread, addr: u64) -> bool {
 pub(crate) fn retire_space(space: &UserAddressSpace) {
     let (mappings, notify) = {
         let mut state = space.pager.lock(line!());
-        state.retired = true;
-        let mappings = core::mem::take(&mut state.mappings);
+        let mappings = state.retire();
         if mappings.is_empty() {
             return;
         }
@@ -360,4 +415,52 @@ pub(crate) fn unmap(
         notify.wake(false);
     }
     Ok(())
+}
+
+#[cfg(debug_assertions)]
+pub(crate) fn test() {
+    let start = PAGE;
+    let mut state = MappingState::default();
+    state.mappings.insert(
+        start,
+        Mapping {
+            id: 1,
+            start,
+            end: start + 3 * PAGE,
+            zero_from: u64::MAX,
+            queued: [start, start + PAGE, start + 2 * PAGE]
+                .into_iter()
+                .collect(),
+            waiters: (0..3)
+                .map(|idx| Waiter {
+                    page: start + idx * PAGE,
+                    thread: Weak::new(),
+                })
+                .collect(),
+        },
+    );
+    let mapping = state.get_mut(start, 1).unwrap();
+    // A partial fill wakes only its completed prefix; the remainder stays
+    // owned by the pager until filled, failed or retired.
+    assert_eq!(mapping.take_waiters(start, start + PAGE).len(), 1);
+    assert_eq!(mapping.waiters.len(), 2);
+    assert_eq!(mapping.queued.len(), 2);
+    assert!(mapping.take_waiters(start, start + PAGE).is_empty());
+    assert_eq!(
+        mapping.take_waiters(start + PAGE, start + 3 * PAGE).len(),
+        2
+    );
+    assert!(mapping.waiters.is_empty());
+    assert!(mapping.queued.is_empty());
+    assert_eq!(
+        state.get_mut(start, 2).map(|_| ()),
+        Err(moto_rt::E_BAD_HANDLE)
+    );
+    assert_eq!(state.retire().len(), 1);
+    assert!(state.retired);
+    assert_eq!(
+        state.get_mut(start, 1).map(|_| ()),
+        Err(moto_rt::E_BAD_HANDLE)
+    );
+    crate::raw_log!("pager retry tests PASS");
 }

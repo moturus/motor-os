@@ -1,11 +1,15 @@
 //! Scheduler-driven OOM selection. The physical allocator owns count/phase/
-//! generation; this lock owns only job and exit-continuation bookkeeping.
+//! generation; this lock owns job, exit-continuation and waiter bookkeeping.
 //! Runtime policy stays unarmed until syscall and fault waits are installed.
 
 use super::process::{Process, ProcessStatus, Thread};
 use crate::{mm::phys, util::SpinLock};
 use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 use moto_sys::caps::ProcessRole;
+
+pub(crate) mod wait;
+use crate::mm::WaitReason;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Disposition {
@@ -59,6 +63,10 @@ struct WorkState {
     // Kept across recovery/new runs until this exact victim finishes cleanup.
     pending_victim: Option<(u64, u64)>,
     waiting_for_exits: Option<u64>,
+    // Parked faults resume through the pager's status-checked path, parked
+    // syscalls through Thread::oom_resume(). Removal owns the resume.
+    fault_waiters: Vec<(Weak<Thread>, WaitReason)>,
+    syscall_waiters: Vec<(Weak<Thread>, WaitReason)>,
 }
 
 impl WorkState {
@@ -147,18 +155,27 @@ fn state() -> &'static OomState {
 /// Called beside process_wake_events(), with no scheduler/MM lock held.
 pub(crate) fn attend() {
     while phys::take_oom_attention() {
-        let (snapshot, free) = phys::oom_snapshot();
-        if !snapshot.armed() {
-            return;
-        }
-        let generation = snapshot.generation();
-        let (ended, started, post) = {
+        let (generation, free, ended, started, post, faults, syscalls) = {
             let mut work = state().work.lock(line!());
+            let (snapshot, free) = phys::oom_snapshot();
+            if !snapshot.armed() {
+                return;
+            }
+            let generation = snapshot.generation();
             let (ended, started) = work.observe(generation, snapshot.killing());
             let post = work.schedule(generation, snapshot.killing());
-            (ended, started, post)
+            let faults = wait::take_ready(&mut work.fault_waiters, snapshot);
+            let syscalls = wait::take_ready(&mut work.syscall_waiters, snapshot);
+            (generation, free, ended, started, post, faults, syscalls)
         };
-        // 5d adds recovery-object wakes and fault-waiter rechecks here.
+        for thread in faults {
+            resume_fault(thread);
+        }
+        for thread in syscalls {
+            if let Some(thread) = thread.upgrade() {
+                thread.oom_resume();
+            }
+        }
         if let Some(ended) = ended {
             crate::raw_log!("OOM: end generation {ended}, {free} free pages");
         }
@@ -174,6 +191,42 @@ pub(crate) fn attend() {
             ));
         }
     }
+}
+
+fn count_park(thread: &Thread, metric: crate::xray::stats::MetricType) {
+    thread.process_stats.adjust_metric(metric, 1);
+    crate::xray::stats::system_stats_ref().adjust_metric(metric, 1);
+}
+
+fn resume_fault(thread: Weak<Thread>) {
+    if let Some(thread) = thread.upgrade() {
+        thread.resume_file_fault(false, true);
+    }
+}
+
+/// The caller has unwound MM and published Preempted, without a resume job.
+/// Removal from this queue is the sole owner of a successful resume. A kill
+/// uses the normal Preempted exit path; resume_file_fault skips killed threads.
+pub(super) fn on_fault(thread: &Thread, failure: crate::mm::AllocationFailure) -> bool {
+    let crate::mm::AllocationFailure::Pressure { class, .. } = failure else {
+        return false;
+    };
+    let reason = match wait::resolve(failure, true) {
+        Ok(reason) => reason.unwrap_or_else(|| WaitReason::gate(class)),
+        Err(_) => return false,
+    };
+    count_park(thread, crate::xray::stats::MetricType::OomParkedFaults);
+    let ready = {
+        let mut work = state().work.lock(line!());
+        // Read under the same lock as removal, after the entry is present.
+        wait::register(&mut work.fault_waiters, thread.get_weak(), reason, || {
+            phys::oom_snapshot().0
+        })
+    };
+    if let Some(thread) = ready {
+        resume_fault(thread);
+    }
+    true
 }
 
 fn finish(generation: u64, wait: bool) {
@@ -308,6 +361,7 @@ fn report() {
 
 #[cfg(debug_assertions)]
 pub(crate) fn test() {
+    wait::test();
     use Disposition::*;
     use ProcessRole::*;
     use ProcessStatus::{Created, Exited, Exiting as ProcessExiting, PausedDebuggee, Running};

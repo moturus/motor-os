@@ -3,8 +3,8 @@
 Implementation plan for step 5 of [oom-handling.md](oom-handling.md), the
 specification. Revised on 2026-11-03 against `b2dccf4e`. This revision
 incorporates the readiness reviews; the separate review file is no longer
-needed. Step 5a is committed as `dcd36704`, and 5b as `b71cad30`. Step 5c
-is implemented locally and awaiting review; steps 5d–5f remain pending.
+needed. Steps 5a–5c are committed as `dcd36704`, `b71cad30` and `8c3a0b6f`.
+Step 5d is implemented locally and awaiting review; steps 5e–5f remain pending.
 
 The 5a changes replace the pool's used counter with the packed state word,
 perform class-aware charges before ownership changes, preserve refusal reasons
@@ -14,13 +14,14 @@ atomically with the one-process claim in the address-space base and carry its
 allocation class through frames, both stacks, page tables and shared MM slabs.
 Internal `AllocationFailure` results distinguish ordinary codes from pressure
 receipts, including the original floor refusal through huge fallback. Current
-syscall boundaries still convert failures to the existing ABI codes; waiting
-arrives in 5d. The production word stays unarmed. The 5c changes add atomic
+syscall boundaries use these receipts for waiting in 5d while preserving the
+existing ABI codes. The production word stays unarmed. The 5c changes add atomic
 request/latch operations, scheduler attention, generation-checked selection,
 exit continuations and victimless reporting. Run starts are counted in the
 physical pool; committed kill requests are counted by the worker. All four
-production metric names are registered, with waiter-counter producers still
-pending in 5d. Activation remains in 5e.
+production metric names are registered. The 5d changes add syscall retries,
+the syscall and fault wait queues, pager partial-progress retries and both
+process-attributed waiter counters. Activation remains in 5e.
 
 The accepted policy stays: None and Interactive allocations have a 2 MiB
 floor, System allocations a 512 KiB floor, and kernel allocations no floor.
@@ -168,6 +169,12 @@ ABI continues to return the existing error codes. Do not turn every
 `E_OUT_OF_MEMORY` into a pressure wait: per-process limits, virtual-address
 exhaustion and invalid requests keep their existing handling.
 
+The 5d implementation also retains a copyable `Waiting(WaitReason)` outcome
+when a woken syscall revalidates its arguments but is still blocked. This
+means no new allocation was attempted. Recovery racing that recheck permits
+retry even above 768 pages; the post-rollback permanent-OOM rule applies only
+to an actual physical shortage.
+
 An ordinary syscall attempt has an outer retry loop and an inner operation
 that returns completely before any wait. The inner operation releases its
 locks, pins, strings and owned references and rolls back incomplete work.
@@ -219,25 +226,24 @@ observed_generation
 queued_or_running_job: Option<generation>
 pending_victim: Option<(generation, kernel_pid)>
 waiting_for_exits: Option<generation>
-recovered: Option<Arc<SysObject>>
 fault_waiters: Vec<(Weak<Thread>, WaitReason)>
+syscall_waiters: Vec<(Weak<Thread>, WaitReason)>
 ```
 
 The 5c implementation installs the generation, job and exit bookkeeping in
 `uspace::oom`. It also tracks the last dispatched run for start/end logs.
-The recovery object and fault queue are added with their consumers in 5d;
-5c does not allocate a recovery object or implement waiter wakeups.
+The local 5d implementation adds the fault and syscall wait queues with their
+consumers. Both hold only weak thread references and copyable wait reasons.
 
 `attend()` runs beside `process_wake_events()` in `sched_loop`, holding no
 other lock. It consumes attention, reads the authoritative state word and
-reconciles the bookkeeping. A generation change wakes the recovery object and
-rechecks fault waiters under the bookkeeping lock. Remove only satisfied/dead
-entries; retain blocked ones in the queue, so recovery cannot race a later
-reinsertion. If Killing needs work, and no job, victim cleanup or current
-exit wait occupies the slot, it records and posts one detached job.
-Posting, logging, object wakes and thread resumes occur after releasing the
-bookkeeping lock. Check for attention again before finishing; a concurrent
-producer must leave work for this or a later iteration.
+reconciles the bookkeeping. It rechecks both wait queues under the bookkeeping
+lock on every attention. Remove only satisfied/dead entries; retain blocked
+ones in the queue, so recovery cannot race a later reinsertion. If Killing
+needs work, and no job, victim cleanup or current exit wait occupies the slot,
+it records and posts one detached job. Posting, logging and thread resumes
+occur after releasing the bookkeeping lock. Check for attention again before
+finishing; a concurrent producer must leave work for this or a later iteration.
 
 The job:
 
@@ -304,13 +310,23 @@ alone does not prove a long wait. Add no test-only metrics or control hooks.
 
 ## Syscall wait ownership
 
-Use one lazily created kernel-owned recovery `SysObject` and a non-NONE
-sentinel below `CUSTOM_HANDLE_OFFSET`. Register with `add_waiting_thread` and
-`add_wait_objects`, then recheck the **full wait reason** against the current
-state word. If already satisfied, add the sentinel waker before `wait()`.
-After every wake, recheck role, handles, target liveness and limits. Keep the
-object alive in kernel/thread-owned state; do not leave a local `Arc` across
-`Thread::wait()`.
+Parked syscalls use the same weak queue protocol as faults, in a second
+`syscall_waiters` vector. `park()` registers `(Weak<Thread>, WaitReason)`
+under the bookkeeping lock, then rechecks the **full wait reason** against the
+state word read under that same lock. If already satisfied, it removes the
+entry and returns at once. Otherwise it calls `Thread::oom_wait()`, a pause
+that is not `Thread::wait()`: `wait()` drains the thread's pending-wake latch
+(its wakers and wake counters), and those wakes belong to the userspace wait
+that follows the syscall. The moto-sdk executor relies on that latch for
+cross-thread `SysCpu::wake` deliveries. `oom_wait()` leaves the latch alone,
+and its `on_thread_paused()` arm sleeps only while the queue still owns the
+thread's resume; a thread whose entry was already removed is requeued
+instead. `attend()` removes satisfied entries and calls `Thread::oom_resume()`
+for each, which only moves an InWait thread to Runnable. A foreign wake that
+returns the pause early is harmless: the thread takes back its unclaimed
+entry before rechecking, so no resume is owed and no entry is duplicated.
+After every wake, recheck role, handles, target liveness and limits. No
+`SysObject`, sentinel handle or wait-object list is involved.
 
 An entry wait depends on the recipient's gate. A physical-shortage wait also
 remembers the run generation established by the refusal/retry rules above.
@@ -337,6 +353,41 @@ Pager `zero_from` only records an offset; it needs no allocation gate. Process
 creation and its first start retain the existing 4 MiB refusal, with tagged
 pressure results converted to the creation error rather than sleeping inside
 partially constructed process ownership.
+
+### 5d ownership audit
+
+`sys_mem_impl`, `sys_obj_impl` and `sys_pager` retry only after their inner
+attempt returns. The outer frames retain borrowed thread/argument references,
+copyable results and `Retry`; pager fill also retains `FillProgress` (completed
+and installed page counts). `sys_mem_impl` dispatches pager operations before
+resolving an owner. `sys_spawn_impl` assigns the spawn result in a separate
+statement so the temporary owner `Arc` is dropped before the waiting match
+arm. Its failed attempt releases both stacks before returning.
+
+Every allocating retry re-resolves its recipients and checks liveness, role
+and the applicable memory charge before testing its wait reason. Stack
+preflight includes both stacks, with cached kernel stacks already charged;
+shared allocation checks both spaces and the combined charge for a self-alias.
+The physical CAS still enforces gates/floors if pressure races this preflight.
+Shared `OP_GET` requeues an unconsumed listener before returning pressure.
+
+The syscall queue is owned by `OomState`; a parked thread is referenced only
+weakly. `Retry::after_failure` and `park()` hold no owned resources while
+suspended; the existing syscall dispatch frames hold only references and
+scalar data. A kill ends the thread inside `Thread::oom_wait()`. Each wake
+returns to the outer operation to revalidate.
+
+Fault handling publishes Preempted after MM unwinds, then registers under the
+OOM lock. Registration reads the current word after insertion; scheduler
+draining also samples under that lock and retains blocked entries in place.
+The removed weak reference alone owns the resume, which runs after unlocking.
+Pager zero-fill uses this queue only after releasing its mapping guard;
+nonzero file misses remain solely in the pager queue.
+
+Pager fill advances past both newly installed and already-present pages,
+accumulates only newly installed pages for the ABI result, drops source pins,
+and wakes the completed prefix outside the mapping lock, including on error.
+Retries look up the mapping ID again and pin only the remaining source pages.
 
 ## Fault waiting
 
@@ -434,6 +485,45 @@ registration and exit notification during a final scan. These use private
 scratch pools and the worker's production bookkeeping; actual pressure kills
 and the disposable-guest abort gate remain for 5e–5f.
 
+5d review validation on 2026-11-03: debug/release kernel builds and Clippy
+checks passed without warnings; formatting checks passed. The corrected debug
+`src/tests/full-test.sh` run passed (17.2 minutes of testing), and
+`src/tests/full-test.sh --release` passed (10.6 minutes). These are one review
+run per build; the three-per-build gate still applies before committing.
+
+The first debug run stopped in a newly added quota preflight assertion: the
+preceding role fixture retains one lazy page and an eight-page cached kernel
+stack, so the new test's assumed zero usage was wrong. The test now sets its
+limit relative to current usage and checks both cached-stack reuse and refusal
+of a larger uncached stack. The failure was in the test setup; no retry,
+timeout or assertion weakening was added to the suite.
+
+The debug guest passed `phys_blocks policy tests`, `OOM waiter tests`,
+`OOM dispatch tests`, `pager retry tests`, `allocation role tests` and the
+existing exhaustion tests. New cases cover post-rollback decisions, completed
+generations across renewed pressure, an unchanged System latch, spurious wakes
+racing recovery, weak-waiter registration/removal and cancellation, completed
+pager prefixes, mapping identity/retirement and stack quota preflight. The
+weak-queue tests use native allocation lifetimes without posting resume jobs;
+actual pressure, syscall cancellation and resumed fault execution remain the
+armed guest tests in 5e. No production arming or additional pool drain was added.
+
+5d review follow-up on 2026-11-03: the syscall park originally called
+`Thread::wait()`, whose post-wait handling drains the thread's waker list and
+marks every queued wake taken. That is the latch for a userspace wake sent to
+a thread that is not waiting, so a thread parked in an allocating syscall lost
+wakes meant for its next `SysCpu::wait`; the moto-sdk executor relies on that
+latch. The park now uses the syscall wait queue with `Thread::oom_wait()` and
+`Thread::oom_resume()`, as described under "Syscall wait ownership", and the
+recovery object is gone. The stack quota preflight shares its sizing helper
+with the stack allocators. Debug/release kernel builds and Clippy passed
+without warnings, `test-system-tty.sh` passed with the OOM, pager and policy
+self-tests, and the three-per-build gate passed on the corrected sources:
+`src/tests/full-test.sh` three times in debug (17.1, 16.6 and 16.6 minutes of
+testing) and three times in release (10.5, 10.6 and 10.6 minutes), with no
+retries. The review is in `step-5d-review.md` at the repository root. The
+changes remain uncommitted.
+
 All new tests run inside Motor OS and are reached from `full-test.sh`, through
 existing kernel self-tests, systest or its console fixture. Keep pressure tests
 out of `--under-load`. Extend existing debug boot test hooks with bounded
@@ -514,7 +604,7 @@ before any authorized commit. Include at least one real one-vCPU run in each
 build's activation validation. Once the complete transition passes, run
 `src/tests/full-test-dev.sh --release`; its source phase remains release-only.
 Do not extend timeouts, weaken assertions or retry defects to obtain a pass.
-The current 5c changes remain uncommitted for review.
+The current 5d changes remain uncommitted for review.
 
 ## Decisions retained and implementation choices
 

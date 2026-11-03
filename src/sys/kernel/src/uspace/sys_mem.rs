@@ -1,50 +1,54 @@
 use moto_sys::*;
 use syscalls::SyscallResult;
 
+use super::oom::wait::Retry;
 use crate::mm::user::UserAddressSpace;
-use crate::mm::MappingOptions;
+use crate::mm::{AllocationFailure, MappingOptions};
 
 use super::syscall::*;
 
 fn sys_mmio_map(
+    retry: &Retry,
     address_space: &UserAddressSpace,
     phys_addr: u64,
     virt_addr: u64,
     page_size: u64,
     num_pages: u64,
-) -> SyscallResult {
+) -> Result<SyscallResult, AllocationFailure> {
     if virt_addr != u64::MAX {
         log::debug!("sys_mem_impl: bad virt_addr: 0x{virt_addr:x}");
-        return ResultBuilder::invalid_argument();
+        return Ok(ResultBuilder::invalid_argument());
     }
 
     if page_size != sys_mem::PAGE_SIZE_SMALL {
         log::debug!("sys_mem_impl: bad page_size: 0x{page_size:x}");
-        return ResultBuilder::invalid_argument();
+        return Ok(ResultBuilder::invalid_argument());
     }
 
+    crate::mm::phys::validate_mmio(phys_addr, num_pages)?;
+    retry.check_space(address_space, num_pages * page_size)?;
     match address_space.mmio_map(phys_addr, num_pages) {
-        Ok(virt_addr) => ResultBuilder::ok_1(virt_addr),
+        Ok(virt_addr) => Ok(ResultBuilder::ok_1(virt_addr)),
         Err(err) => {
             log::debug!("sys_mmio_map failed: {err:?}");
-            ResultBuilder::result(err.into())
+            Err(err)
         }
     }
 }
 
 fn sys_map(
+    retry: &Retry,
     curr_thread: &super::process::Thread,
     address_space: &UserAddressSpace,
-    flags: u32,
-    phys_addr: u64,
-    virt_addr: u64,
-    page_size: u64,
-    num_pages: u64,
-) -> SyscallResult {
-    curr_thread
-        .process_stats
-        .adjust_metric(crate::xray::stats::MetricType::SysMemMaps, 1);
-
+    args: &SyscallArgs,
+) -> Result<SyscallResult, AllocationFailure> {
+    let (flags, phys_addr, virt_addr, page_size, num_pages) = (
+        args.flags,
+        args.args[1],
+        args.args[2],
+        args.args[3],
+        args.args[4],
+    );
     // Protect against bad numbers. No mapping is empty: every path below
     // builds a segment, and a segment of zero size is a kernel assertion.
     // A size that overflows is malformed; one above a terabyte is refused
@@ -52,14 +56,14 @@ fn sys_map(
     // with the memory manager's own code.
     if num_pages == 0 {
         log::debug!("sys_mem_impl: zero pages");
-        return ResultBuilder::invalid_argument();
+        return Ok(ResultBuilder::invalid_argument());
     }
     let (new_bytes, overflow) = page_size.overflowing_mul(num_pages);
     if overflow {
-        return ResultBuilder::invalid_argument();
+        return Ok(ResultBuilder::invalid_argument());
     }
     if new_bytes > (1 << 40) {
-        return ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY);
+        return Ok(ResultBuilder::result(moto_rt::E_OUT_OF_MEMORY));
     }
 
     let io_manager = curr_thread.owner().capabilities() & moto_sys::caps::CAP_IO_MANAGER != 0;
@@ -68,51 +72,65 @@ fn sys_map(
         // This is used for MMIO at specific addresses, e.g. PCI functions.
         if !io_manager {
             log::debug!("sys_map: MMIO w/o CAP_IO_MAN");
-            return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
+            return Ok(ResultBuilder::result(moto_rt::E_NOT_ALLOWED));
         }
-        return sys_mmio_map(address_space, phys_addr, virt_addr, page_size, num_pages);
+        return sys_mmio_map(
+            retry,
+            address_space,
+            phys_addr,
+            virt_addr,
+            page_size,
+            num_pages,
+        );
     }
 
     if page_size != sys_mem::PAGE_SIZE_SMALL {
-        return ResultBuilder::invalid_argument();
+        return Ok(ResultBuilder::invalid_argument());
     }
 
     if flags == (SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_CONTIGUOUS) {
         // This is used for MMIO at arbitrary addresses, e.g. to create VirtIO virtqueues.
         if !io_manager {
             log::debug!("sys_map: MMIO w/o CAP_IO_MAN");
-            return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
+            return Ok(ResultBuilder::result(moto_rt::E_NOT_ALLOWED));
         }
         if phys_addr != u64::MAX || virt_addr != u64::MAX {
             log::debug!("sys_mem_impl: bad map addresses");
-            return ResultBuilder::invalid_argument();
+            return Ok(ResultBuilder::invalid_argument());
         }
 
         if num_pages > 64 {
             log::debug!("sys_mem_impl: too many pages");
-            return ResultBuilder::invalid_argument();
+            return Ok(ResultBuilder::invalid_argument());
         }
 
+        retry.check_space(address_space, new_bytes)?;
         return match address_space.alloc_contiguous_pages(num_pages) {
-            Ok(segment) => ResultBuilder::ok_2(segment.start, segment.size),
-            Err(err) => ResultBuilder::result(err.into()),
+            Ok(segment) => Ok(ResultBuilder::ok_2(segment.start, segment.size)),
+            Err(
+                err @ AllocationFailure::Pressure {
+                    kind: crate::mm::RefusalKind::Gate,
+                    ..
+                },
+            ) => Err(err),
+            Err(err) => Err(AllocationFailure::Code(err.into())),
         };
     }
 
     if flags & SysMem::F_CUSTOM_USER == SysMem::F_CUSTOM_USER {
         if !io_manager {
             log::debug!("sys_map: F_CUSTOM_USER w/o CAP_IO_MAN");
-            return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
+            return Ok(ResultBuilder::result(moto_rt::E_NOT_ALLOWED));
         }
         if phys_addr != u64::MAX || virt_addr == u64::MAX {
             log::debug!("sys_mem_impl: bad map addresses");
-            return ResultBuilder::invalid_argument();
+            return Ok(ResultBuilder::invalid_argument());
         }
 
         let mut flags = flags ^ SysMem::F_CUSTOM_USER;
         if flags == 0 {
             log::debug!("sys_mem_impl: bad flags");
-            return ResultBuilder::invalid_argument();
+            return Ok(ResultBuilder::invalid_argument());
         }
 
         let mut mapping_options = MappingOptions::USER_ACCESSIBLE;
@@ -127,49 +145,58 @@ fn sys_map(
 
         if flags != 0 {
             log::debug!("sys_mem_impl: bad flags");
-            return ResultBuilder::invalid_argument();
+            return Ok(ResultBuilder::invalid_argument());
         }
         if !mapping_options.contains(MappingOptions::READABLE) {
             log::debug!("sys_mem_impl: writable-only custom mapping");
-            return ResultBuilder::invalid_argument();
+            return Ok(ResultBuilder::invalid_argument());
         }
 
         if virt_addr < moto_sys::CUSTOM_USERSPACE_REGION_START
             || (virt_addr + (num_pages << sys_mem::PAGE_SIZE_SMALL_LOG2))
                 >= CUSTOM_USERSPACE_REGION_END
         {
-            return ResultBuilder::invalid_argument();
+            return Ok(ResultBuilder::invalid_argument());
         }
 
+        retry.check_space(address_space, 0)?;
         return match address_space.allocate_user_fixed(virt_addr, num_pages, mapping_options) {
-            Ok(()) => ResultBuilder::ok_2(virt_addr, num_pages << sys_mem::PAGE_SIZE_SMALL_LOG2),
-            Err(err) => ResultBuilder::result(err.into()),
+            Ok(()) => Ok(ResultBuilder::ok_2(
+                virt_addr,
+                num_pages << sys_mem::PAGE_SIZE_SMALL_LOG2,
+            )),
+            Err(err) => Err(err),
         };
     }
 
     if flags == (SysMem::F_READABLE | SysMem::F_WRITABLE) {
         if phys_addr == u64::MAX && virt_addr == u64::MAX {
             // This is a normal user heap allocation.
+            retry.check_space(
+                address_space,
+                crate::mm::user::heap_allocation_bytes(num_pages),
+            )?;
             return match address_space.alloc_user_heap(num_pages) {
-                Ok(segment) => ResultBuilder::ok_2(segment.start, segment.size),
-                Err(err) => ResultBuilder::result(err.into()),
+                Ok(segment) => Ok(ResultBuilder::ok_2(segment.start, segment.size)),
+                Err(err) => Err(err),
             };
         }
 
         log::debug!("sys_mem_impl: bad map addresses");
-        return ResultBuilder::invalid_argument();
+        return Ok(ResultBuilder::invalid_argument());
     }
 
     if flags == (SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_LAZY) {
         // This is a normal user heap allocation.
         if phys_addr != u64::MAX || virt_addr != u64::MAX {
             log::debug!("sys_mem_impl: bad map addresses");
-            return ResultBuilder::invalid_argument();
+            return Ok(ResultBuilder::invalid_argument());
         }
 
+        retry.check_space(address_space, new_bytes)?;
         return match address_space.alloc_user_lazy(num_pages) {
-            Ok(segment) => ResultBuilder::ok_2(segment.start, segment.size),
-            Err(err) => ResultBuilder::result(err.into()),
+            Ok(segment) => Ok(ResultBuilder::ok_2(segment.start, segment.size)),
+            Err(err) => Err(err),
         };
     }
 
@@ -180,13 +207,14 @@ fn sys_map(
         // gets the whole segment, num_pages + 2 pages, guards included.
         if phys_addr != u64::MAX || virt_addr != u64::MAX {
             log::debug!("sys_mem_impl: bad map addresses");
-            return ResultBuilder::invalid_argument();
+            return Ok(ResultBuilder::invalid_argument());
         }
 
         let lazy = (flags & SysMem::F_LAZY) != 0;
+        retry.check_space(address_space, new_bytes + 2 * page_size)?;
         return match address_space.alloc_user_guarded(num_pages, lazy) {
-            Ok(segment) => ResultBuilder::ok_2(segment.start, segment.size),
-            Err(err) => ResultBuilder::result(err.into()),
+            Ok(segment) => Ok(ResultBuilder::ok_2(segment.start, segment.size)),
+            Err(err) => Err(err),
         };
     }
 
@@ -195,15 +223,16 @@ fn sys_map(
         // shared memory operations.
         if phys_addr != u64::MAX || virt_addr != u64::MAX {
             log::debug!("sys_mem_impl: bad map addresses");
-            return ResultBuilder::invalid_argument();
+            return Ok(ResultBuilder::invalid_argument());
         }
 
+        retry.check_space(address_space, new_bytes)?;
         return match address_space.alloc_user_unmapped(num_pages) {
             Ok(segment) => {
                 debug_assert_eq!(page_size * num_pages, segment.size);
-                ResultBuilder::ok_2(segment.start, segment.size)
+                Ok(ResultBuilder::ok_2(segment.start, segment.size))
             }
-            Err(err) => ResultBuilder::result(err.into()),
+            Err(err) => Err(err),
         };
     }
 
@@ -233,26 +262,23 @@ fn sys_map(
         }
         if flags != 0 {
             log::debug!("sys_mem_impl: bad map flags: 0x{flags:x}");
-            return ResultBuilder::invalid_argument();
+            return Ok(ResultBuilder::invalid_argument());
         }
         if !opts.contains(MappingOptions::READABLE) {
             log::debug!("sys_mem_impl: shared mapping is not readable");
-            return ResultBuilder::invalid_argument();
+            return Ok(ResultBuilder::invalid_argument());
         }
         // W^X is enforced per mapping. The writable loader alias can refer
         // to the same frame as an executable target mapping.
         if opts.contains(MappingOptions::EXECUTABLE) && opts.contains(MappingOptions::WRITABLE) {
             log::debug!("sys_mem_impl: W+X mapping rejected");
-            return ResultBuilder::invalid_argument();
+            return Ok(ResultBuilder::invalid_argument());
         }
-        let target_is_self =
-            core::ptr::eq(address_space, curr_thread.owner().address_space().as_ref());
-
         if phys_addr != u64::MAX {
             return sys_share_existing(
+                retry,
                 curr_thread,
                 address_space,
-                target_is_self,
                 opts,
                 phys_addr,
                 virt_addr,
@@ -260,33 +286,39 @@ fn sys_map(
             );
         }
 
-        return match address_space.alloc_user_shared(
-            virt_addr,
-            num_pages,
-            opts,
-            curr_thread.owner().address_space(),
-        ) {
-            Ok((addr1, addr2)) => ResultBuilder::ok_2(addr1, addr2),
-            Err(err) => ResultBuilder::result(err.into()),
+        let owner = curr_thread.owner();
+        let alias = owner.address_space();
+        alias.check_allocation(new_bytes)?;
+        let target_bytes = if core::ptr::eq(address_space, alias.as_ref()) {
+            2 * new_bytes
+        } else {
+            new_bytes
+        };
+        retry.check_space(address_space, target_bytes)?;
+        retry.check(alias.allocation_class())?;
+        return match address_space.alloc_user_shared(virt_addr, num_pages, opts, alias) {
+            Ok((addr1, addr2)) => Ok(ResultBuilder::ok_2(addr1, addr2)),
+            Err(err) => Err(err),
         };
     }
 
     log::debug!("sys_mem_impl: bad map flags: 0x{flags:x}");
-    ResultBuilder::invalid_argument()
+    Ok(ResultBuilder::invalid_argument())
 }
 
 /// Maps the caller's segment at `local_addr` into `address_space` at
 /// `virt_addr`. Both addresses are fixed and the segments must be the same
 /// size; the target mapping is never writable.
 fn sys_share_existing(
+    retry: &Retry,
     curr_thread: &super::process::Thread,
     address_space: &UserAddressSpace,
-    target_is_self: bool,
     opts: MappingOptions,
     local_addr: u64,
     virt_addr: u64,
     num_pages: u64,
-) -> SyscallResult {
+) -> Result<SyscallResult, AllocationFailure> {
+    let target_is_self = core::ptr::eq(address_space, curr_thread.owner().address_space().as_ref());
     let page_mask = sys_mem::PAGE_SIZE_SMALL - 1;
     if target_is_self
         || opts.contains(MappingOptions::WRITABLE)
@@ -294,9 +326,10 @@ fn sys_share_existing(
         || (local_addr | virt_addr) & page_mask != 0
     {
         log::debug!("sys_mem_impl: bad share arguments");
-        return ResultBuilder::invalid_argument();
+        return Ok(ResultBuilder::invalid_argument());
     }
 
+    retry.check_space(address_space, num_pages << sys_mem::PAGE_SIZE_SMALL_LOG2)?;
     match address_space.share_from(
         curr_thread.owner().address_space(),
         local_addr,
@@ -304,8 +337,11 @@ fn sys_share_existing(
         num_pages,
         opts,
     ) {
-        Ok(()) => ResultBuilder::ok_2(virt_addr, num_pages << sys_mem::PAGE_SIZE_SMALL_LOG2),
-        Err(err) => ResultBuilder::result(err.into()),
+        Ok(()) => Ok(ResultBuilder::ok_2(
+            virt_addr,
+            num_pages << sys_mem::PAGE_SIZE_SMALL_LOG2,
+        )),
+        Err(err) => Err(err),
     }
 }
 
@@ -413,32 +449,52 @@ pub fn sys_mem_impl(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
     thread
         .process_stats
         .adjust_metric(crate::xray::stats::MetricType::SysMemCalls, 1);
-
-    let version = args.version;
-    if version > 0 {
+    if args.version > 0 {
         return ResultBuilder::version_too_high();
     }
-
     if args.operation == SysMem::OP_PAGER {
         return super::pager::sys_pager(thread, args);
     }
+    if args.operation == SysMem::OP_MAP {
+        thread
+            .process_stats
+            .adjust_metric(crate::xray::stats::MetricType::SysMemMaps, 1);
+    }
+    let mut retry = Retry::default();
+    loop {
+        match try_sys_mem(thread, args, &retry) {
+            Ok(result) => return result,
+            Err(failure) => {
+                if let Err(code) = retry.after_failure(thread, failure) {
+                    return ResultBuilder::result(code);
+                }
+            }
+        }
+    }
+}
 
+// All owner/target Arcs and sharing temporaries die here, before the outer wait.
+fn try_sys_mem(
+    thread: &super::process::Thread,
+    args: &SyscallArgs,
+    retry: &Retry,
+) -> Result<SyscallResult, AllocationFailure> {
     let address_space_handle = SysHandle::from_u64(args.args[0]);
 
     if address_space_handle == SysHandle::NONE {
         if args.operation != SysMem::OP_QUERY {
             log::debug!("sys_mem_impl: NONE handle and not OP_QUERY.");
-            return ResultBuilder::invalid_argument();
+            return Ok(ResultBuilder::invalid_argument());
         }
 
-        return sys_mem_global_stats(thread, args.flags, args.args[1]);
+        return Ok(sys_mem_global_stats(thread, args.flags, args.args[1]));
     }
 
     if address_space_handle == SysHandle::KERNEL {
         if args.operation == SysMem::OP_RECLAIM {
-            return sys_reclaim();
+            return Ok(sys_reclaim());
         }
-        return ResultBuilder::invalid_argument();
+        return Ok(ResultBuilder::invalid_argument());
     }
 
     let process = thread.owner();
@@ -453,10 +509,15 @@ pub fn sys_mem_impl(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
                     &process,
                     address_space_handle,
                 ) {
-                    Some(p) => p.address_space().clone(),
+                    Some(p) => {
+                        if args.operation == SysMem::OP_MAP && !p.status().is_alive() {
+                            return Ok(ResultBuilder::invalid_argument());
+                        }
+                        p.address_space().clone()
+                    }
                     None => {
                         log::debug!("sys_mem_impl: bad handle");
-                        return ResultBuilder::invalid_argument();
+                        return Ok(ResultBuilder::invalid_argument());
                     }
                 },
                 Some(a) => a,
@@ -467,35 +528,27 @@ pub fn sys_mem_impl(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
     match args.operation {
         SysMem::OP_MAP => {
             if args.args[5] != 0 {
-                return ResultBuilder::invalid_argument();
+                return Ok(ResultBuilder::invalid_argument());
             }
-            sys_map(
-                thread,
-                &address_space,
-                args.flags,
-                args.args[1],
-                args.args[2],
-                args.args[3],
-                args.args[4],
-            )
+            sys_map(retry, thread, &address_space, args)
         }
         SysMem::OP_UNMAP => {
             if args.args[3] != 0 || args.args[4] != 0 || args.args[5] != 0 {
-                return ResultBuilder::invalid_argument();
+                return Ok(ResultBuilder::invalid_argument());
             }
-            sys_unmap(
+            Ok(sys_unmap(
                 thread,
                 &address_space,
                 args.flags,
                 args.args[1],
                 args.args[2],
-            )
+            ))
         }
         SysMem::OP_QUERY => {
             if args.args[5] != 0 {
-                return ResultBuilder::invalid_argument();
+                return Ok(ResultBuilder::invalid_argument());
             }
-            sys_mem_query(
+            Ok(sys_mem_query(
                 thread,
                 &address_space,
                 args.flags,
@@ -503,11 +556,11 @@ pub fn sys_mem_impl(thread: &super::process::Thread, args: &SyscallArgs) -> Sysc
                 args.args[2],
                 args.args[3],
                 args.args[4],
-            )
+            ))
         }
         _ => {
             log::debug!("sys_mem: bad op {}", args.operation);
-            ResultBuilder::invalid_argument()
+            Ok(ResultBuilder::invalid_argument())
         }
     }
 }

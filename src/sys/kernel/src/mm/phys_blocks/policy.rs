@@ -115,6 +115,9 @@ impl StateSnapshot {
     pub(crate) fn killing(self) -> bool {
         self.armed() && self.phase() == KILLING
     }
+    pub(crate) fn run_generation(self) -> Option<u64> {
+        (self.armed() && self.phase() != IDLE).then_some(self.generation())
+    }
     pub(crate) fn free_pages(self, total: u64) -> u64 {
         total - self.used()
     }
@@ -165,7 +168,7 @@ impl StateSnapshot {
         self.0 & PHASE_MASK
     }
 
-    pub(super) fn gate_closed(self, class: AllocationClass) -> bool {
+    pub(crate) fn gate_closed(self, class: AllocationClass) -> bool {
         self.0 & ARMED != 0
             && ((class == AllocationClass::User && self.phase() != IDLE)
                 || (class == AllocationClass::System && self.0 & SYSTEM_BLOCKED != 0))
