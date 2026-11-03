@@ -1,7 +1,8 @@
 # TCP forwarding in russhd and ssh
 
-Status: v5, timeout diagnosis is complete: the existing debug suite exceeds its
-1,500-second budget while making progress. Repair of that gate remains pending.
+Status: v5, implementation resumed with the user-approved 30-minute full-test
+budget. The first complete debug run passed in 28.5 minutes; remaining milestone
+gates are in progress.
 The approved external compression fix is committed and tested. No forwarding code
 has changed.
 See "Implementation progress" below and "Decisions" at the end.
@@ -14,7 +15,7 @@ Developer-image validation remains release-only.
 
 | Step | Progress | Remaining |
 |---|---|---|
-| 1 | 224 MiB matrix removal `dd716bf4` and complete-line wait fix `0f419641` committed; debug timeout diagnosed as aggregate runtime overrun; original failure and diagnostic evidence preserved | Repair existing gate runtime; main-image gates: 0/3 debug, 0/3 release; complete `full-test-dev.sh --release` |
+| 1 | 224 MiB matrix removal `dd716bf4` and complete-line wait fix `0f419641` committed; 30-minute budget validated by a complete debug pass | Main-image gates: 1/3 debug, 0/3 release; complete `full-test-dev.sh --release` |
 | 2 | Baseline preparation; external test signature fix `ac0e947` and approved compression fix `4fe78f9` committed; full fork suite passes; main-repo compression regression added | External russh close fixes and tests, pin, relay, direct opens, configuration, authentication deadline, milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
@@ -96,7 +97,7 @@ Main commit `d80f90b5` adds `src/bin/russhd/tests/compression.rs`, which passes 
 runs transitively from `full-test.sh`. It covers changing packet sizes on the
 wire compression path. Its log is `main-compression-regression.log`.
 
-### Current stop: main-image debug gate runtime (2026-11-03)
+### Debug gate runtime: diagnosis and approved extension (2026-11-03)
 
 The resumed main-image debug gate (`step1-debug-2.log`) exited 124 after its
 existing 1,500-second test budget expired during stdio-route checks. The TUI,
@@ -189,13 +190,24 @@ driver was removed after saving a copy; its VM and processes have exited.
 The original failure logs remain intact. No production code, timeout, or test
 coverage was changed during diagnosis.
 
-The next repair should target test synchronization costs, especially fixed
-settling delays in `test-terminal-size.sh` and the terminal checks in
-`full-test.sh`. Event-based waits must keep the existing per-check deadlines,
-assertions, and deliberate quiet windows that detect unwanted terminal probes.
-That repair needs its own review and measurement; simply extending the budget
-or deleting checks is not the proposed fix. Forwarding and the 3+3 gates remain
-pending while this preexisting harness issue is addressed.
+The initial recommendation was to reduce test synchronization costs while
+preserving per-check deadlines, assertions, and deliberate quiet windows. The
+user instead explicitly instructed extending the timeout to 30 minutes,
+validating a complete pass, committing that change, and resuming russhd work.
+This supersedes the earlier requirement to repair runtime before continuing.
+`full-test.sh` now gives debug and developer-image runs 1,800 seconds; standard
+release runs retain 900 seconds, and the existing single-vCPU doubling policy
+is unchanged. This explicit authorization overrides AGENTS.md's general rule
+against extending timeouts. No assertion or coverage is changed. The original
+1,500-second failure and all diagnostic evidence remain preserved.
+The complete debug validation (`step1-debug-30m-1.log`) succeeded with exit 0:
+`FULL TEST PASS: preparation steps: 0.1 minutes, testing: 28.5 minutes`.
+It ran without diagnostic hooks and completed all SSH/SFTP, mio, Tokio, and VM
+teardown checks. This satisfies the user's validation requirement before
+committing the timeout extension and counts as step 1's first debug pass.
+Guest logs are preserved in `step1-debug-30m-1-evidence/`. The original failure
+is retained separately. Release and developer-image validation come next,
+followed by the remaining consistency runs to reach 3+3.
 
 ## Goal and scope
 
@@ -728,8 +740,10 @@ On existing images, `test-wasm.sh` already passes at both 256 MiB VMs, with
 without the 224 MiB tier.
 
 Gate steps 5 to 8 with host tests and `full-test.sh --release`. The time budgets are tight:
-debug last used about 1,390 of 1,500 s. New guest checks must stay small, with negative
-cases in host tests.
+debug diagnosis estimates about 1,674 seconds against the newly approved 1,800-second
+budget (see progress above). The user requires 3+3 main-image passes for every milestone,
+superseding the lighter gates here. New guest checks must stay small, with negative cases
+in host tests.
 
 ## Acceptance
 
@@ -910,6 +924,9 @@ in `src/tests`.
 8. **The additional external russh compression fix is approved.** Drain buffered
    decoder output after compressed input is exhausted, preserving packet-size limits,
    then resume the forwarding implementation. Preserve the original failure evidence.
+9. **Extend the longer full-test budget to 30 minutes.** The user explicitly requested
+   validating a complete pass before committing the timeout change, then continuing
+   russhd work. Preserve the original failure and diagnostic evidence.
 
 These differences from OpenSSH remain:
 

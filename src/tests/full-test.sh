@@ -104,7 +104,7 @@ if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   # Debug builds and developer-image checks need the larger overall budget.
   # A single vCPU serializes everything the guest does, so it gets twice the
   # time: 30 minutes for the release suite instead of 15.
-  TIMEOUT=1500
+  TIMEOUT=1800
   if [ "$BUILD" = "release" ] && [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
     TIMEOUT=900
   fi
