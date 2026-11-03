@@ -1,7 +1,7 @@
 # TCP forwarding in russhd and ssh
 
 Status: v5, implementation resumed with the user-approved 30-minute full-test
-budget. Two debug runs passed in 28.5 and 28.6 minutes, and two release
+budget. Three debug runs passed in 28.5, 28.6, and 28.6 minutes, and two release
 runs passed in 13.8 minutes each;
 the complete developer-image release gate passed, including both 256 MiB Wasm VMs.
 The approved external compression fix is committed and tested. No forwarding code
@@ -16,7 +16,7 @@ Developer-image validation remains release-only.
 
 | Step | Progress | Remaining |
 |---|---|---|
-| 1 | 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8` committed; two debug passes, two release passes, and complete developer-image release gate passed | Main-image gates: 2/3 debug, 2/3 release; one pass of each profile remains |
+| 1 | 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8` committed; three debug passes, two release passes, and complete developer-image release gate passed | Main-image gates: 3/3 debug, 2/3 release; one release pass remains |
 | 2 | Baseline preparation; external test signature fix `ac0e947` and approved compression fix `4fe78f9` committed; full fork suite passes; main-repo compression regression added | External russh close fixes and tests, pin, relay, direct opens, configuration, authentication deadline, milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
@@ -219,7 +219,10 @@ The second standard debug gate (`step1-debug-30m-2.log`) passed with exit 0:
 preparation 0.2 minutes, testing 28.6 minutes. Guest logs are preserved in
 `step1-debug-30m-2-evidence/`. The second release gate (`step1-release-2.log`)
 passed with exit 0: preparation 1.0 minutes, testing 13.8 minutes. Guest logs
-are in `step1-release-2-evidence/`. One pass of each profile remains for 3+3.
+are in `step1-release-2-evidence/`. The third debug gate
+(`step1-debug-30m-3.log`) passed with exit 0: preparation 0.2 minutes, testing
+28.6 minutes. Guest logs are in `step1-debug-30m-3-evidence/`.
+One standard release pass remains for 3+3.
 
 ## Goal and scope
 
