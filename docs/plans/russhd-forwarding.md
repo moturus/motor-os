@@ -2,9 +2,11 @@
 
 Status: v5, milestone 1 complete with three debug and three release passes and
 the complete developer-image release gate, including both 256 MiB Wasm VMs.
-Milestone 2 is starting with the approved external russh channel-close fixes.
-The approved external compression fix is committed and tested. No forwarding code
-has changed yet.
+Milestone 2's external russh channel-close fixes and live regressions are committed
+and tested. All 145 main russhd tests, including draft close regressions, passed
+against that local fork. Publishing its commits for the Cargo pin awaits user guidance.
+The approved external compression fix is committed and tested; relay integration
+has not started.
 See "Implementation progress" below and "Decisions" at the end.
 
 ## Implementation progress
@@ -16,7 +18,7 @@ Developer-image validation remains release-only.
 | Step | Progress | Remaining |
 |---|---|---|
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
-| 2 | External test signature fix `ac0e947`, approved compression fix `4fe78f9`, peer-close fix `01d0391`, and local-close cleanup `d758c92` committed; full fork suite passes; main-repo compression regression added | Live-transport close tests, pin, relay, direct opens, configuration, authentication deadline, milestone gates |
+| 2 | External fixes `ac0e947`, `4fe78f9`, `01d0391`, `d758c92`, and live regressions `c016ea8` committed; full fork suite passes (231 tests); 145 main russhd tests pass with the local fork, including draft close regressions | Publication guidance and Cargo pin, commit main close regressions, relay, direct opens, configuration, authentication deadline, 3+3 milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
@@ -261,7 +263,47 @@ returned `Some(None)`. This diagnosis is preserved in
 socket test blocked by the sandbox, are in `russh-local-close-focused.log`.
 The final closure assertion checks readiness without the scheduling budget;
 it still fails immediately if any sender remains. Temporary diagnostics were
-removed before the passing full suite. Live-transport regressions are next.
+removed before the passing full suite.
+
+External commit `c016ea8` adds two live-transport regressions. One establishes
+server pending output against a zero-window client using the one-slot application
+queue as a dispatch barrier, closes that channel, and receives EOF on another.
+The other exhausts retained server receive credit, closes the channel with the
+last client byte still pending, and opens another channel. Both pass in about
+0.12 seconds (`russh-live-close-focused.log`). Restoring only the old peer-close
+calls in a temporary external checkout makes both fail at their five-second
+deadlock bounds (`russh-live-close-old-behavior.log` and its saved patch). That
+checkout has been removed.
+
+The diagnostic checkout initially shared the fixed checkout's target directory;
+Cargo then reused its old library on the first return run, producing an unused
+helper warning and the same stalls (`russh-close-full-suite-stale-build.log`).
+Cleaning only russh's build outputs and freshly rebuilding resolves that artifact
+mix-up. The final full suite passes 231 tests, with eight preexisting ignored
+documentation examples (`russh-close-full-suite.log`); no unused-helper warning
+remains. The external test commit is saved as `russh-live-close.patch`.
+
+The main-repository draft will add `src/bin/russhd/tests/channel_close.rs`, so
+these contracts run transitively from `full-test.sh` with the pin update. All
+145 main russhd tests passed with a temporary command-line Cargo path override
+(`main-close-local-fork.log`). The active original lockfile has been restored.
+The tested draft is saved outside the active test suite as
+`build/forwarding-validation/main-channel-close.rs`, with a portable patch at
+`pending-main-channel-close.patch` in the same directory. The proposed pin patch
+is `pending-main-close-pin.patch`: four git-source revisions change from
+`042db50` to `c016ea8f2122f7b9f21d9c20a81f60793a00b1a0`, without any dependency
+version changes. After publication, run the planned canonical `cargo update`
+and validate the actual git pin before committing the main-repository patch.
+No new main-image milestone-2 gate pass is claimed. The fork branch still
+points to `042db50`.
+Publishing the five local commits through `c016ea8` to `moturus/russh`'s shared
+`server-window` branch has been submitted for user guidance under AGENTS.md's
+non-obvious-decision rule. This publication decision is an interpretation of that
+rule, not an explicit AGENTS.md prohibition on pushing. No push has been made,
+and the main-repository pin remains unchanged. Implementation stops at this
+publication decision pending the requested guidance; all running tests have
+completed, temporary diagnostics are removed, and the main workspace contains
+no active uncommitted code patch.
 
 ## Goal and scope
 
