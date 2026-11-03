@@ -1,7 +1,8 @@
 # TCP forwarding in russhd and ssh
 
-Status: v5, implementation resumed after approval to fix the preexisting russh
-compression failure. No forwarding code has changed.
+Status: v5, stopped for review after diagnosing step 1's debug-gate timeout.
+The approved external compression fix is committed and tested. No forwarding code
+has changed.
 See "Implementation progress" below and "Decisions" at the end.
 
 ## Implementation progress
@@ -12,7 +13,7 @@ Developer-image validation remains release-only.
 
 | Step | Progress | Remaining |
 |---|---|---|
-| 1 | 224 MiB matrix removal committed in `dd716bf4`; complete-line wait fix committed in `0f419641`, with host regressions wired into `full-test.sh`; debug gate running (attempt 2) | Main-image gates: 0/3 debug, 0/3 release; complete `full-test-dev.sh --release` |
+| 1 | 224 MiB matrix removal `dd716bf4` and complete-line wait fix `0f419641` committed; debug gate timed out after 1,500 s; phase-timing diagnosis complete (see below) | Review existing gate runtime; main-image gates: 0/3 debug, 0/3 release; complete `full-test-dev.sh --release` |
 | 2 | Baseline preparation; external test signature fix `ac0e947` and approved compression fix `4fe78f9` committed; full fork suite passes; main-repo compression regression added | External russh close fixes and tests, pin, relay, direct opens, configuration, authentication deadline, milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
@@ -26,7 +27,7 @@ Step 1 focused checks: `cargo test` for `wasm-smoke-suite` (two tests),
 pass. The regression checks every partial snapshot of an address diagnostic, including
 a complete-looking address without its terminating newline.
 
-### Stop condition: external russh baseline (2026-11-03)
+### Resolved stop: external russh baseline (2026-11-03)
 
 The external checkout is `/tmp/motor-russh-forwarding`, branch `server-window`, based
 on `042db50`. No changes were made to the Cargo cache checkout. The first baseline
@@ -90,9 +91,57 @@ checks. The full fork suite passes: 219 tests, plus eight preexisting ignored
 documentation examples. Logs are `russh-compression-fixed.log`,
 `russh-compression-full-suite.log`, and `russh-compression-fixed-shipped-deps.log`;
 the commit is also saved as `russh-compression-fix.patch` in the evidence directory.
-The main-repo `src/bin/russhd/tests/compression.rs` regression runs transitively
-from `full-test.sh` and covers changing packet sizes on the wire compression path.
-The main-image debug gate has resumed in `step1-debug-2.log`.
+Main commit `d80f90b5` adds `src/bin/russhd/tests/compression.rs`, which passes and
+runs transitively from `full-test.sh`. It covers changing packet sizes on the
+wire compression path. Its log is `main-compression-regression.log`.
+
+### Current stop: main-image debug gate runtime (2026-11-03)
+
+The resumed main-image debug gate (`step1-debug-2.log`) exited 124 after its
+existing 1,500-second test budget expired during stdio-route checks. The TUI,
+credential, alternate-VMM boot, Motor SSH client, DNS integration, and complete
+`systest` phases had passed. The guest was still progressing through route
+checks just before expiry; no assertion or panic preceded the timeout. The
+original guest logs are preserved in `step1-debug-2-evidence/` beside that log.
+The new main-repo compression regression passed in 0.83 seconds in that run.
+
+A diagnostic run (`step1-debug-timing.log`) added temporary top-level Bash
+timestamps (`step1-debug-timing.trace`) to measure phase costs. It reproduced
+steady progress without an assertion failure. Measured phases included:
+
+| Existing phase | Seconds |
+|---|---:|
+| Analyzer checks | 11 |
+| vsock checks | 33 |
+| HTTP host acceptance | 34 |
+| System TTY | 26 |
+| TUI | 38 |
+| Terminal size | 243 |
+| Credential/key installation | 210 |
+| All work before launching the main guest, including the other host checks | 696 |
+
+In the original failing run, the main guest had reached about 801 seconds of
+uptime and was still advancing when the outer deadline expired. Combined with
+the measured 696 seconds before the main guest starts, that leaves essentially
+no budget for the remaining checks. The stdio-route checks immediately before
+expiry advanced through group, loop, function, and pipeline cases in seconds;
+the evidence supports a whole-suite runtime overrun, rather than a stalled
+stdio case. No specific production component failure was observed.
+
+The diagnostic run was deliberately stopped after collecting the pre-guest
+timings (exit 143), before repeating the long system-test phase. It is not a
+retry to obtain a passing result and does not count toward the milestone gate.
+Its guest console and a copy of the tracing hook are retained under
+`step1-debug-timing-evidence/`; the active temporary hook in `/tmp` was removed.
+No test processes or diagnostic VM remain running. No timeout, assertion,
+coverage requirement, or production configuration was changed.
+
+AGENTS.md requires review for non-obvious decisions. Repairing this existing
+gate's runtime while preserving its timeout and coverage needs separate scope
+guidance; silently increasing the timeout, omitting checks, or repeating runs
+until one fits would violate the stated constraints. Forwarding work stops
+here pending that guidance. The 3+3 main-image gate and developer-image release
+gate remain outstanding; the main repository's russh pin is still unchanged.
 
 ## Goal and scope
 
