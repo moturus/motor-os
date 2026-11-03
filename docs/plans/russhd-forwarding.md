@@ -4,7 +4,8 @@ Status: v5, milestone 1 complete with three debug and three release passes and
 the complete developer-image release gate, including both 256 MiB Wasm VMs.
 Milestone 2's external russh channel-close fixes and live regressions are committed
 and tested. All 145 main russhd tests, including draft close regressions, passed
-against that local fork. Publishing its commits for the Cargo pin awaits user guidance.
+against that local fork. The user will review and push the fork commits before
+the Cargo pin update.
 The approved external compression fix is committed and tested; relay integration
 has not started.
 See "Implementation progress" below and "Decisions" at the end.
@@ -18,7 +19,7 @@ Developer-image validation remains release-only.
 | Step | Progress | Remaining |
 |---|---|---|
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
-| 2 | External fixes `ac0e947`, `4fe78f9`, `01d0391`, `d758c92`, and live regressions `c016ea8` committed; full fork suite passes (231 tests); 145 main russhd tests pass with the local fork, including draft close regressions | Publication guidance and Cargo pin, commit main close regressions, relay, direct opens, configuration, authentication deadline, 3+3 milestone gates |
+| 2 | External fixes `ac0e947`, `4fe78f9`, `01d0391`, `d758c92`, and live regressions `c016ea8` committed; full fork suite passes (231 tests); 145 main russhd tests pass with the local fork, including draft close regressions | User review/push of fork commits, Cargo pin, commit main close regressions, relay, direct opens, configuration, authentication deadline, 3+3 milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
@@ -297,11 +298,14 @@ and validate the actual git pin before committing the main-repository patch.
 No new main-image milestone-2 gate pass is claimed. The fork branch still
 points to `042db50`.
 Publishing the five local commits through `c016ea8` to `moturus/russh`'s shared
-`server-window` branch has been submitted for user guidance under AGENTS.md's
+`server-window` branch was submitted for user guidance under AGENTS.md's
 non-obvious-decision rule. This publication decision is an interpretation of that
-rule, not an explicit AGENTS.md prohibition on pushing. No push has been made,
-and the main-repository pin remains unchanged. Implementation stops at this
-publication decision pending the requested guidance; all running tests have
+rule, not an explicit AGENTS.md prohibition on pushing. The user will review and
+push the five commits from `/tmp/motor-russh-forwarding`, local branch
+`server-window`, to `https://github.com/moturus/russh.git`, remote branch
+`server-window`. The checkout is clean at
+`c016ea8f2122f7b9f21d9c20a81f60793a00b1a0`. The main-repository pin remains
+unchanged pending that push. All running tests have
 completed, temporary diagnostics are removed, and the main workspace contains
 no active uncommitted code patch.
 
