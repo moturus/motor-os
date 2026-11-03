@@ -190,7 +190,7 @@ src/tests/test-wasm.sh --prepare
 src/tests/test-wasm.sh
 ```
 
-By default these Rust checks run both release images at 256 and 224 MiB
+By default these Rust checks run both release images at 256 MiB
 (`--vm IMAGE:MIB` selects VMs instead), with the repeat-for-identical-bytes
 checks on the first VM only: Javy static and
 dynamic compilation, TypeScript, default and custom plugins, Wasmi execution,
@@ -201,7 +201,7 @@ refusals, TypeScript, WASI p2 sockets/filesystem, and p2/p3 HTTP hello/echo.
 HTTP checks include fragmented headers, bounded concurrency, p3 defaults and
 instance turnover, foreground Ctrl-C and shutdown during an active response.
 `src/tests/full-test-dev.sh --release`
-runs them on the wasm image at 224 MiB and the developer image at 256 MiB, and
+runs them on the wasm image at 256 MiB and the developer image at 256 MiB, and
 the Linux identity checks once; debug suites skip them.
 Engine regressions remain in the owning forks; Wasmtime's suite also runs its
 existing engine checks natively in the VM. Upstream Brotli is used; the
@@ -222,7 +222,7 @@ src/tests/test-wasm.sh --services --suite wasmtime
 These variants add p2/p3 servers configured with `svc:256:`. The client
 checks their None role and sys-init parent, serves requests, and shuts them
 down. The same image, memory and VMM selectors apply; the release developer
-gate runs this phase on `wasm:224` and `dev:256` too.
+gate runs this phase on `wasm:256` and `dev:256` too.
 
 For the external sources, the build stages, and their outputs, see
 [Building Motor OS with its external sources](build-motor-os.md); for how the

@@ -8,6 +8,10 @@ per-operation allocation overhead, were reviewed. Historical timings below
 are not new measurements. An unexplained historical failure stays open
 unless the source establishes that its cause was fixed.
 
+## wasm 224MB image test ooming
+
+Find what regressed.
+
 ## WireGuard load test flakes: a single ICMP probe inside a UDP flood (2026-10-29)
 
 `systest wireguard-load <wg pid>` (`src/sys/tests/systest/src/wireguard_load.rs`,

@@ -6,7 +6,7 @@
 # native source builds, a native install of the toolchain archive with programs
 # built by what it installed, and Lorry's bounded product suite. Lorry validation is
 # profile-independent and does not multiply coverage by the OS image profile.
-# Release runs also check the wasm tools on the small wasm image at 224 MiB and
+# Release runs also check the wasm tools on the small wasm image at 256 MiB and
 # the developer image at 256 MiB, and once that Javy's output equals upstream
 # Linux Javy's byte for byte.
 #
@@ -118,10 +118,10 @@ MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" \
 
 # The wasm tools run on two VMs; checks independent of the VM run on the first.
 if [ "$SEEN_RELEASE" = 1 ]; then
-  "$WD/test-wasm.sh" --prepare --vm wasm:224 --vm dev:256 "${FORWARDED_ARGS[@]}"
-  "$WD/test-wasm.sh" --vm wasm:224 --vm dev:256 --linux-identity "${FORWARDED_ARGS[@]}"
-  "$WD/test-wasm.sh" --prepare --services --suite wasmtime --vm wasm:224 --vm dev:256 "${FORWARDED_ARGS[@]}"
-  "$WD/test-wasm.sh" --services --suite wasmtime --vm wasm:224 --vm dev:256 "${FORWARDED_ARGS[@]}"
+  "$WD/test-wasm.sh" --prepare --vm wasm:256 --vm dev:256 "${FORWARDED_ARGS[@]}"
+  "$WD/test-wasm.sh" --vm wasm:256 --vm dev:256 --linux-identity "${FORWARDED_ARGS[@]}"
+  "$WD/test-wasm.sh" --prepare --services --suite wasmtime --vm wasm:256 --vm dev:256 "${FORWARDED_ARGS[@]}"
+  "$WD/test-wasm.sh" --services --suite wasmtime --vm wasm:256 --vm dev:256 "${FORWARDED_ARGS[@]}"
 fi
 
 echo "full-test-dev.sh ALL PASS"

@@ -163,7 +163,7 @@ installed-tool checks, and [capabilities](caps.md) for the masks.
 
 The host-side `src/tests/test-wasm.sh` checks the installed tools.
 `src/tests/full-test-dev.sh --release` runs these checks on the wasm image at
-224 MiB and the developer image at 256 MiB. Javy's Linux byte-identity checks
+256 MiB and the developer image at 256 MiB. Javy's Linux byte-identity checks
 run on the first VM only; Wasmtime service-mask checks and compile/run/plugin/
 serve checks under all process roles run on both images.
 Debug runs skip these Wasm checks.

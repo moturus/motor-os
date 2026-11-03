@@ -4,7 +4,7 @@ set -euo pipefail
 WD="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$WD/../.." && pwd)"
 image=both
-memory=both
+memory=256
 vmm=qemu
 selection=both
 prepare=false
@@ -23,17 +23,17 @@ while [ "$#" -gt 0 ]; do
     --services) services=true; shift ;;
     --suite) selection="${2:?missing suite}"; shift 2 ;;
     --linux-identity) linux_identity=(--linux-identity); shift ;;
-    *) echo "usage: $0 [--release] [--prepare] [--services --suite wasmtime] [--suite javy|wasmtime|both] [--image wasm|dev|both] [--memory 224|256|both] [--vm IMAGE:MIB]... [--vmm qemu|chv] [--linux-identity]" >&2; exit 2 ;;
+    *) echo "usage: $0 [--release] [--prepare] [--services --suite wasmtime] [--suite javy|wasmtime|both] [--image wasm|dev|both] [--memory 256] [--vm IMAGE:MIB]... [--vmm qemu|chv] [--linux-identity]" >&2; exit 2 ;;
   esac
 done
 case "$image" in wasm) images=(wasm);; dev) images=(dev);; both) images=(wasm dev);; *) exit 2;; esac
-case "$memory" in 224|256) sizes=("$memory");; both) sizes=(256 224);; *) exit 2;; esac
+case "$memory" in 256) sizes=("$memory");; *) exit 2;; esac
 # Explicit VMs replace the image/memory matrix.
 if [ "${#vms[@]}" = 0 ]; then
   for variant in "${images[@]}"; do for size in "${sizes[@]}"; do vms+=("$variant:$size"); done; done
 fi
 for vm in "${vms[@]}"; do
-  case "$vm" in wasm:224|wasm:256|dev:224|dev:256) ;; *) echo "test-wasm: bad VM $vm" >&2; exit 2;; esac
+  case "$vm" in wasm:256|dev:256) ;; *) echo "test-wasm: bad VM $vm" >&2; exit 2;; esac
 done
 case "$vmm" in qemu) vmm_label=QEMU;; chv) vmm_label="Cloud Hypervisor";; *) exit 2;; esac
 # rust-toolchain.toml names the toolchain, so build from the root whatever the

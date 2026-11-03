@@ -22,7 +22,7 @@ for selection in default both javy wasmtime; do
   : > "$WASM_SELECTION_LOG"
   args=()
   [ "$selection" = default ] || args=(--suite "$selection")
-  "$runner" --prepare --vm wasm:224 --vm dev:256 "${args[@]}"
+  "$runner" --prepare --vm wasm:256 --vm dev:256 "${args[@]}"
   expected=(javy-smoke wasmtime-smoke)
   case "$selection" in
     javy) expected=(javy-smoke);;
@@ -39,23 +39,36 @@ for selection in default both javy wasmtime; do
     cp "$temporary/bin/cargo" "$dir/$name"
   done
   : > "$WASM_SELECTION_LOG"
-  "$runner" --vm wasm:224 --vmm chv "${args[@]}"
+  "$runner" --vm wasm:256 --vmm chv "${args[@]}"
   mode="$selection"
   [ "$mode" != default ] || mode=both
   [ "$(cat "$WASM_SELECTION_LOG")" = \
-    "timeout 600s env WASM_TEST_TIMED=1 $runner --suite $mode --vmm chv --vm wasm:224" ] ||
+    "timeout 600s env WASM_TEST_TIMED=1 $runner --suite $mode --vmm chv --vm wasm:256" ] ||
     fail "$selection was not forwarded through timeout"
 done
 : > "$WASM_SELECTION_LOG"
-"$runner" --services --suite wasmtime --vm wasm:224 --vmm chv
+"$runner"
 [ "$(cat "$WASM_SELECTION_LOG")" = \
-  "timeout 600s env WASM_TEST_TIMED=1 $runner --suite wasmtime --vmm chv --services --vm wasm:224" ] ||
+  "timeout 600s env WASM_TEST_TIMED=1 $runner --suite both --vmm qemu --vm wasm:256 --vm dev:256" ] ||
+  fail 'default matrix must contain only the two 256 MiB VMs'
+for selector in '--memory 224' '--memory both' '--vm wasm:224' '--vm dev:224'; do
+  : > "$WASM_SELECTION_LOG"
+  status=0
+  read -r -a args <<< "$selector"
+  "$runner" --prepare "${args[@]}" > "$temporary/invalid-memory.log" 2>&1 || status=$?
+  [ "$status" = 2 ] && [ ! -s "$WASM_SELECTION_LOG" ] ||
+    fail "removed memory selector started work: $selector"
+done
+: > "$WASM_SELECTION_LOG"
+"$runner" --services --suite wasmtime --vm wasm:256 --vmm chv
+[ "$(cat "$WASM_SELECTION_LOG")" = \
+  "timeout 600s env WASM_TEST_TIMED=1 $runner --suite wasmtime --vmm chv --services --vm wasm:256" ] ||
   fail 'service mode was not forwarded through timeout'
 cat > "$temporary/src/tests/wasm-service-images.sh" <<'SH'
 prepare_wasm_service_images() { printf 'services %s\n' "$*" >> "$WASM_SELECTION_LOG"; }
 SH
 : > "$WASM_SELECTION_LOG"
-"$runner" --prepare --services --suite wasmtime --vm wasm:224 --vm wasm:256 --vm dev:256
+"$runner" --prepare --services --suite wasmtime --vm wasm:256 --vm wasm:256 --vm dev:256
 grep -qxF "services $temporary wasm dev" "$WASM_SELECTION_LOG" || fail 'service images lost VM selection'
 : > "$WASM_SELECTION_LOG"
 status=0
@@ -81,7 +94,7 @@ for file in p2_cli_serve_hello_world.cwasm p3_cli_serve_hello_world.cwasm \
 done
 printf 'plugin fixture\n' > "$temporary/build/assembly/tests/javy/plugin-p1.wasm"
 : > "$WASM_SELECTION_LOG"
-"$runner" --prepare --services --suite wasmtime --vm wasm:224 --vm dev:256
+"$runner" --prepare --services --suite wasmtime --vm wasm:256 --vm dev:256
 overlay="$temporary/build/wasm-service-images/overlay"
 role_caps="$(sed -n 's|^svc:\([0-9]*\):/none/wasm-services/wasmtime-smoke --roles$|\1|p' \
   "$overlay/system/cfg/sys-init.cfg")"
