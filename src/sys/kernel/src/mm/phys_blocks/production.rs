@@ -129,7 +129,7 @@ impl BlockPool {
             whole: bitmap(whole_words),
             counters: Counters {
                 total,
-                used: AtomicU64::new(used),
+                state: AtomicU64::new(StateSnapshot::new(used).0),
                 high_water: AtomicU64::new(used),
                 reserved: AtomicU64::new(reserved),
                 discarded: AtomicU64::new(discarded),
@@ -255,7 +255,7 @@ impl BlockPool {
     }
 
     pub(crate) fn alloc_small(&self, count: u16) -> Option<u64> {
-        self.allocate(count, cursor())
+        self.allocate(count, cursor(), AllocationClass::Kernel)
             .unwrap_or_else(|err| panic!("phys: corrupt allocator: {err:?} ({count} pages)"))
     }
 
@@ -266,7 +266,7 @@ impl BlockPool {
 
     // A whole dual-purpose block, or None: a recoverable fallback signal.
     pub(crate) fn alloc_huge(&self) -> Option<u64> {
-        self.allocate_huge()
+        self.allocate_huge(AllocationClass::Kernel)
             .unwrap_or_else(|err| panic!("phys: corrupt allocator: {err:?} (huge)"))
     }
 
@@ -280,7 +280,7 @@ impl BlockPool {
     }
 
     pub(crate) fn used_pages(&self) -> u64 {
-        self.counters.used.load(Ordering::Relaxed)
+        self.state_snapshot().used()
     }
 
     pub(crate) fn free_pages(&self) -> u64 {

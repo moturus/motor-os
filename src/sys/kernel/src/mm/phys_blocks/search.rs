@@ -5,8 +5,8 @@ impl<L: PageLinks> Pool<'_, L> {
         &self,
         map: &[AtomicU64],
         descending: bool,
-        mut take: impl FnMut(usize) -> Result<Option<u64>, Corruption>,
-    ) -> Result<Option<u64>, Corruption> {
+        mut take: impl FnMut(usize) -> Result<Option<u64>, AllocationError>,
+    ) -> Result<Option<u64>, AllocationError> {
         for offset in 0..map.len() {
             let word = if descending {
                 map.len() - 1 - offset
@@ -38,13 +38,14 @@ impl<L: PageLinks> Pool<'_, L> {
         &self,
         count: u16,
         cursor: Option<&AtomicUsize>,
-    ) -> Result<Option<u64>, Corruption> {
+        class: AllocationClass,
+    ) -> Result<Option<u64>, AllocationError> {
         if count == 0 || count > PAGES {
             return Ok(None);
         }
         let previous = cursor.map_or(NO_CURSOR, |slot| slot.load(Ordering::Relaxed));
         if previous != NO_CURSOR {
-            if let Some(addr) = self.take_small(previous, count, SmallSource::Split, true)? {
+            if let Some(addr) = self.take_small(previous, count, SmallSource::Split, true, class)? {
                 return Ok(Some(addr));
             }
             let block = self.block(previous)?;
@@ -54,7 +55,7 @@ impl<L: PageLinks> Pool<'_, L> {
         }
         loop {
             let take = |index, source| {
-                let addr = self.take_small(index, count, source, cursor.is_some())?;
+                let addr = self.take_small(index, count, source, cursor.is_some(), class)?;
                 if addr.is_some() {
                     if let Some(slot) = cursor {
                         slot.store(index, Ordering::Relaxed);
@@ -81,13 +82,16 @@ impl<L: PageLinks> Pool<'_, L> {
             }
             // Fragmented free pages cannot guarantee a run. For one page,
             // acquiring a free's released charge also observes its index bit.
-            if count != 1 || self.counters.used.load(Ordering::Acquire) == self.counters.total {
+            if count != 1 || self.state_snapshot().used() == self.counters.total {
                 return Ok(None);
             }
         }
     }
 
-    pub(super) fn allocate_huge(&self) -> Result<Option<u64>, Corruption> {
-        self.scan(self.whole, true, |index| self.take_huge(index))
+    pub(super) fn allocate_huge(
+        &self,
+        class: AllocationClass,
+    ) -> Result<Option<u64>, AllocationError> {
+        self.scan(self.whole, true, |index| self.take_huge(index, class))
     }
 }

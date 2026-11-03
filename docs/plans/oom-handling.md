@@ -19,7 +19,7 @@ As of 2026-11-03:
 | 4a   | Fallible MM core, boot exhaustion self-test               | Committed, `3780bce0`                   |
 | 4b   | Fallible frame-descriptor slab growth                     | Committed, `56eedffb`                   |
 | 4c   | Real error codes in the syscall and process layers        | Committed, `b2dccf4e`                   |
-| 5    | Allocation gates, OOM jobs, waiters, recovery             | Planned: [oom-handling-step5.md](oom-handling-step5.md) |
+| 5    | Allocation gates, OOM jobs, waiters, recovery             | 5a implemented locally, awaiting review; [5b–5f planned](oom-handling-step5.md) |
 
 What the committed steps provide is described in
 [docs/oom-handling.md](../oom-handling.md) and
@@ -39,6 +39,9 @@ outside the guarantee by design.
 
 Left to do:
 
+- Review the uncommitted 5a packed accounting and class-aware physical charge
+  changes. Its scratch-pool tests run during debug guest boot; runtime policy
+  stays unarmed, with recipient propagation and scheduler work still pending.
 - **5.** The gates and waits in "Fallible user-page allocation" from the
   paragraph on pausing at syscall entry onward, the 2 MiB and 512 KiB rules,
   "OOM jobs" in full, and the validation items for boundaries, victims,

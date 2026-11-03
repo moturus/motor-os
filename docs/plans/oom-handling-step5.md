@@ -3,7 +3,16 @@
 Implementation plan for step 5 of [oom-handling.md](oom-handling.md), the
 specification. Revised on 2026-11-03 against `b2dccf4e`. This revision
 incorporates the readiness reviews; the separate review file is no longer
-needed. It changes documentation only. The implementation remains pending.
+needed. Step 5a is implemented locally and awaiting review; no commit has
+been made. Steps 5b–5f remain pending.
+
+The 5a changes replace the pool's used counter with the packed policy word,
+perform class-aware charges before ownership changes, preserve refusal reasons
+inside the physical allocator, and test charge/release transitions in the
+existing debug guest scratch-pool suite. Production entries still supply Kernel
+and the production word stays unarmed. Recipient propagation belongs to 5b;
+worker request/latch operations, attention notifications and run metrics belong
+to 5c, before activation in 5e.
 
 The accepted policy stays: None and Interactive allocations have a 2 MiB
 floor, System allocations a 512 KiB floor, and kernel allocations no floor.
@@ -368,6 +377,13 @@ and all syscall callers are complete.
 
 ## Validation
 
+5a review validation on 2026-11-03: debug and release kernel builds and Clippy
+checks passed without warnings; repository-toolchain formatting checks passed.
+`src/tests/full-test.sh` passed once (16.6 minutes of testing), and
+`src/tests/full-test.sh --release` passed once (10.6 minutes). The debug log
+includes `phys_blocks policy tests PASS`. These are the pre-review runs;
+the three-per-build gate below still applies before an authorized core commit.
+
 All new tests run inside Motor OS and are reached from `full-test.sh`, through
 existing kernel self-tests, systest or its console fixture. Keep pressure tests
 out of `--under-load`. Extend existing debug boot test hooks with bounded
@@ -448,7 +464,7 @@ before any authorized commit. Include at least one real one-vCPU run in each
 build's activation validation. Once the complete transition passes, run
 `src/tests/full-test-dev.sh --release`; its source phase remains release-only.
 Do not extend timeouts, weaken assertions or retry defects to obtain a pass.
-No commits are authorized by this documentation update.
+The current 5a changes remain uncommitted for review.
 
 ## Decisions retained and implementation choices
 
