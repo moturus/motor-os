@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 use moto_sdk::stats::Collector;
 use moto_sdk::sys::stats::{MemoryStats, ProcessInfoV1};
 
+mod output;
+
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const DEADLINE: Duration = Duration::from_secs(120);
 /// The status of a process the kernel killed.
@@ -252,12 +254,12 @@ pub struct Job {
 }
 
 impl Job {
-    /// Waits until the command's stdout contains `text`.
+    /// Waits until the command's stdout contains `text` in complete lines.
     pub fn wait_stdout(&mut self, text: &str) -> Result<()> {
         self.wait_output(text, false).map(|_| ())
     }
 
-    /// Waits for a diagnostic and returns stderr, including reported addresses.
+    /// Waits for a complete diagnostic line and returns complete stderr lines.
     pub fn wait_stderr(&mut self, text: &str) -> Result<String> {
         self.wait_output(text, true)
     }
@@ -266,8 +268,8 @@ impl Job {
         loop {
             let (stdout, stderr) = self.logs()?;
             let output = if use_stderr { &stderr } else { &stdout };
-            if output.contains(text) {
-                return Ok(output.clone());
+            if let Some(complete) = output::complete_output(output, text) {
+                return Ok(complete.to_owned());
             }
             if let Some(status) = self.child.try_wait()? {
                 return Err(

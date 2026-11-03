@@ -1,6 +1,29 @@
 # TCP forwarding in russhd and ssh
 
-Status: v5, ready to implement. No forwarding code has changed. See "Decisions" at the end.
+Status: v5, implementation in progress. No forwarding code has changed.
+See "Implementation progress" below and "Decisions" at the end.
+
+## Implementation progress
+
+The implementation request requires three complete debug and three complete release
+`full-test.sh` passes per milestone, superseding the lighter milestone gates below.
+Developer-image validation remains release-only.
+
+| Step | Progress | Remaining |
+|---|---|---|
+| 1 | 224 MiB matrix removal committed in `dd716bf4`; complete-line wait fix implemented, with host regressions wired into `full-test.sh` | Three debug and three release main-image passes; complete `full-test-dev.sh --release` |
+| 2 | Not started | External russh close fixes and tests, pin, relay, direct opens, configuration, authentication deadline, milestone gates |
+| 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
+| 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
+| 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
+| 6 | Not started | SOCKS parser, `-D` integration and guest coverage, milestone gates |
+| 7 | Not started | Server remote listeners, credit handoff, `gateway_ports`, host/guest coverage, milestone gates |
+| 8 | Not started | Client remote-forward authorization and ordering, `-R` integration and guest coverage, milestone gates |
+
+Step 1 focused checks: `cargo test` for `wasm-smoke-suite` (two tests),
+`test-wasm-selection.sh`, `test-full-test-size.sh`, and `test-dev-memory-contract.sh`
+pass. The regression checks every partial snapshot of an address diagnostic, including
+a complete-looking address without its terminating newline.
 
 ## Goal and scope
 
@@ -495,6 +518,10 @@ forwarding is unsupported and that a connection runs one channel at a time.
    line. Gate with those three shell tests, which already run from `full-test.sh`, and the
    complete `full-test-dev.sh --release`. Finish these patches before any russh or forwarding
    changes.
+
+The matrix removal is done (`dd716bf4`); see the progress table for the complete-line
+fix and validation status.
+
 2. Start the **external russh fork** channel-close fixes and their tests, then update the
    main repository's pin. Cover both pending outbound data on peer close and local cleanup
    without a close reply. Build the bounded queue and event-driven relay with focused tests;

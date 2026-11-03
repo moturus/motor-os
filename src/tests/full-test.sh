@@ -261,6 +261,7 @@ for crate in red rmux rush russhd wg; do
   fi
   (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet "${profile_args[@]}")
 done
+cargo test "${profile_args[@]}" --manifest-path "$WD/wasm-smoke-suite/Cargo.toml"
 # Independent upstream WireGuard peer and its localhost transport tests.
 (cd "$ROOT_DIR/src/tests/wg-peer" && cargo test --quiet --locked "${profile_args[@]}")
 # The crossterm revision Rush ships: its own tests, and Rush's pty tests over
