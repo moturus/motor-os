@@ -3,8 +3,9 @@
 Implementation plan for step 5 of [oom-handling.md](oom-handling.md), the
 specification. Revised on 2026-11-03 against `b2dccf4e`. This revision
 incorporates the readiness reviews; the separate review file is no longer
-needed. Steps 5a–5c are committed as `dcd36704`, `b71cad30` and `8c3a0b6f`.
-Step 5d is implemented locally and awaiting review; steps 5e–5f remain pending.
+needed. Steps 5a–5d are committed as `dcd36704`, `b71cad30`, `8c3a0b6f` and
+`fdca1b82`. Step 5e is implemented and validated locally, awaiting review;
+step 5f remains pending.
 
 The 5a changes replace the pool's used counter with the packed state word,
 perform class-aware charges before ownership changes, preserve refusal reasons
@@ -15,13 +16,15 @@ allocation class through frames, both stacks, page tables and shared MM slabs.
 Internal `AllocationFailure` results distinguish ordinary codes from pressure
 receipts, including the original floor refusal through huge fallback. Current
 syscall boundaries use these receipts for waiting in 5d while preserving the
-existing ABI codes. The production word stays unarmed. The 5c changes add atomic
-request/latch operations, scheduler attention, generation-checked selection,
+existing ABI codes. The production word stayed unarmed through 5d. The 5c
+changes add atomic request/latch operations, scheduler attention, generation-checked selection,
 exit continuations and victimless reporting. Run starts are counted in the
 physical pool; committed kill requests are counted by the worker. All four
 production metric names are registered. The 5d changes add syscall retries,
 the syscall and fault wait queues, pager partial-progress retries and both
-process-attributed waiter counters. Activation remains in 5e.
+process-attributed waiter counters. The local 5e changes arm the allocator
+immediately before sys-io starts and add native pressure tests to the System
+console fixture, including actual one-vCPU runs.
 
 The accepted policy stays: None and Interactive allocations have a 2 MiB
 floor, System allocations a 512 KiB floor, and kernel allocations no floor.
@@ -232,7 +235,7 @@ syscall_waiters: Vec<(Weak<Thread>, WaitReason)>
 
 The 5c implementation installs the generation, job and exit bookkeeping in
 `uspace::oom`. It also tracks the last dispatched run for start/end logs.
-The local 5d implementation adds the fault and syscall wait queues with their
+The committed 5d implementation adds the fault and syscall wait queues with their
 consumers. Both hold only weak thread references and copyable wait reasons.
 
 `attend()` runs beside `process_wake_events()` in `sched_loop`, holding no
@@ -522,7 +525,119 @@ self-tests, and the three-per-build gate passed on the corrected sources:
 `src/tests/full-test.sh` three times in debug (17.1, 16.6 and 16.6 minutes of
 testing) and three times in release (10.5, 10.6 and 10.6 minutes), with no
 retries. The review is in `step-5d-review.md` at the repository root. The
-changes remain uncommitted.
+changes are committed as `fdca1b82`.
+
+5e implementation: `Pool::arm_oom()` commits the armed bit and initial phase
+in one CAS, retrying against the current count. Initial free counts below 512
+start Killing; below 128 also blocks System. It does not change accounting or
+the published free-page mirror. `init::start_userspace_processes()` calls it
+after constructing sys-io and immediately before starting that process. The
+existing scratch suite checks arming at 0, 127, 128, 511, 512, 767, 768 and
+1024 free pages, including attention and run counts. Boot exhaustion remains
+unarmed, and activation adds no scan or drain.
+
+The new `systest system-oom-tests` command runs from `test-system-tty.sh`'s
+System console. Its pressure helpers, child processes, shared control pages,
+thread handles and observation buffers are prepared before draining memory.
+It covers process creation and delayed-start refusal, large eager rollback,
+newest None selection before Interactive, repeated recovery, syscall waits,
+spurious wake/repark with the userspace wake retained, target-handle closure,
+permanent size refusal under pressure, lazy-fault survival and cancellation,
+System syscall and fault waits, and cleanup of a killed syscall waiter.
+The System cases use four measured small victims that cannot reach recovery,
+followed by a larger victim; they require five kills in one generation.
+Retained handles allow checking that killed children release user pages,
+kernel pages and all threads before the handles are dropped. These tests run
+in the ordinary full gate through its console fixture, outside `--under-load`.
+
+Fixture development exposed incorrect metric scope, an incorrect expected
+closed-handle error, double-closing a debugger handle, missing child spawn
+authority and pressure attempts that completed before the intended wait.
+These test setup errors were corrected. The System-fault case also initially
+missed all three pressure windows: a cold executable page could wait on
+sys-io's pager before reaching the intended data fault. Temporary diagnostics
+identified the unrelated pager wait; the helper now executes that same
+instruction path before pressure. The allocating and faulting System helpers
+use separate address spaces, avoiding observation-buffer copy-out contention
+with the driver's MM lock. Temporary diagnostics were removed. A missed
+window is reported and accepted only with a successful operation and observed
+recovery before entry; any observed wait followed by failure remains a failure.
+
+5e initial validation completed on 2026-11-04. The kernel and OOM guest
+implementation before the test-only review follow-up below passed three full
+debug gates and three full release gates,
+including a real one-vCPU guest in each build. Every completed console run
+passed its OOM cases. Logs below are under `/tmp/oom-5e-full-`; corresponding
+`-serial.log` files retain the console results.
+
+| Build | vCPUs | Testing time | Log suffix |
+|-------|-------|--------------|------------|
+| Debug | 4 | 17.3 minutes | `debug-4a.log` |
+| Debug | 1 | 49.4 minutes | `debug-1.log` |
+| Debug | 4 | 17.7 minutes | `debug-4b.log` |
+| Release | 4 | 10.6 minutes | `release-4a.log` |
+| Release | 1 | 20.5 minutes | `release-1.log` |
+| Release | 4 | 10.6 minutes | `release-4c.log` |
+
+The unrelated terminal-test setup correction described below was added after
+the first five passes. Its focused debug and release tests and the final full
+release gate passed with that correction. Kernel builds and Clippy passed
+without new warnings; systest Clippy passed in both profiles with preexisting
+warnings in the unchanged `virtio-async` dependency. Rust formatting, shell
+syntax and diff checks passed. Separate abort verification, production
+documentation and the release developer-image gate remain in 5f.
+
+An initial full run was interrupted to strengthen syscall missed-window
+evidence before entry. A nested terminal-test VM survived that interruption
+and held the shared VM lock, causing the next attempt's host image-format
+check to fail. A traced rerun identified the conflicting launcher, and the
+lock owner was the interrupted VM. After stopping that VM, the same traced
+check passed and validation restarted. These attempts are not counted as
+successful full gates. Logs are `/tmp/oom-5e-full-interrupted-for-fixture.log`,
+`/tmp/oom-5e-full-stale-vm-lock.log` and
+`/tmp/oom-5e-image-format-{diagnostic,after-cleanup}.log`.
+
+The first attempt at the third release gate stopped in
+`test-terminal-size.sh`: `rush_settle`
+sent Ctrl-U while the cursor was in the middle of `Xechx`. Ctrl-U erases only
+the prefix, so the helper submitted the remaining `echx`. Its asynchronous
+error output raced the next screen assertion, which saw
+`$ rush: echx: command not found` instead of `$ echo Zab`. The recorded serial
+bytes and Rush's existing Ctrl-U test establish the cause. The helper now
+sends Ctrl-E before Ctrl-U, clearing the entire line before Enter. This is a
+test-only setup correction; assertions, timing limits and production code
+are unchanged. The original failure is retained in
+`/tmp/oom-5e-full-release-4b.log` and
+`/tmp/oom-5e-terminal-size-failure.log`. The corrected focused tests passed
+in both builds (`/tmp/oom-5e-terminal-fixed-{debug,release}.log`), followed
+by the full release pass recorded above.
+
+The one-vCPU debug gate spent much longer in the existing 2,000-round poll
+add/close contention test. Non-pausing native thread samples showed workers
+waiting on the registry mutex while its hammer thread ran; subsequent reads
+of the loop variable advanced from round 1337 to 1526. That guest had about
+800 MiB free and zero OOM runs/waits. The temporary diagnostic sources and
+guest executables were removed, and source checksums confirmed the tested
+implementation was unchanged. No scheduling workaround, test change or
+timeout extension was made. Evidence is in
+`/tmp/oom-5e-thread-round-{1,2}.log` and
+`/tmp/oom-5e-single-cpu-stats.log`.
+
+5e review follow-up: the syscall fixture now requires an increased OOM run
+count only after observing a wait. A successful map after recovery before
+entry need not start a run, so the former unconditional assertion prevented
+that permitted miss from reaching its retry. A recorded but unobserved park
+still fails under the existing pre-entry recovery rule; its diagnostic now
+states that explicitly. No kernel or other production code changed.
+
+A temporary guest diagnostic left the first attempt unpressured and asserted
+an unchanged run count. Both syscall cases reported the miss, retried and
+passed (`/tmp/oom-5e-review-forced-miss{,-serial}.log`). That diagnostic was
+removed before final validation. The final `test-system-tty.sh` fixture passed
+in debug and release, each with one and four vCPUs; logs are
+`/tmp/oom-5e-review-{debug,release}-{1,4}c{,-serial}.log`. Formatting and Clippy
+passed in both profiles, with only the existing `virtio-async` warnings. The
+earlier full 3+3 gates above were not repeated for this test-only correction.
 
 All new tests run inside Motor OS and are reached from `full-test.sh`, through
 existing kernel self-tests, systest or its console fixture. Keep pressure tests
@@ -572,6 +687,9 @@ window was missed. Report each miss and its evidence. Require successful
 operations and independent evidence of recovery before entry to classify a
 miss; absence of a park counter alone is insufficient. Once a waiter was
 observed, a wrong result, leak, hang or lost wake is a failure, never a retry.
+For syscall misses the park counter must also remain unchanged: a successful
+map with a recorded but unobserved park fails the fixture, rather than counting
+as recovery before entry.
 If all three attempts miss, fail the gate rather than silently skip coverage.
 
 Test both large-request outcomes: a partial eager allocation that unwinds to
@@ -604,7 +722,7 @@ before any authorized commit. Include at least one real one-vCPU run in each
 build's activation validation. Once the complete transition passes, run
 `src/tests/full-test-dev.sh --release`; its source phase remains release-only.
 Do not extend timeouts, weaken assertions or retry defects to obtain a pass.
-The current 5d changes remain uncommitted for review.
+The current 5e changes remain uncommitted for review.
 
 ## Decisions retained and implementation choices
 

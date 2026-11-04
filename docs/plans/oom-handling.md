@@ -8,7 +8,7 @@ after it are the specification, each opening with its own state.
 
 ## Status
 
-As of 2026-11-03:
+As of 2026-11-04:
 
 | Step | Work                                                      | State                                   |
 |------|-----------------------------------------------------------|-----------------------------------------|
@@ -22,8 +22,9 @@ As of 2026-11-03:
 | 5a   | Packed accounting, physical charges and transition tests | Committed, `dcd36704`                  |
 | 5b   | Recipient classes and typed MM allocation failures       | Committed, `b71cad30`                  |
 | 5c   | Scheduler dispatch, victim cleanup and OOM diagnostics   | Committed, `8c3a0b6f`                  |
-| 5d   | Syscall retries, fault waiters and pager partial progress | Working tree, awaiting review        |
-| 5    | Activation and runtime validation                       | [5e–5f planned](oom-handling-step5.md) |
+| 5d   | Syscall retries, fault waiters and pager partial progress | Committed, `fdca1b82`                 |
+| 5e   | Activation and native guest pressure tests               | Validated locally, awaiting review   |
+| 5f   | Documentation, abort verification and developer gate     | [Planned](oom-handling-step5.md)      |
 
 What the committed steps provide is described in
 [docs/oom-handling.md](../oom-handling.md) and
@@ -43,20 +44,15 @@ outside the guarantee by design.
 
 Left to do:
 
-- Review the uncommitted 5d syscall retries, syscall waits, fault
-  registration and partial pager-fill handling. Bounded native tests cover
-  retry decisions and queue ownership; existing exhaustion coverage now also
-  checks the completed prefix separately from newly installed pages. The
-  production policy stays unarmed.
-- **5.** Activation of the 2 MiB and 512 KiB rules and the installed waits,
-  and the remaining runtime validation for boundaries, victims,
-  episodes and waiters, staged in
-  [oom-handling-step5.md](oom-handling-step5.md). Runtime floors and gates
-  remain unarmed until syscall waiting, fault waiting and scheduler dispatch
-  are all complete. Until then a fault that cannot get a frame kills the
-  faulting thread.
-- The `full-test-dev.sh --release` run of the completed transition, and the
-  three deferred issues at the end of this document.
+- Review the validated local 5e activation. Policy is armed
+  immediately before sys-io starts, after boot exhaustion and scheduler setup.
+  Native console tests cover pressure, victims, syscall/fault waits, recovery
+  and cancellation. Three full gates passed in each build, including a real
+  one-vCPU run in each.
+- Complete 5f: update production documentation, verify the victimless abort
+  in a separate guest, and run `full-test-dev.sh --release`, as staged in
+  [oom-handling-step5.md](oom-handling-step5.md).
+- The three deferred issues at the end of this document.
 
 ## Intended behavior
 
@@ -337,8 +333,9 @@ as long as the remaining address-space object requires them.
 ## OOM jobs
 
 Worker and exit-continuation machinery committed in 5c (`8c3a0b6f`); waiter
-integration implemented locally in 5d, awaiting review. Runtime policy remains
-unarmed until activation in 5e. This section specifies the completed behavior.
+integration committed in 5d (`fdca1b82`). Local 5e changes activate runtime
+policy and add guest pressure tests; validation passed and review is pending.
+This section specifies the completed behavior.
 
 Use posted jobs on the existing scheduler. **Do not create a worker thread.**
 The pool's atomic word contains the count, armed flag, Idle/Killing/Latched
@@ -516,7 +513,7 @@ All work stays in the main repository.
    scheduler jobs, and both syscall and fault waits while runtime policy
    remains unarmed. Enable the complete mechanism only after all consumers
    are present, then complete pressure, blocking, recovery and abort coverage.
-   *5a–5c committed; 5d awaiting review; 5e–5f planned in
+   *5a–5d committed; 5e implemented and validated locally, awaiting review; 5f planned in
    [oom-handling-step5.md](oom-handling-step5.md).*
 
 Step 1 is the single large cleanup patch. Keep subsequent patches small,

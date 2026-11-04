@@ -1,6 +1,6 @@
 //! Scheduler-driven OOM selection. The physical allocator owns count/phase/
 //! generation; this lock owns job, exit-continuation and waiter bookkeeping.
-//! Runtime policy stays unarmed until syscall and fault waits are installed.
+//! Boot arms policy after schedulers and syscall/fault wait consumers are ready.
 
 use super::process::{Process, ProcessStatus, Thread};
 use crate::{mm::phys, util::SpinLock};

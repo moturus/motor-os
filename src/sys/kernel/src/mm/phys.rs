@@ -94,6 +94,10 @@ pub fn request_oom() -> Option<u64> {
     PhysicalMemory::inst().blocks.request_oom()
 }
 
+pub(crate) fn arm_oom() {
+    PhysicalMemory::inst().blocks.arm_oom();
+}
+
 pub(crate) fn oom_snapshot() -> (super::phys_blocks::StateSnapshot, u64) {
     let blocks = &PhysicalMemory::inst().blocks;
     let state = blocks.state_snapshot();

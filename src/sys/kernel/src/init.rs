@@ -446,6 +446,8 @@ pub fn start_userspace_processes() {
     log::set_max_level(log::LevelFilter::Info);
 
     log::debug!("starting sys-io");
+    // Schedulers and OOM consumers are ready; boot exhaustion stayed unarmed.
+    crate::mm::phys::arm_oom();
     process.start();
 
     let _ = alloc::sync::Arc::into_raw(process);

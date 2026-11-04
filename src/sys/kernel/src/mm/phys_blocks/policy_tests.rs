@@ -198,7 +198,30 @@ pub(crate) fn run() {
     pressure_receipts();
     worker_transitions();
     retry_decisions();
+    arming();
     crate::raw_log!("phys_blocks policy tests PASS");
+}
+
+fn arming() {
+    for free in [0, 127, 128, 511, 512, 767, 768, 1024] {
+        let mut fixture = Fixture::new();
+        fixture.shape(0, 0, PAGES);
+        fixture.shape(HIGH, 0, PAGES);
+        let pool = fixture.pool();
+        pool.charge((1024 - free) as u16, AllocationClass::Kernel)
+            .unwrap();
+        assert!(!pool.take_oom_attention());
+        pool.arm_oom();
+        let state = pool.state_snapshot();
+        assert!(state.armed());
+        assert_eq!(state.free_pages(1024), free);
+        assert_eq!(state.killing(), free < 512);
+        assert_eq!(state.generation(), u64::from(free < 512));
+        assert_eq!(state.gate_closed(AllocationClass::System), free < 128);
+        assert_eq!(pool.oom_runs(), u64::from(free < 512));
+        assert!(pool.take_oom_attention());
+        assert!(!pool.take_oom_attention());
+    }
 }
 
 fn retry_decisions() {

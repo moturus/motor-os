@@ -100,8 +100,8 @@ impl From<Corruption> for AllocationError {
 /// use it to reject work from an obsolete run.
 ///
 /// Unarmed state disables floors, gates and OOM transitions while retaining
-/// accounting. The OS allocator stays unarmed through the preparatory stages. Debug guest
-/// tests construct private `Pool` instances and exercise armed states there.
+/// accounting. The OS allocator is armed just before starting sys-io, after
+/// boot exhaustion tests. Debug guest tests also exercise private armed pools.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct StateSnapshot(pub(super) u64);
 
@@ -244,6 +244,31 @@ impl StateSnapshot {
 }
 
 impl<L: PageLinks> Pool<'_, L> {
+    /// Enable runtime policy once, after schedulers and wait consumers exist.
+    /// A concurrent charge/release forces a fresh initial-count decision.
+    pub(crate) fn arm_oom(&self) {
+        let mut old = self.state_snapshot();
+        loop {
+            assert!(!old.armed(), "phys: OOM policy already armed");
+            let mut next = StateSnapshot(old.0 | ARMED);
+            if next.free_pages(self.counters.total) < 512 {
+                next = next.request(self.counters.total);
+            }
+            match self.counters.state.compare_exchange_weak(
+                old.0,
+                next.0,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    self.publish_transition(old, next);
+                    return;
+                }
+                Err(current) => old = StateSnapshot(current),
+            }
+        }
+    }
+
     // Called under allocation callers' locks: no OOM lock, posting, allocation
     // or logging here. Scratch pools record attention without touching CPUs.
     pub(crate) fn request_oom_attention(&self) {

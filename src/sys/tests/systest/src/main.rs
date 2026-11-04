@@ -6,6 +6,7 @@
 mod checked_copy_in;
 mod cold_spawn;
 mod memory;
+mod oom;
 mod raw_spawn;
 mod sched_fairness;
 // mod channel_test;
@@ -1464,6 +1465,13 @@ fn main() {
         // Nothing listens: an admitted client would see a refusal instead.
         net_caps::check_denied(9);
         return;
+    }
+    if args.len() == 2 && args[1] == "system-oom-tests" {
+        oom::run_all_tests();
+        return;
+    }
+    if args.len() == 3 && args[1] == "oom-child" {
+        oom::run_child(&args[2]);
     }
     if args.len() == 2 && args[1] == "capability-policy-tests" {
         test_caps();

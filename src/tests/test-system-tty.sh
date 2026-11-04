@@ -185,6 +185,25 @@ system_caps_output="$(vm_ssh /system/bin/cat /user/tmp/system-caps.log)"
   fail "System capability tests did not finish: '$system_caps_output'"
 printf '%s\n' "$system_caps_output"
 
+# Prepare through SSH, then observe serial output without starting SSH commands
+# during pressure. The helper needs System authority and preallocates its tests.
+printf '/none/tmp/capability-systest system-oom-tests; echo OOM_TEST_STATUS=$?\r' >&3
+oom_done=0
+for _ in $(seq 1 120); do
+  if grep -aq 'oom::run_all_tests PASS' "$CONSOLE_LOG"; then
+    oom_done=1
+    break
+  fi
+  if grep -aqE 'OOM_TEST_STATUS=(-[0-9]|[1-9])' "$CONSOLE_LOG"; then
+    tail -80 "$CONSOLE_LOG" >&2
+    fail "OOM helper failed (log: $CONSOLE_LOG)"
+  fi
+  serial_test_vm_alive || fail "$TEST_VM_LABEL exited during OOM tests (log: $CONSOLE_LOG)"
+  sleep 0.25
+done
+[ "$oom_done" = 1 ] || fail "OOM tests did not finish (log: $CONSOLE_LOG)"
+echo 'oom::run_all_tests PASS'
+
 # WireGuard derives roles from the complete capability word, including when
 # CAP_SYS and CAP_INTERACTIVE are both present. This needs the System console.
 scp -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
