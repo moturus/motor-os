@@ -1657,4 +1657,12 @@ vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/tokio-tests"
 kill -0 "$VMM_PID" 2>/dev/null ||
   fail "owned $TEST_VM_LABEL exited before final teardown"
 cleanup_full_test 0 || exit "$?"
+# The expected OOM panic belongs to a separate guest, after ordinary tests.
+# Teardown removed the ERR trap, so name this phase on failure.
+oom_args=(--vmm "$VMM")
+if [ "$BUILD" = release ]; then
+  oom_args+=(--release)
+fi
+"$WD/test-oom-abort.sh" "${oom_args[@]}" ||
+  fail "test-oom-abort.sh failed (status $?)"
 echo "-------- MOTOR OS FULL TEST PASS ---------"

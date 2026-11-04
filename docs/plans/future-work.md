@@ -8,9 +8,47 @@ per-operation allocation overhead, were reviewed. Historical timings below
 are not new measurements. An unexplained historical failure stays open
 unless the source establishes that its cause was fixed.
 
+<<<<<<< HEAD
 ## wasm 224MB image test ooming
 
 Find what regressed.
+=======
+## The one-vCPU debug full gate runs at its budget: poll contention tests (2026-11-04)
+
+`src/tests/full-test.sh --cpus 1` in debug has a 3,000-second budget, twice
+the multi-vCPU one. It passed in 49.4 minutes on 2026-11-04 during the OOM
+step 5e validation and timed out at 3,000 seconds later that day with the
+step 5f tree, in the SFTP phase about two minutes before the end. The abort
+fixture that 5f appends to the suite takes 14 seconds at that shape, so the
+tree change did not cause the overrun: the gate has no headroom. The
+one-vCPU release gate passes in about 21 minutes.
+
+Guest-uptime stamps on the runtime's spawn log lines place about 25 minutes
+(1,476 seconds in the passing run, 1,549 in the timed-out one) between the
+last child spawn of `test_stale_tombstone_is_dropped_after_reregistration`
+and the first child spawn of `test_registration_races_source_close` in
+`src/sys/tests/systest/src/poll.rs`. On four vCPUs the same stretch takes
+3 seconds. It contains all of `test_add_races_source_close`, 2,000 rounds of
+`poll::add` and source close against a thread that loops `poll::add` and
+`poll::del` without blocking, and the setup of the 32-round registration
+test, which starts the same kind of hammer thread before its first spawn and
+then needs about 2.3 seconds per round. Native thread samples taken during
+the 5e run caught the 2,000-round test advancing from round 1,337 to 1,526
+between two samples, with its workers waiting on the registry lock while the
+hammer ran. The guest had about 800 MiB free and no OOM runs or waits, so
+memory is not involved. The likely mechanism is spin locks in the runtime
+(rt.vdso's descriptor table and the poll registry) contended by a thread that
+never blocks: on one vCPU the other threads progress only when the hammer is
+preempted. This has not been confirmed with instrumentation.
+
+Options, none taken: yield in the hammer loops, size the rounds by
+`--host-cpus`, or back off in the runtime's spin locks. AGENTS.md forbids
+extending the budget or trimming a test to obtain a pass, so this is a
+maintainer decision. Evidence, all in temporary files: the 5e logs
+`/tmp/oom-5e-full-debug-1.log`, `/tmp/oom-5e-thread-round-{1,2}.log` and
+`/tmp/oom-5e-single-cpu-stats.log`, and the 2026-11-04 review session's
+`oom-5f-review-full-debug-1c-timeout.log` in its scratchpad.
+>>>>>>> 46acdb9e (docs, tests: oom handlings update)
 
 ## Batch the kernel-stack shootdowns of a process exit (2026-11-01)
 
@@ -21,7 +59,8 @@ A process that ran many short-lived threads can hold up to 254 cached stacks
 per size class. Freeing them under one invalidation needs a multi-segment
 free in the kernel stack region that clears every mapping first and shoots
 down once. The cost is the old drop-time cost moved to exit, not a
-regression; raised in the step 3 review of docs/plans/oom-handling.md.
+regression; raised in the review of OOM handling step 3, the release of user
+memory at exit.
 
 ## WireGuard load test flakes: a single ICMP probe inside a UDP flood (2026-10-29)
 

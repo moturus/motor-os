@@ -511,7 +511,6 @@ fn child_wait(metrics: &Metrics, mode: &str) -> bool {
     };
     let mut small_victims = Vec::with_capacity(4);
     if mode.starts_with("system") {
-        let before = moto_sys::free_pages();
         for _ in 0..4 {
             let space =
                 SysObj::create(SysHandle::NONE, 0, "address_space:debug_name=oom-small").unwrap();
@@ -519,9 +518,6 @@ fn child_wait(metrics: &Metrics, mode: &str) -> bool {
                 .push(SysObj::create(space, 0, "process:entry_point=4096;capabilities=0").unwrap());
             SysObj::put(space).unwrap();
         }
-        // Even their complete footprint plus the post-rollback free count
-        // stays below recovery. Only the older 32 MiB victim can end the run.
-        assert!(before.saturating_sub(moto_sys::free_pages()) < 128);
     }
     let metric = if fault || mode == "system-fault" {
         metrics.faults
@@ -593,6 +589,9 @@ fn child_wait(metrics: &Metrics, mode: &str) -> bool {
         SysObj::put(victim).unwrap();
     }
     if mode.starts_with("system") {
+        // Five kills in one run prove the small cleanups never reached recovery
+        // before selection of the large victim. Creation's global free-page delta
+        // also includes shared kernel allocator growth, not just victim memory.
         assert_eq!(metrics.read(metrics.kills, PID_SYSTEM), kills + 5);
         assert_eq!(
             metrics.read(metrics.runs, PID_SYSTEM),
@@ -651,4 +650,62 @@ pub fn run_all_tests() {
     );
     child_wait(&metrics, "cancel");
     println!("oom::run_all_tests PASS");
+}
+
+/// Deliberately terminates a fresh, disposable System-console guest.
+/// The host accepts only the kernel's victimless report and ensuing abort.
+pub fn abort_test() -> ! {
+    use moto_sys::caps::ProcessRole;
+    use moto_sys::stats::{PID_SYS_IO, ProcessInfoV1};
+
+    assert_eq!(
+        ProcessRole::from_caps(moto_sys::ProcessStaticPage::get().capabilities),
+        ProcessRole::System
+    );
+    let metrics = Metrics::new();
+    let mut pressure = Pressure::new();
+    let mut processes = [ProcessInfoV1::default(); 128];
+    let count = ProcessInfoV1::list(PID_SYS_IO, &mut processes).unwrap();
+    assert!(count < processes.len(), "incomplete process inventory");
+    let processes = &processes[..count];
+    assert!(processes.iter().any(|p| p.pid == moto_sys::current_pid()));
+    for process in processes.iter().filter(|p| p.active != 0) {
+        // A listed process without threads has exited or is exiting, possibly
+        // still referenced by its parent; the kernel never selects it.
+        if crate::kernel_metric("active_threads", process.pid) == 0 {
+            println!(
+                "oom-abort: no threads pid={} name={}",
+                process.pid,
+                process.debug_name()
+            );
+            continue;
+        }
+        let parent = processes.iter().find(|p| p.pid == process.parent_pid);
+        assert!(
+            process.process_role == ProcessRole::System as u8
+                || process.pid == PID_SYS_IO
+                || process.parent_pid == PID_SYS_IO
+                || parent.is_some_and(|p| p.parent_pid == PID_SYS_IO),
+            "eligible process remains: {} ({})",
+            process.debug_name(),
+            process.pid
+        );
+        println!(
+            "oom-abort: protected pid={} parent={} role={} name={}",
+            process.pid,
+            process.parent_pid,
+            process.process_role,
+            process.debug_name()
+        );
+    }
+    // A fresh guest with no committed selection cannot have a pending victim.
+    assert_eq!(metrics.read(metrics.runs, PID_SYSTEM), 0);
+    assert_eq!(metrics.read(metrics.kills, PID_SYSTEM), 0);
+    println!("oom-abort: READY pid={}", moto_sys::current_pid());
+    pressure.drain_to(256);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        SysCpu::sched_yield();
+    }
+    panic!("victimless OOM did not abort the guest");
 }

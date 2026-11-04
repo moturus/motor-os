@@ -67,7 +67,8 @@ What works today:
 * **Boot and kernel**: MBR (QEMU) or PVH (Cloud Hypervisor, Firecracker) boot
   in about 200 ms; cooperative in-kernel scheduling with preemptive userspace;
   SMP up to 16 vCPUs; guarded lazy stacks; physical memory-pressure reporting.
-  [OOM handling](docs/oom-handling.md) is transitioning to kernel OOM killing.
+  [OOM handling](docs/oom-handling.md): under memory pressure the kernel parks
+  allocating operations and kills eligible processes.
 * **I/O in userspace**: VirtIO block and network drivers with checksum and TSO
   offload; Motor FS with per-role permissions and advisory locks; moto-netstack
   with IPv4 and IPv6, DHCPv4, TCP with CUBIC, SACK, RACK-TLP, timestamps, and

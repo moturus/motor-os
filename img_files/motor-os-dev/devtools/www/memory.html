@@ -398,7 +398,9 @@ a.card h3 { color: var(--accent); }
 <div class="eyebrow">System</div>
 <h1>Memory</h1>
 <p class="lead">Motor OS uses 4 KiB pages, 2 MiB pages for large heaps, eager mappings by
-default, and guarded lazy stacks. The shared page carries the allocator's live free-page count. The OOM killer and fallible allocation paths are being added in stages.</p>
+default, and guarded lazy stacks. The shared page carries the allocator's live free-page count.
+Under pressure, the kernel parks allocating operations and kills eligible processes until
+memory recovers.</p>
 
 <h2>Pages and mappings</h2>
 <ul>
@@ -450,10 +452,23 @@ after releasing unused cached blocks and checking again. Reads, stat, list, spar
 resize, and deletes remain allowed. Capacity and cache sizing are unchanged.</p>
 <p>Reservation-based admission, its query and metrics, and the memory-based service refusals
 have been removed. Physical allocator metrics remain available; memfs refusals are counted
-by <code>fs.memory_refused</code>. Physical exhaustion can still panic until the later
-fallible-allocation and OOM-killer steps land.</p>
+by <code>fs.memory_refused</code>.</p>
+
+<h2>Memory pressure and recovery</h2>
+<p>None and Interactive allocations preserve 2 MiB of free physical memory; System
+allocations preserve 512 KiB. The recipient's role applies even when another process maps
+its memory. Kernel-owned allocations have no floor. Allocating syscalls release temporary
+resources before waiting, and valid lazy and pager faults can wait for recovery.</p>
+<p>The OOM worker selects the newest eligible None process first, then Interactive
+processes. System processes, sys-io, its direct children and grandchildren, and paused
+debuggees are protected. Reclamation uses normal exit cleanup. At 3 MiB free, the run ends
+and allocation gates reopen. If no victim remains between 2 and 3 MiB, System can allocate
+while None and Interactive remain blocked. Below 2 MiB, with no eligible victim or pending
+reclamation, the kernel reports remaining processes and aborts. Kernel-heap exhaustion
+also remains fatal.</p>
 <p>See <a href="https://github.com/moturus/motor-os/blob/main/docs/oom-handling.md">
-<code>docs/oom-handling.md</code></a> for the current transition state.</p>
+<code>docs/oom-handling.md</code></a> for allocation gates, wait behavior, metrics and
+deferred limitations.</p>
 <nav class="pager">
 <a class="pager-prev" href="capabilities.html"><span>Previous</span>Capabilities</a>
 <a class="pager-next" href="filesystem.html"><span>Next</span>Filesystem</a>

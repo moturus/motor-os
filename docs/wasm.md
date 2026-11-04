@@ -46,10 +46,12 @@ Wasmtime and Wasmi use sparse lazy mappings for linear memory: only the pages
 a guest touches use RAM. Wasmtime reserves the declared maximum up to the
 addressable range: 4 GiB for memory32 and the kernel's 1 TiB allocation limit
 for memory64. Growth within that reservation does not move or copy memory.
-Wasmi retains its 4 GiB per-memory capacity. When RAM runs out, Motor OS
-kills whichever process has a page fault refused (there is no OOM killer, see
-[OOM handling](oom-handling.md)): the guest's runtime or another process. `-W
-max-memory-size` and `-W max-memories` bound a Wasmtime guest as upstream.
+Wasmi retains its 4 GiB per-memory capacity. Under physical memory pressure,
+Motor OS parks valid faults and selects eligible processes for OOM killing,
+newest None-role processes first, then Interactive processes. The runtime or
+another eligible process may be killed; role-based allocation floors and
+recovery are described in [OOM handling](oom-handling.md). `-W max-memory-size`
+and `-W max-memories` bound a Wasmtime guest as upstream.
 Store limits use upstream defaults and explicit `-W max-instances`,
 `-W max-tables` and `-W max-table-elements` overrides, with no Motor-only caps.
 `-W timeout=DURATION` interrupts a guest compiled with epoch interruption.

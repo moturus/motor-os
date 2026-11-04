@@ -91,7 +91,7 @@ type = "memfs"
 
 ### Memory protection
 
-- The [OOM transition](oom-handling.md) replaces the iteration-1 reserve:
+- [OOM handling](../oom-handling.md) replaced the iteration-1 reserve:
   memfs write/copy/create/move return `StorageFull` below 4 MiB of actual
   free physical memory, after reclaiming unused cache blocks and resampling.
   The same threshold applies to every guest size.

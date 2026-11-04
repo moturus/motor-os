@@ -1470,6 +1470,9 @@ fn main() {
         oom::run_all_tests();
         return;
     }
+    if args.len() == 2 && args[1] == "system-oom-abort" {
+        oom::abort_test();
+    }
     if args.len() == 3 && args[1] == "oom-child" {
         oom::run_child(&args[2]);
     }

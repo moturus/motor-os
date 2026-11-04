@@ -237,8 +237,10 @@ EOF
   else
     mkfifo "$work/stale.in" "$work/stale.out"
     exec {stale_in}<>"$work/stale.in"
+    # Debug runtimes log to stderr; merged into stdout, a chunk of such a line
+    # can split around a protocol line and hide it from the exact match below.
     ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 "$TEST_BIN/systest wireguard-stale-sockets" \
-      < "$work/stale.in" > "$work/stale.out" 2>&1 &
+      < "$work/stale.in" > "$work/stale.out" 2> "$work/stale.err" &
     stale_pid="$!"
     exec {stale_out}<"$work/stale.out"
     stale_phase() {
@@ -248,6 +250,7 @@ EOF
         printf '%s\n' "$line"
         [ "$line" != "$1" ] || return 0
       done
+      cat "$work/stale.err" >&2
       fail "stale sockets did not reach $1"
     }
     stale_phase 'STALE READY'
@@ -266,6 +269,7 @@ EOF
     cat <&"$stale_out"
     wait "$stale_pid"
     stale_pid=""
+    cat "$work/stale.err" >&2
     vm_ssh "$TEST_BIN/systest wireguard-client 10.250.20.1 10.250.20.2"
     vm_ssh "$TEST_BIN/systest wireguard-client fd50:20::1 fd50:20::2"
     stop_wireguard

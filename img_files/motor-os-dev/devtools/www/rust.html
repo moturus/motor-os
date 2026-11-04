@@ -503,8 +503,9 @@ refactoring; and crates that wrap native Linux or Windows APIs will not work.</p
   while a few network conditions still surface as <code>NotConnected</code>. A new code
   needs both a moto-rt release and a toolchain std that knows it.</li>
   <li><strong>Memory.</strong> Spawning is refused with a recoverable error while free
-  physical memory is below 4 MiB; fallible allocation and the OOM killer are being added
-  in stages. See <a href="memory.html">Memory</a>.</li>
+  physical memory is below 4 MiB. Under pressure, allocating operations can wait while
+  the kernel kills eligible processes and reclaims their memory.
+  See <a href="memory.html">Memory</a>.</li>
   <li><strong>Motor OS-specific APIs.</strong> <code>moto-rt</code> exposes the runtime
   (process capabilities and roles, the Ctrl+C handler, the terminal descriptor, file
   permission updates); <code>moto-sys</code> exposes the syscalls and shared pages
