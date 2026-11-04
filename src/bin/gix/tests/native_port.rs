@@ -154,6 +154,9 @@ fn main() -> Result {
     check_unstage(&output)?;
     check_commit(&output)?;
     check_transition_delta(&output)?;
+    check_transition_prunes_emptied_directories(&output)?;
+    #[cfg(unix)]
+    check_transition_preserves_directory_permissions(&output)?;
     check_merge_abort(&output)?;
     check_switch(&output)?;
     let mut index = File::from_state(state, output.join("written.index"));
@@ -2653,6 +2656,10 @@ fn check_transition_delta(output: &Path) -> Result {
     assert_eq!(fs::read(workdir.join("keep"))?, b"target keep\n");
     assert!(gix::index::fs::Metadata::from_path_no_follow(&workdir.join("keep"))?.is_executable());
     assert!(!workdir.join("removed/old").try_exists()?);
+    assert!(
+        !workdir.join("removed").try_exists()?,
+        "checkout must prune directories emptied by file removals",
+    );
     assert_eq!(fs::read(&unchanged_path)?, unchanged_bytes);
     assert_eq!(
         gix::index::entry::Stat::from_fs(&gix::index::fs::Metadata::from_path_no_follow(
@@ -4546,5 +4553,154 @@ fn check_head_ref(output: &Path) -> Result {
     run_mutation_child(&repository, "blocked")?;
     drop(guard);
     run_mutation_child(&repository, "acquire")?;
+    Ok(())
+}
+
+fn check_transition_prunes_emptied_directories(output: &Path) -> Result {
+    let repository = output.join("prune-repository");
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    motor_gix::init::run(
+        &repository,
+        &["init.defaultBranch=main"],
+        false,
+        &cancellation,
+    )?;
+    for directory in ["gone/a/b/c", "mixed", "kept-dir"] {
+        fs::create_dir_all(repository.join(directory))?;
+    }
+    for (path, data) in [
+        ("gone/a/b/c/deep.rs", b"deep\n".as_slice()),
+        ("gone/a/file.rs", b"a\n"),
+        ("gone/top.rs", b"top\n"),
+        ("kept-dir/remain", b"remain\n"),
+        ("kept-dir/removed", b"removed\n"),
+        ("mixed/tracked", b"tracked\n"),
+    ] {
+        fs::write(repository.join(path), data)?;
+    }
+    let overrides = ["user.name=Native Test", "user.email=native@example.com"];
+    let mut opened = motor_gix::repository::open(&repository, &overrides, false)?;
+    motor_gix::add::run(&opened, true, &[], &cancellation)?;
+    motor_gix::commit::run(&opened, "original", &cancellation)?;
+    let repo = &opened.repo;
+    let original_commit = repo.head_id()?.detach();
+    let (mut target, _) = repo.open_index()?.into_parts();
+    target.remove_entries(|_, path, _| {
+        path.starts_with(b"gone/") || path == "mixed/tracked" || path == "kept-dir/removed"
+    });
+    target.sort_entries();
+    let target_tree = motor_gix::tree_index::write(repo, &target, &cancellation)?;
+    let target_commit = repo
+        .new_commit("prune target", target_tree, [original_commit])?
+        .id;
+    let target_ref: gix::refs::FullName = "refs/heads/prune-target".try_into()?;
+    repo.reference(
+        target_ref,
+        target_commit,
+        gix::refs::transaction::PreviousValue::MustNotExist,
+        "prune fixture",
+    )?;
+
+    // An untracked file inside `mixed` must protect the directory from pruning.
+    let workdir = repo.workdir().ok_or("worktree missing")?.to_owned();
+    let untracked = workdir.join("mixed/untracked");
+    fs::write(&untracked, b"untracked\n")?;
+
+    motor_gix::switch::run(&mut opened, "prune-target", &cancellation)?;
+
+    assert!(
+        !workdir.join("gone").try_exists()?,
+        "removed directories must be pruned at every depth"
+    );
+    assert!(!workdir.join("gone/a/file.rs").try_exists()?);
+    assert_eq!(fs::read(workdir.join("kept-dir/remain"))?, b"remain\n");
+    assert!(!workdir.join("kept-dir/removed").try_exists()?);
+    assert!(!workdir.join("mixed/tracked").try_exists()?);
+    assert!(
+        workdir.join("mixed").is_dir(),
+        "a directory with an untracked file must survive pruning"
+    );
+    assert_eq!(fs::read(&untracked)?, b"untracked\n");
+    let repo = &opened.repo;
+    let published = repo.open_index()?;
+    assert_eq!(
+        motor_gix::tree_index::write(repo, &published, &cancellation)?,
+        target_tree
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+fn check_transition_preserves_directory_permissions(output: &Path) -> Result {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repository = output.join("directory-permissions-repository");
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    motor_gix::init::run(
+        &repository,
+        &["init.defaultBranch=main"],
+        false,
+        &cancellation,
+    )?;
+    for directory in ["single", "mixed"] {
+        fs::create_dir(repository.join(directory))?;
+    }
+    for path in [
+        "single/file",
+        "mixed/changed",
+        "mixed/removed",
+        "mixed/unchanged",
+    ] {
+        fs::write(repository.join(path), b"original\n")?;
+    }
+    let overrides = ["user.name=Native Test", "user.email=native@example.com"];
+    let mut opened = motor_gix::repository::open(&repository, &overrides, false)?;
+    motor_gix::add::run(&opened, true, &[], &cancellation)?;
+    motor_gix::commit::run(&opened, "original", &cancellation)?;
+    opened.repo.reference(
+        "refs/heads/original",
+        opened.repo.head_id()?.detach(),
+        gix::refs::transaction::PreviousValue::MustNotExist,
+        "permission fixture",
+    )?;
+    for path in ["single/file", "mixed/changed"] {
+        fs::write(repository.join(path), b"target\n")?;
+    }
+    fs::remove_file(repository.join("mixed/removed"))?;
+    motor_gix::add::run(&opened, true, &[], &cancellation)?;
+    motor_gix::commit::run(&opened, "target", &cancellation)?;
+
+    let root_permissions = fs::metadata(&repository)?.permissions();
+    for readonly_root in [false, true] {
+        motor_gix::switch::run(&mut opened, "original", &cancellation)?;
+        for directory in ["single", "mixed"] {
+            fs::set_permissions(
+                repository.join(directory),
+                fs::Permissions::from_mode(0o700),
+            )?;
+        }
+        if readonly_root {
+            fs::set_permissions(&repository, fs::Permissions::from_mode(0o555))?;
+        }
+        let result = motor_gix::switch::run(&mut opened, "main", &cancellation);
+        // Restore permissions before propagating an error so test cleanup can remove the fixture.
+        fs::set_permissions(&repository, root_permissions.clone())?;
+        result?;
+        for directory in ["single", "mixed"] {
+            assert_eq!(
+                fs::metadata(repository.join(directory))?
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700,
+                "switch must preserve {directory} permissions (readonly root: {readonly_root})"
+            );
+        }
+        for path in ["single/file", "mixed/changed"] {
+            assert_eq!(fs::read(repository.join(path))?, b"target\n");
+        }
+        assert_eq!(fs::read(repository.join("mixed/unchanged"))?, b"original\n");
+        assert!(!repository.join("mixed/removed").try_exists()?);
+    }
     Ok(())
 }
