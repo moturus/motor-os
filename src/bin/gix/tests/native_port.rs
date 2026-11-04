@@ -17,7 +17,21 @@ use gix::{
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+fn check_user_config_location() {
+    let location = gix::config::Source::User.storage_location(&mut |name| match name {
+        "GIT_CONFIG_GLOBAL" => None,
+        "HOME" => Some("test-home".into()),
+        unexpected => panic!("unexpected config environment variable: {unexpected}"),
+    });
+    #[cfg(target_os = "motor")]
+    let expected = Path::new("/user/cfg/gix.config");
+    #[cfg(not(target_os = "motor"))]
+    let expected = Path::new("test-home/.gitconfig");
+    assert_eq!(location.as_deref(), Some(expected));
+}
+
 fn main() -> Result {
+    check_user_config_location();
     let mut args = std::env::args_os().skip(1);
     let first = args.next().ok_or("fixture path required")?;
     if first == OsStr::new("--capture-child") {
@@ -2996,6 +3010,24 @@ fn check_commit(output: &Path) -> Result {
             .err()
             .ok_or("invalid identity created a commit")?;
         assert!(error.to_string().contains(expected), "{error}");
+        if overrides == ["user.name=", "user.email="] {
+            let message = error.to_string();
+            assert!(
+                message.contains("[user]\n    name = Your Name\n    email = you@example.com"),
+                "{message}"
+            );
+            assert!(
+                message.contains(".git/config (this repository)"),
+                "{message}"
+            );
+            #[cfg(target_os = "motor")]
+            assert!(message.contains("/user/cfg/gix.config"), "{message}");
+            #[cfg(not(target_os = "motor"))]
+            {
+                assert!(message.contains("~/.gitconfig"), "{message}");
+                assert!(message.contains("$XDG_CONFIG_HOME/git/config"), "{message}");
+            }
+        }
         assert!(invalid.repo.head()?.is_unborn());
         assert_eq!(fs::read(invalid.repo.index_path())?, index_before);
         assert_eq!(

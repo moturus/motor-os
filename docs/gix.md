@@ -13,7 +13,8 @@ The program is always called `gix`; there is no `git` alias.
 ## Getting started
 
 Gix has to know who you are before it can write a commit. Put your name and
-email into `~/.gitconfig`, or into the repository's `.git/config`:
+email into `/user/cfg/gix.config` on Motor OS, `~/.gitconfig` on Linux, or
+the repository's `.git/config`:
 
 ```ini
 [user]
@@ -124,11 +125,13 @@ is where the branch begins; it defaults to HEAD.
 
 ## Configuration
 
-Gix reads Git's configuration files in this order: the XDG Git
-configuration, `~/.gitconfig` and the files it includes, the repository's
-`.git/config`, and finally the `-c key=value` options on the command line.
-Run a command with `--config-paths` to see which files were read. `HOME` and
-`XDG_CONFIG_HOME` say where your own configuration lives.
+Gix reads configuration files in this order: the XDG Git configuration,
+the user configuration and its includes, the repository's `.git/config`,
+and finally the `-c key=value` options on the command line. The user
+configuration is `/user/cfg/gix.config` on Motor OS and `~/.gitconfig` on
+Linux. On Linux, `HOME` selects the home directory. `XDG_CONFIG_HOME`
+selects the XDG directory, defaulting to `~/.config`. Run a command with
+`--config-paths` to see which files were read.
 
 Some settings are fixed and no configuration can change them: the ones that
 concern the Motor OS filesystem, and the size limits listed below. Gix does

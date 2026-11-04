@@ -157,12 +157,12 @@ pub(crate) fn finish_ready(
 pub(crate) fn identities(repo: &gix::Repository) -> crate::Result<Identities> {
     let author = repo
         .author()
-        .ok_or_else(|| invalid("author identity is not configured"))??;
+        .ok_or_else(|| identity_error("author identity is not configured"))??;
     validate_identity(author, "author")?;
     let author = author.to_owned()?;
     let committer = repo
         .committer()
-        .ok_or_else(|| invalid("committer identity is not configured"))??;
+        .ok_or_else(|| identity_error("committer identity is not configured"))??;
     validate_identity(committer, "committer")?;
     let committer = committer.to_owned()?;
     Ok(Identities { author, committer })
@@ -171,13 +171,25 @@ pub(crate) fn identities(repo: &gix::Repository) -> crate::Result<Identities> {
 fn validate_identity(signature: gix::actor::SignatureRef<'_>, role: &str) -> crate::Result {
     let trimmed = signature.trim();
     if trimmed.name.is_empty() || trimmed.email.is_empty() {
-        return Err(invalid(format!(
+        return Err(identity_error(format!(
             "{role} identity requires a nonempty name and email"
         ))
         .into());
     }
     signature.write_to(&mut io::sink())?;
     Ok(())
+}
+
+fn identity_error(message: impl fmt::Display) -> io::Error {
+    #[cfg(target_os = "motor")]
+    let locations = "  /user/cfg/gix.config (all repositories)";
+    #[cfg(not(target_os = "motor"))]
+    let locations = "  ~/.gitconfig (all repositories)\n  $XDG_CONFIG_HOME/git/config (defaults to ~/.config/git/config)";
+    invalid(format!(
+        "{message}\n\nAdd your name and email to one of these configuration files:\n\
+         {locations}\n  .git/config (this repository)\n\n\
+         [user]\n    name = Your Name\n    email = you@example.com"
+    ))
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {

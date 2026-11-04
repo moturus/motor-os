@@ -863,9 +863,16 @@ fn prune_empty_directories(
                 Some(metadata) if metadata.is_dir() => {}
                 _ => break,
             }
+            // Motor OS reports nonempty directories as FileTooLarge.
             match fs::remove_dir(directory) {
                 Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::DirectoryNotEmpty => break,
+                Err(error)
+                    if error.kind() == io::ErrorKind::DirectoryNotEmpty
+                        || cfg!(target_os = "motor")
+                            && error.kind() == io::ErrorKind::FileTooLarge =>
+                {
+                    break;
+                }
                 Err(error) => return Err(error.into()),
             }
             let Some(next) = directory.parent() else {
