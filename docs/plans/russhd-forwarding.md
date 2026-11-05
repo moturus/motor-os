@@ -3,12 +3,12 @@
 Status: v6, rebase review incorporated on 2026-11-05. Milestone 1 is complete with
 three debug and three release passes and the complete developer-image release
 gate, including both 256 MiB Wasm VMs.
-Milestone 2 now starts by rebasing the external russh fork onto v0.65.1, repairing
-the remaining pending-delivery close stall, and validating a new published pin.
-The old-base close fixes and a scratch rebase have passed host tests, but the
-rebase checkpoint and relay integration remain outstanding. The user retains
-ownership of fork review and publication. This revision changes the plan only;
-the main repository still pins `server-window` at `042db50`.
+Milestone 2's external v0.65.1 rebase is committed and tested on branch
+`motor-v0.65.1`, tip `bc44c5d`. Its complete fork suite passes 289 tests, including
+the repaired pending-delivery close stall. Work stops for the user to review and
+publish that branch; see the publication handoff below. The main repository still
+pins `server-window` at `042db50`. The main pin/contract patches, their guest gates,
+and relay integration remain outstanding.
 See "Implementation progress" below and "Decisions" at the end.
 
 ## Implementation progress
@@ -20,7 +20,7 @@ Developer-image validation remains release-only.
 | Step | Progress | Remaining |
 |---|---|---|
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
-| 2 | Old-base fork suite passed (231 tests); 145 main russhd tests passed with draft close regressions. Scratch v0.65.1 rebase passed 285 fork tests and 143 main host tests. Login deadline/idle policy landed separately in `bc39a586` | Step 2a: final rebase, pending-delivery stall regression/fix, user publication, pin and contract tests, 3+3 main-image and developer-image release gates. Step 2b: relay, direct opens, configuration, login-deadline coverage, 3+3 milestone gates |
+| 2 | External step 2a series ready at `bc44c5d` on `motor-v0.65.1`; 289 fork tests pass, including deterministic pending-delivery close regressions. Login deadline/idle policy landed separately in `bc39a586` | User publication; main pin and contract patches, 3+3 main-image and developer-image release gates. Step 2b: relay, direct opens, configuration, login-deadline coverage, 3+3 milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
@@ -58,8 +58,9 @@ cover the new rebase checkpoint.
   peer-close behavior (`c016ea8`); pass the complete fork suite (231 total tests).
 - [x] Prepare the main pin/contract-test patch and pass 145 total main russhd
   tests against the local fork, including the draft regressions.
-- [ ] Complete step 2a below: rebase onto v0.65.1 on a new fork branch, fix the
-  pending-delivery close stall, and pass the fork checks before user publication.
+- [x] Rebase onto v0.65.1 on the new fork branch, fix the pending-delivery close
+  stall, and pass the fork checks (`bc44c5d`; publication handoff below).
+- [ ] User reviews and publishes `motor-v0.65.1` from the persistent fork checkout.
 - [ ] Update the actual git pin with Cargo, adapt authentication callbacks,
   restore close contract tests, strengthen compression coverage, and pass the
   separate step 2a main-image and developer-image gates.
@@ -156,12 +157,13 @@ This is a separate checkpoint before step 2b's relay work and its own 3+3 gate.
 Do not count the scratch rebase or step 1 passes toward it, and do not add retries,
 longer timeouts, or known-failure exceptions.
 
-**Evidence and limits.** Saved trial logs in `build/russh-rebase/` show 239 library,
+**Trial evidence and limits.** Saved trial logs in `build/russh-rebase/` show 239 library,
 43 integration, and 3 documentation tests passing (8 preexisting ignored examples),
 143 main host tests passing, and both Motor OS release binaries building. The
 143-test trial omitted the two draft close regressions included in the earlier
-145-test old-base run. The stale-flag fix and deterministic regression, final
-published pin, and guest gates remain unvalidated. External warnings include
+145-test old-base run. That trial did not validate the stale-flag fix or its
+deterministic regression; the final fork results below now do. The published
+main pin and guest gates remain outstanding. External warnings include
 the fork's deprecated `AtomicU32::fetch_update`; main-repository changes must
 introduce no compiler or clippy warnings.
 
@@ -172,6 +174,86 @@ all-feature, wasm32, semver, and minimal-version upstream checks remain outstand
 the Motor feature suite does not establish them. PR publication stays outside
 this implementation handoff. Removal of the unused vendored cryptovec copy is
 separate housekeeping.
+
+### Step 2a: fork publication handoff (2026-11-05)
+
+The **external `moturus/russh` fork** is ready for user review and publication.
+Its persistent checkout is `build/russh-rebase/fork`, branch `motor-v0.65.1`, at
+`bc44c5d366366b8d2d5f997e0a3d27c5d7b208f2`, based on upstream tag commit
+`b33092aad1e51c66258a12e8b83fc473a68d9d34`. The checkout is clean. The six published
+commits were replayed, with test callback corrections folded into their introducing
+commits. The local compression implementation was dropped in favor of upstream's
+complete fix, while its two extra boundary tests were retained.
+
+All eleven new commit messages are one line:
+
+| New commit | Work and original provenance |
+|---|---|
+| `55a3d43` | Receive-window validation (`145a683`) |
+| `a029f51` | Application-controlled receive credit (`49428c4`) |
+| `9ea8d48` | Backpressure test clippy correction (`8e6abf4`) |
+| `519eb75` | Credit before confirmation (`8dcf301`), including `ac0e947` and #785 fixture fixes |
+| `31efde1` | Nonblocking server delivery (`f261f84`), including its #785 fixture fix |
+| `49e8370` | Explicit receive-control lifetimes (`042db50`), preserving upstream's timeout helper |
+| `853de61` | Immediate peer-close cleanup (`01d0391`) |
+| `cb9db32` | Local-close receive cleanup (`d758c92`) |
+| `9b85fb6` | Refresh the pending-delivery guard after the application drain, with two deterministic regressions |
+| `5da2c58` | Live peer-close liveness regressions (`c016ea8`) |
+| `bc44c5d` | Retain `4fe78f9`'s partial-flush packet-limit and next-packet tests |
+
+The new close tests use an in-process duplex transport. They fill the channel
+queue, prove its delivery permit is pending, and enqueue close either before the
+first session poll or after the session has parked in select. Another channel's
+packet must arrive without freeing that queue or injecting an unrelated wakeup.
+With the old guard, the pre-select-drain case failed its three-second watchdog
+while the normal select case passed (`pending-delivery-old-guard.log`). Moving
+the existing guard calculation after the drain makes both pass; all 20 focused
+server-session tests pass (`pending-delivery-fixed.log`). There are no sleeps,
+production test hooks, added runtime allocations, or extra boot work in the fix.
+
+Each replayed patch passed focused tests before committing. The final complete
+offline suite passed **243 library + 43 integration + 3 documentation tests**, with
+the same eight preexisting ignored documentation examples. Upstream's baseline
+passed 258 tests before replay. The final suite command, run in the fork checkout
+with loopback access, was:
+
+```sh
+RUSTUP_TOOLCHAIN=x86_64-unknown-motor-1.99.1 cargo test --offline --locked \
+  -p russh --no-default-features --features flate2,ring,rsa
+```
+
+`cargo fmt --check` passes. Direct rustfmt checks of every changed Rust file also
+pass with `--edition 2024 --config-path rustfmt.toml --config skip_children=true`;
+this checks included modules without reformatting unrelated upstream children.
+Library clippy completes with the ten upstream warnings plus the already known
+fork `AtomicU32::fetch_update` deprecation. No lint was suppressed or relaxed.
+
+One focused invocation without loopback access failed at the existing
+`TcpListener::bind` in `tests::channels::test_server_receives_close_on_client_close`
+with `PermissionDenied` (`replay-06-lifetime-tests.log`). The unchanged selection
+passed with loopback access (`replay-06-receive-loopback-tests.log`), and all new
+lifetime checks then passed (`replay-06-lifetime-focused.log`). This was a sandbox
+restriction; the original failure is retained and no test code was weakened.
+
+Evidence is under `build/russh-rebase/`: `motor-v0.65.1-suite.log`,
+`motor-v0.65.1-fmt.log`, `motor-v0.65.1-included-fmt.log`,
+`motor-v0.65.1-clippy.log`, and the focused logs above. `validation.Cargo.lock`
+records the standalone dependency
+resolution. The final eleven patches are in `motor-v0.65.1-patches/`; a range diff
+of the six published commits is in `published-series-range-diff.txt`.
+
+A fresh remote check (`publication-remote-refs.txt`) found `server-window` still
+at `042db50cf72626b464caf63f1c0d2b76c7272e18` and no published `motor-v0.65.1` branch.
+The requested stopping point is here. From the Motor OS repository root, the user
+can publish the reviewed series with:
+
+```sh
+git -C build/russh-rebase/fork push --set-upstream origin motor-v0.65.1
+```
+
+After publication, verify the published revision and continue the main pin/API/
+contract patches above. No main-repository dependency or source change, main host
+test pass against the final fork, or step 2a guest-gate pass is claimed yet.
 
 Step 1 focused checks: `cargo test` for `wasm-smoke-suite` (two tests),
 `test-wasm-selection.sh`, `test-full-test-size.sh`, and `test-dev-memory-contract.sh`
