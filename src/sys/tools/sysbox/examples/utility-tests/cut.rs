@@ -89,7 +89,7 @@ pub fn fields(root: &Path) {
         ),
     ] {
         expect(
-            run(root, args, b"a:b"),
+            run(root, args, b""),
             1,
             b"",
             format!("cut: {diagnostic}\nTry 'cut --help' for more information.\n").as_bytes(),

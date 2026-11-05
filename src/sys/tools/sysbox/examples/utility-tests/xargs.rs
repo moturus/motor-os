@@ -178,11 +178,7 @@ pub fn batches(root: &Path) {
         b"xargs: max-args must be a positive integer\n",
     );
     expect(
-        run(
-            root,
-            &["xargs", "-n=2", executable, "--probe", "args"],
-            b"a b",
-        ),
+        run(root, &["xargs", "-n=2", executable, "--probe", "args"], b""),
         1,
         b"",
         b"xargs: max-args must be a positive integer\n",

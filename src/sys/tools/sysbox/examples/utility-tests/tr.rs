@@ -32,7 +32,7 @@ pub fn one_set(root: &Path) {
         ("[:]:]", "invalid character class ']'"),
     ] {
         expect(
-            run(root, &["tr", "-d", set], b"abc"),
+            run(root, &["tr", "-d", set], b""),
             1,
             b"",
             format!("tr: {diagnostic}\n").as_bytes(),
@@ -40,7 +40,7 @@ pub fn one_set(root: &Path) {
     }
     for set in ["[=a=]", r"[\]*]"] {
         expect(
-            run(root, &["tr", "-d", set], b"abc"),
+            run(root, &["tr", "-d", set], b""),
             1,
             b"",
             b"tr: unsupported equivalence or repetition construct\n",
