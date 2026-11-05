@@ -93,117 +93,73 @@ fn in_map(debug: SysHandle, tid: u64) -> bool {
         && data.syscall_op == SysMem::OP_MAP
 }
 
-/// A System caller mapping a process-less (User-class) space still waits.
-/// A foreign wake must survive both the first park and its spurious retry.
-fn syscall_wait(metrics: &Metrics, close_target: bool) {
-    for attempt in 1..=3 {
-        let space =
-            SysObj::create(SysHandle::NONE, 0, "address_space:debug_name=oom-wait").unwrap();
-        let go = AtomicBool::new(false);
-        let done = AtomicBool::new(false);
-        let recovered_before_entry = AtomicBool::new(false);
-        let tid = AtomicU64::new(0);
-        let handle = AtomicU64::new(0);
-        let mut pressure = Pressure::new();
-        let before = metrics.read(metrics.parks, moto_sys::current_pid());
-        let runs = metrics.read(metrics.runs, PID_SYSTEM);
-        let observed = std::thread::scope(|scope| {
-            let worker = scope.spawn(|| {
-                handle.store(moto_sys::current_thread().as_u64(), Ordering::Release);
-                tid.store(
-                    moto_sys::UserThreadControlBlock::this_thread_tid(),
-                    Ordering::Release,
-                );
-                while !go.load(Ordering::Acquire) {
-                    SysCpu::sched_yield();
-                }
-                recovered_before_entry.store(moto_sys::free_pages() >= 768, Ordering::Release);
-                let result = map(space, 256);
-                done.store(true, Ordering::Release);
-                // No intervening userspace wait may consume the test wake.
-                let woke = SysCpu::wait(
-                    &mut [],
-                    SysHandle::NONE,
-                    SysHandle::NONE,
-                    Some(moto_rt::time::Instant::now() + Duration::from_millis(50)),
-                );
-                (result, woke)
-            });
-            while tid.load(Ordering::Acquire) == 0 {
-                SysCpu::sched_yield();
+/// A victimless run releases allocating syscalls without consuming a wake
+/// intended for userspace. Later calls in the latch fail without rescanning.
+fn victimless_syscalls(metrics: &Metrics) {
+    let space = SysObj::create(SysHandle::NONE, 0, "address_space:debug_name=oom-latch").unwrap();
+    let go = AtomicBool::new(false);
+    let done = AtomicBool::new(false);
+    let handle = AtomicU64::new(0);
+    let mut pressure = Pressure::new();
+    let runs = metrics.read(metrics.runs, PID_SYSTEM);
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            handle.store(moto_sys::current_thread().as_u64(), Ordering::Release);
+            while !go.load(Ordering::Acquire) {
+                // sched_yield is a userspace wait and would consume the
+                // wake being saved for the wait after the allocating syscall.
+                core::hint::spin_loop();
             }
-            pressure.drain_to(640);
-            go.store(true, Ordering::Release);
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let mut observed = false;
-            while !done.load(Ordering::Acquire) && Instant::now() < deadline {
-                if metrics.read(metrics.parks, moto_sys::current_pid()) > before
-                    && in_map(SysHandle::SELF, tid.load(Ordering::Acquire))
-                {
-                    observed = true;
-                    break;
-                }
-                SysCpu::sched_yield();
-            }
-            let completed_before_release = done.load(Ordering::Acquire);
-            if observed {
-                let parks = metrics.read(metrics.parks, moto_sys::current_pid());
-                SysCpu::wake(SysHandle::from_u64(handle.load(Ordering::Acquire))).unwrap();
-                // Require the spurious return to register another wait while
-                // pressure is still held. A lost wake after this is a failure.
-                while metrics.read(metrics.parks, moto_sys::current_pid()) == parks
-                    && Instant::now() < deadline
-                {
-                    SysCpu::sched_yield();
-                }
-                let reparked = metrics.read(metrics.parks, moto_sys::current_pid()) > parks;
-                // Permanent size errors are still returned while the gate is closed.
-                assert_eq!(map(space, (1 << 28) + 1), Err(moto_rt::E_OUT_OF_MEMORY));
-                if close_target {
-                    SysObj::put(space).unwrap();
-                }
-                drop(pressure);
-                assert!(reparked, "OOM wake did not recheck its wait reason");
-            } else {
-                drop(pressure);
-            }
-            let (result, woke) = worker.join().unwrap();
-            if observed && close_target {
-                assert_eq!(result, Err(moto_rt::E_INVALID_ARGUMENT));
-            } else {
-                let addr = result.unwrap();
-                SysMem::unmap(space, 0, u64::MAX, addr).unwrap();
-            }
-            if observed {
-                assert_eq!(woke, Ok(()), "OOM park consumed the pending userspace wake");
-            } else {
-                // Only recovery before entry permits another attempt. A park
-                // missed by the observer still fails, even if the map succeeded.
-                assert_eq!(
-                    metrics.read(metrics.parks, moto_sys::current_pid()),
-                    before,
-                    "worker parked but was not observed; not a pre-entry recovery miss"
-                );
-                assert!(
-                    completed_before_release && recovered_before_entry.load(Ordering::Acquire),
-                    "worker wait was not observed and recovery was not proven before entry"
-                );
-            }
-            observed
+            let result = map(space, 256);
+            done.store(true, Ordering::Release);
+            let woke = SysCpu::wait(
+                &mut [],
+                SysHandle::NONE,
+                SysHandle::NONE,
+                Some(moto_rt::time::Instant::now() + Duration::from_millis(50)),
+            );
+            (result, woke)
         });
-        if !observed || !close_target {
-            SysObj::put(space).unwrap();
+        while handle.load(Ordering::Acquire) == 0 {
+            SysCpu::sched_yield();
         }
-        if observed {
-            assert!(metrics.read(metrics.runs, PID_SYSTEM) > runs);
-            println!("oom: syscall wait, wake retention, target_closed={close_target} PASS");
-            return;
+        pressure.drain_to(576);
+        // Publish the userspace wake before the allocating syscall can park.
+        SysCpu::wake(SysHandle::from_u64(handle.load(Ordering::Acquire))).unwrap();
+        go.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done.load(Ordering::Acquire) && Instant::now() < deadline {
+            SysCpu::sched_yield();
         }
-        println!(
-            "oom: attempt {attempt} missed: map succeeded and >=768 free pages before map entry"
+        assert!(
+            done.load(Ordering::Acquire),
+            "victimless syscall did not return before memory release"
         );
-    }
-    panic!("all three syscall pressure windows were missed");
+        let (result, woke) = worker.join().unwrap();
+        assert_eq!(result, Err(moto_rt::E_OUT_OF_MEMORY));
+        assert_eq!(woke, Ok(()), "OOM wait consumed the pending userspace wake");
+    });
+    let free = moto_sys::free_pages();
+    assert!(
+        (512..768).contains(&free),
+        "expected Latched range, got {free} free pages"
+    );
+    let latched_runs = metrics.read(metrics.runs, PID_SYSTEM);
+    assert!(latched_runs > runs);
+    assert_eq!(map(space, 1), Err(moto_rt::E_OUT_OF_MEMORY));
+    let small = SysMem::alloc(PAGE_SIZE_SMALL, 1).unwrap();
+    // Permanent size refusals also return without starting another run.
+    assert_eq!(
+        map(SysHandle::SELF, (1 << 28) + 1),
+        Err(moto_rt::E_OUT_OF_MEMORY)
+    );
+    SysMem::free(small).unwrap();
+    assert_eq!(metrics.read(metrics.runs, PID_SYSTEM), latched_runs);
+    drop(pressure);
+    let addr = map(space, 1).unwrap();
+    SysMem::unmap(space, 0, u64::MAX, addr).unwrap();
+    SysObj::put(space).unwrap();
+    println!("oom: victimless syscall refusal, System progress, wake retention, recovery PASS");
 }
 
 /// Creation and first start both enforce the existing 4 MiB limit, including System.
@@ -418,16 +374,7 @@ pub fn run_child(mode: &str) -> ! {
     let mut bytes = [0; 8];
     std::io::stdin().read_exact(&mut bytes).unwrap();
     let control = unsafe { &*(u64::from_le_bytes(bytes) as *const Control) };
-    let space = if mode == "cancel" {
-        SysObj::create(
-            SysHandle::NONE,
-            0,
-            "address_space:debug_name=oom-child-wait",
-        )
-        .unwrap()
-    } else {
-        SysHandle::SELF
-    };
+    let space = SysHandle::SELF;
     let lazy = SysMem::map(
         SysHandle::SELF,
         RW | SysMem::F_LAZY,
@@ -468,7 +415,15 @@ pub fn run_child(mode: &str) -> ! {
         }
     } else {
         ready();
-        map(space, if mode == "system" { 1024 } else { 256 }).unwrap();
+        map(
+            space,
+            if matches!(mode, "system" | "cancel") {
+                1024
+            } else {
+                256
+            },
+        )
+        .unwrap();
     }
     control.done.store(true, Ordering::Release);
     // The parent controls termination and keeps both handles through cleanup.
@@ -489,7 +444,7 @@ fn child_wait(metrics: &Metrics, mode: &str) -> bool {
     }
     let debug = SysRay::dbg_attach(child.pid).unwrap();
     // A newer None victim supplies recovery for a fault or System shortage.
-    let victim = if matches!(mode, "cancel" | "fault-kill") {
+    let victim = if mode == "fault-kill" {
         None
     } else {
         let space =
@@ -581,6 +536,10 @@ fn child_wait(metrics: &Metrics, mode: &str) -> bool {
     drop(pressure);
     SysRay::dbg_detach(debug).unwrap();
     if let Some(victim) = victim {
+        if mode == "cancel" {
+            // Cancelling the waiter can recover before OOM selects this helper.
+            SysCpu::kill(victim).unwrap();
+        }
         crate::raw_spawn::wait_exit(victim, "fault/System recovery victim");
         SysObj::put(victim).unwrap();
     }
@@ -633,8 +592,7 @@ pub fn run_all_tests() {
     spawn_refusal();
     large_rollback();
     victims(&metrics);
-    syscall_wait(&metrics, false);
-    syscall_wait(&metrics, true);
+    victimless_syscalls(&metrics);
     child_wait(&metrics, "fault");
     child_wait(&metrics, "fault-kill");
     child_wait(&metrics, "system");

@@ -70,31 +70,52 @@ impl From<AllocationFailure> for ErrorCode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct WaitReason {
-    class: AllocationClass,
-    // Gate-only waits have no generation. Shortage waits need this run to end
-    // even if System's gate is open, including in an unchanged Latched state.
+    // Faults need their recipient's gate; syscalls wake to revalidate/retry
+    // as soon as their run ends, including when User remains blocked.
+    class: Option<AllocationClass>,
     generation: Option<u64>,
 }
 
 impl WaitReason {
     pub(crate) fn shortage(class: AllocationClass, generation: u64) -> Self {
         Self {
-            class,
+            class: Some(class),
             generation: Some(generation),
         }
     }
     pub(crate) fn gate(class: AllocationClass) -> Self {
         Self {
-            class,
+            class: Some(class),
             generation: None,
         }
     }
     pub(crate) fn with_class(self, class: AllocationClass) -> Self {
-        Self { class, ..self }
+        Self {
+            class: self.class.map(|_| class),
+            ..self
+        }
+    }
+    pub(crate) fn syscall(generation: u64) -> Self {
+        Self {
+            class: None,
+            generation: Some(generation),
+        }
     }
     pub(crate) fn ready(self, snapshot: StateSnapshot) -> bool {
-        !snapshot.gate_closed(self.class) && self.generation != Some(snapshot.generation())
+        match self.class {
+            Some(class) => {
+                !snapshot.gate_closed(class) && self.generation != Some(snapshot.generation())
+            }
+            None => !snapshot.killing() || self.generation != Some(snapshot.generation()),
+        }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RetryKind {
+    Syscall,
+    PagerFill,
+    Fault,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -112,7 +133,7 @@ impl AllocationFailure {
         self,
         snapshot: StateSnapshot,
         free: u64,
-        fault: bool,
+        retry: RetryKind,
     ) -> RetryDecision {
         if let Self::Waiting(reason) = self {
             return if reason.ready(snapshot) {
@@ -130,15 +151,37 @@ impl AllocationFailure {
         if !snapshot.armed() {
             return RetryDecision::Error(moto_rt::E_OUT_OF_MEMORY);
         }
+        if retry != RetryKind::Fault {
+            let protected_fill = retry == RetryKind::PagerFill && class == AllocationClass::System;
+            if kind == RefusalKind::Gate {
+                if !snapshot.gate_closed(class) {
+                    return RetryDecision::Retry;
+                }
+            } else {
+                if protected_fill && !snapshot.killing() {
+                    return RetryDecision::Retry;
+                }
+                if free >= 768 {
+                    return RetryDecision::Error(moto_rt::E_OUT_OF_MEMORY);
+                }
+                if state.run_generation().is_some() && state.generation() != snapshot.generation() {
+                    return RetryDecision::Retry;
+                }
+                if snapshot.run_generation().is_none() {
+                    return RetryDecision::Request(class);
+                }
+            }
+            return if snapshot.killing() {
+                RetryDecision::Wait(WaitReason::syscall(snapshot.generation()))
+            } else {
+                RetryDecision::Error(moto_rt::E_OUT_OF_MEMORY)
+            };
+        }
         let generation = if kind == RefusalKind::Gate {
             None
         } else {
             if free >= 768 {
-                return if fault {
-                    RetryDecision::Retry
-                } else {
-                    RetryDecision::Error(moto_rt::E_OUT_OF_MEMORY)
-                };
+                return RetryDecision::Retry;
             }
             if state.run_generation().is_some() && state.generation() != snapshot.generation() {
                 // This attempt already saw its run end. Do not retag it with a
@@ -150,7 +193,10 @@ impl AllocationFailure {
                 return RetryDecision::Request(class);
             }
         };
-        let reason = WaitReason { class, generation };
+        let reason = WaitReason {
+            class: Some(class),
+            generation,
+        };
         if reason.ready(snapshot) {
             RetryDecision::Retry
         } else {

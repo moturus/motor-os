@@ -9,9 +9,9 @@ backpressure remain independent of this mechanism.
 
 What a process observes:
 
-- An allocating syscall or a page fault that arrives while OOM killing is
-  active completes later instead of failing. The delay is the only visible
-  effect; the retry happens inside the kernel.
+- An allocating syscall blocked by an active OOM run waits and retries
+  when the run ends. If the retry still cannot allocate, it returns
+  `E_OUT_OF_MEMORY`. Page faults keep waiting for usable memory.
 - A victim is terminated like any killed process: its threads stop, its
   memory goes back at exit, and its parent sees the killed status.
 - Below 4 MiB free, process spawns fail with `E_OUT_OF_MEMORY` and memfs
@@ -75,26 +75,30 @@ Every generation change invalidates the waits and jobs of the previous one,
 even when recovery and renewed pressure both happen before any scheduler
 looks at the word.
 
-A valid allocating syscall waits when its recipient's gate is closed.
-After a physical shortage, it first rolls back and releases its temporary
-resources. Below 768 free pages it joins reclamation and retries when both
-its wait generation and recipient gate permit. If rollback restored at least
-768 pages, it returns `E_OUT_OF_MEMORY`; a large request does not get a
-special exemption from the floors. An unsatisfied contiguous request returns
+A valid allocating syscall blocked by an active run waits for that run to
+end. Recovery to Idle and stopping in Latched both release the wait, even
+when the recipient's gate is still closed. After a physical shortage, the
+syscall first rolls back and releases its temporary resources. Below 768
+free pages it joins reclamation; if rollback restored at least 768 pages,
+an ordinary allocating syscall returns `E_OUT_OF_MEMORY`. A large request
+does not get a special exemption from the floors. An unsatisfied contiguous request returns
 `E_OUT_OF_MEMORY`; an opportunistic huge-page miss falls back to small pages
 and keeps the reason of its first refusal. Permanent validation, quota and
 virtual address-space errors return their existing codes even under pressure.
 Retries re-resolve handles and mappings, so a target closed during a wait
-retains its normal error behavior. In an unchanged Latched state, a System
-request refused at its floor waits for the next generation change rather
-than rescanning the same process set; smaller System requests that fit
-proceed. Process creation and start use the separate 4 MiB refusal described
-below.
+retains its normal error behavior. In Latched, User allocations and System
+requests that do not fit return `E_OUT_OF_MEMORY`; smaller System requests
+that fit proceed. These refusals do not rescan the same process set. Process
+creation and start use the separate 4 MiB refusal described below.
 
 Valid lazy and pager zero-fill faults park on physical pressure and retry
 after recovery; invalid faults retain fatal handling. Pager fills keep
 completed pages and retry only their unfinished suffix after validating the
-mapping identity. Wait registration and draining share one lock, preventing
+mapping identity. A pager fill for a protected process retries physical
+shortages after recovery, including recovery before wait registration, or
+after the run stops in Latched. Such a fill does not turn physical pressure
+into a fatal pager error. Invalid mappings and I/O errors retain their
+normal handling. Wait registration and draining share one lock, preventing
 lost recovery notifications and duplicate resumes. Syscall OOM waits preserve
 ordinary wakes intended for the thread's next userspace wait. Killing a
 waiter uses normal thread cleanup; no owned resources depend on unwinding its
@@ -124,9 +128,10 @@ with the generation, the free count and the victim's name and both PIDs.
 When no candidate remains, the job waits for pending exits to finish, then
 rechecks the state. At 768 free pages (3 MiB), a release returns the pool to
 Idle, clears the System block and advances the generation; scheduler
-dispatch then wakes the waiters whose gates allow it. At 512–767 pages the
-run ends in Latched: System reopens, User stays blocked, and
-a later charge below 512 starts a new run. Below 512 pages, with no victim
+dispatch then wakes the waiters. At 512–767 pages the run ends in Latched:
+System reopens, User stays blocked, and all allocating syscalls waiting for
+that run retry. Fault waits still require an open recipient gate. A later
+charge below 512 starts a new run. Below 512 pages, with no victim
 and no pending reclamation, the kernel prints every remaining process and
 aborts the VM, after a final check that the same run is still active below
 512 pages.
@@ -226,10 +231,9 @@ System totals use stats scope 0. The two wait counters also have process
 attribution; they count registrations, including re-parks, not current queue
 lengths or unique threads. `mem.oom_kills` is system-wide only.
 
-Three issues are deferred, with their current behavior described in
-[plans/oom-handling.md](plans/oom-handling.md): sys-io parks when it
-allocates for a non-System recipient, and a refused pager fill still kills
-the faulting thread of a protected process; a debugger pause racing a
+Remaining work is described in [plans/oom-handling.md](plans/oom-handling.md):
+sys-io still treats temporary pager-buffer exhaustion as a failed fill;
+a debugger pause racing a
 committed kill can stall that victim's reclamation and, with it, further
 selection; and the abort rule can terminate a guest whose protected processes
 legitimately hold the memory while nothing is blocked.
@@ -295,8 +299,8 @@ Pressure itself is exercised from the System console of
 `test-system-tty.sh` by `systest system-oom-tests`, whose helper holds
 `CAP_SYS` from that parent: process creation and delayed-start refusal, large
 eager rollback, newest None selection before Interactive, repeated recovery,
-syscall waits with spurious wakes and the userspace wake retained,
-target-handle closure, permanent size refusal under pressure, lazy-fault
+victimless syscall refusal with the userspace wake retained, System progress
+in Latched without rescanning, permanent size refusal under pressure, lazy-fault
 survival and cancellation, System syscall and fault waits, and cleanup of a
 killed waiter. The System cases kill four small victims and one larger one
 and require all five kills in a single run, which proves the small cleanups

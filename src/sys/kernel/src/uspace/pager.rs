@@ -95,7 +95,12 @@ pub(super) fn sys_pager(thread: &Thread, args: &SyscallArgs) -> SyscallResult {
         match try_sys_pager(thread, args, &retry, &mut progress) {
             Ok(value) => return ResultBuilder::ok_1(value),
             Err(failure) => {
-                if let Err(code) = retry.after_failure(thread, failure) {
+                let result = if args.flags == SysMem::F_PAGER_FILL {
+                    retry.after_pager_fill_failure(thread, failure)
+                } else {
+                    retry.after_failure(thread, failure)
+                };
+                if let Err(code) = result {
                     return ResultBuilder::result(code);
                 }
             }

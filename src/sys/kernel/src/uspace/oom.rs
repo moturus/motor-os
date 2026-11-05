@@ -220,7 +220,7 @@ pub(super) fn on_fault(thread: &Thread, failure: crate::mm::AllocationFailure) -
     let crate::mm::AllocationFailure::Pressure { class, .. } = failure else {
         return false;
     };
-    let reason = match wait::resolve(failure, true) {
+    let reason = match wait::resolve(failure, crate::mm::RetryKind::Fault) {
         Ok(reason) => reason.unwrap_or_else(|| WaitReason::gate(class)),
         Err(_) => return false,
     };
