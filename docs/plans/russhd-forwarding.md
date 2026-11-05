@@ -6,11 +6,14 @@ gate, including both 256 MiB Wasm VMs.
 Milestone 2's external v0.65.1 rebase is committed and tested on branch
 `motor-v0.65.1`, tip `bc44c5d`. Its complete fork suite passes 289 tests, including
 the repaired pending-delivery close stall. The user published it; the remote
-revision is verified. Local main pin/API/contract patches pass 147 host tests,
-host clippy without warnings, and both Motor OS release builds. Their image gates
-and commits are stopped for review of a diagnosed preexisting login-deadline bug;
-see the current stop below. The committed pin remains `042db50`; the working tree
-pins published `bc44c5d`. Relay integration has not started.
+revision is verified. The user approved repairing the diagnosed login-deadline
+bug. That repair is prepared and tested: its external session-abort prerequisite
+is commit `2a07f3a`, and the main draft passes 151 host tests, clippy, and both
+Motor OS release builds using a temporary local fork override. Work stops for
+user publication of `2a07f3a` before the pin update and full image gates. The main
+deadline patch is saved for application after publication; the active working tree
+retains the buildable `bc44c5d` pin/API/contract changes, with their 147-test pass.
+The committed pin remains `042db50`. Relay integration has not started.
 See "Implementation progress" below and "Decisions" at the end.
 
 ## Implementation progress
@@ -22,7 +25,7 @@ Developer-image validation remains release-only.
 | Step | Progress | Remaining |
 |---|---|---|
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
-| 2 | External step 2a series published at `bc44c5d`; 289 fork tests pass. Local main pin/API/contract patches pass 147 host tests, clippy, and release builds of both binaries | Review the preexisting login-deadline bug, finish 3+3 main-image and developer-image release gates, commit pin/contracts. Step 2b: relay, direct opens, configuration, login-deadline coverage, 3+3 milestone gates |
+| 2 | Rebase published at `bc44c5d`; session-abort addition `2a07f3a` passes 291 fork tests and awaits publication. Main deadline draft passes 151 host tests, clippy, and both Motor OS release builds against the local fork | User publishes `2a07f3a`; update pin, apply saved deadline fix, run 3+3 main-image and developer-image release gates, commit patches. Step 2b: relay, direct opens, configuration, milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
@@ -64,6 +67,10 @@ cover the new rebase checkpoint.
   stall, and pass the fork checks (`bc44c5d`; publication handoff below).
 - [x] User publishes `motor-v0.65.1`; a fresh remote check verifies `bc44c5d` and
   leaves `server-window` at `042db50`.
+- [x] Prepare the approved login-deadline repair and its external session-abort
+  prerequisite; pass 291 fork tests and 151 main draft tests.
+- [ ] User publishes the additional fork commit `2a07f3a`, then update the pin
+  and apply the saved main deadline patch.
 - [ ] Update the actual git pin with Cargo, adapt authentication callbacks,
   restore close contract tests, strengthen compression coverage, and pass the
   separate step 2a main-image and developer-image gates.
@@ -316,6 +323,91 @@ remains running. Source checksums confirm the pin patch did not change during th
 run. Debug passes remain **0/3**, release passes **0/3**; the developer-image gate
 has not started. No timeout, retry, assertion, or coverage rule was changed.
 The pin/API/contract changes remain uncommitted pending the required image gates.
+
+### Login-deadline repair: tested draft and publication handoff (2026-11-05)
+
+The user approved fixing the deadline defect and resuming the gates. Correct
+enforcement needs cancellation of the actual russh session task: `run_stream`
+spawns it internally, and its returned join wrapper exposes no cancellation.
+Dropping that wrapper, queuing a disconnect, or checking only transport reads
+cannot interrupt a pending credential callback or russh's rejection delay.
+
+**Additional external fork patch.** In **`moturus/russh`**, persistent checkout
+`build/russh-rebase/fork`, commit
+`2a07f3a882cbe80aa71f0fb543b31bbb370162cd` adds `RunningSession::abort()`.
+Its one-line message is `server: allow aborting a running session`. It wraps the
+existing session future with the already available futures `Abortable`; awaiting
+an aborted session waits until its handler and transport have been dropped.
+Ordinary join-wrapper drop behavior is unchanged, and no dependency was added.
+Independently spawned blocking credential work may finish after cancellation;
+it does not retain the session or transport.
+
+Two new in-process regressions verify handler destruction and peer termination
+when aborting either a blocked authentication callback or an authenticated idle
+session. The complete fork suite passes **291 tests** (243 library, 45 integration,
+3 documentation; the same eight preexisting ignored examples), with formatting
+checks passing and library clippy's same eleven existing external warnings.
+Evidence: `session-abort-focused-fixed.log`, `session-abort-full-suite.log`,
+`session-abort-clippy.log`; the portable commit is `session-abort.patch`.
+
+The first focused run used an incorrect fixture assertion that cancellation must
+return an authentication I/O error. `client::wait_recv_reply` reports a closed
+reply channel as `AuthResult::Failure` with empty methods and no partial success.
+The corrected assertion checks that exact result; the handler-drop and session
+termination assertions were already passing. The original failed fixture log
+is retained as `session-abort-focused.log`.
+
+**Prepared main repair.** `pending-main-login.patch` contains the main-only
+deadline change, ready to apply to the current pin/API working tree:
+
+- Capture the expiry immediately after TCP accept, before the connection task is
+  scheduled. Authentication completion must occur strictly before that expiry.
+- Bound initial `run_stream` setup while it still owns the socket directly.
+  Afterwards supervise its actual session, abort on expiry, and await cleanup.
+- Retain unlimited authenticated idle lifetime. The existing connection task
+  supervises the timer; the boxed read-only transport timer is removed, and no
+  new connection task or boot-time work is added.
+- Add four controlled-clock host tests, including exact-deadline rejection,
+  silent identification and blocked banner writes, cancellation while a real
+  protocol authentication callback is pending, and an authenticated idle session
+  that still answers a ping after the grace interval.
+
+Against a temporary Cargo override to the tested local fork, the complete main
+suite passes **151 tests**, all-target clippy introduces no main warnings, and
+both Motor OS release binaries build. Logs are `login-fixed-focused.log`,
+`login-fixed-main-host-tests.log`, `login-fixed-main-clippy-routed.log`, and
+`login-fixed-motor-release.log`. The local fork's already known deprecation warning
+remains external. These are draft checks, not published-pin or image-gate passes.
+
+Temporary validation setup failures are retained too. Placing `--config` before
+the external `clippy` subcommand did not route the local override to its check
+invocation, causing a `--locked` mismatch; the same path lockfile is unchanged
+when `cargo clippy --config ... --locked` succeeds. A controlled comparison is in
+`login-clippy-global-config-probe.log` and the before/after clippy lock snapshots.
+An initial unfiltered offline metadata query requested an uncached Windows-only
+archive; the host-filtered metadata query resolved the native graph. No product
+test, timeout, or assertion was changed to accommodate either setup failure.
+
+The canonical published lockfile was restored after every override. The prepared
+deadline patch was then saved and reversed, leaving the active `bc44c5d` working
+tree byte-identical to its earlier 147-test validation. This keeps it buildable
+until the new API is published. `login-fixed-sources.sha256` records the tested
+draft and fork source files, and `git apply --check pending-main-login.patch`
+passes against the current working tree. No deadline implementation was committed
+in the main repository before the required gates.
+
+The latest remote check (`session-abort-publication-refs.txt`) still finds
+`motor-v0.65.1` at `bc44c5d` and `server-window` at `042db50`. Publication remains
+with the user. From the Motor OS repository root:
+
+```sh
+git -C build/russh-rebase/fork push origin motor-v0.65.1
+```
+
+After verifying published `2a07f3a`, update Cargo with the real git revision,
+apply `build/russh-rebase/pending-main-login.patch`, and resume the main pin's
+unchanged 3+3 image gates and developer-image release gate. Preserve the original
+diagnostic failure and deliberately interrupted debug run; neither is a pass.
 
 Step 1 focused checks: `cargo test` for `wasm-smoke-suite` (two tests),
 `test-wasm-selection.sh`, `test-full-test-size.sh`, and `test-dev-memory-contract.sh`
