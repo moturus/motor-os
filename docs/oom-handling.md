@@ -104,6 +104,13 @@ ordinary wakes intended for the thread's next userspace wait. Killing a
 waiter uses normal thread cleanup; no owned resources depend on unwinding its
 discarded syscall stack.
 
+Before filling a page, sys-io allocates its read and relocation buffers.
+Read-ahead failures fall back to the one required page. If buffer preparation
+for that page runs out of memory, the request yields to the async runtime
+and retries later. It checks for mapping retirement before retrying. This
+temporary buffer failure does not call `pager_fail`; other read errors and
+errors returned by the kernel fill retain their normal handling.
+
 ## Victims and recovery
 
 While the pool is Killing, scheduler jobs select one victim at a time: the
@@ -113,7 +120,10 @@ created but not yet started are eligible. System processes, sys-io and its
 direct children and grandchildren are protected and use System allocation
 class, including protected None and Interactive processes. Their process
 roles and capabilities are unchanged. Protection is not inherited beyond
-sys-io's grandchildren. Paused debuggees are skipped. Processes already
+sys-io's grandchildren. Paused debuggees are skipped. A kill that encounters
+a paused thread still completes: it wakes a saved syscall context or posts
+exit cleanup for a preempted thread. A syscall still saving its context owns
+its cleanup until the pause completes. Processes already
 exiting, or left without threads, count as pending reclamation rather than
 as candidates.
 
@@ -231,12 +241,9 @@ System totals use stats scope 0. The two wait counters also have process
 attribution; they count registrations, including re-parks, not current queue
 lengths or unique threads. `mem.oom_kills` is system-wide only.
 
-Remaining work is described in [plans/oom-handling.md](plans/oom-handling.md):
-sys-io still treats temporary pager-buffer exhaustion as a failed fill;
-a debugger pause racing a
-committed kill can stall that victim's reclamation and, with it, further
-selection; and the abort rule can terminate a guest whose protected processes
-legitimately hold the memory while nothing is blocked.
+The abort rule can still terminate a guest whose protected processes
+legitimately hold the memory while nothing is blocked. Changing that policy
+is deferred in [plans/oom-handling.md](plans/oom-handling.md).
 
 ## Services and spawning
 
@@ -276,7 +283,7 @@ transition at the 127/128, 511/512 and 767/768 boundaries, plus arming;
 `OOM waiter tests` and `OOM dispatch tests` cover registration and draining,
 generations, victim cleanup and exit interest; `pager retry tests` cover
 completed prefixes and mapping identity; `allocation role tests` cover
-recipient-role propagation and claim rollback; the unarmed `exhaustion
+recipient-class propagation and claim rollback; the unarmed `exhaustion
 tests` cover allocation failure and rollback at every boundary, contiguous
 failure and huge-page fallback. `process PID tests` exercise isolated
 counter/index state across public-PID wrap and reuse, kernel-ID exhaustion
@@ -290,7 +297,9 @@ maps 8 MiB and exits normally or is killed, and verifies with the handle
 still held that its user pages read zero, the pool recovered, a shared page
 survived and the dead space takes no new mapping; it also checks that an
 address space refuses a second process before and after the first one's
-exit. Memfs tests cover mutation classification, the 4 MiB boundary and cache
+exit. Debugger tests kill paused userspace and syscall threads, race pause
+against kill, and check reclamation while process and debugger handles remain
+open. Memfs tests cover mutation classification, the 4 MiB boundary and cache
 reclamation; filesystem, network, logging and spawn regressions run with the
 old admission gates gone. Quiescent kernel checks compare the shared count
 with the allocator's after small, huge and contiguous allocations and frees.
@@ -299,6 +308,7 @@ Pressure itself is exercised from the System console of
 `test-system-tty.sh` by `systest system-oom-tests`, whose helper holds
 `CAP_SYS` from that parent: process creation and delayed-start refusal, large
 eager rollback, newest None selection before Interactive, repeated recovery,
+reclamation of a victim whose thread is still debugger-paused,
 victimless syscall refusal with the userspace wake retained, System progress
 in Latched without rescanning, permanent size refusal under pressure, lazy-fault
 survival and cancellation, System syscall and fault waits, and cleanup of a
