@@ -1,13 +1,14 @@
 # TCP forwarding in russhd and ssh
 
-Status: v5, milestone 1 complete with three debug and three release passes and
-the complete developer-image release gate, including both 256 MiB Wasm VMs.
-Milestone 2's external russh channel-close fixes and live regressions are committed
-and tested. All 145 main russhd tests, including draft close regressions, passed
-against that local fork. The user will review and push the fork commits before
-the Cargo pin update.
-The approved external compression fix is committed and tested; relay integration
-has not started.
+Status: v6, rebase review incorporated on 2026-11-05. Milestone 1 is complete with
+three debug and three release passes and the complete developer-image release
+gate, including both 256 MiB Wasm VMs.
+Milestone 2 now starts by rebasing the external russh fork onto v0.65.1, repairing
+the remaining pending-delivery close stall, and validating a new published pin.
+The old-base close fixes and a scratch rebase have passed host tests, but the
+rebase checkpoint and relay integration remain outstanding. The user retains
+ownership of fork review and publication. This revision changes the plan only;
+the main repository still pins `server-window` at `042db50`.
 See "Implementation progress" below and "Decisions" at the end.
 
 ## Implementation progress
@@ -19,7 +20,7 @@ Developer-image validation remains release-only.
 | Step | Progress | Remaining |
 |---|---|---|
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
-| 2 | External fixes `ac0e947`, `4fe78f9`, `01d0391`, `d758c92`, and live regressions `c016ea8` committed; full fork suite passes (231 tests); 145 main russhd tests pass with the local fork, including draft close regressions | User review/push of fork commits, Cargo pin, commit main close regressions, relay, direct opens, configuration, authentication deadline, 3+3 milestone gates |
+| 2 | Old-base fork suite passed (231 tests); 145 main russhd tests passed with draft close regressions. Scratch v0.65.1 rebase passed 285 fork tests and 143 main host tests. Login deadline/idle policy landed separately in `bc39a586` | Step 2a: final rebase, pending-delivery stall regression/fix, user publication, pin and contract tests, 3+3 main-image and developer-image release gates. Step 2b: relay, direct opens, configuration, login-deadline coverage, 3+3 milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
@@ -39,11 +40,15 @@ plan commit `be3e43b7`. They represent:
 | External russh checkout | 5, separate from those 17 | Baseline test signature correction, approved compression fix, peer-close fix, local-close cleanup, and live-transport regressions |
 
 The completed main-repository work is the prerequisite test/harness milestone.
-Milestone 2 has completed its external-fork prerequisite; forwarding integration
-in `russhd` remains. Milestones 3–8 have not started. The test totals above include
-existing tests; they are not counts of newly added tests.
+Milestone 2's original external-fork prerequisite passed on v0.63.1; the rebase
+review adds the step 2a work below before forwarding integration in `russhd`.
+Milestones 3–8 have not started. The test totals above include existing tests;
+they are not counts of newly added tests.
 
 ### Milestone 2 checklist
+
+The first four completed entries record the original v0.63.1 work; they do not
+cover the new rebase checkpoint.
 
 - [x] Repair the baseline fork test signature and the separately approved
   compression defect (`ac0e947`, `4fe78f9`).
@@ -53,18 +58,120 @@ existing tests; they are not counts of newly added tests.
   peer-close behavior (`c016ea8`); pass the complete fork suite (231 total tests).
 - [x] Prepare the main pin/contract-test patch and pass 145 total main russhd
   tests against the local fork, including the draft regressions.
-- [ ] User reviews and pushes the five fork commits. The remote `server-window`
-  branch was verified still at `042db50` during this progress audit.
-- [ ] Update the actual git pin with Cargo, restore and commit the main contract
-  tests, and validate against the published revision.
+- [ ] Complete step 2a below: rebase onto v0.65.1 on a new fork branch, fix the
+  pending-delivery close stall, and pass the fork checks before user publication.
+- [ ] Update the actual git pin with Cargo, adapt authentication callbacks,
+  restore close contract tests, strengthen compression coverage, and pass the
+  separate step 2a main-image and developer-image gates.
 - [ ] Implement the bounded block queue and event-driven relay, including credit,
   half-close, peer-close draining, pressure shedding, and cancellation tests.
 - [ ] Integrate task ownership/reaping, direct opens, admission limits and host
   validation, handler isolation, and configuration with the imager field.
-- [ ] Add the authentication deadline and its tests, then remove the application
-  idle timeout in the same patch.
+- [x] `bc39a586`, now merged from `dev`, adds the 120 s login deadline and removes
+  the application idle timeout; preserve it through the API migration.
+- [ ] Complete the controlled-clock authentication/idle coverage below against
+  the rebased dependency.
 - [ ] Pass the integrated milestone's three debug and three release main-image
   gates. No milestone-2 main-image gate pass is claimed yet.
+
+### Rebase prerequisite (step 2a)
+
+The incorporated rebase review supports moving to upstream
+[v0.65.1](https://github.com/Eugeny/russh/releases/tag/v0.65.1), tag commit
+`b33092aad1e51c66258a12e8b83fc473a68d9d34`, before the relay. The original review
+is archived at `build/russh-rebase/review-proposal-2026-11-03.md` alongside its
+trial evidence. The fork remains necessary for `ReceiveCredit` and
+nonblocking server delivery; upstream alone cannot replace it.
+
+Two upstream fixes are prerequisites. `24e2c37` fixes both zlib output truncation
+on incompressible full-size packets and buffered decoder output, superseding local
+`4fe78f9`, which fixed only decoding. [#790 / `13c94f0`](https://github.com/Eugeny/russh/pull/790)
+fixes writer credit on window adjustments: queued bytes must not receive credit
+twice and spill into `pending_data`. The release also brings rekey and hardening
+fixes; cherry-picking only compression would leave the relay's credit assumption
+unmet. Host compatibility evidence favors the released base over further patches
+on v0.63.1, but cannot replace the guest gates.
+
+**External fork patches.** All of this work is in **`moturus/russh`, outside the
+main Motor OS repository**. Use branch `motor-v0.65.1`, in the separate persistent
+checkout `build/russh-rebase/fork`. Leave the published
+`server-window` branch and its pinned `042db50` history intact.
+
+1. Recover the series from the retained patches: `/tmp/motor-russh-forwarding`
+   is absent at this review. Original local patches are in
+   `build/forwarding-validation/`; the trial replay is in
+   `build/russh-rebase/trial-v0.65.1-patches/`. Resolve and record the full upstream
+   tag commit before replaying; save the final series outside `/tmp` too.
+2. Replay the six published receive-window commits. Fold `ac0e947` and the #785
+   test callback adaptations into the commits that introduced those tests. Keep
+   both upstream's `flush_or_timeout` and the fork's `PendingChannelCleanup` when
+   resolving their shared context. Do not replay the superseded compression fix;
+   retain its packet-limit and next-packet regressions where upstream lacks them.
+3. Replay `01d0391`, `d758c92`, and `c016ea8`, retaining receive-credit and close
+   contracts. Fix the stale `has_pending_channel_data` snapshot: queued application
+   messages can close a parked channel, so compute the flag after that drain,
+   immediately before `select!`. Otherwise socket reads remain disabled even
+   after local close has discarded the pending delivery.
+4. Add an event-ordered regression that proves delivery is parked and the close
+   is handled by the pre-select drain, then proves another channel can receive
+   without a timer, credit event, or unrelated message rescuing the session.
+   The saved probe's 200 ms sleep is diagnostic only. Demonstrate failure with
+   the stale snapshot restored and success with the fix, preserving both logs.
+5. Run the complete fork suite with the repository-selected toolchain and
+   `--no-default-features --features flate2,ring,rsa`, with loopback access.
+   Run library clippy and compare any existing external warnings with the
+   upstream base; do not weaken lints to obtain a pass. Run `cargo fmt --check`
+   and check changed included modules directly with repository-selected
+   `rustfmt --edition 2024 --config-path rustfmt.toml --check`, because `include!`
+   prevents Cargo's formatter from reaching them. Dependency fetching is setup;
+   regressions use only local peers and deterministic data.
+
+The user reviews and publishes this tested series on the new branch. This replaces
+the earlier handoff to push the five old-base commits to `server-window`. Do not
+update the main pin until the reviewed revision is published.
+
+**Main-repository patches.** Point `src/bin/russhd/Cargo.toml` at the new branch
+and update the lockfile with `cargo update -p russh`. Adapt `auth_publickey_offered`
+to `PublicKeyOffer<'_>` and `auth_publickey` to `VerifiedPublicKey<'_>`, using
+`.public_key`, in the real handler and `client_protocol.rs` fixture. Preserve the
+current credential checks and `auth_succeeded`/`GracedStream` login protection;
+the saved API patch predates the latest `dev` merge. Correct the branch description
+in `img_files/motor-os-dev/devtools/www/rust.html` in this pin patch, rather than
+waiting for step 4.
+
+Restore `tests/channel_close.rs` from the saved main draft and strengthen
+`tests/compression.rs` with deterministic incompressible channel-packet-sized
+input, a following packet, and a local compressed-transfer regression. The
+existing compressible 1–4 KiB test passes on the shipped faulty compressor;
+require the new regression to fail on the old pin and pass on the new one.
+These tests must run transitively from `full-test.sh`. Audit Cargo's dependency
+diff: the trial changed russh to 0.65.1, pageant to 0.2.5, num-bigint to 0.5.1,
+and removed internal-russh-num-bigint. Preserve the Motor tokio/mio/ring forks
+and imager's compatible ssh-key pin; investigate additional dependency drift.
+
+Gate the published git pin, without a local path override, with all russhd host
+tests, release Motor OS builds of both binaries, three complete debug and three
+complete release `full-test.sh` passes, and `full-test-dev.sh --release`.
+This is a separate checkpoint before step 2b's relay work and its own 3+3 gate.
+Do not count the scratch rebase or step 1 passes toward it, and do not add retries,
+longer timeouts, or known-failure exceptions.
+
+**Evidence and limits.** Saved trial logs in `build/russh-rebase/` show 239 library,
+43 integration, and 3 documentation tests passing (8 preexisting ignored examples),
+143 main host tests passing, and both Motor OS release binaries building. The
+143-test trial omitted the two draft close regressions included in the earlier
+145-test old-base run. The stale-flag fix and deterministic regression, final
+published pin, and guest gates remain unvalidated. External warnings include
+the fork's deprecated `AtomicU32::fetch_update`; main-repository changes must
+introduce no compiler or clippy warnings.
+
+Upstream contributions follow separately: close fixes with upstream-compatible
+tests, nonblocking server delivery including the stale-flag repair, then server
+and step 4 client receive credit after API discussion with maintainers. Default/
+all-feature, wasm32, semver, and minimal-version upstream checks remain outstanding;
+the Motor feature suite does not establish them. PR publication stays outside
+this implementation handoff. Removal of the unused vendored cryptovec copy is
+separate housekeeping.
 
 Step 1 focused checks: `cargo test` for `wasm-smoke-suite` (two tests),
 `test-wasm-selection.sh`, `test-full-test-size.sh`, and `test-dev-memory-contract.sh`
@@ -272,7 +379,7 @@ Step 1 is complete: debug testing times were 28.5, 28.6, and 28.6 minutes;
 release testing times were 13.8 minutes each. No assertions or coverage were
 weakened, and the original 1,500-second failure remains preserved.
 
-### Step 2: external channel-close fixes
+### Step 2: external channel-close fixes (v0.63.1 checkpoint)
 
 External commit `01d0391` adds the immediate peer-close path on both client and
 server. It discards unsent outbound data and deferred controls, replies without
@@ -332,24 +439,24 @@ these contracts run transitively from `full-test.sh` with the pin update. All
 (`main-close-local-fork.log`). The active original lockfile has been restored.
 The tested draft is saved outside the active test suite as
 `build/forwarding-validation/main-channel-close.rs`, with a portable patch at
-`pending-main-channel-close.patch` in the same directory. The proposed pin patch
+`pending-main-channel-close.patch` in the same directory. The then-proposed pin patch
 is `pending-main-close-pin.patch`: four git-source revisions change from
 `042db50` to `c016ea8f2122f7b9f21d9c20a81f60793a00b1a0`, without any dependency
-version changes. After publication, run the planned canonical `cargo update`
-and validate the actual git pin before committing the main-repository patch.
+version changes. That pin patch is historical and must not be applied after the
+step 2a rebase; generate the new published pin with Cargo instead.
 No new main-image milestone-2 gate pass is claimed. The fork branch still
 points to `042db50`.
 Publishing the five local commits through `c016ea8` to `moturus/russh`'s shared
 `server-window` branch was submitted for user guidance under AGENTS.md's
 non-obvious-decision rule. This publication decision is an interpretation of that
-rule, not an explicit AGENTS.md prohibition on pushing. The user will review and
-push the five commits from `/tmp/motor-russh-forwarding`, local branch
+rule, not an explicit AGENTS.md prohibition on pushing. The user chose to review
+and push the five commits from `/tmp/motor-russh-forwarding`, local branch
 `server-window`, to `https://github.com/moturus/russh.git`, remote branch
-`server-window`. The checkout is clean at
-`c016ea8f2122f7b9f21d9c20a81f60793a00b1a0`. The main-repository pin remains
-unchanged pending that push. All running tests have
-completed, temporary diagnostics are removed, and the main workspace contains
-no active uncommitted code patch.
+`server-window`. At that checkpoint the checkout was clean at
+`c016ea8f2122f7b9f21d9c20a81f60793a00b1a0`, with no active code patch or diagnostic.
+The step 2a rebase now supersedes that publication target; the temporary checkout
+is absent and the retained patches are the recovery source. The main pin remains
+unchanged pending publication of the rebased series on a new branch.
 
 ## Goal and scope
 
@@ -366,7 +473,7 @@ tests. A milestone is not a single patch; each patch must leave existing tests p
 | Step | Work | Gives |
 |---|---|---|
 | 1 | Remove Wasm tests on 224 MiB VMs; retain both images at 256 MiB | A developer-image gate with no known-failure exception |
-| 2 | **russh fork:** channel-close fixes, then `russhd`: local forwarding (`direct-tcpip`) | `ProxyJump`, `-L`, `-D`, and `-W` from OpenSSH clients |
+| 2 | **2a, external russh fork:** v0.65.1 rebase, close repair, and validated published pin; **2b, russhd:** local forwarding (`direct-tcpip`) | `ProxyJump`, `-L`, `-D`, and `-W` from OpenSSH clients |
 | 3 | Enable shipped forwarding, update guest tests and docs | The coverage `0355fc70` removed |
 | 4 | **russh fork:** receive credit in the client | The base for steps 5, 6, and 8 |
 | 5 | `ssh`: `-L` and `-N` | Local tunnels from Motor OS |
@@ -383,8 +490,9 @@ several session channels per connection; OpenSSH's `GatewayPorts clientspecified
 ## What russh already provides
 
 The protocol is done at both ends. `russhd` pins `moturus/russh`, branch `server-window`,
-commit `042db50`: v0.63.1 plus six receive-window commits. `russhd` overrides none of the
-server side, so russh's default drops the reply, and clients see
+commit `042db50`: v0.63.1 plus six receive-window commits. Step 2a replaces that
+pin with the reviewed v0.65.1-based fork on a new branch. `russhd` overrides none
+of the server forwarding callbacks, so russh's default drops the reply, and clients see
 `AdministrativelyProhibited`.
 
 | Need | russh |
@@ -393,13 +501,14 @@ server side, so russh's default drops the reply, and clients see
 | Reply after connecting | `accept` and `reject` only queue a message, so a spawned task can call them later |
 | Failure reasons | `ConnectFailed`, `ResourceShortage`, `AdministrativelyProhibited` |
 | Server: receive flow control | `Session::receive_credit`, during the open callback: window credit returns only when the application reports bytes consumed |
-| Window-aware sending | `Channel::make_writer`, which waits for the peer's window |
+| Window-aware sending | `Channel::make_writer`, which waits for the peer's window; step 2a brings #790's correct accounting for queued writes |
 | Server: remote forwarding | `Handler::tcpip_forward`, `cancel_tcpip_forward`, `Handle::channel_open_forwarded_tcpip` |
 | Client: open a forward | `Handle::channel_open_direct_tcpip`, already used for `ProxyJump` |
 | Client: remote forwarding | `Handle::tcpip_forward`, `cancel_tcpip_forward`, `Handler::server_channel_open_forwarded_tcpip` |
 
-**Two areas need changes to the russh fork.** Step 2 starts with fixes for channel-close
-leaks and stalls; see "Constraints". Step 4 adds receive flow control to the client, and
+**The fork rebase precedes two areas of local changes.** Step 2a retains the
+channel-close fixes and repairs the pending-delivery stall; see "Constraints".
+Step 4 adds receive flow control to the client, and
 steps 5, 6, and 8 depend on it. Credit handoff for locally opened channels needs validation
 at both ends; see steps 4 and 7. Any further fork change must be proposed explicitly first.
 All such changes are outside the main Motor OS repository and must be identified separately
@@ -428,6 +537,13 @@ when its byte queue is full, and close that forward on overflow. Simply copying
 parks in `pending_data`, and the session stops taking application messages, for every
 channel, until that window reopens. Reads continue, so window adjustments can still arrive,
 but it couples channels.
+
+The current pin also over-credits `make_writer()` when a window adjustment arrives
+while writes are queued. Step 2a must include upstream #790 before using that
+writer for forwards. Normal window-aware writes then fit the peer's credit;
+rekeying can still defer them temporarily. A reserved write must survive relay
+polls until completion or channel teardown: cancelling it and reusing the channel
+can permanently lose credit, as documented in #790.
 
 **Client, inbound.** This is worse, and only russh can fix it. `adjust_window_size` refills
 the window when data arrives, not when the application consumes it, so the window does not
@@ -469,6 +585,12 @@ Forward writers avoid this queue, but shells still use `Handle::data`, so this p
 be fixed before sharing a connection with forwards. It reproduces at both ends on Linux: the
 client can no longer open a channel, and the server stops delivering EOF on other channels.
 
+**Local close can leave a stale inbound stall.** The reviewed close patch discards
+`pending_channel_data`, but the server loop snapshots its presence before draining
+application messages. A close during that drain leaves socket reads disabled for
+the following `select!`. Step 2a repairs the snapshot and tests that exact ordering
+with an event barrier; the broad passing close suite did not cover it.
+
 **Memory.** Both programs run on one thread with a current-thread runtime. A failed
 allocation aborts the process, and a refused page kills the faulting thread
 (`docs/oom-handling.md`). A backlog that grows under memory pressure can end every session
@@ -484,8 +606,8 @@ records must not accumulate on a long-lived connection.
 
 ### The russh changes (step 2)
 
-In the **external `moturus/russh` fork**, branch `server-window`, fix both client and server
-close paths. About 15 lines did this on a scratch copy:
+In the **external `moturus/russh` fork**, on the new v0.65.1-based branch from
+step 2a, retain and validate both client and server close paths:
 
 - **Peer close:** add `Encrypted::close_from_peer` in `session.rs`, and use it in place of
   `close` in both incoming `CHANNEL_CLOSE` handlers. It discards unsent outbound
@@ -500,7 +622,8 @@ close paths. About 15 lines did this on a scratch copy:
   peer close during that flush takes the immediate-discard path above. Window adjustments
   already tolerate the missing entry. Removing it also ends the local `Channel::wait()`,
   which today never returns after a local close. Clean up pending delivery and credit
-  handoff records too.
+  handoff records too. Compute pending-delivery readiness after the pre-select
+  application-message drain so the close cannot leave a stale socket-read guard.
 - **No closing records:** nothing about a channel outlives its local close. russh already
   removes it from `enc.channels` there and ignores a later reply, so a peer that never
   replies costs nothing, and a permit is released when its relay ends. Channel IDs come from
@@ -510,11 +633,13 @@ close paths. About 15 lines did this on a scratch copy:
   remove a locally initiated channel waiting for confirmation. Rejection, abandoned opens,
   and disconnect still release their state.
 
-On that Linux scratch copy, these changes kept no closed channels and no memory growth over
-102,000 cycles with either side closing first, kept none over 12,000 closes to a peer that
-never replied, and cleared the stall at both ends. russh's own test suite could not be built
-offline there, so run it first. Add the regressions in "Acceptance", split these changes
-into small patches, then update the main repository's pin with `cargo update -p russh`.
+On the original Linux scratch copy, these changes kept no closed channels and no
+memory growth over 102,000 cycles with either side closing first, kept none over
+12,000 closes to a peer that
+never replied, and cleared the outbound stall at both ends. The later old-base
+suite passed but missed the stale inbound guard. Preserve these contracts through
+the rebase, add the deterministic regression, and gate the published pin as step 2a
+requires before relay implementation.
 
 ### Opening
 
@@ -548,8 +673,9 @@ currently advertise 2 MiB; derive the bound from the same setting as the adverti
   Empty data is not EOF. Overflow, data after EOF, or unsupported extended data ends that
   forward without a panic or more buffering. Do not retain one allocation per SSH packet.
 - **Socket to channel.** Read the socket and write through `make_writer()`, avoiding
-  `pending_data` for the forward. A pending write must not prevent channel-event handling
-  or cancellation. Preserve any in-progress write until it completes or the relay ends.
+  peer-window overflow after step 2a's accounting fix. Rekey may temporarily defer
+  data. A pending write must not prevent channel-event handling or cancellation.
+  Preserve any in-progress write until it completes or the relay ends.
 - **Half-close.** Channel EOF shuts down the socket's write side after queued bytes drain.
   Socket EOF sends channel EOF after its outstanding write completes. The other direction
   continues. When both directions drain, send channel close and release the socket, without
@@ -636,13 +762,13 @@ on `ConnectionHandler`.
 
 ### Authentication and idle connections
 
-Authenticated tunnels and shells should have no application inactivity timeout. However,
-russh also uses the current one-hour `inactivity_timeout` while reading the client's SSH
-identification and before authentication. Removing it alone would let a live TCP peer
-occupy resources indefinitely without logging in. TCP keepalive only detects dead peers.
+`bc39a586`, merged from `dev`, already sets `inactivity_timeout` to `None` and
+provides a 120 s `LOGIN_GRACE` through `GracedStream`, cleared by `auth_succeeded`.
+Preserve that behavior during step 2a's callback migration. TCP keepalive only
+detects dead peers; it cannot replace the login deadline for a live unauthenticated peer.
 
-In the same patch that sets `inactivity_timeout` to `None`, add a 120 s deadline from TCP
-accept through successful authentication, following OpenSSH's
+The contract remains a 120 s deadline from TCP accept through successful
+authentication, following OpenSSH's
 [`LoginGraceTime`](https://man.openbsd.org/sshd_config#LoginGraceTime). Use connection-local
 deadline state and the transport-wrapper pattern already used by the client. Clear it only
 on authentication completed before the deadline. Expiry must terminate the actual russh
@@ -655,7 +781,8 @@ with a controlled clock; do not add a wall-clock wait of minutes to the suite.
 
 ### The russh change (step 4)
 
-In `moturus/russh`, branch `server-window`, give the client what the server has:
+In `moturus/russh`, on the rebased fork branch from step 2a, give the client what
+the server has:
 
 - Use `consume_receive_window` and `refill_receive_window` in its data paths in place of
   `adjust_window_size`. This also brings the server's window validation to the client.
@@ -677,8 +804,8 @@ The accounting is shared in `session.rs` and `lib_inner.rs`; reuse it, modelled 
 `49428c4` and `f261f84`. Split accounting, nonblocking dispatch, and credit handoff into
 reviewable patches with tests. Channels left in automatic mode retain their current
 policy. The relay still enforces its own byte bound despite russh's overrun tolerance.
-Then `cargo update -p russh`: only `src/bin/russhd/Cargo.lock` pins it. `rust.html` says
-russh tracks its default branch, so correct that here too.
+Then `cargo update -p russh`: only `src/bin/russhd/Cargo.lock` pins it. Keep
+`rust.html`'s branch description, corrected in step 2a, current with that revision.
 
 ### Options
 
@@ -848,13 +975,15 @@ forwarding is unsupported and that a connection runs one channel at a time.
 The matrix removal is done (`dd716bf4`); see the progress table for the complete-line
 fix and validation status.
 
-2. Start the **external russh fork** channel-close fixes and their tests, then update the
-   main repository's pin. Cover both pending outbound data on peer close and local cleanup
-   without a close reply. Build the bounded queue and event-driven relay with focused tests;
-   then integrate connection cancellation and direct opens with stalled-peer tests. Add the
+2. **2a:** Complete the external rebase, deterministic pending-delivery close repair,
+   user publication, authentication API migration, and main pin/contract patches
+   described above. Require its separate 3+3 main-image and complete developer-image
+   release gates before relay work. **2b:** Build the bounded queue and event-driven
+   relay with focused tests; then integrate connection cancellation and direct
+   opens with stalled-peer tests. Add the
    config and imager fields together, with forwarding enabled only in the new host fixtures.
-   Separate the authentication-deadline/idle-timeout patch and its tests. Gate patches with
-   `cargo test` in `src/bin/russhd` and, when affected, `src/imager`.
+   Preserve the existing login deadline/idle policy and add its missing controlled-clock
+   tests. Gate patches with `cargo test` in `src/bin/russhd` and, when affected, `src/imager`.
 3. Add guest coverage, then enable shipped configs and existing forwarding fixtures together
    with replacement of their refusal assertions. Keep the policy-off refusal test in a
    dedicated fixture. Gate with `full-test.sh`, debug and release, and
@@ -877,9 +1006,9 @@ Step 1 replaces v3's exception for the known `typescript-compressed` refused-pag
 on `wasm:224`. The 224 MiB test tier is removed by request; the failure is not fixed or
 accepted at 256 MiB. All remaining tests must pass. Do not substitute manual service-only
 runs for a complete developer-image gate: they omit ordinary Javy and Wasmtime coverage.
-On existing images, `test-wasm.sh` already passes at both 256 MiB VMs, with
-`--linux-identity` and with `--services`; `full-test-dev.sh` has not yet run end to end
-without the 224 MiB tier.
+Step 1's complete `full-test-dev.sh --release` has now passed on both 256 MiB VMs,
+including ordinary Javy/Wasmtime, `--linux-identity`, and `--services`; see the
+retained evidence above.
 
 Gate steps 5 to 8 with host tests and `full-test.sh --release`. The time budgets are tight:
 step 1's slowest complete debug runs took 28.6 minutes against the newly approved
@@ -963,6 +1092,11 @@ Guest tests in `src/tests/test-ssh-config.sh`:
 
 For step 2, exercise both client and server close paths:
 
+- Step 2a additionally checks full-size incompressible compressed packets and
+  subsequent packets, a local compressed transfer, and #790's window accounting
+  while writes are queued. Keep upstream's rekey regressions and exercise a
+  forwarding transfer across rekey in step 2b; it must resume without corruption
+  or a persistent stall after key exchange completes.
 - Repeated open/close cycles leave no closed channel in `Session::channels`, with either
   side closing first. Check retained entries and queues directly, not just process RSS.
 - A peer holds its receive window at zero until `Handle::data` has populated
@@ -978,6 +1112,10 @@ For step 2, exercise both client and server close paths:
   payload queues, pending delivery, and handoff state before acknowledgement, and
   `Channel::wait()` ends on the closing side. An in-crate test can check that the entry is
   gone right after `close`, before any reply. Another admitted channel stays usable.
+- A locally closed channel with parked inbound data is closed through the
+  pre-select application drain. Event barriers establish the order; another
+  channel receives data without an unrelated wakeup. Cover the close through
+  the normal select arm too, and verify the drain case fails with the old guard.
 - Peer close still delivers already-received data before `ChannelMsg::Close`; the relay's
   slow-target drain test must keep passing. Local close preserves data-before-close
   ordering unless the peer closes first. Duplicate or late replies are harmless, and
@@ -1052,9 +1190,9 @@ in `src/tests`.
 3. **Retain the approved count policy:** 16,384 forwards per connection, no smaller
    Motor-specific cap and no server-wide forward cap. Memory-pressure shedding is best
    effort; it does not guarantee isolation between sessions.
-4. **Separate authentication and idle lifetime:** retain OS connect timeouts, add a finite
-   authentication deadline, and remove the application idle timeout only alongside that
-   protection. Connection and task cancellation must release forwarding resources.
+4. **Separate authentication and idle lifetime:** retain OS connect timeouts and
+   `bc39a586`'s finite login deadline with no application idle timeout. Connection
+   and task cancellation must release forwarding resources.
 5. **`gateway_ports`** is approved, as the counterpart of OpenSSH's `GatewayPorts yes`.
    Remote listeners stay on loopback unless it is set, and shipped configs leave it off.
    CLI/config parsing and the event-driven relay are shared; session state and forward
@@ -1065,10 +1203,18 @@ in `src/tests`.
    v3's known-failure exception and manual service-only follow-up.
 8. **The additional external russh compression fix is approved.** Drain buffered
    decoder output after compressed input is exhausted, preserving packet-size limits,
-   then resume the forwarding implementation. Preserve the original failure evidence.
+   then resume the forwarding implementation. Step 2a replaces the local decoder
+   patch with upstream's complete compression fix. Preserve the original failure evidence.
 9. **Extend the longer full-test budget to 30 minutes.** The user explicitly requested
    validating a complete pass before committing the timeout change, then continuing
    russhd work. Preserve the original failure and diagnostic evidence.
+10. **Incorporate the reviewed rebase as step 2a before relay integration.** Use
+    upstream v0.65.1 on a new external fork branch; preserve `server-window`.
+    Replace the old compression patch with upstream's complete fix, retain the
+    close contracts, and repair/test the stale pending-delivery guard. The user
+    reviews and publishes; then gate the actual pin with 3+3 main-image passes
+    and the complete developer-image release run. This replaces the old-base
+    publication handoff, without claiming the rebase has been implemented.
 
 These differences from OpenSSH remain:
 
