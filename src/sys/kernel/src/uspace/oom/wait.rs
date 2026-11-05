@@ -3,7 +3,8 @@
 
 use super::{state, Thread};
 use crate::mm::{
-    phys, AllocationClass, AllocationFailure, RefusalKind, RetryDecision, StateSnapshot, WaitReason,
+    phys, AllocationClass, AllocationFailure, RefusalKind, RetryDecision, RetryKind, StateSnapshot,
+    WaitReason,
 };
 use alloc::{sync::Weak, vec::Vec};
 use moto_sys::ErrorCode;
@@ -81,17 +82,23 @@ pub(super) fn test() {
 
 pub(super) fn resolve(
     failure: AllocationFailure,
-    fault: bool,
+    retry: RetryKind,
 ) -> Result<Option<WaitReason>, ErrorCode> {
     loop {
         let (snapshot, free) = phys::oom_snapshot();
-        match failure.retry_decision(snapshot, free, fault) {
+        match failure.retry_decision(snapshot, free, retry) {
             RetryDecision::Retry => return Ok(None),
             RetryDecision::Wait(reason) => return Ok(Some(reason)),
             RetryDecision::Error(code) => return Err(code),
             RetryDecision::Request(class) => {
                 if let Some(generation) = phys::request_oom() {
-                    return Ok(Some(WaitReason::shortage(class, generation)));
+                    return Ok(Some(if retry == RetryKind::Fault {
+                        WaitReason::shortage(class, generation)
+                    } else {
+                        // request_oom may have joined a run that already
+                        // latched. Such a syscall wait is immediately ready.
+                        WaitReason::syscall(generation)
+                    }));
                 }
                 // Recovery won the request CAS. Reconcile the original receipt
                 // with that recovery instead of issuing a stale request.
@@ -142,7 +149,24 @@ impl Retry {
         thread: &Thread,
         failure: AllocationFailure,
     ) -> Result<(), ErrorCode> {
-        self.pending = resolve(failure, false)?;
+        self.after_failure_kind(thread, failure, RetryKind::Syscall)
+    }
+
+    pub(crate) fn after_pager_fill_failure(
+        &mut self,
+        thread: &Thread,
+        failure: AllocationFailure,
+    ) -> Result<(), ErrorCode> {
+        self.after_failure_kind(thread, failure, RetryKind::PagerFill)
+    }
+
+    fn after_failure_kind(
+        &mut self,
+        thread: &Thread,
+        failure: AllocationFailure,
+        retry: RetryKind,
+    ) -> Result<(), ErrorCode> {
+        self.pending = resolve(failure, retry)?;
         if let Some(reason) = self.pending {
             park(thread, reason);
         }

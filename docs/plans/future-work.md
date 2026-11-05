@@ -8,11 +8,76 @@ per-operation allocation overhead, were reviewed. Historical timings below
 are not new measurements. An unexplained historical failure stays open
 unless the source establishes that its cause was fixed.
 
-<<<<<<< HEAD
 ## wasm 224MB image test ooming
 
 Find what regressed.
-=======
+
+## Optional change to the victimless OOM abort policy
+
+The completed OOM follow-up retains the agreed abort rule: with no eligible
+victim and no pending exit cleanup below 512 free pages, the kernel reports
+the remaining processes and panics. Protected processes can legitimately
+hold that memory while nothing is blocked, since System allocations can
+continue down to 128 free pages.
+
+An optional alternative would end such a run in Latched, keep the User gate
+closed and release System callers. Ordinary allocating syscalls could return
+`E_OUT_OF_MEMORY` if their retry still fails. Missing-page faults need a
+separate policy because they cannot return an error to the program. The rule
+that a charge below 512 pages while Latched starts a new run would also need
+changing to avoid repeated scans of the same process set.
+
+This alternative remains outside the completed implementation scope.
+`src/tests/test-oom-abort.sh` and its `systest system-oom-abort` helper assert
+the current rule and would change with it. Current behavior is documented in
+[OOM handling](../oom-handling.md).
+
+## Host SSH full-duplex test reports a channel-send error (2026-11-05)
+
+The OOM follow-up's debug full gate failed before booting a guest in
+`russhd/tests/client_protocol.rs::server_drains_output_while_child_does_not_read_large_stdin`.
+The Linux SSH client reported `Channel send error` while receiving 8 MiB
+from a child that does not read stdin. The other 21 protocol tests passed.
+Neither this host test nor its binaries use the changed Motor kernel code.
+
+Temporary diagnostics enabled server logs and reporting of both channel
+and connection-close errors. Both an isolated run and the concurrent 22-test
+suite passed, so the original cause remains unresolved. The diagnostics
+were removed; no SSH code, assertion, timeout or retry policy changed.
+If it recurs, retain the connection-close error too: `run_ssh` currently
+returns the channel error first, which can hide the transport failure.
+
+Original failure: `/tmp/motor-oom-validation/final-v3/debug-1.log`.
+Diagnostic evidence: `/tmp/motor-oom-validation/ssh-diagnostic-isolated.log`
+and `/tmp/motor-oom-validation/ssh-diagnostic-concurrent.log`. Those passes
+do not resolve the original failure.
+
+## Developer release full gate can exceed its time budget (2026-11-05)
+
+The first OOM follow-up `full-test-dev.sh --release` run reached its
+1,500-second limit during ordinary guest network tests. The OOM suite,
+native analyzer and formatter, logging cleanup, and paused-debugger kill
+checks had passed; there was no failing assertion at the timeout.
+
+A later run with timestamped output and read-only guest snapshots measured
+129 seconds between logging's basic check and its rotation/space-cleanup
+check. That test fills the developer image's 16 GiB data partition. Its fill
+file grew from 129 MB to 5.17 GB in 41 seconds while physical memory usage
+stayed around 86 MB, the free-page low-water mark exceeded 7 GiB, and all OOM
+run, kill and wait counters stayed at zero. The original run also completed
+the fill before timing out. This is bulk filesystem work, not evidence of
+an OOM wait that failed to resume.
+
+Host-side image checks were slower in the original run: its analyzer-size
+check was still active after three minutes, whereas the later run completed
+that check 126 seconds after the whole timed suite started. The cause of
+that timing variation has not been established. The original timeout stays
+recorded independently of later passes; no test budget or assertion changed.
+
+Evidence: `/tmp/motor-oom-validation/final-v2/developer-release.log`,
+`/tmp/motor-oom-validation/final-v4/developer-release-timed.log` and
+`/tmp/motor-oom-validation/final-v4/developer-logging-sample-{1,2,3}.log`.
+
 ## The one-vCPU debug full gate runs at its budget: poll contention tests (2026-11-04)
 
 `src/tests/full-test.sh --cpus 1` in debug has a 3,000-second budget, twice
@@ -48,7 +113,14 @@ maintainer decision. Evidence, all in temporary files: the 5e logs
 `/tmp/oom-5e-full-debug-1.log`, `/tmp/oom-5e-thread-round-{1,2}.log` and
 `/tmp/oom-5e-single-cpu-stats.log`, and the 2026-11-04 review session's
 `oom-5f-review-full-debug-1c-timeout.log` in its scratchpad.
->>>>>>> 46acdb9e (docs, tests: oom handlings update)
+
+Update 2026-11-05: the OOM follow-up validation reproduced the 3,000-second
+timeout, this time during the IP-device frame tests. The same poll interval
+took 1,507 seconds (guest uptime 524.267 to 2031.049); both poll race tests
+subsequently passed. The OOM suite and debugger-paused kill tests also passed
+before the timeout. The poll code, round counts and time limit were unchanged.
+The failed run is retained at
+`/tmp/motor-oom-validation/final-v2/debug-3.log`; it is not a full-gate pass.
 
 ## Batch the kernel-stack shootdowns of a process exit (2026-11-01)
 
@@ -204,6 +276,14 @@ parent descriptor drops its endpoint, and `StdioPipe::write_timeout_impl`
 propagates peer-close errors. The source of
 `systest::stdio::test_child_stdout_reader_drop` covers termination after
 reader drop, but its child accepts any write error.
+
+The 2026-11-05 OOM follow-up developer gate also exposed this classification
+in sysbox's argument-error tests: `cut -b=1` exited before the fixture's stdin
+writer ran, which received `BadHandle` rather than `BrokenPipe`. Argument
+errors in the cut, tr and xargs fixtures now use empty input, while retaining
+their exact exit-status and diagnostic assertions. The pipe error itself
+remains unresolved. The failure is recorded in
+`/tmp/motor-oom-validation/final-v2/developer-release-diagnostic.log`.
 
 The remaining WASI EPIPE problem is error classification.
 `src/sys/lib/moto-sdk/src/ipc/stdio_pipe.rs` returns `E_NOT_CONNECTED` for

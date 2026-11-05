@@ -722,16 +722,16 @@ pub(super) struct AddressSpaceBase {
     pub(super) page_allocator: super::virt_intrusive::PageAllocator,
 
     pub(super) mem_stats: Arc<crate::xray::stats::MemStats>,
-    // 0 = unclaimed; 1/2/3 = claimed None/Interactive/System; 255 = kernel.
-    // One word publishes claim and role together, including claim rollback.
+    // 0 = unclaimed; 1/2 = claimed User/System; 255 = kernel.
+    // One word publishes claim and class together, including claim rollback.
     allocation_owner: core::sync::atomic::AtomicU8,
 }
 
 impl AddressSpaceBase {
     pub(super) fn allocation_class(&self) -> AllocationClass {
         match self.allocation_owner.load(Ordering::Acquire) {
-            0..=2 => AllocationClass::User,
-            3 => AllocationClass::System,
+            0..=1 => AllocationClass::User,
+            2 => AllocationClass::System,
             255 => AllocationClass::Kernel,
             _ => unreachable!("invalid address-space owner"),
         }
@@ -949,20 +949,20 @@ pub(crate) fn oom_state() -> &'static crate::uspace::oom::OomState {
 }
 
 // Uses the existing boot-test path, before pressure is armed. Existing user
-// segments must see a claim's role; process stacks in kernel regions need an
+// segments must see a claim's class; process stacks in kernel regions need an
 // explicit class because their region belongs to the kernel address space.
 #[cfg(debug_assertions)]
 pub(super) fn allocation_role_self_test(
     space: &super::user::UserAddressSpace,
     inner: &UserAddressSpaceBase,
 ) {
-    use moto_sys::caps::ProcessRole;
+    use AllocationClass::{System, User};
     assert_eq!(space.allocation_class(), AllocationClass::User);
     let lazy = space.alloc_user_lazy(1).unwrap();
-    space.claim_for_process(ProcessRole::System).unwrap();
+    space.claim_for_process(System).unwrap();
     assert_eq!(space.allocation_class(), AllocationClass::System);
     assert_eq!(
-        space.claim_for_process(ProcessRole::None),
+        space.claim_for_process(User),
         Err(moto_rt::E_ALREADY_IN_USE.into())
     );
     assert_eq!(space.allocation_class(), AllocationClass::System);
@@ -995,14 +995,14 @@ pub(super) fn allocation_role_self_test(
     space.drop_stacks(&user_stack, &Some(kernel_stack));
     space.release_claim();
     assert_eq!(space.allocation_class(), AllocationClass::User);
-    for role in [ProcessRole::None, ProcessRole::Interactive] {
-        space.claim_for_process(role).unwrap();
-        assert_eq!(space.allocation_class(), AllocationClass::User);
+    for class in [User, System] {
+        space.claim_for_process(class).unwrap();
+        assert_eq!(space.allocation_class(), class);
         assert_eq!(
-            space.claim_for_process(ProcessRole::System),
+            space.claim_for_process(System),
             Err(moto_rt::E_ALREADY_IN_USE.into())
         );
-        assert_eq!(space.allocation_class(), AllocationClass::User);
+        assert_eq!(space.allocation_class(), class);
         space.release_claim();
     }
     crate::raw_log!("allocation role tests PASS");
@@ -1042,11 +1042,16 @@ impl Drop for UserAddressSpaceBase {
 impl UserAddressSpaceBase {
     pub(super) fn claim_for_process(
         &self,
-        role: moto_sys::caps::ProcessRole,
+        class: AllocationClass,
     ) -> Result<(), AllocationFailure> {
+        let owner = match class {
+            AllocationClass::User => 1,
+            AllocationClass::System => 2,
+            AllocationClass::Kernel => unreachable!("process cannot own Kernel-class memory"),
+        };
         self.base
             .allocation_owner
-            .compare_exchange(0, role as u8 + 1, Ordering::AcqRel, Ordering::Acquire)
+            .compare_exchange(0, owner, Ordering::AcqRel, Ordering::Acquire)
             .map(|_| ())
             .map_err(|_| moto_rt::E_ALREADY_IN_USE.into())
     }

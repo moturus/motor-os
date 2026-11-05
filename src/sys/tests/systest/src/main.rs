@@ -15,6 +15,7 @@ mod boot_identity;
 mod closerace;
 mod command_output;
 mod ctrl_c;
+mod debugger;
 mod descriptor_attr;
 mod diagnostics;
 mod environment;
@@ -1717,6 +1718,10 @@ fn main() {
         spawn_wait_kill::test_shared_listener_restart();
         return;
     }
+    if args.len() == 2 && args[1] == "test-kill-paused" {
+        debugger::test_kill_paused();
+        return;
+    }
     if ipc_service::run_command(&args) {
         return;
     }
@@ -1762,6 +1767,9 @@ fn main() {
     }
     if spawn_wait_kill::is_interrupt_child(&args) {
         spawn_wait_kill::run_interrupt_child();
+    }
+    if debugger::is_child(&args) {
+        debugger::run_child(&args[2]);
     }
     if spawn_wait_kill::is_empty_args_child(&args) {
         spawn_wait_kill::run_empty_args_child(&args);
@@ -1988,6 +1996,7 @@ fn main() {
     spawn_wait_kill::test_pid_kill();
     process_permissions::test_pid_kill_permissions();
     process_permissions::test_debug_attach_permissions();
+    debugger::test_kill_paused();
     spawn_wait_kill::test_shared_listener_restart();
     ipc_service::run_tests();
     spawn_wait_kill::test_thread_creation_exit_rollback();

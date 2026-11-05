@@ -225,7 +225,7 @@ fn arming() {
 }
 
 fn retry_decisions() {
-    use crate::mm::{AllocationFailure, RetryDecision as D, WaitReason};
+    use crate::mm::{AllocationFailure, RetryDecision as D, RetryKind, WaitReason};
     use AllocationClass::{System, User};
     use RefusalKind::{Capacity, Floor, Gate};
     let total = 2048;
@@ -241,8 +241,16 @@ fn retry_decisions() {
         state,
         free_pages: state.free_pages(total),
     };
-    let decide = |failure: AllocationFailure, state: StateSnapshot, fault| {
-        failure.retry_decision(state, state.free_pages(total), fault)
+    let decide = |failure: AllocationFailure, state: StateSnapshot, fault: bool| {
+        failure.retry_decision(
+            state,
+            state.free_pages(total),
+            if fault {
+                RetryKind::Fault
+            } else {
+                RetryKind::Syscall
+            },
+        )
     };
     for class in [System, User] {
         for fault in [false, true] {
@@ -250,11 +258,19 @@ fn retry_decisions() {
             assert_eq!(decide(gate, recovered, fault), D::Retry);
             assert_eq!(
                 decide(gate, blocked, fault),
-                D::Wait(WaitReason::gate(class))
+                D::Wait(if fault {
+                    WaitReason::gate(class)
+                } else {
+                    WaitReason::syscall(blocked.generation())
+                })
             );
             for kind in [Floor, Capacity] {
                 let shortage = receipt(class, kind, killing);
-                let waiting = WaitReason::shortage(class, killing.generation());
+                let waiting = if fault {
+                    WaitReason::shortage(class, killing.generation())
+                } else {
+                    WaitReason::syscall(killing.generation())
+                };
                 assert_eq!(decide(shortage, killing, fault), D::Wait(waiting));
                 assert!(!waiting.ready(killing)); // Open System gate is insufficient.
                 assert!(!waiting.ready(blocked));
@@ -270,7 +286,7 @@ fn retry_decisions() {
                 // A completed generation survives new pressure before dispatch.
                 assert_eq!(
                     decide(shortage, renewed, fault),
-                    if class == System {
+                    if !fault || class == System {
                         D::Retry
                     } else {
                         D::Wait(WaitReason::gate(User))
@@ -278,7 +294,7 @@ fn retry_decisions() {
                 );
                 assert_eq!(
                     decide(shortage, latched, fault),
-                    if class == System {
+                    if !fault || class == System {
                         D::Retry
                     } else {
                         D::Wait(WaitReason::gate(User))
@@ -306,22 +322,59 @@ fn retry_decisions() {
     // An unchanged victimless latch cannot make a System shortage spin.
     let shortage = receipt(System, Floor, latched);
     let wait = WaitReason::shortage(System, latched.generation());
-    assert_eq!(decide(shortage, latched, false), D::Wait(wait));
+    assert_eq!(
+        decide(shortage, latched, false),
+        D::Error(moto_rt::E_OUT_OF_MEMORY)
+    );
+    assert_eq!(decide(shortage, latched, true), D::Wait(wait));
     assert!(!wait.ready(latched));
     assert!(!latched.gate_closed(System)); // Smaller System requests can proceed.
     let later_recovery = latched.release(total, 168);
     assert!(wait.ready(later_recovery));
     // A spurious wake revalidated the syscall but did not attempt allocation.
     // Recovery racing that recheck permits a retry even above 768 pages.
-    let pending = AllocationFailure::Waiting(wait);
-    assert_eq!(decide(pending, latched, false), D::Wait(wait));
+    let pending = AllocationFailure::Waiting(WaitReason::syscall(latched.generation()));
+    assert_eq!(decide(pending, latched, false), D::Retry);
     assert_eq!(decide(pending, later_recovery, false), D::Retry);
     assert_eq!(decide(pending, renewed, false), D::Retry);
     let user_wait = wait.with_class(User);
     assert_eq!(
-        decide(AllocationFailure::Waiting(user_wait), latched, false),
+        decide(AllocationFailure::Waiting(user_wait), latched, true),
         D::Wait(user_wait)
     );
+    // A syscall may register after request_oom has already returned a
+    // Latched generation. It must never sleep awaiting another generation.
+    assert!(WaitReason::syscall(latched.generation()).ready(latched));
+    assert!(WaitReason::syscall(killing.generation()).ready(blocked.next_generation().unwrap()));
+    assert!(!WaitReason::syscall(killing.generation()).ready(blocked));
+    for retry in [RetryKind::Syscall, RetryKind::PagerFill] {
+        assert_eq!(
+            receipt(User, Gate, killing).retry_decision(latched, 600, retry),
+            D::Error(moto_rt::E_OUT_OF_MEMORY)
+        );
+        assert_eq!(
+            receipt(User, Gate, killing).retry_decision(recovered, 768, retry),
+            D::Retry
+        );
+    }
+    // Protected fills retry physical pressure whether recovery precedes
+    // registration, follows a park, or stops below full recovery.
+    for kind in [Floor, Capacity] {
+        for state in [recovered, latched] {
+            assert_eq!(
+                receipt(System, kind, killing).retry_decision(
+                    state,
+                    state.free_pages(total),
+                    RetryKind::PagerFill
+                ),
+                D::Retry
+            );
+        }
+        assert_eq!(
+            receipt(System, kind, blocked).retry_decision(blocked, 600, RetryKind::PagerFill),
+            D::Wait(WaitReason::syscall(blocked.generation()))
+        );
+    }
     for code in [
         moto_rt::E_OUT_OF_MEMORY,
         moto_rt::E_INVALID_ARGUMENT,

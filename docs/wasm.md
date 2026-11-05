@@ -49,7 +49,7 @@ for memory64. Growth within that reservation does not move or copy memory.
 Wasmi retains its 4 GiB per-memory capacity. Under physical memory pressure,
 Motor OS parks valid faults and selects eligible processes for OOM killing,
 newest None-role processes first, then Interactive processes. The runtime or
-another eligible process may be killed; role-based allocation floors and
+another eligible process may be killed; allocation floors and
 recovery are described in [OOM handling](oom-handling.md). `-W max-memory-size`
 and `-W max-memories` bound a Wasmtime guest as upstream.
 Store limits use upstream defaults and explicit `-W max-instances`,

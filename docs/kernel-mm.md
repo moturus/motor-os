@@ -169,12 +169,14 @@ word alongside a 2-bit OOM phase, System block, armed bit and 35-bit generation.
 Count readers mask that word. `StateSnapshot` is a copied observation of this
 pool state; allocation/refusal/recovery decisions commit a new word by CAS.
 
-The allocation class comes from the recipient address space, with None and
-Interactive sharing the User class. Its one-process claim binds the role
-atomically; an unclaimed space uses User. Both stacks, page tables and MM
-slab growth use that class even when their virtual addresses are in kernel
-space. Kernel-owned allocations have no floor. Role floors, gates and the
-boot arming point are described in [oom-handling.md](oom-handling.md).
+The allocation class comes from the recipient address space. Its one-process
+claim atomically records System for System-role processes and sys-io's children
+and grandchildren, using the actual parent even for delegated spawns. sys-io
+itself also uses System. Other processes and unclaimed spaces use User. Both
+stacks, page tables and MM slab growth use that class even when their virtual
+addresses are in kernel space. Kernel-owned allocations have no floor.
+Allocation floors, gates and the boot arming point are described in
+[oom-handling.md](oom-handling.md).
 
 Two atomic bitmaps index blocks: F for split blocks with free pages and W for
 whole blocks, including small-only ones. Bits match the descriptor whenever
@@ -387,16 +389,23 @@ failed share leaves the destination as it was.
 Internal `AllocationFailure` values preserve the recipient class, physical
 refusal kind and state observed at refusal. Ordinary validation, quota and
 virtual-region errors stay distinct. Outer syscall retries unwind temporary
-resources and sample the post-rollback state before parking. A physical
-shortage below recovery waits; one whose rollback restores at least 768
-pages returns `E_OUT_OF_MEMORY`. A gate refusal alone waits for the gate to
-reopen. Retry revalidates the target and preserves an earlier floor refusal
-through huge-to-small fallback. No owned syscall resource relies on Rust
-destructors running when a killed thread's stack is discarded.
+resources and sample the post-rollback state before parking. Ordinary syscalls
+wait for an active OOM run and retry when it ends in Idle or Latched, or when
+the generation changes. A gate refusal whose run already ended retries without
+parking. In Latched, User requests and System requests that do not fit return
+`E_OUT_OF_MEMORY`; neither waits for a finished run. An ordinary physical
+failure whose rollback restores at least 768 pages still returns
+`E_OUT_OF_MEMORY`. Retry revalidates the target and preserves an earlier floor
+refusal through huge-to-small fallback. No owned syscall resource relies on
+Rust destructors running when a killed thread's stack is discarded.
 
-Valid faults park on pressure and retry after recovery; invalid faults keep
-their fatal handling. Pager fills retain their completed prefix, release
-source pins before waiting and revalidate mapping identity before resuming.
+Valid faults keep class-based waits on pressure; invalid faults keep their
+fatal handling. Pager fills retain their completed prefix, release source
+pins before waiting and revalidate mapping identity before resuming. A fill
+for a System-class process retries physical pressure even if recovery happened
+before wait registration, and can retry through the System gate in Latched.
+It does not turn that pressure into a fatal pager error; the existing
+victimless-abort rule still applies below 512 free pages.
 Fault waiters use the pager's preempted-thread resume path; syscall waiters
 preserve ordinary userspace wakes. Queue removal owns each single resume.
 
@@ -588,7 +597,8 @@ guarded IPC listener buffer refused with its guards and bytes intact.
 
 Pool-squeezing cases run only in plain systest, never under load.
 The armed System-console cases cover allocation floors, victims, syscall and
-fault waits, cancellation and recovery. A separate disposable guest verifies
+fault waits, completed-run retries, Latched refusals, cancellation, recovery
+and reclamation of debugger-paused victims. A separate disposable guest verifies
 the victimless report and abort after the ordinary full suite; commands and
 expected diagnostics are in [oom-handling.md](oom-handling.md).
 Benchmarks are user-owned.

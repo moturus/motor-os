@@ -4,7 +4,8 @@
 
 mod allocation;
 pub(crate) use allocation::{
-    AllocationClass, AllocationFailure, RefusalKind, RetryDecision, StateSnapshot, WaitReason,
+    AllocationClass, AllocationFailure, RefusalKind, RetryDecision, RetryKind, StateSnapshot,
+    WaitReason,
 };
 mod cache;
 pub mod kheap;
