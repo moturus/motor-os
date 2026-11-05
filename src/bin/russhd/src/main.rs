@@ -59,7 +59,9 @@ async fn main() {
     }
 
     let russh_config = russh::server::Config {
-        inactivity_timeout: Some(std::time::Duration::from_secs(3600)),
+        // Idle sessions stay up, as with OpenSSH; `LOGIN_GRACE` bounds the
+        // unauthenticated phase instead.
+        inactivity_timeout: None,
         auth_rejection_time: std::time::Duration::from_secs(3),
         auth_rejection_time_initial: Some(std::time::Duration::from_secs(0)),
         methods: auth_methods(),
@@ -129,6 +131,11 @@ async fn serve(
             {
                 log::warn!("set_nodelay() failed: {err:?}");
             }
+            let socket = GracedStream {
+                inner: socket,
+                deadline: Box::pin(tokio::time::sleep(LOGIN_GRACE)),
+                authenticated: handler.authenticated.clone(),
+            };
             let result = match server::run_stream(config, socket, handler).await {
                 Ok(session) => session.await,
                 Err(err) => Err(err),
@@ -137,6 +144,54 @@ async fn serve(
                 log::info!("Session error: {err:?}");
             }
         });
+    }
+}
+
+/// OpenSSH's `LoginGraceTime`: a connection not authenticated by then is dropped.
+const LOGIN_GRACE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The connection's transport. Its reads fail once `LOGIN_GRACE` passes without
+/// authentication, which ends the russh session and, with it, the TCP connection.
+/// russh's own disconnect cannot do this: it is not delivered during key exchange.
+struct GracedStream {
+    inner: tokio::net::TcpStream,
+    deadline: Pin<Box<tokio::time::Sleep>>,
+    authenticated: Arc<AtomicBool>,
+}
+
+impl AsyncRead for GracedStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if !this.authenticated.load(Ordering::Relaxed) && this.deadline.as_mut().poll(cx).is_ready()
+        {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "not authenticated within the login grace time",
+            )));
+        }
+        Pin::new(&mut this.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for GracedStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
     }
 }
 
@@ -212,6 +267,8 @@ struct ConnectionHandler {
     sftp_channel_id: Option<ChannelId>,
     close_guard: Option<ChannelCloseGuard>,
     receive_credit: Option<ReceiveCredit>,
+    /// Set by `auth_succeeded`; read by the connection's `GracedStream`.
+    authenticated: Arc<AtomicBool>,
 }
 
 impl ConnectionHandler {
@@ -231,6 +288,7 @@ impl ConnectionHandler {
             sftp_channel_id: None,
             close_guard: None,
             receive_credit: None,
+            authenticated: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -420,6 +478,11 @@ impl server::Handler for ConnectionHandler {
     // async fn authentication_banner(&mut self) -> Result<Option<String>, Self::Error> {
     //     Ok(Some("Motor OS SSH Server.".to_owned()))
     // }
+
+    async fn auth_succeeded(&mut self, _session: &mut Session) -> Result<(), Self::Error> {
+        self.authenticated.store(true, Ordering::Relaxed);
+        Ok(())
+    }
 
     async fn auth_none(&mut self, _user: &str) -> Result<server::Auth, Self::Error> {
         Ok(rejected())
