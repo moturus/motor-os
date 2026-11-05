@@ -5,10 +5,12 @@ three debug and three release passes and the complete developer-image release
 gate, including both 256 MiB Wasm VMs.
 Milestone 2's external v0.65.1 rebase is committed and tested on branch
 `motor-v0.65.1`, tip `bc44c5d`. Its complete fork suite passes 289 tests, including
-the repaired pending-delivery close stall. Work stops for the user to review and
-publish that branch; see the publication handoff below. The main repository still
-pins `server-window` at `042db50`. The main pin/contract patches, their guest gates,
-and relay integration remain outstanding.
+the repaired pending-delivery close stall. The user published it; the remote
+revision is verified. Local main pin/API/contract patches pass 147 host tests,
+host clippy without warnings, and both Motor OS release builds. Their image gates
+and commits are stopped for review of a diagnosed preexisting login-deadline bug;
+see the current stop below. The committed pin remains `042db50`; the working tree
+pins published `bc44c5d`. Relay integration has not started.
 See "Implementation progress" below and "Decisions" at the end.
 
 ## Implementation progress
@@ -20,7 +22,7 @@ Developer-image validation remains release-only.
 | Step | Progress | Remaining |
 |---|---|---|
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
-| 2 | External step 2a series ready at `bc44c5d` on `motor-v0.65.1`; 289 fork tests pass, including deterministic pending-delivery close regressions. Login deadline/idle policy landed separately in `bc39a586` | User publication; main pin and contract patches, 3+3 main-image and developer-image release gates. Step 2b: relay, direct opens, configuration, login-deadline coverage, 3+3 milestone gates |
+| 2 | External step 2a series published at `bc44c5d`; 289 fork tests pass. Local main pin/API/contract patches pass 147 host tests, clippy, and release builds of both binaries | Review the preexisting login-deadline bug, finish 3+3 main-image and developer-image release gates, commit pin/contracts. Step 2b: relay, direct opens, configuration, login-deadline coverage, 3+3 milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
@@ -60,7 +62,8 @@ cover the new rebase checkpoint.
   tests against the local fork, including the draft regressions.
 - [x] Rebase onto v0.65.1 on the new fork branch, fix the pending-delivery close
   stall, and pass the fork checks (`bc44c5d`; publication handoff below).
-- [ ] User reviews and publishes `motor-v0.65.1` from the persistent fork checkout.
+- [x] User publishes `motor-v0.65.1`; a fresh remote check verifies `bc44c5d` and
+  leaves `server-window` at `042db50`.
 - [ ] Update the actual git pin with Cargo, adapt authentication callbacks,
   restore close contract tests, strengthen compression coverage, and pass the
   separate step 2a main-image and developer-image gates.
@@ -127,9 +130,9 @@ checkout `build/russh-rebase/fork`. Leave the published
    prevents Cargo's formatter from reaching them. Dependency fetching is setup;
    regressions use only local peers and deterministic data.
 
-The user reviews and publishes this tested series on the new branch. This replaces
-the earlier handoff to push the five old-base commits to `server-window`. Do not
-update the main pin until the reviewed revision is published.
+The user published this tested series on the new branch, replacing the earlier
+handoff to push the five old-base commits to `server-window`. The publication
+prerequisite for updating the main pin is satisfied.
 
 **Main-repository patches.** Point `src/bin/russhd/Cargo.toml` at the new branch
 and update the lockfile with `cargo update -p russh`. Adapt `auth_publickey_offered`
@@ -177,7 +180,8 @@ separate housekeeping.
 
 ### Step 2a: fork publication handoff (2026-11-05)
 
-The **external `moturus/russh` fork** is ready for user review and publication.
+The user has now published the **external `moturus/russh` fork**. The following
+records its original review/publication handoff and tested commit series.
 Its persistent checkout is `build/russh-rebase/fork`, branch `motor-v0.65.1`, at
 `bc44c5d366366b8d2d5f997e0a3d27c5d7b208f2`, based on upstream tag commit
 `b33092aad1e51c66258a12e8b83fc473a68d9d34`. The checkout is clean. The six published
@@ -242,18 +246,76 @@ records the standalone dependency
 resolution. The final eleven patches are in `motor-v0.65.1-patches/`; a range diff
 of the six published commits is in `published-series-range-diff.txt`.
 
-A fresh remote check (`publication-remote-refs.txt`) found `server-window` still
+A remote check at that handoff (`publication-remote-refs.txt`) found `server-window` still
 at `042db50cf72626b464caf63f1c0d2b76c7272e18` and no published `motor-v0.65.1` branch.
-The requested stopping point is here. From the Motor OS repository root, the user
-can publish the reviewed series with:
+The requested stopping point was there. From the Motor OS repository root, the
+publication command was:
 
 ```sh
 git -C build/russh-rebase/fork push --set-upstream origin motor-v0.65.1
 ```
 
-After publication, verify the published revision and continue the main pin/API/
-contract patches above. No main-repository dependency or source change, main host
-test pass against the final fork, or step 2a guest-gate pass is claimed yet.
+No main-repository dependency/source change or step 2a main-host/guest pass was
+claimed at that handoff. The next checkpoint records publication and main work.
+
+### Step 2a: published pin validation and login-deadline stop (2026-11-05)
+
+`publication-confirmed-refs.txt` verifies the published branch at
+`bc44c5d366366b8d2d5f997e0a3d27c5d7b208f2`, with `server-window` unchanged.
+Local main-repository patches now point Cargo at `motor-v0.65.1`, adapt the
+authentication callback types without changing their credential checks, correct
+the developer documentation, restore the two live close contracts, and strengthen
+compression coverage. Cargo's actual git-source lockfile changes match the trial:
+russh 0.65.1, pageant 0.2.5, num-bigint 0.5.1, and removal of
+internal-russh-num-bigint. The Motor tokio/mio/ring and ssh-key pins are unchanged.
+
+The new compression regressions failed on the old pin as intended: a 32,777-byte
+incompressible packet decoded to 32,742 bytes, and a compressed transfer delivered
+0 of 262,144 bytes (`main-compression-old-pin.log`). The existing small compressible
+packet test passed in that same run. Against the published pin, all **147 main
+russhd host tests** pass, including both immediate and deferred zlib transfer modes
+and both restored close regressions (`main-published-pin-host-tests.log`).
+Host `cargo clippy --offline --locked --all-targets` completes without warnings,
+formatting passes, and `make -j$(nproc) BUILD=release russhd ssh` builds both Motor OS
+binaries without warnings (`main-published-pin-clippy.log`,
+`main-published-pin-motor-release.log`). Tests use the actual published git pin,
+with no local path override.
+
+**Diagnosed preexisting defect.** The login-deadline contract requires successful
+authentication before `LOGIN_GRACE` expires. `GracedStream::poll_read` checks the
+deadline only while `authenticated` is false, and `auth_succeeded` unconditionally
+sets it true. Password/key checks await `spawn_blocking` credential work. If that
+work completes after expiry, the callback disables the expired read deadline and
+the connection is allowed to continue. The timer does not enforce the deadline
+while that callback is pending.
+
+A separate controlled-clock transport diagnostic in
+`build/russh-rebase/login-grace-diagnostic/` compiles an exact extraction of the
+production `GracedStream`. That extraction matches `bc39a586` byte for byte;
+the callback's unconditional store is unchanged from that commit too. Its two
+controls pass: unauthenticated expiry rejects reads, and timely authentication
+remains valid after expiry. Its late-authentication case fails: after advancing
+past 120 s and performing the callback's flag store, a read succeeds with
+`Ok(120)` (the byte `x`) instead of `TimedOut`. The original log is
+`login-grace-diagnostic.log`. The proof covers the transport invariant; an
+end-to-end delayed credential-store case remains to add with the fix.
+
+AGENTS.md requires stopping on a preexisting production bug after diagnosis.
+No production deadline fix was made. Proposed follow-up for review: share the
+accept-time deadline with authentication completion, reject completion after
+expiry, and ensure expiry terminates the actual session/transport while a
+credential callback is pending. Add controlled-clock tests without a multi-minute
+wall-clock wait, then resume the pin checkpoint's unchanged full gates.
+
+The first debug image gate was deliberately stopped with exit **143** during
+terminal-size checks after 5.6 minutes of timed testing. It was not an assertion
+failure and does not count as a pass. Its log is `step2a-debug-1.log`, with original
+and final teardown logs in `step2a-debug-1-evidence/`. The remaining terminal-size
+test group and its QEMU guest were stopped, and no task-owned VM/test process
+remains running. Source checksums confirm the pin patch did not change during the
+run. Debug passes remain **0/3**, release passes **0/3**; the developer-image gate
+has not started. No timeout, retry, assertion, or coverage rule was changed.
+The pin/API/contract changes remain uncommitted pending the required image gates.
 
 Step 1 focused checks: `cargo test` for `wasm-smoke-suite` (two tests),
 `test-wasm-selection.sh`, `test-full-test-size.sh`, and `test-dev-memory-contract.sh`
