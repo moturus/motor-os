@@ -388,50 +388,11 @@ async fn requests() -> Result<()> {
         "pagination fixture too small",
     )?;
 
-    // Simulate an admitted pressure exception; size is checked under the
-    // mutation guard, and freeing drains the cache before its reply.
-    for command in api_fs::CMD_STAT..=api_fs::CMD_GET_MOUNTS {
-        if command == api_fs::CMD_FILE_LOCK {
-            continue;
-        }
-        let mut msg = api_fs::resize_msg_encode(wire, 0);
-        msg.command = command;
-        ensure(
-            served_under_pressure(&msg, &runtime)
-                == matches!(command, api_fs::CMD_RESIZE | api_fs::CMD_DELETE_ENTRY),
-            "pressure command classification",
-        )?;
-    }
-    for operation in [
-        moto_rt::fs::UNLOCK,
-        moto_rt::fs::TRY_LOCK_EXCLUSIVE,
-        moto_rt::fs::TRY_LOCK_SHARED,
-    ] {
-        ensure(
-            served_under_pressure(&api_fs::file_lock_msg_encode(wire, 3, operation), &runtime)
-                == (operation == moto_rt::fs::UNLOCK),
-            "pressure lock classification",
-        )?;
-    }
-    let err = on_cmd_resize(
-        api_fs::resize_msg_encode(wire, 8192),
-        &server,
-        runtime.clone(),
-        Role::None,
-        true,
-    )
-    .await
-    .unwrap_err();
-    ensure(
-        err.kind() == ErrorKind::OutOfMemory,
-        "pressure resize growth",
-    )?;
     on_cmd_resize(
         api_fs::resize_msg_encode(wire, 0),
         &server,
         runtime.clone(),
         Role::None,
-        true,
     )
     .await?;
     responses
@@ -440,18 +401,11 @@ async fn requests() -> Result<()> {
         .map_err(map_native_error)?
         .status()
         .map_err(map_native_error)?;
-    if let FS::MemFs(fs) = &*mounted.read().await? {
-        ensure(
-            fs.cached_free_bytes() == 0,
-            "pressure shrink must return pages",
-        )?;
-    }
     on_cmd_delete_entry(
         api_fs::delete_entry_msg_encode(wire),
         &server,
         runtime.clone(),
         Role::None,
-        true,
     )
     .await?;
     responses

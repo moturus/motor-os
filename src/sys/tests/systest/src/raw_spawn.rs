@@ -243,8 +243,45 @@ fn test_double_wake() {
     println!("raw_spawn::test_double_wake PASS");
 }
 
+/// A refused creation answers with the kernel's own code, not an internal
+/// error: a missing entry point is an invalid argument, one outside user
+/// space is not allowed. The refusal leaves the space free for another
+/// process, and a space that hosts one takes no second.
+fn test_creation_error_codes() {
+    let what = "raw_spawn::test_creation_error_codes";
+    let space = SysObj::create(
+        SysHandle::NONE,
+        0,
+        "address_space:debug_name=raw-spawn-codes",
+    )
+    .unwrap();
+    let create = |url: &str| SysObj::create(space, 0, url);
+    assert_eq!(
+        create("process:capabilities=0"),
+        Err(moto_rt::E_INVALID_ARGUMENT)
+    );
+    assert_eq!(
+        create(&format!(
+            "process:entry_point={};capabilities=0",
+            1_u64 << 63
+        )),
+        Err(moto_rt::E_NOT_ALLOWED)
+    );
+    let process = create("process:entry_point=4096;capabilities=0").unwrap();
+    assert_eq!(
+        create("process:entry_point=4096;capabilities=0"),
+        Err(moto_rt::E_ALREADY_IN_USE)
+    );
+    SysObj::put(space).unwrap();
+    SysCpu::kill(process).unwrap();
+    wait_exit(process, what);
+    SysObj::put(process).unwrap();
+    println!("{what} PASS");
+}
+
 pub fn run_all_tests() {
     test_requester_refused();
+    test_creation_error_codes();
     test_kill_unstarted_child();
     test_kill_racing_a_wake();
     test_double_wake();

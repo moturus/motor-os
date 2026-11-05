@@ -634,7 +634,6 @@ impl MotoSocket {
         };
 
         let runtime = tcp_listener.borrow().runtime().clone();
-        runtime.pressure.admit()?;
         // Create the socket.
         let (weak_socket, key, socket_id) = {
             let mut tcp_listener_mut = tcp_listener.borrow_mut();
@@ -704,9 +703,7 @@ impl MotoSocket {
         // endpoint: minting stops, in-flight cookies keep verifying.
         runtime.inner.borrow_mut().devices[device_idx].disengage_syn_cookies(socket_addr);
 
-        // Allocate both lifecycle tasks while this socket's pressure check is
-        // still current. Deferring the waiter until the listen task's first
-        // poll let a large new pool queue heap growth past that boundary.
+        // Construct both lifecycle tasks together.
         let (connected_tx, connected_rx) = moto_sdk::async_runtime::oneshot();
         let listen_runtime = runtime.clone();
         listen_runtime.spawn_device_task(device_idx, async move {
@@ -746,9 +743,6 @@ impl MotoSocket {
                 .tcp_cookie_restores_dropped
                 .set(runtime.stats.tcp_cookie_restores_dropped.get() + 1);
         };
-        if runtime.pressure.admit().is_err() {
-            return drop_restore("memory pressure");
-        }
 
         let local_addr = crate::runtime::net::config::socket_addr_from_endpoint(restore.local);
         let tcp_listener = {
@@ -2131,8 +2125,6 @@ impl MotoSocket {
             return Err(ErrorKind::InvalidInput.into());
         }
         let subchannel_mask = api_net::io_subchannel_mask(subchannel_idx);
-
-        runtime.pressure.admit()?;
         let remote_addr = api_net::get_socket_addr(&msg.payload);
 
         log::debug!(
@@ -2610,9 +2602,7 @@ impl MotoSocket {
 }
 
 /// Refill the pool at `key` until its deficit is gone. The socket's lifecycle
-/// waiter calls this after the socket leaves Listen; under memory pressure the
-/// refill parks, and pressure's recovery task re-arms it here once availability
-/// returns.
+/// waiter calls this after the socket leaves Listen.
 pub(in crate::runtime::net) fn replenish_pool(
     runtime: NetRuntime,
     weak_listener: Weak<RefCell<TcpListener>>,
@@ -2620,17 +2610,12 @@ pub(in crate::runtime::net) fn replenish_pool(
     socket_addr: SocketAddr,
     key: super::super::backlog::PoolKey,
 ) {
+    runtime.free_caches.reclaim_if_pressured();
     // The whole deficit, which a burst that emptied the pool has just
     // deepened. Every departure replenishes, so re-reading it each time
     // is what keeps them from overshooting together; a torn-down
     // listener owes nothing, and this loop ends.
     while runtime.backlog.deficit(key) > 0 {
-        if runtime
-            .pressure
-            .defer_replenish(key, &weak_listener, device_idx, socket_addr)
-        {
-            break;
-        }
         if MotoSocket::create_tcp_listening_socket(weak_listener.clone(), device_idx, socket_addr)
             .is_err()
         {

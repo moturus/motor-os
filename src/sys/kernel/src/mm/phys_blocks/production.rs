@@ -129,7 +129,9 @@ impl BlockPool {
             whole: bitmap(whole_words),
             counters: Counters {
                 total,
-                used: AtomicU64::new(used),
+                state: AtomicU64::new(StateSnapshot::new(used).0),
+                attention: core::sync::atomic::AtomicBool::new(false),
+                oom_runs: AtomicU64::new(0),
                 high_water: AtomicU64::new(used),
                 reserved: AtomicU64::new(reserved),
                 discarded: AtomicU64::new(discarded),
@@ -137,6 +139,7 @@ impl BlockPool {
                 taken: AtomicU64::new(0),
                 splits: AtomicU64::new(0),
                 recombined: AtomicU64::new(0),
+                published: crate::util::StaticRef::default_const(),
             },
             links: DirectLinks,
             #[cfg(debug_assertions)]
@@ -253,9 +256,12 @@ impl BlockPool {
         }
     }
 
-    pub(crate) fn alloc_small(&self, count: u16) -> Option<u64> {
-        self.allocate(count, cursor())
-            .unwrap_or_else(|err| panic!("phys: corrupt allocator: {err:?} ({count} pages)"))
+    pub(crate) fn alloc_small(
+        &self,
+        count: u16,
+        class: AllocationClass,
+    ) -> Result<u64, crate::mm::AllocationFailure> {
+        self.allocation_result(self.allocate(count, cursor(), class), class)
     }
 
     pub(crate) fn free_small(&self, addr: u64) {
@@ -263,10 +269,12 @@ impl BlockPool {
             .unwrap_or_else(|err| panic!("phys: corrupt free of 0x{addr:x}: {err:?}"));
     }
 
-    // A whole dual-purpose block, or None: a recoverable fallback signal.
-    pub(crate) fn alloc_huge(&self) -> Option<u64> {
-        self.allocate_huge()
-            .unwrap_or_else(|err| panic!("phys: corrupt allocator: {err:?} (huge)"))
+    // A whole dual-purpose block, preserving the pressure refusal for fallback.
+    pub(crate) fn alloc_huge(
+        &self,
+        class: AllocationClass,
+    ) -> Result<u64, crate::mm::AllocationFailure> {
+        self.allocation_result(self.allocate_huge(class), class)
     }
 
     pub(crate) fn free_huge(&self, addr: u64) {
@@ -279,11 +287,19 @@ impl BlockPool {
     }
 
     pub(crate) fn used_pages(&self) -> u64 {
-        self.counters.used.load(Ordering::Relaxed)
+        self.state_snapshot().used()
     }
 
     pub(crate) fn free_pages(&self) -> u64 {
         self.counters.total - self.used_pages()
+    }
+
+    /// Mirror the free-page count into `target` from now on: one snapshot,
+    /// then the delta of every charge and release. Called once on the BSP
+    /// before any other CPU allocates, so the snapshot cannot miss a change.
+    pub(crate) fn publish_free_pages(&self, target: &'static AtomicU64) {
+        target.store(self.free_pages(), Ordering::Relaxed);
+        self.counters.published.set(target);
     }
 
     pub(crate) fn high_water_pages(&self) -> u64 {

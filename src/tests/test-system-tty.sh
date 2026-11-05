@@ -162,30 +162,20 @@ run_console /user/tmp/system-tty-script-edit-done \
 run_console /user/tmp/system-tty-script-done \
   "echo '#!/system/bin/rush' > /user/tmp/system-tty-script; echo 'echo V2 > /user/tmp/system-tty-script-v2' >> /user/tmp/system-tty-script; chmod r-xr--r-- /user/tmp/system-tty-script; /user/tmp/system-tty-script"
 
-# The System console can grant both reserve capabilities and can launch
-# unprivileged children. The ordinary SSH shell cannot grant System authority.
+# The ordinary SSH shell cannot grant System authority.
 # The binary goes in /none/tmp so that its None-role children can run it.
 make -C "$ROOT_DIR" systest BUILD="$BUILD" -j"$(nproc)"
 scp -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
   -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
   -i "$WD/test.key" "$ROOT_DIR/build/bin/$BUILD/systest" \
-  motor@192.168.4.2:/none/tmp/admission-systest
-run_console /user/tmp/admission-mode-done \
-  'chmod r-xr-xr-x /none/tmp/admission-systest'
-run_console /user/tmp/admission-class-done \
-  'MOTOR_OS_CAPS=0x20d /none/tmp/admission-systest admission-class-tests > /user/tmp/admission-class.log 2>&1; echo $? > /user/tmp/admission-class.status'
-admission_status="$(vm_ssh /system/bin/cat /user/tmp/admission-class.status)"
-admission_output="$(vm_ssh /system/bin/cat /user/tmp/admission-class.log)"
-[ "$admission_status" = "0" ] || fail "admission classes exited $admission_status: '$admission_output'"
-[ "$admission_output" = "admission::test_process_classes PASS" ] ||
-  fail "admission classes did not finish: '$admission_output'"
-printf '%s\n' "$admission_output"
-
+  motor@192.168.4.2:/none/tmp/capability-systest
+run_console /user/tmp/capability-mode-done \
+  'chmod r-xr-xr-x /none/tmp/capability-systest'
 # CAP_SYS does not substitute for the sys-io bits: a System parent without
 # CAP_NET cannot grant it, a System child without CAP_FS_WRITE is refused
 # writes, and the System process itself is refused network access.
 run_console /user/tmp/system-caps-done \
-  'MOTOR_OS_CAPS=0x20d /none/tmp/admission-systest system-caps-tests > /user/tmp/system-caps.log 2> /user/tmp/system-caps.err; echo $? > /user/tmp/system-caps.status'
+  'MOTOR_OS_CAPS=0x20d /none/tmp/capability-systest system-caps-tests > /user/tmp/system-caps.log 2> /user/tmp/system-caps.err; echo $? > /user/tmp/system-caps.status'
 system_caps_status="$(vm_ssh /system/bin/cat /user/tmp/system-caps.status)"
 system_caps_output="$(vm_ssh /system/bin/cat /user/tmp/system-caps.log)"
 # Debug runtimes log to stderr, so it is kept apart from the verdict.
@@ -194,6 +184,25 @@ system_caps_output="$(vm_ssh /system/bin/cat /user/tmp/system-caps.log)"
 [ "$system_caps_output" = $'spawn_wait_kill::test_system_parent_cannot_grant_unheld PASS\nfs_permissions::test_write_capability(System) PASS\nnet_caps::check_denied(System) PASS' ] ||
   fail "System capability tests did not finish: '$system_caps_output'"
 printf '%s\n' "$system_caps_output"
+
+# Prepare through SSH, then observe serial output without starting SSH commands
+# during pressure. The helper needs System authority and preallocates its tests.
+printf '/none/tmp/capability-systest system-oom-tests; echo OOM_TEST_STATUS=$?\r' >&3
+oom_done=0
+for _ in $(seq 1 120); do
+  if grep -aq 'oom::run_all_tests PASS' "$CONSOLE_LOG"; then
+    oom_done=1
+    break
+  fi
+  if grep -aqE 'OOM_TEST_STATUS=(-[0-9]|[1-9])' "$CONSOLE_LOG"; then
+    tail -80 "$CONSOLE_LOG" >&2
+    fail "OOM helper failed (log: $CONSOLE_LOG)"
+  fi
+  serial_test_vm_alive || fail "$TEST_VM_LABEL exited during OOM tests (log: $CONSOLE_LOG)"
+  sleep 0.25
+done
+[ "$oom_done" = 1 ] || fail "OOM tests did not finish (log: $CONSOLE_LOG)"
+echo 'oom::run_all_tests PASS'
 
 # WireGuard derives roles from the complete capability word, including when
 # CAP_SYS and CAP_INTERACTIVE are both present. This needs the System console.
@@ -214,7 +223,7 @@ printf '%s\n' "$wg_role_output"
 # An exported mask wins over Rush's ordinary System grant, even when it omits
 # CAP_NET; without one, the grant keeps the console's own bits.
 run_console /user/tmp/rush-caps-done \
-  '/system/bin/rush -c "export MOTOR_OS_CAPS=0x205; /none/tmp/admission-systest print-caps exported > /user/tmp/rush-caps.log"; /none/tmp/admission-systest print-caps ordinary >> /user/tmp/rush-caps.log'
+  '/system/bin/rush -c "export MOTOR_OS_CAPS=0x205; /none/tmp/capability-systest print-caps exported > /user/tmp/rush-caps.log"; /none/tmp/capability-systest print-caps ordinary >> /user/tmp/rush-caps.log'
 rush_caps="$(vm_ssh /system/bin/cat /user/tmp/rush-caps.log)"
 [ "$rush_caps" = $'exported=0x205\nordinary=0x38d' ] ||
   fail "System Rush capability precedence: '$rush_caps'"
@@ -243,7 +252,7 @@ for burst in $(seq 1 11); do
   [ "$burst" -ne 11 ] || lines=512 # Exceeds the old 16 KiB backlog.
   offset="$(wc -c < "$CONSOLE_LOG")"
   # Adjacent quoted words keep the full prompt token out of the command echo.
-  printf "PS1='[TTY-BURST-''%s] '; /none/tmp/admission-systest stderr-burst %s %s\r" \
+  printf "PS1='[TTY-BURST-''%s] '; /none/tmp/capability-systest stderr-burst %s %s\r" \
     "$burst" "$burst" "$lines" >&3
   wait_console_burst "$offset" "$burst" ready
   printf '!' >&3

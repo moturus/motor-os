@@ -20,10 +20,8 @@ pub fn run_all_tests() {
     }
     // CPU 0 is reserved for the I/O manager's affinity.
     let cpu = num_cpus - 1;
-    let yields_before = crate::admission::kernel_metric_at(
-        "sched.syscall_exit_yields",
-        moto_sys::stats::PID_KERNEL,
-    );
+    let yields_before =
+        crate::memory::kernel_metric_at("sched.syscall_exit_yields", moto_sys::stats::PID_KERNEL);
 
     // The syscall-bound thread: each iteration zeroes 16 pages in the kernel
     // and spends a few instructions in user mode.
@@ -60,10 +58,9 @@ pub fn run_all_tests() {
     stop.store(true, Ordering::Relaxed);
     spinner.join().unwrap();
 
-    let yields = crate::admission::kernel_metric_at(
-        "sched.syscall_exit_yields",
-        moto_sys::stats::PID_KERNEL,
-    ) - yields_before;
+    let yields =
+        crate::memory::kernel_metric_at("sched.syscall_exit_yields", moto_sys::stats::PID_KERNEL)
+            - yields_before;
     assert!(yields > 0, "no syscall gave the CPU up at its exit");
     println!("sched_fairness::run_all_tests PASS: worst sleep {worst:?}, {yields} yields");
 }

@@ -32,8 +32,8 @@ use core::sync::atomic::AtomicU64;
 
 use crate::arch::paging::PAGING_DIRECT_MAP_OFFSET;
 
+use super::{AllocationClass, AllocationFailure};
 use alloc::sync::Arc;
-use moto_sys::ErrorCode;
 
 const ONE_GB: u64 = 1u64 << 30;
 
@@ -102,30 +102,72 @@ pub fn is_user(vmem_addr: u64) -> bool {
 
 pub fn init() {
     KERNEL_ADDRESS_SPACE.set(KernelAddressSpace::new());
-}
-
-/// # Safety
-///
-/// Assumes addresses are properly initialized.
-pub unsafe fn map_page(phys_addr: u64, virt_addr: u64, kind: PageType, options: MappingOptions) {
-    KERNEL_ADDRESS_SPACE
-        .base
-        .page_table
-        .map_page(phys_addr, virt_addr, kind, options)
-        .expect("invalid kernel mapping options");
+    // Userspace reads the live free-page count from the shared page.
+    super::phys::publish_free_pages(&get_kernel_static_page_mut().free_pages);
 }
 
 pub fn get_kernel_static_page_mut() -> &'static mut moto_sys::KernelStaticPage {
     KERNEL_ADDRESS_SPACE.get_static_shared_page_mut()
 }
 
-pub(super) fn reserve_pages_for_slabs(num_pages: u64) -> u64 {
-    let sz = num_pages << PAGE_SIZE_SMALL_LOG2;
-    let result = KERNEL_ADDRESS_SPACE
-        .next_slabs_addr
-        .fetch_add(sz, Ordering::Relaxed);
-    assert!(result + sz <= VMEM_K_SLABS_END);
-    result
+// The most pages one slab takes; a `Frame` slab with its refcounts takes 21.
+pub(super) const MAX_SLAB_PAGES: usize = 32;
+
+/// The backing of one kernel slab: `num_pages` fresh pages mapped at the
+/// next slab address, or `E_OUT_OF_MEMORY` with every page given back, also
+/// once the region, which holds the descriptors of over a terabyte, is full.
+/// The cursor lock is held across the mapping and the cursor advances only
+/// on success, so a failed growth leaves no gap in the region.
+/// Physical pages and page-table growth use the supplied recipient's class,
+/// even though the slab's virtual region belongs to the kernel.
+pub(super) fn map_slab_pages(
+    num_pages: u64,
+    class: AllocationClass,
+) -> Result<u64, AllocationFailure> {
+    let num_pages = num_pages as usize;
+    assert!(num_pages <= MAX_SLAB_PAGES);
+    let mut cursor = KERNEL_ADDRESS_SPACE.next_slab_addr.lock(line!());
+    let start = *cursor;
+    let size = (num_pages as u64) << PAGE_SIZE_SMALL_LOG2;
+    if start + size > VMEM_K_SLABS_END {
+        return Err(moto_rt::E_OUT_OF_MEMORY.into());
+    }
+    let vaddr = |idx: usize| start + ((idx as u64) << PAGE_SIZE_SMALL_LOG2);
+
+    // The pages first, so that running short of them, the usual failure,
+    // costs no TLB shootdown.
+    let mut pages = [0_u64; MAX_SLAB_PAGES];
+    for taken in 0..num_pages {
+        match super::phys::phys_allocate_frameless(PageType::SmallPage, class) {
+            Ok(phys) => pages[taken] = phys,
+            Err(err) => {
+                free_slab_pages(&pages[..taken]);
+                return Err(err);
+            }
+        }
+    }
+    let table = &KERNEL_ADDRESS_SPACE.base.page_table;
+    let options = MappingOptions::READABLE | MappingOptions::WRITABLE;
+    for (idx, phys) in pages[..num_pages].iter().enumerate() {
+        if let Err(err) = table.map_page(*phys, vaddr(idx), PageType::SmallPage, options, class) {
+            for (done, phys) in pages[..idx].iter().enumerate() {
+                table.unmap_page_no_flush(*phys, vaddr(done), PageType::SmallPage);
+            }
+            if idx > 0 {
+                table.flush_pages(start, idx as u64);
+            }
+            free_slab_pages(&pages[..num_pages]);
+            return Err(err);
+        }
+    }
+    *cursor = start + size;
+    Ok(start)
+}
+
+fn free_slab_pages(pages: &[u64]) {
+    for phys in pages {
+        super::phys::phys_deallocate_frameless(*phys, PageType::SmallPage);
+    }
 }
 
 #[derive(Debug, PartialEq, Copy, Clone)]
@@ -162,16 +204,20 @@ impl VaddrMapStatus {
     }
 }
 
-pub fn vmem_allocate_pages(kind: VmemKind, num_pages: u64) -> Result<MemorySegment, ErrorCode> {
-    KERNEL_ADDRESS_SPACE.vmem_allocate_pages(kind, num_pages)
+pub(crate) fn vmem_allocate_pages(
+    kind: VmemKind,
+    num_pages: u64,
+    class: AllocationClass,
+) -> Result<MemorySegment, AllocationFailure> {
+    KERNEL_ADDRESS_SPACE.vmem_allocate_pages(kind, num_pages, class)
 }
 
 /// Read-only kernel-static mapping of reserved physical pages (see
 /// `VmemRegion::map_reserved_pages`).
-pub fn vmem_map_reserved_pages(
+pub(crate) fn vmem_map_reserved_pages(
     phys_start: u64,
     num_pages: u64,
-) -> Result<MemorySegment, ErrorCode> {
+) -> Result<MemorySegment, AllocationFailure> {
     KERNEL_ADDRESS_SPACE.kernel_static.map_reserved_pages(
         phys_start,
         num_pages,
@@ -260,6 +306,9 @@ impl Drop for VmemRegion {
 }
 
 impl VmemRegion {
+    fn allocation_class(&self) -> AllocationClass {
+        unsafe { self.address_space.get() }.allocation_class()
+    }
     fn new(segment: MemorySegment) -> Self {
         VmemRegion {
             segment,
@@ -313,7 +362,7 @@ impl VmemRegion {
     }
 
     #[allow(unused)]
-    pub(super) fn free(&self, addr: u64) -> Result<u64, ErrorCode> {
+    pub(super) fn free(&self, addr: u64) -> Result<u64, moto_sys::ErrorCode> {
         if !self.segment.contains(addr) {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
@@ -322,7 +371,11 @@ impl VmemRegion {
         self.free_locked(&mut segments, addr)
     }
 
-    fn free_locked(&self, segments: &mut SegmentMap, addr: u64) -> Result<u64, ErrorCode> {
+    fn free_locked(
+        &self,
+        segments: &mut SegmentMap,
+        addr: u64,
+    ) -> Result<u64, moto_sys::ErrorCode> {
         if let Some(deleted) = segments.remove(addr) {
             let sz = VmemSegment::unmap(deleted); // Consumes deleted.
 
@@ -339,6 +392,13 @@ impl VmemRegion {
         }
     }
 
+    #[cfg(debug_assertions)]
+    pub(super) fn is_closed(&self) -> bool {
+        self.used_segments.lock(line!()).is_closed()
+    }
+
+    // Terminal: frees every segment and closes the region under its lock,
+    // so that a later reservation is refused. A second call is a no-op.
     fn clear(&self) {
         let mut segments = self.used_segments.lock(line!());
 
@@ -360,9 +420,19 @@ impl VmemRegion {
         &self,
         num_pages: u64,
         mapping_options: MappingOptions,
-    ) -> Result<MemorySegment, ErrorCode> {
+    ) -> Result<MemorySegment, AllocationFailure> {
         let mut segments = self.used_segments.lock(line!());
-        self.allocate_pages_locked(&mut segments, num_pages, mapping_options)
+        self.allocate_pages_locked(&mut segments, num_pages, mapping_options, None)
+    }
+
+    fn allocate_pages_for(
+        &self,
+        num_pages: u64,
+        mapping_options: MappingOptions,
+        class: AllocationClass,
+    ) -> Result<MemorySegment, AllocationFailure> {
+        let mut segments = self.used_segments.lock(line!());
+        self.allocate_pages_locked(&mut segments, num_pages, mapping_options, Some(class))
     }
 
     fn allocate_pages_locked(
@@ -370,9 +440,14 @@ impl VmemRegion {
         segments: &mut SegmentMap,
         num_pages: u64,
         mapping_options: MappingOptions,
-    ) -> Result<MemorySegment, ErrorCode> {
+        class: Option<AllocationClass>,
+    ) -> Result<MemorySegment, AllocationFailure> {
         debug_assert!(!self.address_space.is_null());
         debug_assert_ne!(num_pages, 0);
+        if segments.is_closed() {
+            return Err(moto_rt::E_BAD_HANDLE.into());
+        }
+        segments.ensure_free_node(class.unwrap_or_else(|| self.allocation_class()))?;
         let size = num_pages << PAGE_SIZE_SMALL_LOG2;
         // Huge-eligible segments start on a 2 MiB boundary, whether or not
         // any candidate ends up huge.
@@ -414,10 +489,10 @@ impl VmemRegion {
                 self.bytes_used.load(Ordering::Relaxed),
                 size
             );
-            return Err(moto_rt::E_OUT_OF_MEMORY);
+            return Err(moto_rt::E_OUT_OF_MEMORY.into());
         };
 
-        let mut seg = VmemSegment::new(MemorySegment { start, size }, self, mapping_options);
+        let mut seg = VmemSegment::new(MemorySegment { start, size }, self, mapping_options, class);
         seg.allocate_pages()?;
         self.bytes_used.fetch_add(size, Ordering::Relaxed);
 
@@ -436,11 +511,11 @@ impl VmemRegion {
         phys_start: u64,
         num_pages: u64,
         mapping_options: MappingOptions,
-    ) -> Result<MemorySegment, ErrorCode> {
+    ) -> Result<MemorySegment, AllocationFailure> {
         debug_assert_eq!(0, phys_start & (PAGE_SIZE_SMALL - 1));
         let mut segments = self.used_segments.lock(line!());
         let memory_segment =
-            self.allocate_pages_locked(&mut segments, num_pages, MappingOptions::empty())?;
+            self.allocate_pages_locked(&mut segments, num_pages, MappingOptions::empty(), None)?;
         let vmem_segment = segments.get_mut(&memory_segment.start).unwrap();
         let mut virt_addr = memory_segment.start;
         let mut phys_addr = phys_start;
@@ -452,6 +527,7 @@ impl VmemRegion {
                     virt_addr,
                     PageType::SmallPage,
                     mapping_options | MappingOptions::DONT_ZERO,
+                    self.allocation_class(),
                 )?;
             }
             vmem_segment.set_frame(virt_addr, frame);
@@ -466,9 +542,13 @@ impl VmemRegion {
         &self,
         num_pages: u64,
         mapping_options: MappingOptions,
-    ) -> Result<MemorySegment, ErrorCode> {
+    ) -> Result<MemorySegment, AllocationFailure> {
         let mut frames: alloc::vec::Vec<SlabArc<Frame>> =
-            super::phys::phys_allocate_contiguous_frames(PageType::SmallPage, num_pages)?;
+            super::phys::phys_allocate_contiguous_frames(
+                PageType::SmallPage,
+                num_pages,
+                self.allocation_class(),
+            )?;
 
         #[cfg(debug_assertions)]
         {
@@ -496,7 +576,7 @@ impl VmemRegion {
         // Do not expose a reservation that unmap can remove before mapping completes.
         let mut segments = self.used_segments.lock(line!());
         let memory_segment =
-            self.allocate_pages_locked(&mut segments, num_pages, MappingOptions::empty())?;
+            self.allocate_pages_locked(&mut segments, num_pages, MappingOptions::empty(), None)?;
         let vmem_segment = segments.get_mut(&memory_segment.start).unwrap();
         let mut virt_addr = vmem_segment.segment().start;
         for idx in 0..num_pages {
@@ -508,6 +588,7 @@ impl VmemRegion {
                     virt_addr,
                     PageType::SmallPage,
                     mapping_options,
+                    self.allocation_class(),
                 )
             };
             if let Err(err) = result {
@@ -529,11 +610,11 @@ impl VmemRegion {
         phys_addr: u64,
         num_pages: u64,
         user: bool,
-    ) -> Result<MemorySegment, ErrorCode> {
+    ) -> Result<MemorySegment, AllocationFailure> {
         // Reservation, mapping and rollback share the same lock as unmap.
         let mut segments = self.used_segments.lock(line!());
         let memory_segment =
-            self.allocate_pages_locked(&mut segments, num_pages, MappingOptions::empty())?;
+            self.allocate_pages_locked(&mut segments, num_pages, MappingOptions::empty(), None)?;
         let virt_addr = memory_segment.start;
         let segment = segments.get_mut(&virt_addr).unwrap();
         let size = segment.segment().size;
@@ -558,7 +639,7 @@ impl VmemRegion {
         vaddr_start: u64,
         num_pages: u64,
         mapping_options: MappingOptions,
-    ) -> Result<MemorySegment, ErrorCode> {
+    ) -> Result<MemorySegment, AllocationFailure> {
         let mut segments = self.used_segments.lock(line!());
         self.allocate_user_fixed_locked(&mut segments, vaddr_start, num_pages, mapping_options)
     }
@@ -569,8 +650,11 @@ impl VmemRegion {
         vaddr_start: u64,
         num_pages: u64,
         mapping_options: MappingOptions,
-    ) -> Result<MemorySegment, ErrorCode> {
+    ) -> Result<MemorySegment, AllocationFailure> {
         debug_assert!(!self.address_space.is_null());
+        if segments.is_closed() {
+            return Err(moto_rt::E_BAD_HANDLE.into());
+        }
         let size = num_pages << PAGE_SIZE_SMALL_LOG2;
 
         let memory_segment = MemorySegment {
@@ -585,16 +669,17 @@ impl VmemRegion {
             || ((vaddr_start + size) >= self.segment.end())
         {
             log::debug!("allocate_user_fixed failed for addr 0x{vaddr_start:x}");
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
 
         // Validate that there is no overlap with existing segments.
         if segments.intersects(&memory_segment) {
             log::debug!("allocate_user_fixed failed for addr 0x{vaddr_start:x}");
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
 
-        let mut seg = VmemSegment::new(memory_segment, self, mapping_options);
+        segments.ensure_free_node(self.allocation_class())?;
+        let mut seg = VmemSegment::new(memory_segment, self, mapping_options, None);
         seg.allocate_pages()?;
         self.bytes_used.fetch_add(size, Ordering::Relaxed);
         segments.insert(seg);
@@ -608,18 +693,18 @@ impl VmemRegion {
     fn with_file_segment<R>(
         &self,
         addr: u64,
-        f: impl FnOnce(&mut super::virt_intrusive::VmemSegment) -> Result<R, ErrorCode>,
-    ) -> Result<R, ErrorCode> {
+        f: impl FnOnce(&mut super::virt_intrusive::VmemSegment) -> Result<R, AllocationFailure>,
+    ) -> Result<R, AllocationFailure> {
         let mut segments = self.used_segments.lock(line!());
         match segments.find_mut(addr) {
             Some(segment) if segment.is_file_paged() => f(segment),
-            _ => Err(moto_rt::E_INVALID_ARGUMENT),
+            _ => Err(moto_rt::E_INVALID_ARGUMENT.into()),
         }
     }
 
-    fn fix_pagefault(&self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
+    fn fix_pagefault(&self, pf_addr: u64, error_code: u64) -> Result<(), AllocationFailure> {
         if !self.segment.contains(pf_addr) {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
 
         let mut segments = self.used_segments.lock(line!());
@@ -628,7 +713,7 @@ impl VmemRegion {
             return seg.fix_pagefault(pf_addr, error_code);
         }
 
-        Err(moto_rt::E_INVALID_ARGUMENT)
+        Err(moto_rt::E_INVALID_ARGUMENT.into())
     }
 }
 
@@ -637,15 +722,27 @@ pub(super) struct AddressSpaceBase {
     pub(super) page_allocator: super::virt_intrusive::PageAllocator,
 
     pub(super) mem_stats: Arc<crate::xray::stats::MemStats>,
+    // 0 = unclaimed; 1/2 = claimed User/System; 255 = kernel.
+    // One word publishes claim and class together, including claim rollback.
+    allocation_owner: core::sync::atomic::AtomicU8,
 }
 
 impl AddressSpaceBase {
+    pub(super) fn allocation_class(&self) -> AllocationClass {
+        match self.allocation_owner.load(Ordering::Acquire) {
+            0..=1 => AllocationClass::User,
+            2 => AllocationClass::System,
+            255 => AllocationClass::Kernel,
+            _ => unreachable!("invalid address-space owner"),
+        }
+    }
     pub fn page_table(&self) -> u64 {
         self.page_table.phys_addr()
     }
 
-    fn new(kernel: bool) -> Result<Self, ErrorCode> {
+    fn new(kernel: bool) -> Result<Self, AllocationFailure> {
         Ok(Self {
+            allocation_owner: core::sync::atomic::AtomicU8::new(if kernel { 255 } else { 0 }),
             page_table: if kernel {
                 PageTable::new_kernel_page_table()
             } else {
@@ -681,7 +778,7 @@ impl AddressSpaceBase {
 }
 
 pub struct KernelAddressSpace {
-    base: AddressSpaceBase,
+    pub(super) base: AddressSpaceBase,
 
     kernel_static: VmemRegion,
     kernel_stacks: VmemRegion,
@@ -689,9 +786,11 @@ pub struct KernelAddressSpace {
     kernel_mmio: VmemRegion,
 
     static_shared_page: UnsafeRef<moto_sys::KernelStaticPage>,
-    next_slabs_addr: AtomicU64,
+    // The next free address in the slab region; see `map_slab_pages`.
+    pub(super) next_slab_addr: SpinLock<u64>,
     /// The executable pager's registry; see `uspace::pager`.
     pager: crate::uspace::pager::PagerRegistry,
+    oom: crate::uspace::oom::OomState,
 
     _pin: PhantomPinned,
 }
@@ -728,8 +827,9 @@ impl KernelAddressSpace {
             base: AddressSpaceBase::new(true).unwrap(),
 
             static_shared_page: UnsafeRef::const_default(),
-            next_slabs_addr: AtomicU64::new(VMEM_K_SLABS_START),
+            next_slab_addr: SpinLock::new(VMEM_K_SLABS_START),
             pager: crate::uspace::pager::PagerRegistry::new(),
+            oom: crate::uspace::oom::OomState::new(),
 
             _pin: PhantomPinned,
         }));
@@ -742,7 +842,9 @@ impl KernelAddressSpace {
         result.kernel_static.address_space.set_from(&space);
 
         {
-            let phys_addr = super::phys::phys_allocate_frameless(PageType::SmallPage).unwrap();
+            let phys_addr =
+                super::phys::phys_allocate_frameless(PageType::SmallPage, AllocationClass::Kernel)
+                    .unwrap();
             let virt_addr = phys_addr + PAGING_DIRECT_MAP_OFFSET;
             result.static_shared_page =
                 UnsafeRef::from_ptr(virt_addr as usize as *const moto_sys::KernelStaticPage);
@@ -769,28 +871,33 @@ impl KernelAddressSpace {
         &self,
         kind: VmemKind,
         num_pages: u64,
-    ) -> Result<MemorySegment, ErrorCode> {
+        class: AllocationClass,
+    ) -> Result<MemorySegment, AllocationFailure> {
         match kind {
-            VmemKind::KernelMMIO => self
-                .kernel_mmio
-                .allocate_pages(num_pages, MappingOptions::empty()),
+            VmemKind::KernelMMIO => {
+                self.kernel_mmio
+                    .allocate_pages_for(num_pages, MappingOptions::empty(), class)
+            }
             VmemKind::KernelHeap => {
                 // assert_eq!(page_type, PageType::MidPage);
-                self.kernel_heap.allocate_pages(
+                self.kernel_heap.allocate_pages_for(
                     num_pages,
                     MappingOptions::READABLE | MappingOptions::WRITABLE | MappingOptions::DONT_ZERO,
+                    class,
                 )
             }
-            VmemKind::KernelStack => self.kernel_stacks.allocate_pages(
+            VmemKind::KernelStack => self.kernel_stacks.allocate_pages_for(
                 num_pages,
                 MappingOptions::READABLE
                     | MappingOptions::WRITABLE
                     | MappingOptions::DONT_ZERO
                     | MappingOptions::GUARD,
+                class,
             ),
-            VmemKind::KernelStatic => self.kernel_static.allocate_pages(
+            VmemKind::KernelStatic => self.kernel_static.allocate_pages_for(
                 num_pages,
                 MappingOptions::READABLE | MappingOptions::WRITABLE,
+                class,
             ),
             _ => panic!(),
         }
@@ -826,7 +933,7 @@ impl KernelAddressSpace {
         &self,
         phys_addr: u64,
         num_pages: u64,
-    ) -> Result<MemorySegment, ErrorCode> {
+    ) -> Result<MemorySegment, AllocationFailure> {
         self.kernel_mmio.mmio_map(phys_addr, num_pages, false)
     }
 }
@@ -835,6 +942,70 @@ pub(super) static KERNEL_ADDRESS_SPACE: StaticRef<KernelAddressSpace> = StaticRe
 
 pub(crate) fn pager_registry() -> &'static crate::uspace::pager::PagerRegistry {
     &KERNEL_ADDRESS_SPACE.pager
+}
+
+pub(crate) fn oom_state() -> &'static crate::uspace::oom::OomState {
+    &KERNEL_ADDRESS_SPACE.oom
+}
+
+// Uses the existing boot-test path, before pressure is armed. Existing user
+// segments must see a claim's class; process stacks in kernel regions need an
+// explicit class because their region belongs to the kernel address space.
+#[cfg(debug_assertions)]
+pub(super) fn allocation_role_self_test(
+    space: &super::user::UserAddressSpace,
+    inner: &UserAddressSpaceBase,
+) {
+    use AllocationClass::{System, User};
+    assert_eq!(space.allocation_class(), AllocationClass::User);
+    let lazy = space.alloc_user_lazy(1).unwrap();
+    space.claim_for_process(System).unwrap();
+    assert_eq!(space.allocation_class(), AllocationClass::System);
+    assert_eq!(
+        space.claim_for_process(User),
+        Err(moto_rt::E_ALREADY_IN_USE.into())
+    );
+    assert_eq!(space.allocation_class(), AllocationClass::System);
+    assert_eq!(
+        inner
+            .normal_memory
+            .used_segments
+            .lock(line!())
+            .find(lazy.start)
+            .unwrap()
+            .allocation_class(),
+        AllocationClass::System
+    );
+    let user_stack = space.alloc_user_stack(4).unwrap();
+    let kernel_stack = space.alloc_kernel_stack(4).unwrap();
+    assert_eq!(
+        KERNEL_ADDRESS_SPACE
+            .kernel_stacks
+            .used_segments
+            .lock(line!())
+            .find(kernel_stack.start)
+            .unwrap()
+            .allocation_class(),
+        AllocationClass::System
+    );
+    assert_eq!(
+        KERNEL_ADDRESS_SPACE.base.allocation_class(),
+        AllocationClass::Kernel
+    );
+    space.drop_stacks(&user_stack, &Some(kernel_stack));
+    space.release_claim();
+    assert_eq!(space.allocation_class(), AllocationClass::User);
+    for class in [User, System] {
+        space.claim_for_process(class).unwrap();
+        assert_eq!(space.allocation_class(), class);
+        assert_eq!(
+            space.claim_for_process(System),
+            Err(moto_rt::E_ALREADY_IN_USE.into())
+        );
+        assert_eq!(space.allocation_class(), class);
+        space.release_claim();
+    }
+    crate::raw_log!("allocation role tests PASS");
 }
 
 pub(super) struct UserAddressSpaceBase {
@@ -849,28 +1020,18 @@ pub(super) struct UserAddressSpaceBase {
 
 impl Drop for UserAddressSpaceBase {
     fn drop(&mut self) {
-        self.normal_memory.clear();
-        self.custom_memory.clear();
+        // UserAddressSpace, the only owner, has released the user memory.
+        #[cfg(debug_assertions)]
+        assert!(self.normal_memory.is_closed() && self.custom_memory.is_closed());
 
-        self.base.page_allocator.clear();
-
-        // Need to manually unmap manually mapped pages.
+        // The kernel static page and the kernel's own L4 entries stay until
+        // here; see UserAddressSpace::release_user_memory for why no CPU is
+        // on this table any more.
         self.base.page_table.unmap_page(
             KERNEL_ADDRESS_SPACE.static_shared_phys_addr(),
             KERNEL_STATIC_SHARED_PAGE_USER_VADDR,
             PageType::SmallPage,
         );
-
-        let phys_addr = self
-            .process_static_page_phys_addr
-            .swap(0, Ordering::Relaxed);
-        self.base.page_table.unmap_page(
-            phys_addr,
-            PROCESS_STATIC_SHARED_PAGE_USER_VADDR,
-            PageType::SmallPage,
-        );
-        super::phys::phys_deallocate_frameless(phys_addr, PageType::SmallPage);
-
         self.base.page_table.unmap_kernel_from_user();
 
         #[cfg(debug_assertions)]
@@ -879,6 +1040,29 @@ impl Drop for UserAddressSpaceBase {
 }
 
 impl UserAddressSpaceBase {
+    pub(super) fn claim_for_process(
+        &self,
+        class: AllocationClass,
+    ) -> Result<(), AllocationFailure> {
+        let owner = match class {
+            AllocationClass::User => 1,
+            AllocationClass::System => 2,
+            AllocationClass::Kernel => unreachable!("process cannot own Kernel-class memory"),
+        };
+        self.base
+            .allocation_owner
+            .compare_exchange(0, owner, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| moto_rt::E_ALREADY_IN_USE.into())
+    }
+
+    pub(super) fn release_claim(&self) {
+        self.base.allocation_owner.store(0, Ordering::Release);
+    }
+
+    pub(super) fn allocation_class(&self) -> AllocationClass {
+        self.base.allocation_class()
+    }
     pub fn page_table(&self) -> u64 {
         self.base.page_table()
     }
@@ -887,14 +1071,50 @@ impl UserAddressSpaceBase {
         &self.base.page_table
     }
 
+    /// Frees both user regions with their page descriptors and the process
+    /// static page, and closes the regions. Idempotent. The caller has moved
+    /// every CPU off the page table and marked it dead, so the unmaps here
+    /// do no shootdowns.
+    pub(super) fn release_user_memory(&self) {
+        self.normal_memory.clear();
+        self.custom_memory.clear();
+        self.base.page_allocator.clear();
+
+        let phys_addr = self
+            .process_static_page_phys_addr
+            .swap(0, Ordering::Relaxed);
+        if phys_addr != 0 {
+            self.base.page_table.unmap_page(
+                phys_addr,
+                PROCESS_STATIC_SHARED_PAGE_USER_VADDR,
+                PageType::SmallPage,
+            );
+            super::phys::phys_deallocate_frameless(phys_addr, PageType::SmallPage);
+        }
+    }
+
     #[cfg(debug_assertions)]
     pub(super) fn page_descriptors(&self) -> u64 {
         self.base.page_allocator.used_pages()
     }
 
-    pub(super) fn new() -> Result<Self, ErrorCode> {
+    pub(super) fn new() -> Result<Self, AllocationFailure> {
         #[cfg(debug_assertions)]
         log::debug!("UserAddressSpaceBase::new()");
+
+        let mut base = AddressSpaceBase::new(false)?;
+        // We map kernel to user (with user accessible bit not set) for simplicity.
+        // We may need to harden this against speculative execution attacks.
+        base.page_table
+            .map_kernel_to_user(&KERNEL_ADDRESS_SPACE.base.page_table);
+        let process_static_page = match Self::map_static_pages(&base.page_table) {
+            Ok(phys_addr) => phys_addr,
+            Err(err) => {
+                // The table goes back empty; see PageTable::drop.
+                base.page_table.unmap_kernel_from_user();
+                return Err(err);
+            }
+        };
 
         Ok(UserAddressSpaceBase {
             normal_memory: VmemRegion::new(MemorySegment {
@@ -907,56 +1127,64 @@ impl UserAddressSpaceBase {
                     - moto_sys::CUSTOM_USERSPACE_REGION_START,
             }),
 
-            base: AddressSpaceBase::new(false)?,
-            process_static_page_phys_addr: AtomicU64::new(0),
+            base,
+            process_static_page_phys_addr: AtomicU64::new(process_static_page),
         })
     }
 
+    /// Maps the kernel static page and a fresh process static page, whose
+    /// physical address is returned. A failure leaves nothing mapped.
+    fn map_static_pages(page_table: &PageTable) -> Result<u64, AllocationFailure> {
+        const _: () = assert!(moto_sys::KernelStaticPage::PAGE_SIZE == PAGE_SIZE_SMALL);
+        let kernel_static = KERNEL_ADDRESS_SPACE.static_shared_phys_addr();
+        page_table.map_page(
+            kernel_static,
+            KERNEL_STATIC_SHARED_PAGE_USER_VADDR,
+            PageType::SmallPage,
+            MappingOptions::READABLE | MappingOptions::USER_ACCESSIBLE | MappingOptions::DONT_ZERO,
+            AllocationClass::User,
+        )?;
+        match Self::map_process_static_page(page_table) {
+            Ok(phys_addr) => Ok(phys_addr),
+            Err(err) => {
+                page_table.unmap_page(
+                    kernel_static,
+                    KERNEL_STATIC_SHARED_PAGE_USER_VADDR,
+                    PageType::SmallPage,
+                );
+                Err(err)
+            }
+        }
+    }
+
+    /// A fresh process static page, mapped; nothing on failure.
+    fn map_process_static_page(page_table: &PageTable) -> Result<u64, AllocationFailure> {
+        let phys_addr =
+            super::phys::phys_allocate_frameless(PageType::SmallPage, AllocationClass::User)?;
+        if let Err(err) = page_table.map_page(
+            phys_addr,
+            PROCESS_STATIC_SHARED_PAGE_USER_VADDR,
+            PageType::SmallPage,
+            MappingOptions::READABLE | MappingOptions::USER_ACCESSIBLE,
+            AllocationClass::User,
+        ) {
+            super::phys::phys_deallocate_frameless(phys_addr, PageType::SmallPage);
+            return Err(err);
+        }
+        Ok(phys_addr)
+    }
+
+    /// Links the regions to the base, which has its final address now.
     pub(super) fn init(&mut self) {
         let space = UnsafeRef::from(&self.base);
-
-        let region = &mut self.normal_memory;
-        region.address_space.set_from(&space);
-        let region = &mut self.custom_memory;
-        region.address_space.set_from(&space);
-
-        // We map kernel to user (with user accessible bit not set) for simplicity.
-        // We may need to harden this against speculative execution attacks.
-        self.base
-            .page_table
-            .map_kernel_to_user(&KERNEL_ADDRESS_SPACE.base.page_table);
-
-        const _: () = assert!(moto_sys::KernelStaticPage::PAGE_SIZE == PAGE_SIZE_SMALL);
-
-        self.base
-            .page_table
-            .map_page(
-                KERNEL_ADDRESS_SPACE.static_shared_phys_addr(),
-                KERNEL_STATIC_SHARED_PAGE_USER_VADDR,
-                PageType::SmallPage,
-                MappingOptions::READABLE
-                    | MappingOptions::USER_ACCESSIBLE
-                    | MappingOptions::DONT_ZERO,
-            )
-            .expect("invalid kernel-static-page mapping options");
-
-        let phys_addr = super::phys::phys_allocate_frameless(PageType::SmallPage).unwrap();
-        self.base
-            .page_table
-            .map_page(
-                phys_addr,
-                PROCESS_STATIC_SHARED_PAGE_USER_VADDR,
-                PageType::SmallPage,
-                MappingOptions::READABLE | MappingOptions::USER_ACCESSIBLE,
-            )
-            .expect("invalid process-static-page mapping options");
-        self.process_static_page_phys_addr
-            .store(phys_addr, Ordering::Relaxed);
+        self.normal_memory.address_space.set_from(&space);
+        self.custom_memory.address_space.set_from(&space);
     }
 
     pub fn process_static_page_mut(&self) -> &'static mut moto_sys::ProcessStaticPage {
-        let vaddr =
-            self.process_static_page_phys_addr.load(Ordering::Relaxed) + PAGING_DIRECT_MAP_OFFSET;
+        let phys_addr = self.process_static_page_phys_addr.load(Ordering::Relaxed);
+        debug_assert_ne!(0, phys_addr, "the process static page was released");
+        let vaddr = phys_addr + PAGING_DIRECT_MAP_OFFSET;
         unsafe {
             (vaddr as usize as *mut moto_sys::ProcessStaticPage)
                 .as_mut()
@@ -973,7 +1201,7 @@ impl UserAddressSpaceBase {
         kind: VmemKind,
         num_pages: u64,
         mapping_options: Option<MappingOptions>,
-    ) -> Result<MemorySegment, ErrorCode> {
+    ) -> Result<MemorySegment, AllocationFailure> {
         debug_assert_ne!(num_pages, 0);
 
         if let Some(m_o) = mapping_options {
@@ -1006,7 +1234,7 @@ impl UserAddressSpaceBase {
         &self,
         kind: VmemKind,
         num_pages: u64,
-    ) -> Result<MemorySegment, ErrorCode> {
+    ) -> Result<MemorySegment, AllocationFailure> {
         debug_assert_ne!(num_pages, 0);
         debug_assert_eq!(kind, VmemKind::User);
         self.normal_memory.allocate_contiguous_pages(
@@ -1020,7 +1248,7 @@ impl UserAddressSpaceBase {
         vaddr_start: u64,
         num_pages: u64,
         mapping_options: MappingOptions,
-    ) -> Result<MemorySegment, ErrorCode> {
+    ) -> Result<MemorySegment, AllocationFailure> {
         // File faults and fills are served only in the normal region.
         if mapping_options.contains(MappingOptions::FILE_PAGED) {
             return self
@@ -1035,7 +1263,7 @@ impl UserAddressSpaceBase {
             moto_sys::CUSTOM_USERSPACE_REGION_START..=moto_sys::CUSTOM_USERSPACE_REGION_END => self
                 .custom_memory
                 .allocate_user_fixed(vaddr_start, num_pages, mapping_options),
-            _ => Err(moto_rt::E_INVALID_ARGUMENT),
+            _ => Err(moto_rt::E_INVALID_ARGUMENT.into()),
         }
     }
 
@@ -1057,7 +1285,7 @@ impl UserAddressSpaceBase {
         &self,
         phys_addr: u64,
         num_pages: u64,
-    ) -> Result<MemorySegment, ErrorCode> {
+    ) -> Result<MemorySegment, AllocationFailure> {
         self.normal_memory.mmio_map(phys_addr, num_pages, true)
     }
 
@@ -1078,7 +1306,7 @@ impl UserAddressSpaceBase {
         other: &Self,
         addr_there: u64,
         mapping_options: MappingOptions,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), AllocationFailure> {
         log::trace!("share_with: here: 0x{addr_here:x} there: 0x{addr_there:x}");
         let here = self
             .region_for(addr_here)
@@ -1088,7 +1316,7 @@ impl UserAddressSpaceBase {
             .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
         if core::ptr::eq(here, there) && addr_here == addr_there {
             log::debug!("map_shared: source and destination are identical");
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
 
         // TODO: we here only map if both address spaces have allocated
@@ -1103,7 +1331,7 @@ impl UserAddressSpaceBase {
             addr_there,
         ) else {
             log::debug!("map_shared: can't find the segments to map");
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         };
         share_segments(source, dest, mapping_options)
     }
@@ -1119,7 +1347,7 @@ impl UserAddressSpaceBase {
         num_pages: u64,
         mapping_options: MappingOptions,
         other: &Self,
-    ) -> Result<(u64, u64), ErrorCode> {
+    ) -> Result<(u64, u64), AllocationFailure> {
         let here = if vaddr == u64::MAX {
             &self.normal_memory
         } else {
@@ -1129,7 +1357,7 @@ impl UserAddressSpaceBase {
         let (mut here_map, mut there_map) = lock_regions(here, there);
 
         let addr_here = if vaddr == u64::MAX {
-            here.allocate_pages_locked(&mut here_map, num_pages, mapping_options)?
+            here.allocate_pages_locked(&mut here_map, num_pages, mapping_options, None)?
         } else {
             here.allocate_user_fixed_locked(&mut here_map, vaddr, num_pages, mapping_options)?
         }
@@ -1138,6 +1366,7 @@ impl UserAddressSpaceBase {
             there_map.as_deref_mut().unwrap_or(&mut here_map),
             num_pages,
             MappingOptions::empty(),
+            None,
         );
         let addr_there = match reserved {
             Ok(segment) => segment.start,
@@ -1183,13 +1412,13 @@ impl UserAddressSpaceBase {
         source: &Self,
         source_addr: u64,
         mapping_options: MappingOptions,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), AllocationFailure> {
         let dest = self.region_for(vaddr).ok_or(moto_rt::E_INVALID_ARGUMENT)?;
         let from = source
             .region_for(source_addr)
             .ok_or(moto_rt::E_INVALID_ARGUMENT)?;
         if core::ptr::eq(dest, from) && vaddr == source_addr {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
         let (mut from_map, mut dest_map) = lock_regions(from, dest);
         dest.allocate_user_fixed_locked(
@@ -1199,7 +1428,7 @@ impl UserAddressSpaceBase {
             MappingOptions::empty(),
         )?;
         let shared = share_pair(&mut from_map, dest_map.as_deref_mut(), source_addr, vaddr)
-            .ok_or(moto_rt::E_INVALID_ARGUMENT)
+            .ok_or(AllocationFailure::from(moto_rt::E_INVALID_ARGUMENT))
             .and_then(|(source, dest)| share_segments(source, dest, mapping_options));
         if shared.is_err() {
             dest.free_locked(dest_map.as_deref_mut().unwrap_or(&mut from_map), vaddr)
@@ -1208,7 +1437,11 @@ impl UserAddressSpaceBase {
         shared
     }
 
-    pub(super) fn fix_pagefault(&self, pf_addr: u64, error_code: u64) -> Result<(), ErrorCode> {
+    pub(super) fn fix_pagefault(
+        &self,
+        pf_addr: u64,
+        error_code: u64,
+    ) -> Result<(), AllocationFailure> {
         self.normal_memory.fix_pagefault(pf_addr, error_code)
     }
 
@@ -1216,10 +1449,10 @@ impl UserAddressSpaceBase {
     pub(super) fn with_file_segment<R>(
         &self,
         addr: u64,
-        f: impl FnOnce(&mut super::virt_intrusive::VmemSegment) -> Result<R, ErrorCode>,
-    ) -> Result<R, ErrorCode> {
+        f: impl FnOnce(&mut super::virt_intrusive::VmemSegment) -> Result<R, AllocationFailure>,
+    ) -> Result<R, AllocationFailure> {
         if !self.normal_memory.segment.contains(addr) {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
+            return Err(moto_rt::E_INVALID_ARGUMENT.into());
         }
         self.normal_memory.with_file_segment(addr, f)
     }
@@ -1236,7 +1469,7 @@ impl UserAddressSpaceBase {
         kernel_vaddr: u64,
         num_pages: u64,
         mapping_options: MappingOptions,
-    ) -> Result<(), ErrorCode> {
+    ) -> Result<(), AllocationFailure> {
         let region = self.region_for(vaddr).ok_or(moto_rt::E_INVALID_ARGUMENT)?;
         let mut user_segments = region.used_segments.lock(line!());
         region.allocate_user_fixed_locked(
@@ -1261,7 +1494,7 @@ impl UserAddressSpaceBase {
             }
             None => {
                 log::debug!("fill_kernel_static: 0x{kernel_vaddr:x} is not kernel-static");
-                Err(moto_rt::E_INVALID_ARGUMENT)
+                Err(moto_rt::E_INVALID_ARGUMENT.into())
             }
         };
         drop(kernel_segments);
@@ -1314,14 +1547,14 @@ fn share_segments(
     source: &VmemSegment,
     dest: &mut VmemSegment,
     mapping_options: MappingOptions,
-) -> Result<(), ErrorCode> {
+) -> Result<(), AllocationFailure> {
     if dest.segment().size != source.segment().size {
         log::debug!(
             "map_shared: segment sizes don't match: to: {} from: {}",
             dest.segment().size,
             source.segment().size,
         );
-        return Err(moto_rt::E_INVALID_ARGUMENT);
+        return Err(moto_rt::E_INVALID_ARGUMENT.into());
     }
     source.share_with(
         dest,

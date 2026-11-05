@@ -208,7 +208,7 @@ another cache has since claimed or refilled.
 Memory on a list is reachable from every thread: the tier before growth
 scans the other shards, and reclaim drains every list before it looks for
 empty batches. A per-thread list would keep other threads' frees where a
-process at its admission floor cannot reach them; that is why the lists
+process under memory pressure cannot reach them; that is why the lists
 are sharded by CPU. `release_cache` gives every private block back; the
 cache may be used again afterwards. Listed slots need no release: they
 belong to the shard, not the thread.
@@ -223,7 +223,7 @@ run and the cache is released. The global allocator fetches the cache and
 sets its shard from `current_cpu` on every call; a thread without a block
 uses the shared path, and frees never create one. The backend is `SysMem`
 pages; a housekeeping resident calls `reclaim()` every five seconds when
-the slack exceeds 1 MiB, or a page under kernel memory pressure.
+the slack exceeds 1 MiB, or a page while free physical memory is below 4 MiB.
 
 ## 7. The kernel heap
 

@@ -375,10 +375,13 @@ impl GS {
             }
         }
 
-        let gs_val =
-            crate::mm::virt::vmem_allocate_pages(crate::mm::virt::VmemKind::KernelStatic, 1)
-                .unwrap()
-                .start;
+        let gs_val = crate::mm::virt::vmem_allocate_pages(
+            crate::mm::virt::VmemKind::KernelStatic,
+            1,
+            crate::mm::AllocationClass::Kernel,
+        )
+        .unwrap()
+        .start;
 
         let gs = Self::from_addr_mut(gs_val);
         gs.gs_val = gs_val;

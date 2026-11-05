@@ -1,4 +1,4 @@
-//! Reactive reclamation only: never drain caches on an admitted fast path.
+//! Memfs physical-memory limit and reactive cache reclamation.
 use memfs::FreeBlockCache;
 use moto_sdk::sys_io::api_fs::{self, MountKind};
 use std::cell::RefCell;
@@ -18,44 +18,33 @@ impl FreeCaches {
         }
     }
 
+    pub(crate) fn reclaim_if_pressured(&self) {
+        if moto_sys::low_memory() {
+            self.reclaim();
+        }
+    }
+
     /// Re-evaluate the relevant signal exactly once after reclaiming. This
     /// runs before an operation, without FS locks, and never replays work.
-    fn refused(&self, mut would_refuse: impl FnMut() -> bool) -> bool {
-        if !would_refuse() {
+    fn refused(&self, mut free_pages: impl FnMut() -> u64) -> bool {
+        if free_pages() >= moto_sys::LOW_MEMORY_PAGES {
             return false;
         }
         self.reclaim();
-        would_refuse()
+        free_pages() < moto_sys::LOW_MEMORY_PAGES
     }
 
-    pub(crate) fn pressure(&self) -> bool {
-        self.refused(moto_sys::memory_pressure)
-    }
-
-    pub(super) fn reserve(&self, stats: &super::stats::FsStats) -> Result<()> {
-        let threshold = reserve_bytes(super::super::guest_ram_mib() << 20) / 4096;
-        let free = || {
-            moto_sys::stats::AdmissionStats::get()
-                .map(|stats| stats.free_for_admission())
-                .map_err(|err| std::io::Error::from_raw_os_error(err as i32))
-        };
-        if free()? >= threshold {
+    // The 4 MiB limit applies to every guest size.
+    pub(super) fn check(&self, stats: &super::stats::FsStats) -> Result<()> {
+        if !self.refused(moto_sys::free_pages) {
             return Ok(());
         }
-        self.reclaim();
-        if free()? >= threshold {
-            return Ok(());
-        }
-        stats.reserve_refused.set(stats.reserve_refused.get() + 1);
+        stats.memory_refused.set(stats.memory_refused.get() + 1);
         Err(ErrorKind::StorageFull.into())
     }
 }
 
-pub(super) fn reserve_bytes(ram: u64) -> u64 {
-    if ram < 32 << 20 { 8 << 20 } else { 16 << 20 }
-}
-
-pub(super) fn needs_reserve(command: u16, destination: MountKind) -> bool {
+pub(super) fn needs_memory(command: u16, destination: MountKind) -> bool {
     destination == MountKind::MemFs
         && matches!(
             command,
@@ -92,13 +81,13 @@ pub(super) mod self_test {
     use super::*;
     use crate::self_test::{st_assert, st_assert_eq};
     pub(in crate::runtime::fs) const TESTS: &[crate::self_test::SelfTest] =
-        &[("fs::memfs_admission", run)];
+        &[("fs::memfs_memory", run)];
 
     fn run() -> std::result::Result<(), String> {
         for command in api_fs::CMD_STAT..=api_fs::CMD_GET_MOUNTS {
-            st_assert!(!needs_reserve(command, MountKind::MotorFs));
+            st_assert!(!needs_memory(command, MountKind::MotorFs));
             st_assert_eq!(
-                needs_reserve(command, MountKind::MemFs),
+                needs_memory(command, MountKind::MemFs),
                 [
                     api_fs::CMD_CREATE_FILE,
                     api_fs::CMD_CREATE_DIR,
@@ -111,19 +100,18 @@ pub(super) mod self_test {
                 .contains(&command)
             );
         }
-        for (ram, cap, cache, reserve) in [
-            (16, 8, 2, 8),
-            (31, 8, 2, 8),
-            (32, 16, 2, 16),
-            (63, 32, 2, 16),
-            (64, 48, 4, 16),
-            (128, 112, 8, 16),
-            (256, 240, 16, 16),
-            (1024, 1008, 51, 16),
+        for (ram, cap, cache) in [
+            (16, 8, 2),
+            (31, 8, 2),
+            (32, 16, 2),
+            (63, 32, 2),
+            (64, 48, 4),
+            (128, 112, 8),
+            (256, 240, 16),
+            (1024, 1008, 51),
         ] {
             st_assert_eq!(default_capacity(ram << 20) >> 20, cap);
             st_assert_eq!(cache_capacity(ram << 20) >> 20, cache);
-            st_assert_eq!(reserve_bytes(ram << 20) >> 20, reserve);
         }
         let super::super::FS::MemFs(mut fs) =
             super::super::self_test::memfs(1 << 20).map_err(|err| err.to_string())?
@@ -151,18 +139,19 @@ pub(super) mod self_test {
         let mut samples = 0;
         st_assert!(!caches.refused(|| {
             samples += 1;
-            false
+            moto_sys::LOW_MEMORY_PAGES
         }));
         st_assert_eq!(samples, 1);
         st_assert_eq!(fs.cached_free_bytes(), 4096);
         samples = 0;
         st_assert!(!caches.refused(|| {
             samples += 1;
-            fs.cached_free_bytes() != 0
+            moto_sys::LOW_MEMORY_PAGES - u64::from(fs.cached_free_bytes() != 0)
         }));
         st_assert_eq!(samples, 2);
         st_assert_eq!(fs.cached_free_bytes(), 0);
-        st_assert!(caches.refused(|| true));
+        st_assert!(caches.refused(|| moto_sys::LOW_MEMORY_PAGES - 1));
+        st_assert!(!caches.refused(|| moto_sys::LOW_MEMORY_PAGES + 1));
         caches.reclaim(); // Empty and repeated drains free no page twice.
         Ok(())
     }

@@ -3,16 +3,7 @@ use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
-fn timer_ticks(pid: u64) -> u64 {
-    use moto_sdk::stats::Collector;
-    let provider = Collector::provider_by_name(&format!("wg:{pid}")).unwrap();
-    let metric = Collector::describe(&provider)
-        .unwrap()
-        .into_iter()
-        .find(|metric| metric.name == "wg.timer_ticks")
-        .unwrap();
-    Collector::read(&provider, metric.id, 0).unwrap()
-}
+use crate::wireguard::timer_ticks;
 
 pub fn run(pid: &str) {
     let pid = pid.parse().unwrap();

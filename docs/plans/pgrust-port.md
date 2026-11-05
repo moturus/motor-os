@@ -397,9 +397,10 @@ there is no way to give back part of a mapping.
 * **Machine size.** Physical memory should come from Motor OS
   (`SysMem::query_stats`) rather than `sysconf` or cgroups, so the budget
   is sized from the VM.
-* **Admission floor.** Motor OS's admission floor applies. Failed allocations
-  return null, and stack growth can fail
-  (`docs/oom-handling.md`).
+* **Memory exhaustion.** Reservation-based admission has been removed.
+  Physical exhaustion can still panic until the fallible-allocation and
+  kernel OOM-killer steps land; see `docs/oom-handling.md`. Do not rely on a
+  protected allocation floor.
 
 ### 5.9 File I/O and the filesystem
 

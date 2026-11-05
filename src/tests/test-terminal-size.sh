@@ -602,8 +602,9 @@ sleep 2
 
 rush_rows() { console_since "$edit_at" | screen_rows 0 100; }
 prompt_line() { rush_rows | awk '/^\$( |$)/ { line = $0 } END { print line }'; }
-# A fresh prompt on a row of its own: ^U abandons the line, Enter runs nothing.
-rush_settle() { console_keys '\025' 0.3; console_keys '\r'; }
+# Move to the end before ^U, which only erases text before the cursor.
+# Enter then runs an empty line, leaving a fresh prompt on its own row.
+rush_settle() { console_keys '\005\025' 0.3; console_keys '\r'; }
 
 rush_settle
 # rush paints exactly one prompt per line it reads, so the prompts are the count.

@@ -50,11 +50,8 @@ pub(super) fn runtime() -> std::result::Result<NetRuntime, String> {
             16.try_into().unwrap(),
             8.try_into().unwrap(),
         )),
-        pressure: Rc::new(pressure::Pressure::new(
-            stats.clone(),
-            fs.free_caches.clone(),
-        )),
         stats,
+        free_caches: fs.free_caches.clone(),
         orphan_lingers: Rc::new(Cell::new(0)),
         fs: fs.root_fs(),
         dns_write_lock: Rc::new(moto_sdk::async_runtime::LocalMutex::new(())),

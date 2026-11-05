@@ -232,6 +232,9 @@ impl Inner {
 // Only free, validated pages reach this interface. The scratch implementation
 // stores one word per page and never dereferences its synthetic addresses.
 pub(crate) trait PageLinks {
+    // This implementation also distinguishes the production pool from scratch
+    // pools, which record attention but must never notify the live scheduler.
+    const NOTIFY_SCHEDULER: bool = false;
     fn read(&self, addr: u64) -> u64;
     fn write(&self, addr: u64, word: u64);
 }
@@ -239,6 +242,7 @@ pub(crate) trait PageLinks {
 pub(crate) struct DirectLinks;
 
 impl PageLinks for DirectLinks {
+    const NOTIFY_SCHEDULER: bool = true;
     fn read(&self, addr: u64) -> u64 {
         unsafe { *((super::PAGING_DIRECT_MAP_OFFSET + addr) as *const u64) }
     }
@@ -262,7 +266,9 @@ enum Publication {
 
 struct Counters {
     total: u64,
-    used: AtomicU64,
+    state: AtomicU64,
+    attention: core::sync::atomic::AtomicBool,
+    oom_runs: AtomicU64,
     high_water: AtomicU64,
     reserved: AtomicU64,
     discarded: AtomicU64,
@@ -271,6 +277,8 @@ struct Counters {
     // Cumulative events since the pool was built.
     splits: AtomicU64,
     recombined: AtomicU64,
+    // Once set, mirrors the free-page count: see `publish_free_pages`.
+    published: crate::util::StaticRef<AtomicU64>,
 }
 
 // Storage is permanent in production and private to one pool. Construction
@@ -325,42 +333,31 @@ impl<L: PageLinks> Pool<'_, L> {
         }
     }
 
-    fn charge(&self, count: u16) {
-        let used = self
-            .counters
-            .used
-            .fetch_add(u64::from(count), Ordering::Release)
-            + u64::from(count);
-        self.counters.high_water.fetch_max(used, Ordering::Relaxed);
-        #[cfg(debug_assertions)]
-        if let Some(trace) = self.trace {
-            trace.record(Publication::Charge(count));
-        }
-    }
-
-    fn release(&self, count: u16) {
-        self.counters
-            .used
-            .fetch_sub(u64::from(count), Ordering::Release);
-        #[cfg(debug_assertions)]
-        if let Some(trace) = self.trace {
-            trace.record(Publication::Release(count));
-        }
+    #[cfg(debug_assertions)]
+    fn pop(&self, block: usize) -> Result<Option<u64>, AllocationError> {
+        self.take_small(block, 1, SmallSource::Split, false, AllocationClass::Kernel)
     }
 
     #[cfg(debug_assertions)]
-    fn pop(&self, block: usize) -> Result<Option<u64>, Corruption> {
-        self.take_small(block, 1, SmallSource::Split, false)
+    fn run(&self, block: usize, count: u16) -> Result<Option<u64>, AllocationError> {
+        self.take_small(
+            block,
+            count,
+            SmallSource::Split,
+            false,
+            AllocationClass::Kernel,
+        )
     }
 
     #[cfg(debug_assertions)]
-    fn run(&self, block: usize, count: u16) -> Result<Option<u64>, Corruption> {
-        self.take_small(block, count, SmallSource::Split, false)
-    }
-
-    #[cfg(debug_assertions)]
-    fn split(&self, block: usize, count: u16) -> Result<Option<u64>, Corruption> {
-        self.take_small(block, count, SmallSource::Whole, false)
+    fn split(&self, block: usize, count: u16) -> Result<Option<u64>, AllocationError> {
+        self.take_small(
+            block,
+            count,
+            SmallSource::Whole,
+            false,
+            AllocationClass::Kernel,
+        )
     }
 
     fn take_small(
@@ -369,27 +366,17 @@ impl<L: PageLinks> Pool<'_, L> {
         count: u16,
         source: SmallSource,
         claim: bool,
-    ) -> Result<Option<u64>, Corruption> {
+        class: AllocationClass,
+    ) -> Result<Option<u64>, AllocationError> {
         if count == 0 || count > PAGES {
             return Ok(None);
         }
         let block = self.block(index)?;
         let mut inner = block.inner.lock(line!());
+        let whole = block.state.load(Ordering::Relaxed) == WHOLE;
         match (block.state.load(Ordering::Relaxed), source) {
             (WHOLE, SmallSource::Whole) => {
                 inner.check_whole(0)?;
-                // The block lock excludes all access to this entry. Initialize
-                // all words before switching to the only state that reads them.
-                unsafe {
-                    (*self.lists[index].0.get()).write([0; 8]);
-                }
-                inner.unused_lo = 0;
-                inner.unused_hi = PAGES;
-                block.state.store(SPLIT, Ordering::Relaxed);
-                self.counters.split.fetch_add(1, Ordering::Relaxed);
-                self.counters.splits.fetch_add(1, Ordering::Relaxed);
-                self.publish(index, Publication::FreeSet);
-                self.publish(index, Publication::WholeClear);
             }
             (SPLIT, SmallSource::Split | SmallSource::Unclaimed) => {
                 if matches!(source, SmallSource::Unclaimed)
@@ -399,37 +386,62 @@ impl<L: PageLinks> Pool<'_, L> {
                 }
             }
             (ABSENT | WHOLE | SPLIT | TAKEN, _) => return Ok(None),
-            _ => return Err(Corruption::State),
+            _ => return Err(Corruption::State.into()),
         }
-        // SPLIT guarantees initialized words; its lock gives exclusive access.
-        let words = unsafe { (*self.lists[index].0.get()).assume_init_mut() };
+        // Validate the prospective split without changing ownership or reading
+        // a whole block's uninitialized list words before a successful charge.
+        let mut checked = *inner;
+        let empty = [0; 8];
+        let words = if whole {
+            checked.unused_lo = 0;
+            checked.unused_hi = PAGES;
+            &empty
+        } else {
+            unsafe { (*self.lists[index].0.get()).assume_init_ref() }
+        };
         let base = (index as u64) << BLOCK_SHIFT;
-        let head = inner.check_pop(words)?;
-        let page = if let (1, Some(page)) = (count, head) {
-            if inner.used == PAGES {
-                return Err(Corruption::Used);
+        let head = checked.check_pop(words)?;
+        let (page, next_head) = if let (1, Some(page)) = (count, head) {
+            if checked.used == PAGES {
+                return Err(Corruption::Used.into());
             }
             let addr = base + (u64::from(page) << PAGE_SHIFT);
             let next = link_decode(addr, self.links.read(addr))?;
             if next != 0 {
-                inner.check_list_index(words, next - 1)?;
+                checked.check_list_index(words, next - 1)?;
             }
-            flip_bit(words, page);
-            inner.head = next;
-            page
+            (page, Some(next))
         } else {
-            if !inner.check_run(words, count)? {
+            if !checked.check_run(words, count)? {
                 return Ok(None);
             }
-            let page = inner.unused_lo;
-            inner.unused_lo += count;
-            page
+            (checked.unused_lo, None)
         };
+        self.charge(count, class)?;
+        // Every fallible check precedes the charge; the remaining mutation is
+        // infallible under this block's lock.
+        if whole {
+            unsafe {
+                (*self.lists[index].0.get()).write([0; 8]);
+            }
+            *inner = checked;
+            block.state.store(SPLIT, Ordering::Relaxed);
+            self.counters.split.fetch_add(1, Ordering::Relaxed);
+            self.counters.splits.fetch_add(1, Ordering::Relaxed);
+            self.publish(index, Publication::FreeSet);
+            self.publish(index, Publication::WholeClear);
+        }
+        if let Some(next) = next_head {
+            let words = unsafe { (*self.lists[index].0.get()).assume_init_mut() };
+            flip_bit(words, page);
+            inner.head = next;
+        } else {
+            inner.unused_lo += count;
+        }
         inner.used += count;
         if claim {
             block.flags.fetch_or(CLAIMED, Ordering::Relaxed);
         }
-        self.charge(count);
         if inner.used == PAGES {
             self.publish(index, Publication::FreeClear);
         }
@@ -470,22 +482,26 @@ impl<L: PageLinks> Pool<'_, L> {
         Ok(())
     }
 
-    fn take_huge(&self, index: usize) -> Result<Option<u64>, Corruption> {
+    fn take_huge(
+        &self,
+        index: usize,
+        class: AllocationClass,
+    ) -> Result<Option<u64>, AllocationError> {
         let block = self.block(index)?;
         let mut inner = block.inner.lock(line!());
         match block.state.load(Ordering::Relaxed) {
             WHOLE => {}
             ABSENT | SPLIT | TAKEN => return Ok(None),
-            _ => return Err(Corruption::State),
+            _ => return Err(Corruption::State.into()),
         }
         if block.flags.load(Ordering::Relaxed) & SMALL_ONLY != 0 {
             return Ok(None);
         }
         inner.check_whole(0)?;
+        self.charge(PAGES, class)?;
         inner.used = PAGES;
         block.state.store(TAKEN, Ordering::Relaxed);
         self.counters.taken.fetch_add(1, Ordering::Relaxed);
-        self.charge(PAGES);
         self.publish(index, Publication::WholeClear);
         Ok(Some((index as u64) << BLOCK_SHIFT))
     }
@@ -511,6 +527,10 @@ impl<L: PageLinks> Pool<'_, L> {
         Ok(())
     }
 }
+
+mod policy;
+use policy::AllocationError;
+pub(crate) use policy::{AllocationClass, RefusalKind, StateSnapshot};
 
 mod layout;
 mod production;

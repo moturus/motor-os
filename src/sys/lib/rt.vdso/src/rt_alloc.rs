@@ -72,8 +72,8 @@ unsafe impl GlobalAlloc for CachedAlloc {
 const RECLAIM_SLACK_BYTES: usize = 1 << 20;
 
 /// The housekeeping resident, spawned with the process's IO runtime thread
-/// (a process without one allocates too little to matter). Kernel memory
-/// pressure drops the threshold to a single page: under pressure every
+/// (a process without one allocates too little to matter). Low free physical
+/// memory (below 4 MiB) drops the threshold to a single page, so every
 /// process gives back what it can.
 ///
 /// A reclaim pass write-locks each slab it shrinks against concurrent
@@ -92,7 +92,7 @@ pub(crate) async fn reclaim_resident() {
             .allocated_from_fallback
             .saturating_sub(stats.allocated_metadata)
             .saturating_sub(stats.in_use.saturating_sub(stats.in_use_metadata));
-        let threshold = if moto_sys::memory_pressure() {
+        let threshold = if moto_sys::low_memory() {
             moto_sys::sys_mem::PAGE_SIZE_SMALL as usize
         } else {
             RECLAIM_SLACK_BYTES

@@ -375,6 +375,7 @@ fn install_prepared(
     )
     .map_err(|error| cancellation.normalize_error(error.into()))?;
     checkout::check_outcome(&outcome).map_err(|error| cancellation.normalize_error(error))?;
+    prune_empty_directories(workdir, &changes, &target_index, cancellation)?;
     for entry in target_index.entries_mut() {
         entry.flags.remove(Flags::SKIP_WORKTREE);
     }
@@ -819,4 +820,66 @@ fn path_error(kind: io::ErrorKind, path: &BStr, message: &str) -> io::Error {
             path.to_str_lossy().escape_debug()
         ),
     )
+}
+
+/// Prune directories our file removals left empty, as `git checkout` does.
+///
+/// Run after checkout and preserve directories required by the target index.
+/// Untracked or ignored files protect their directories, since removal only
+/// succeeds for empty directories.
+fn prune_empty_directories(
+    workdir: &Path,
+    changes: &[Change],
+    target_index: &gix::index::State,
+    cancellation: &Cancellation,
+) -> crate::Result {
+    for change in changes
+        .iter()
+        .filter(|change| change.observed.is_some() && change.target.is_none())
+    {
+        cancellation.check()?;
+        let path = workdir.join(gix::path::from_bstr(change.path.as_bstr()).as_ref());
+        let Some(mut directory) = path.parent() else {
+            continue;
+        };
+        loop {
+            if directory == workdir {
+                break;
+            }
+            cancellation.check()?;
+            let relative = repository_path(workdir, directory)?;
+            let mut prefix = Vec::new();
+            prefix.try_reserve_exact(relative.len() + 1)?;
+            prefix.extend_from_slice(&relative);
+            prefix.push(b'/');
+            if target_index
+                .prefixed_entries_range(prefix.as_bstr())
+                .is_some()
+            {
+                break;
+            }
+            let metadata = selection::checked_symlink_metadata(workdir, relative.as_bstr())?;
+            match metadata {
+                Some(metadata) if metadata.is_dir() => {}
+                _ => break,
+            }
+            // Motor OS reports nonempty directories as FileTooLarge.
+            match fs::remove_dir(directory) {
+                Ok(()) => {}
+                Err(error)
+                    if error.kind() == io::ErrorKind::DirectoryNotEmpty
+                        || cfg!(target_os = "motor")
+                            && error.kind() == io::ErrorKind::FileTooLarge =>
+                {
+                    break;
+                }
+                Err(error) => return Err(error.into()),
+            }
+            let Some(next) = directory.parent() else {
+                break;
+            };
+            directory = next;
+        }
+    }
+    Ok(())
 }

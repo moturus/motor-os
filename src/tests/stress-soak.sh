@@ -936,12 +936,12 @@ while :; do
   if [ "$now" -ge "$NEXT_PROGRESS" ]; then
     log "everything is OK; still working; no issues (soak uptime ${up}s / ${DURATION}s)"
     NEXT_PROGRESS=$(( now + PROGRESS_INTERVAL ))
-    # Block allocator gauges and admission refusals over time: a trend is
+    # Block allocator gauges over time: a trend is
     # diagnostic evidence (metadata growth can legitimately pin blocks).
     {
       echo "=== uptime=${up}s $(date +%H:%M:%S)"
       VSSH_TMO=25 vssh_n /system/bin/stats get 1 2>&1 |
-        grep -aE 'mem\.(blocks_|pages_reserved|pages_free_low|block_|admission_refused|used_pages|phys_small_pages_low_water)' || true
+        grep -aE 'mem\.(blocks_|pages_reserved|pages_free_low|block_|used_pages|phys_small_pages_low_water)' || true
     } >> "$OUT/blocks.log"
     {
       echo "=== uptime=${up}s $(date +%H:%M:%S)"

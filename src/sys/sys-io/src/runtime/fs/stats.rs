@@ -46,12 +46,8 @@ pub(super) struct FsStats {
     pub device_writes: Cell<u64>,
     /// 4k blocks written to the virtio device.
     pub device_write_blocks: Cell<u64>,
-    /// FS requests refused under memory pressure.
-    pub pressure_refused: Cell<u64>,
-    /// New FS clients dropped at accept under memory pressure.
-    pub pressure_refused_clients: Cell<u64>,
     /// Memfs allocations refused after reclaiming cached pages and resampling.
-    pub reserve_refused: Cell<u64>,
+    pub memory_refused: Cell<u64>,
 }
 
 /// Compile-time switch for the TSC timing pairs (`read_ticks`,
@@ -104,12 +100,6 @@ mod ids {
     pub const FS_DEVICE_READ_BLOCKS: u32 = 1012;
     pub const FS_DEVICE_WRITE_BLOCKS: u32 = 1013;
 
-    // Memory-pressure refusals; the FS counterparts of `net.pressure_*`.
-    // There is no FS episode counter, and `net.pressure_entries` moves only
-    // when a net-side refusal observes the episode: an episode in which only
-    // FS traffic was refused is visible solely as deltas in these two.
-    pub const FS_PRESSURE_REFUSED: u32 = 1014;
-    pub const FS_PRESSURE_REFUSED_CLIENTS: u32 = 1015;
     pub const FS_CHANNELS: u32 = 1016;
     pub const FS_CACHE_CAPACITY_BYTES: u32 = 1017;
 
@@ -129,7 +119,7 @@ mod ids {
     pub const MEMFS_USED_BYTES: u32 = 1028;
     pub const MEMFS_ENTRIES: u32 = 1029;
     pub const MEMFS_CACHED_FREE_BYTES: u32 = 1030;
-    pub const FS_RESERVE_REFUSED: u32 = 1031;
+    pub const FS_MEMORY_REFUSED: u32 = 1031;
 }
 
 /// Build a snapshot of the FS metrics in moto-stats wire form. Mirrors
@@ -154,11 +144,6 @@ pub(super) async fn entries(runtime: &super::FsRuntime) -> Vec<MetricEntry> {
         MetricEntry::global(ids::FS_WRITE_MSGS, stats.write_msgs.get()),
         MetricEntry::global(ids::FS_DEVICE_READ_BLOCKS, stats.device_read_blocks.get()),
         MetricEntry::global(ids::FS_DEVICE_WRITE_BLOCKS, stats.device_write_blocks.get()),
-        MetricEntry::global(ids::FS_PRESSURE_REFUSED, stats.pressure_refused.get()),
-        MetricEntry::global(
-            ids::FS_PRESSURE_REFUSED_CLIENTS,
-            stats.pressure_refused_clients.get(),
-        ),
         MetricEntry::global(ids::FS_CHANNELS, channels),
         MetricEntry::global(ids::EXEC_LOCKED_FILES, locked_files),
         MetricEntry::global(ids::SPAWNS, spawn.requests.get()),
@@ -170,7 +155,7 @@ pub(super) async fn entries(runtime: &super::FsRuntime) -> Vec<MetricEntry> {
         MetricEntry::global(ids::PAGER_FAILED_FILLS, pager.failed_fills.get()),
         MetricEntry::global(ids::SPAWN_SCAN_US, spawn.scan_us.get()),
         MetricEntry::global(ids::PAGER_SERVE_US, pager.serve_us.get()),
-        MetricEntry::global(ids::FS_RESERVE_REFUSED, stats.reserve_refused.get()),
+        MetricEntry::global(ids::FS_MEMORY_REFUSED, stats.memory_refused.get()),
     ];
     if let Ok(root) = runtime.root()
         && let Ok(fs) = root.read().await
@@ -254,11 +239,6 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::FS_WRITE_MSGS, "fs.write.msgs"),
         MetricDescWire::new(ids::FS_DEVICE_READ_BLOCKS, "fs.device.read_blocks"),
         MetricDescWire::new(ids::FS_DEVICE_WRITE_BLOCKS, "fs.device.write_blocks"),
-        MetricDescWire::new(ids::FS_PRESSURE_REFUSED, "fs.pressure_refused"),
-        MetricDescWire::new(
-            ids::FS_PRESSURE_REFUSED_CLIENTS,
-            "fs.pressure_refused_clients",
-        ),
         MetricDescWire::new(ids::FS_CHANNELS, "fs.channels"),
         MetricDescWire::new(ids::FS_CACHE_CAPACITY_BYTES, "fs.cache.capacity_bytes"),
         MetricDescWire::new(ids::EXEC_LOCKED_FILES, "exec.locked_files"),
@@ -274,7 +254,7 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
         MetricDescWire::new(ids::MEMFS_USED_BYTES, "fs.memfs.used_bytes"),
         MetricDescWire::new(ids::MEMFS_ENTRIES, "fs.memfs.entries"),
         MetricDescWire::new(ids::MEMFS_CACHED_FREE_BYTES, "fs.memfs.cached_free_bytes"),
-        MetricDescWire::new(ids::FS_RESERVE_REFUSED, "fs.reserve_refused"),
+        MetricDescWire::new(ids::FS_MEMORY_REFUSED, "fs.memory_refused"),
     ]
 }
 

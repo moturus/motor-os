@@ -560,7 +560,7 @@ fn test_exit_while_faulting(dir: &Path) {
 /// syscall argument: the kernel names the absent page and the syscall
 /// wrapper faults it in and retries.
 fn test_syscall_buffer(mode: &str) {
-    let misses_before = crate::admission::kernel_metric_at(
+    let misses_before = crate::memory::kernel_metric_at(
         "mem.file_paged_syscall_misses",
         moto_sys::stats::PID_KERNEL,
     );
@@ -575,7 +575,7 @@ fn test_syscall_buffer(mode: &str) {
     assert!(output.status.success(), "{:?}", output.status);
     assert_eq!(output.stdout, b"syscall-buffer-ok\n");
     assert!(
-        crate::admission::kernel_metric_at(
+        crate::memory::kernel_metric_at(
             "mem.file_paged_syscall_misses",
             moto_sys::stats::PID_KERNEL,
         ) > misses_before,
@@ -978,57 +978,18 @@ fn test_abandoned_request(dir: &Path, requester: &mut Requester) {
     println!("cold_spawn::test_abandoned_request PASS");
 }
 
-/// A paged image commits all of its pages when it is mapped: at the memory
-/// floor the spawn is refused up front, and no child runs to die later.
-fn test_spawn_under_memory_floor(dir: &Path) {
-    use moto_sys::stats::AdmissionStats;
-
-    let program = copy(dir, "floor", EXEC, |_| {});
-    assert!(
-        std::fs::metadata(&program).unwrap().len() >= 2 << 20,
-        "the image is too small to exceed the squeeze band"
-    );
-    // Hold free memory a little above the low watermark: the pressure flag
-    // stays down, so sys-io keeps serving, while a whole image's pages can
-    // no longer be committed over the user floor.
-    let target = AdmissionStats::get().unwrap().pressure_low_pages + 256;
-    let mut squeeze = crate::subcommand::spawn();
-    let mut squeeze_out = std::io::BufReader::new(squeeze.std_child().stdout.take().unwrap());
-    squeeze.pressure_squeeze(target);
-    let mut line = String::new();
-    squeeze_out.read_line(&mut line).unwrap();
-    assert_eq!(line.trim(), "squeezed");
-    assert!(!moto_sys::memory_pressure(), "the squeeze raised the flag");
-
-    let result = child(&program, "digest").stdout(Stdio::null()).status();
-
-    squeeze.do_exit(0);
-    assert!(squeeze.wait().unwrap().success());
-    drop(squeeze);
-
-    let err = result.expect_err("a paged image was committed at the floor");
-    assert_eq!(
-        err.raw_os_error(),
-        Some(moto_rt::E_OUT_OF_MEMORY as i32),
-        "{err:?}"
-    );
-    // Nothing of the refused child remains: the file is not locked.
-    std::fs::remove_file(&program).unwrap();
-    println!("cold_spawn::test_spawn_under_memory_floor PASS");
-}
-
 pub fn run_all_tests() {
-    run_tests(true);
+    run_tests();
     println!("cold_spawn::run_all_tests PASS");
 }
 
 /// Repeat beside unrelated workloads without driving them to the memory floor.
 pub fn run_soak_tests() {
-    run_tests(false);
+    run_tests();
     println!("paging-soak PASS");
 }
 
-fn run_tests(test_floor: bool) {
+fn run_tests() {
     let dir = crate::temp_path(&format!("systest-cold-spawn-{}", moto_sys::current_pid()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir(&dir).unwrap();
@@ -1053,9 +1014,6 @@ fn run_tests(test_floor: bool) {
     test_unauthorized_entries(&dir, &mut requester);
     test_abandoned_request(&dir, &mut requester);
     drop(requester);
-    if test_floor {
-        test_spawn_under_memory_floor(&dir);
-    }
 
     std::fs::remove_dir_all(&dir).unwrap();
 }

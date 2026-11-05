@@ -1,4 +1,5 @@
 // Memory segment caching.
+use super::{AllocationClass, AllocationFailure};
 use crate::{mm::PAGE_SIZE_SMALL_LOG2, util::SpinLock};
 use core::sync::atomic::*;
 use moto_sys::ErrorCode;
@@ -46,10 +47,10 @@ impl CacheLine {
         // todo!("pop from prev")
     }
 
-    fn new() -> Result<*mut Self, ErrorCode> {
+    fn new(class: AllocationClass) -> Result<*mut Self, AllocationFailure> {
         // Allocate a page. Note that we don't need to map the frame/page here,
         // as all phys mem has been mapped at PAGING_DIRECT_MAP_OFFSET.
-        let phys_addr = super::phys::phys_allocate_frameless(super::PageType::SmallPage)?;
+        let phys_addr = super::phys::phys_allocate_frameless(super::PageType::SmallPage, class)?;
         let virt_addr = phys_addr + super::PAGING_DIRECT_MAP_OFFSET;
 
         let result = virt_addr as usize as *mut Self;
@@ -86,16 +87,7 @@ pub(super) struct SegmentCache {
 
 impl Drop for SegmentCache {
     fn drop(&mut self) {
-        for idx in 0..CACHE_LINES {
-            assert_eq!(0, self.counts[idx].load(Ordering::Relaxed));
-            let mut lock = self.caches[idx].lock(line!());
-            if lock.is_null() {
-                continue;
-            }
-
-            CacheLine::drop(*lock);
-            *lock = core::ptr::null_mut();
-        }
+        self.release_storage();
     }
 }
 
@@ -110,7 +102,7 @@ impl SegmentCache {
         }
     }
 
-    pub(super) fn _count(&self, num_pages: usize) -> u64 {
+    pub(super) fn count(&self, num_pages: usize) -> u64 {
         debug_assert!(num_pages.is_power_of_two());
         let idx = num_pages.ilog2() as usize;
         debug_assert!(idx < CACHE_LINES);
@@ -118,13 +110,18 @@ impl SegmentCache {
         self.counts[idx].load(Ordering::Relaxed)
     }
 
-    pub(super) fn push(&self, segment: MemorySegment, num_pages: usize) -> Result<(), ErrorCode> {
+    pub(super) fn push(
+        &self,
+        segment: MemorySegment,
+        num_pages: usize,
+        class: AllocationClass,
+    ) -> Result<(), AllocationFailure> {
         debug_assert!(num_pages.is_power_of_two());
         debug_assert_eq!(segment.size, (num_pages as u64) << PAGE_SIZE_SMALL_LOG2);
         let idx = num_pages.ilog2() as usize;
         debug_assert!(idx < CACHE_LINES);
 
-        self.push_at_line(idx, segment)
+        self.push_at_line(idx, segment, class)
     }
 
     pub(super) fn pop(&self, num_pages: usize) -> Option<MemorySegment> {
@@ -150,12 +147,33 @@ impl SegmentCache {
         None
     }
 
-    fn push_at_line(&self, idx: usize, segment: MemorySegment) -> Result<(), ErrorCode> {
+    /// Frees the cache's own pages; the cache must be empty. The terminal drain
+    /// of a space calls this so that the pages go back with the process's
+    /// memory rather than with the space; a later call is a no-op.
+    pub(super) fn release_storage(&self) {
+        for idx in 0..CACHE_LINES {
+            assert_eq!(0, self.counts[idx].load(Ordering::Relaxed));
+            let mut lock = self.caches[idx].lock(line!());
+            if lock.is_null() {
+                continue;
+            }
+
+            CacheLine::drop(*lock);
+            *lock = core::ptr::null_mut();
+        }
+    }
+
+    fn push_at_line(
+        &self,
+        idx: usize,
+        segment: MemorySegment,
+        class: AllocationClass,
+    ) -> Result<(), AllocationFailure> {
         debug_assert!(idx < CACHE_LINES);
 
         let mut lock = self.caches[idx].lock(line!());
         if lock.is_null() {
-            *lock = CacheLine::new()?;
+            *lock = CacheLine::new(class)?;
         }
 
         let line = unsafe { (*lock).as_mut().unwrap() };

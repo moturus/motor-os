@@ -438,6 +438,7 @@ impl Scheduler {
             }
 
             crate::uspace::process_wake_events(); // May add jobs to queues.
+            crate::uspace::oom::attend(); // Allocator attention, outside MM/queue locks.
 
             curr_iteration += 1;
 

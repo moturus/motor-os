@@ -293,6 +293,18 @@ async fn serve(runtime: FsRuntime, id: u64, page: u64) {
                 Err(moto_rt::E_BAD_HANDLE) => return,
                 result => result.map_err(native),
             },
+            Err(err) if count == 1 && err.kind() == std::io::ErrorKind::OutOfMemory => {
+                // Buffer preparation is temporary pressure in sys-io, not a
+                // failure of the faulting process's page. Let other work run.
+                moto_sdk::async_runtime::yield_to_io().await;
+                // All serve tickets can be busy, so the main pager task may
+                // not be able to consume retirements for us.
+                pager.drain();
+                if !pager.is_live(id) || mapping.in_last_window(page) {
+                    return;
+                }
+                continue;
+            }
             Err(err) => Err(err),
         };
         match result {
@@ -305,7 +317,7 @@ async fn serve(runtime: FsRuntime, id: u64, page: u64) {
             }
             Err(_) if count > 1 => {
                 // Read-ahead is optional: retry only the required page, with
-                // the larger buffer already freed. A one-page failure is final.
+                // the larger buffer already freed.
                 count = 1;
             }
             Err(err) => {

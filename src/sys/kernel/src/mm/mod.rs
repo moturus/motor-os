@@ -2,7 +2,11 @@
 // Note: only kheap and virt_intrusive provide memory allocation facilities,
 //       other than some corner cases that do frameless allocations.
 
-pub mod admission;
+mod allocation;
+pub(crate) use allocation::{
+    AllocationClass, AllocationFailure, RefusalKind, RetryDecision, RetryKind, StateSnapshot,
+    WaitReason,
+};
 mod cache;
 pub mod kheap;
 pub mod mmio;
@@ -39,42 +43,23 @@ pub const fn kernel_offset_virt() -> u64 {
     PAGING_DIRECT_MAP_OFFSET + KERNEL_PHYS_START
 }
 
-// Slabs are currently only used for phys memory, and are thus never deallocated.
-pub(super) unsafe fn raw_alloc_for_slab<T: Sized>() -> *mut T {
-    let result: *mut T = if !memory_initialized() {
-        // Bootup: use the bootup heap.
+// The backing of one slab: `num_pages` page-aligned pages, or
+// `E_OUT_OF_MEMORY` with nothing kept. Slabs are never freed.
+pub(super) fn raw_alloc_for_slab(
+    num_pages: u64,
+    class: AllocationClass,
+) -> Result<*mut u8, AllocationFailure> {
+    if !memory_initialized() {
+        // Bootup: the startup heap, which panics when exhausted.
         use core::alloc::GlobalAlloc;
         let layout = core::alloc::Layout::from_size_align(
-            core::mem::size_of::<T>(),
-            core::mem::align_of::<T>(),
+            (num_pages << PAGE_SIZE_SMALL_LOG2) as usize,
+            PAGE_SIZE_SMALL as usize,
         )
         .expect("Invalid layout");
-
-        kheap::RAW_ALLOCATOR.alloc(layout) as *mut T
-    } else {
-        // Runtime: "manually" map pages for slabs (they will never get unmapped).
-        let num_pages =
-            align_up(core::mem::size_of::<T>() as u64, PAGE_SIZE_SMALL) >> PAGE_SIZE_SMALL_LOG2;
-        let vaddr = virt::reserve_pages_for_slabs(num_pages);
-        let mut page_vaddr = vaddr;
-        let mapping_options = MappingOptions::READABLE | MappingOptions::WRITABLE;
-
-        for _ in 0..num_pages {
-            let page_phys_addr = phys::phys_allocate_frameless(PageType::SmallPage)
-                .expect("OOM: no more phys frames available");
-            virt::map_page(
-                page_phys_addr,
-                page_vaddr,
-                PageType::SmallPage,
-                mapping_options,
-            );
-
-            page_vaddr += PAGE_SIZE_SMALL;
-        }
-
-        vaddr as usize as *mut T
-    };
-    result
+        return Ok(unsafe { kheap::RAW_ALLOCATOR.alloc(layout) });
+    }
+    virt::map_slab_pages(num_pages, class).map(|vaddr| vaddr as usize as *mut u8)
 }
 
 #[cfg(debug_assertions)]
@@ -443,6 +428,7 @@ fn allocate_kernel_stack() -> u64 {
     let stack = virt::vmem_allocate_pages(
         virt::VmemKind::KernelStack,
         crate::config::KERNEL_STACK_PAGES + 2,
+        AllocationClass::Kernel,
     )
     .expect("OOM during kernel bootup.");
 

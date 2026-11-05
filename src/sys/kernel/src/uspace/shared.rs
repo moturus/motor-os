@@ -131,8 +131,7 @@ struct Service {
     owner: Weak<Process>,
     // Listening and connected server endpoints both reserve the service name.
     endpoints: usize,
-    // Small tree nodes keep growth within object admission's fixed charge;
-    // a contiguous queue would reallocate the entire pool on growth.
+    // Small tree nodes avoid reallocating the entire pool on growth.
     pending: BTreeMap<u64, Arc<Shared>>,
 }
 
@@ -207,12 +206,13 @@ pub(super) fn create(
 }
 
 pub(super) fn get(
+    retry: &super::oom::wait::Retry,
     requestor: Arc<Process>,
     url: String,
     requestor_addr: u64,
     page_type: PageType,
     page_num: u16,
-) -> Result<Arc<SysObject>, ErrorCode> {
+) -> Result<Arc<SysObject>, crate::mm::AllocationFailure> {
     let (listener, owner_process) = {
         let mut listeners = LISTENERS.lock(line!());
         if let Some(service) = listeners.get_mut(&url) {
@@ -222,12 +222,12 @@ pub(super) fn get(
                 .filter(|proc| proc.status().is_alive())
             else {
                 listeners.remove(&url);
-                return Err(moto_rt::E_NOT_FOUND);
+                return Err(moto_rt::E_NOT_FOUND.into());
             };
             loop {
                 let Some((_, shared)) = service.pending.first_key_value() else {
                     // Exhausting the listener pool does not release ownership.
-                    return Err(moto_rt::E_NOT_READY);
+                    return Err(moto_rt::E_NOT_READY.into());
                 };
                 // This drops the upgraded reference under LISTENERS. That is safe
                 // only because a named endpoint gets a process handle right after
@@ -240,7 +240,7 @@ pub(super) fn get(
 
                 if shared.page_type != page_type || shared.page_num != page_num {
                     log::debug!("shared: get: '{url}': pages don't match.");
-                    return Err(moto_rt::E_INVALID_ARGUMENT);
+                    return Err(moto_rt::E_INVALID_ARGUMENT.into());
                 }
                 let (_, listener) = service.pending.pop_first().unwrap();
                 // Takeover clears pending, so the listener's page is in the
@@ -251,26 +251,32 @@ pub(super) fn get(
             }
         } else {
             log::debug!("shared: get: bad url: '{url}'.");
-            return Err(moto_rt::E_NOT_FOUND);
+            return Err(moto_rt::E_NOT_FOUND.into());
         }
     };
 
     debug_assert!(listener.sharee.lock(line!()).upgrade().is_none());
 
-    let mapping_result = crate::mm::user::UserAddressSpace::map_shared(
-        owner_process.address_space(),
-        listener.owner_addr,
-        requestor.address_space(),
-        requestor_addr,
-        MappingOptions::USER_ACCESSIBLE
-            | MappingOptions::READABLE
-            | MappingOptions::WRITABLE
-            | MappingOptions::DONT_ZERO,
-    );
-    if mapping_result.is_err() {
-        log::debug!("shared: get: failed to map.");
+    let mapping_result = (|| {
+        // These regions are already accounted. Both spaces can need new
+        // metadata; check both recipients before consuming the listener.
+        retry.check_space(owner_process.address_space(), 0)?;
+        retry.check_space(requestor.address_space(), 0)?;
+        crate::mm::user::UserAddressSpace::map_shared(
+            owner_process.address_space(),
+            listener.owner_addr,
+            requestor.address_space(),
+            requestor_addr,
+            MappingOptions::USER_ACCESSIBLE
+                | MappingOptions::READABLE
+                | MappingOptions::WRITABLE
+                | MappingOptions::DONT_ZERO,
+        )
+    })();
+    if let Err(err) = mapping_result {
+        log::debug!("shared: get: failed to map: {err:?}.");
         requeue(listener);
-        return Err(moto_rt::E_INVALID_ARGUMENT);
+        return Err(err);
     }
     let sharee = SysObject::new_owned(
         listener.url.clone(),

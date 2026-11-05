@@ -53,24 +53,6 @@ pub fn run_child(args: &[String]) -> ! {
             println!("route={}", moto_rt::internal_helper(1, mode, 0, 0, 0, 0));
             std::process::exit(0)
         }
-        "vdso-panic-at-floor" => {
-            // The floor refuses stack growth too, and a refused fault on a
-            // fresh stack page kills the thread: map what a report may use.
-            map_stack_below();
-
-            // Pin the machine at the user floor, where the heap cannot grow,
-            // then take every free slot of every size class, the small ones
-            // last: from here on no allocation of any size succeeds.
-            while moto_sys::SysMem::alloc(moto_sys::sys_mem::PAGE_SIZE_SMALL, 8).is_ok() {}
-            for shift in (4..=12).rev() {
-                let layout = std::alloc::Layout::from_size_align(1 << shift, 8).unwrap();
-                // black_box: an allocation that is only compared with null is
-                // elided, and the comparison folded to "not null".
-                while !std::hint::black_box(unsafe { std::alloc::alloc(layout) }).is_null() {}
-            }
-            moto_rt::internal_helper(1, 4, 0, 0, 0, 0);
-            unreachable!()
-        }
         "vdso-nested-panic" => {
             let threads = args[3].parse().unwrap();
             let barrier = std::sync::Barrier::new(threads);
@@ -114,13 +96,6 @@ pub fn run_child(args: &[String]) -> ! {
         }
         _ => unreachable!(),
     }
-}
-
-/// Touches the stack below the caller's frame, which is where whatever the
-/// caller calls next will run.
-#[inline(never)]
-fn map_stack_below() {
-    std::hint::black_box(&mut [0_u8; 32 << 10]);
 }
 
 #[inline(never)]
@@ -217,40 +192,6 @@ fn test_failure_and_reentry_policy() {
             assert_eq!(2, failed_route(mode, WITH_LOG));
         }
     }
-}
-
-/// A panic inside rt.vdso is reported whole even when no allocation can
-/// succeed. The handler used to format its report on the heap; a failure there
-/// re-entered it, and the original message and backtrace were lost.
-pub fn test_vdso_panic_at_floor() {
-    // The child pins the machine at the user floor until its handle is
-    // released, and this process cannot grow its heap meanwhile. So read into
-    // a buffer allocated up front, and assert only after the release. Nothing
-    // is inherited either: relaying stdio is runtime work at the floor.
-    let mut stderr = vec![0_u8; 16 << 10];
-    let mut child = child("vdso-panic-at-floor", WITHOUT_LOG)
-        .stdin(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut pipe = child.stderr.take().unwrap();
-    let mut len = 0;
-    while let Ok(n @ 1..) = pipe.read(&mut stderr[len..]) {
-        len += n;
-    }
-    let status = child.wait().unwrap();
-    drop(pipe);
-    drop(child);
-
-    let stderr = String::from_utf8_lossy(&stderr[..len]);
-    assert!(!status.success(), "{stderr:?}");
-    assert_eq!(1, stderr.matches("PANIC").count(), "{stderr:?}");
-    assert!(stderr.contains("rt.vdso panic test marker"), "{stderr:?}");
-    assert!(stderr.contains("backtrace:"), "{stderr:?}");
-    assert!(
-        stderr.ends_with("\n\n"),
-        "incomplete panic backtrace: {stderr:?}"
-    );
-    println!("diagnostics::test_vdso_panic_at_floor PASS");
 }
 
 /// Formatting a panic can itself panic. The first marker must survive, and

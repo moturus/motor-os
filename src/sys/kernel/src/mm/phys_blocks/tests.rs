@@ -3,8 +3,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::AtomicUsize;
 
 const BLOCKS: usize = 66;
-const HIGH: usize = 64;
-const BASE: u64 = (HIGH as u64) << BLOCK_SHIFT;
+pub(super) const HIGH: usize = 64;
+pub(super) const BASE: u64 = (HIGH as u64) << BLOCK_SHIFT;
 
 pub(super) struct Trace {
     next: AtomicUsize,
@@ -46,7 +46,7 @@ impl Trace {
     }
 }
 
-struct ScratchLinks {
+pub(super) struct ScratchLinks {
     words: Vec<AtomicU64>,
     reads: AtomicUsize,
 }
@@ -62,7 +62,7 @@ impl PageLinks for &ScratchLinks {
     }
 }
 
-struct Fixture {
+pub(super) struct Fixture {
     lines: Vec<BlockLine>,
     lists: Vec<ListWords>,
     free: [AtomicU64; 2],
@@ -71,7 +71,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             lines: (0..BLOCKS.div_ceil(4))
                 .map(|_| BlockLine(core::array::from_fn(|_| Block::absent())))
@@ -88,7 +88,7 @@ impl Fixture {
         }
     }
 
-    fn shape(&mut self, index: usize, lo: u16, hi: u16) {
+    pub(super) fn shape(&mut self, index: usize, lo: u16, hi: u16) {
         let full = lo == 0 && hi == PAGES;
         let block = &mut self.lines[index / 4].0[index % 4];
         *block.inner.lock(line!()) = Inner {
@@ -116,7 +116,7 @@ impl Fixture {
         }
     }
 
-    fn pool(&self) -> Pool<'_, &ScratchLinks> {
+    pub(super) fn pool(&self) -> Pool<'_, &ScratchLinks> {
         let mut total = 0;
         let mut split = 0;
         for index in 0..BLOCKS {
@@ -136,7 +136,9 @@ impl Fixture {
             links: &self.links,
             counters: Counters {
                 total,
-                used: AtomicU64::new(0),
+                state: AtomicU64::new(StateSnapshot::new(0).0),
+                attention: core::sync::atomic::AtomicBool::new(false),
+                oom_runs: AtomicU64::new(0),
                 high_water: AtomicU64::new(0),
                 reserved: AtomicU64::new(0),
                 discarded: AtomicU64::new(0),
@@ -144,13 +146,14 @@ impl Fixture {
                 taken: AtomicU64::new(0),
                 splits: AtomicU64::new(0),
                 recombined: AtomicU64::new(0),
+                published: crate::util::StaticRef::default_const(),
             },
             trace: None,
         }
     }
 }
 
-fn check(pool: &Pool<'_, &ScratchLinks>, used: u64) {
+pub(super) fn check(pool: &Pool<'_, &ScratchLinks>, used: u64) {
     let mut free = 0;
     let mut split = 0;
     let mut taken = 0;
@@ -200,7 +203,7 @@ fn check(pool: &Pool<'_, &ScratchLinks>, used: u64) {
             state == WHOLE
         );
     }
-    assert_eq!(pool.counters.used.load(Ordering::Acquire), used);
+    assert_eq!(pool.state_snapshot().used(), used);
     assert_eq!(pool.counters.total - used, free);
     assert_eq!(pool.counters.split.load(Ordering::Relaxed), split);
     assert_eq!(pool.counters.taken.load(Ordering::Relaxed), taken);
@@ -278,7 +281,7 @@ fn publication() {
     let mut pool = fixture.pool();
     pool.trace = Some(&trace);
     assert_eq!(pool.split(HIGH, 2), Ok(Some(BASE)));
-    trace.expect(&[FreeSet, WholeClear, Charge(2)]);
+    trace.expect(&[Charge(2), FreeSet, WholeClear]);
     pool.push(BASE).unwrap();
     trace.expect(&[FreeSet, Release(1)]);
     assert_eq!(pool.pop(HIGH), Ok(Some(BASE)));
@@ -294,14 +297,17 @@ fn publication() {
     trace.expect(&[WholeSet, FreeClear, Release(1)]);
     check(&pool, 0);
     assert_eq!(pool.split(HIGH, 512), Ok(Some(BASE)));
-    trace.expect(&[FreeSet, WholeClear, Charge(512), FreeClear]);
+    trace.expect(&[Charge(512), FreeSet, WholeClear, FreeClear]);
     for page in 0..511 {
         pool.push(BASE + (page << PAGE_SHIFT)).unwrap();
         trace.expect(&[FreeSet, Release(1)]);
     }
     pool.push(BASE + (511 << PAGE_SHIFT)).unwrap();
     trace.expect(&[WholeSet, FreeClear, Release(1)]);
-    assert_eq!(pool.take_huge(HIGH), Ok(Some(BASE)));
+    assert_eq!(
+        pool.take_huge(HIGH, AllocationClass::Kernel),
+        Ok(Some(BASE))
+    );
     trace.expect(&[Charge(512), WholeClear]);
     check(&pool, 512);
     pool.return_huge(BASE).unwrap();
@@ -331,11 +337,11 @@ fn rejection_and_lifo() {
     let block = pool.block(HIGH).unwrap();
     let reads = fixture.links.reads.load(Ordering::Relaxed);
     block.inner.lock(line!()).head = 513;
-    assert_eq!(pool.pop(HIGH), Err(Corruption::Head));
+    assert_eq!(pool.pop(HIGH), Err(Corruption::Head.into()));
     assert_eq!(fixture.links.reads.load(Ordering::Relaxed), reads);
     block.inner.lock(line!()).head = 2;
     block.inner.lock(line!()).alloc_lo = 2;
-    assert_eq!(pool.pop(HIGH), Err(Corruption::Bounds));
+    assert_eq!(pool.pop(HIGH), Err(Corruption::Bounds.into()));
     assert_eq!(fixture.links.reads.load(Ordering::Relaxed), reads);
     block.inner.lock(line!()).alloc_lo = 0;
     let head_addr = BASE + 4096;
@@ -346,14 +352,14 @@ fn rejection_and_lifo() {
         link_encode(head_addr, 2),
     ] {
         pool.links.write(head_addr, bad);
-        assert_eq!(pool.pop(HIGH), Err(Corruption::Link));
+        assert_eq!(pool.pop(HIGH), Err(Corruption::Link.into()));
         check(&pool, 1);
     }
     // A correctly encoded link still cannot name a live or never-used page.
     pool.links.write(head_addr, link_encode(head_addr, 3));
-    assert_eq!(pool.pop(HIGH), Err(Corruption::ListBit));
+    assert_eq!(pool.pop(HIGH), Err(Corruption::ListBit.into()));
     pool.links.write(head_addr, link_encode(head_addr, 4));
-    assert_eq!(pool.pop(HIGH), Err(Corruption::NeverUsed));
+    assert_eq!(pool.pop(HIGH), Err(Corruption::NeverUsed.into()));
     pool.links.write(head_addr, original);
     assert_eq!(pool.pop(HIGH), Ok(Some(head_addr)));
     assert_eq!(pool.pop(HIGH), Ok(Some(BASE)));
@@ -361,8 +367,8 @@ fn rejection_and_lifo() {
     check(&pool, 512);
     pool.push(BASE).unwrap();
     block.inner.lock(line!()).head = 0;
-    assert_eq!(pool.pop(HIGH), Err(Corruption::Empty));
-    assert_eq!(pool.run(HIGH, 2), Err(Corruption::Empty));
+    assert_eq!(pool.pop(HIGH), Err(Corruption::Empty.into()));
+    assert_eq!(pool.run(HIGH, 2), Err(Corruption::Empty.into()));
     block.inner.lock(line!()).head = 1;
     check(&pool, 511);
 }
@@ -386,7 +392,7 @@ fn partial_and_recombination() {
     pool.push(partial + 16 * 4096).unwrap();
     assert_eq!(pool.block(1).unwrap().state.load(Ordering::Relaxed), SPLIT);
     check(&pool, 0);
-    assert_eq!(pool.take_huge(0), Ok(None));
+    assert_eq!(pool.take_huge(0, AllocationClass::Kernel), Ok(None));
     let events = |pool: &Pool<'_, &ScratchLinks>| {
         (
             pool.counters.splits.load(Ordering::Relaxed),
@@ -416,7 +422,7 @@ fn partial_and_recombination() {
         check(&pool, 0);
     }
     assert_eq!(events(&pool), (4, 4));
-    assert_eq!(pool.take_huge(0), Ok(None));
+    assert_eq!(pool.take_huge(0, AllocationClass::Kernel), Ok(None));
 
     // Corrupt metadata must not promote a partial block to whole.
     assert_eq!(pool.pop(1), Ok(Some(partial + 16 * 4096)));
@@ -431,12 +437,15 @@ fn huge_and_lazy_words() {
     let pool = fixture.pool();
     assert_eq!(pool.pop(HIGH), Ok(None));
     assert_eq!(pool.return_huge(BASE), Err(Corruption::State));
-    assert_eq!(pool.take_huge(HIGH), Ok(Some(BASE)));
+    assert_eq!(
+        pool.take_huge(HIGH, AllocationClass::Kernel),
+        Ok(Some(BASE))
+    );
     check(&pool, 512);
     assert_eq!(pool.pop(HIGH), Ok(None));
     assert_eq!(pool.run(HIGH, 2), Ok(None));
     assert_eq!(pool.split(HIGH, 1), Ok(None));
-    assert_eq!(pool.take_huge(HIGH), Ok(None));
+    assert_eq!(pool.take_huge(HIGH, AllocationClass::Kernel), Ok(None));
     assert_eq!(pool.push(BASE), Err(Corruption::State));
     assert_eq!(pool.return_huge(BASE + 4096), Err(Corruption::Address));
     assert_eq!(
@@ -473,26 +482,32 @@ fn malformed_bounds_and_state() {
         let _guard = block.inner.lock(line!());
         block.state.store(255, Ordering::Relaxed);
     }
-    assert_eq!(pool.pop(HIGH), Err(Corruption::State));
-    assert_eq!(pool.take_huge(HIGH), Err(Corruption::State));
+    assert_eq!(pool.pop(HIGH), Err(Corruption::State.into()));
+    assert_eq!(
+        pool.take_huge(HIGH, AllocationClass::Kernel),
+        Err(Corruption::State.into())
+    );
     {
         let _guard = block.inner.lock(line!());
         block.state.store(WHOLE, Ordering::Relaxed);
     }
     block.inner.lock(line!()).alloc_hi = 513;
-    assert_eq!(pool.split(HIGH, 1), Err(Corruption::Bounds));
-    assert_eq!(pool.take_huge(HIGH), Err(Corruption::Bounds));
+    assert_eq!(pool.split(HIGH, 1), Err(Corruption::Bounds.into()));
+    assert_eq!(
+        pool.take_huge(HIGH, AllocationClass::Kernel),
+        Err(Corruption::Bounds.into())
+    );
     block.inner.lock(line!()).alloc_hi = PAGES;
     assert_eq!(pool.split(HIGH, 1), Ok(Some(BASE)));
     block.inner.lock(line!()).used = 513;
-    assert_eq!(pool.pop(HIGH), Err(Corruption::Used));
+    assert_eq!(pool.pop(HIGH), Err(Corruption::Used.into()));
     block.inner.lock(line!()).used = 1;
     {
         let _guard = block.inner.lock(line!());
         let words = unsafe { (*pool.lists[HIGH].0.get()).assume_init_mut() };
         words[0] |= 1 << 1;
     }
-    assert_eq!(pool.run(HIGH, 2), Err(Corruption::ListBit));
+    assert_eq!(pool.run(HIGH, 2), Err(Corruption::ListBit.into()));
     assert_eq!(pool.push(BASE), Err(Corruption::Recombine));
     let used = block.inner.lock(line!()).used;
     assert_eq!(used, 1);
@@ -510,6 +525,7 @@ pub(super) fn run() {
     huge_and_lazy_words();
     malformed_bounds_and_state();
     search::run();
+    super::policy::tests::run();
     super::shaping::test();
     super::layout::test();
     crate::raw_log!("phys_blocks core tests PASS");

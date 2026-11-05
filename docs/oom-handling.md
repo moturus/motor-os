@@ -1,381 +1,217 @@
-# OOM handling: low-memory admission control
+# Physical memory pressure and OOM handling
 
-Why the mechanism exists, the argument for why it is safe, and what remains
-open. The implementation lives in `kernel/src/mm/admission.rs` (floors,
-charges, reservations, the pressure flag), `sys-io`'s
-`runtime/net/pressure.rs` (net-side service refusals) and `runtime/fs.rs`
-(the FS-side gate in `on_msg` and the accept-time client drop, with
-moto-sdk's `sys_io::api_fs::release_donated_pages` freeing refused requests'
-pages), and rt.vdso's `spawn_impl` (spawn refusals). Regressions are in
-`systest` (`admission.rs`, `pressure.rs`).
+The kernel decides from the live count of free physical pages whether an
+allocation proceeds, waits or fails. When free memory gets low, it kills
+unprotected processes, newest first, until enough memory comes back. There
+is no reservation or admission control. Per-process memory limits,
+filesystem capacities, capabilities and socket or channel limits are
+separate and unchanged.
 
-## The problem
+All sizes below are binary; a page is 4 KiB.
 
-Allocating N data pages also consumes page descriptors, page tables, segment
-nodes, and occasionally a new global `Frame` slab. Before admission control,
-the kernel's soft-OOM check counted only the requested data pages and was
-separate from allocation, so concurrent requests could all pass it; one
-unprivileged eager `SysMem::alloc` could empty the physical small-page pool
-and panic the kernel. Measured release-build metadata overhead for eager
-mappings:
+## Protected services
 
-| requested data pages | pool lost | overhead |
-|---:|---:|---:|
-| 2,048 | 2,089 | 2.00% |
-| 16,384 | 16,797 | 2.52% |
-| 65,536 | 67,032 | 2.28% |
-| 131,072 | 133,836 | 2.11% |
+A process is protected if any of these holds:
 
-The worst case agrees with the data structures: `Page` slabs cost about
-1.82%, `Frame` slabs about 0.51%, page tables about 0.20%. These numbers
-motivate the conservative admission charge below; they are not used as exact
-accounting.
+- it has the System role;
+- it is sys-io;
+- its parent or grandparent is sys-io.
 
-This is a stability mechanism, not a fairness policy. It does not choose an
-OOM victim, promise that every lazy page will eventually receive physical
-backing, or attribute shared kernel-heap objects to individual processes.
+Everything else is unprotected. Protection is not inherited further: a
+great-grandchild of sys-io is unprotected unless it has the System role.
+Parentage is the actual one, also for a spawn that sys-io performs on
+another process's behalf. In the shipped image the protected set is sys-io,
+sys-init and strobe (System), sys-tty and russhd (Interactive) and
+dns-resolver (None). Every program a user starts is a great-grandchild of
+sys-io and can be killed.
 
-## Memory zones
+Protected processes are never chosen as OOM victims and allocate under the
+smaller System floor below. Protection changes neither roles nor
+capabilities.
 
-Two non-configurable floors apply after subtracting outstanding reservations
-and the operation's charge:
+The kernel does not defend the guest against a protected service that
+misbehaves. If protected services alone use up memory, nothing can be
+killed: the guest stays latched or aborts, as described below. An optional
+change to that abort policy is recorded in
+[future-work.md](plans/future-work.md#optional-change-to-the-victimless-oom-abort-policy).
 
-- Ordinary address spaces must leave `USER_FLOOR` pages free.
-- Processes with `CAP_SYS` or `CAP_IO_MANAGER` may use the reserve between
-  the floors, but must still leave `SYS_IO_FLOOR` pages for bounded kernel
-  work. This includes strobe and sys-init as well as sys-io and sys-tty.
+## Floors
 
-The lower floor and its exported statistics retain their historical `sys_io`
-names. Reserve eligibility does not grant IO-manager permissions or guarantee
-that every allocation succeeds. New address spaces start ordinary and acquire
-their process's eligibility at process creation; a privileged loader does not
-lend its reserve to ordinary children.
+Every physical allocation is charged to the address space that receives the
+memory, including mappings made by another process, both stacks, page
+tables and memory-manager metadata. The recipient decides the class:
 
-The floors are compile-time constants: `USER_FLOOR_PAGES = 256` (1 MiB),
-`SYS_IO_FLOOR_PAGES = 128` (512 KiB), validated by measurement (below). They
-are kernel safety constants, not configuration: an operator must not be able
-to configure the machine back into physical exhaustion. If future
-measurements do not fit comfortably, raise the floors rather than add a new
-allocation class.
+| Recipient                          | Class  | Must leave free     | Blocked                      |
+|------------------------------------|--------|---------------------|------------------------------|
+| Unprotected process, or an address | User   | 512 pages (2 MiB)   | While killing or latched     |
+| space with no process yet          |        |                     |                              |
+| Protected process                  | System | 128 pages (512 KiB) | When the System block is set |
+| Kernel                             | Kernel | Nothing             | Never                        |
 
-## Atomic admission
+The class is fixed when a process claims its address space. An address
+space without a process is User, so sys-io sets up every new executable
+image under the User floor, protected or not. Once the process exists its
+own class applies, also to the executable pages sys-io fills later.
 
-Every userspace memory-growing operation is admitted first:
+Two more limits matter:
 
-```text
-charge = conservative_worst_case(operation)
-free_for_admission = available_small_pages - outstanding_reservations
+- 768 pages (3 MiB): killing ends and every blocked allocation retries when
+  free memory comes back to this level.
+- 1,024 pages (4 MiB), `moto_sys::LOW_MEMORY_PAGES`: below it, process
+  creation and start fail with `E_OUT_OF_MEMORY`, memfs refuses allocating
+  mutations with `StorageFull` after dropping unused cache blocks (see
+  [fs-permissions.md](fs-permissions.md)), and every process's allocator
+  returns idle pages eagerly.
 
-admit iff free_for_admission - charge >= applicable_floor
-```
+## How OOM killing works
 
-The reservation is CASed into a global counter and held (RAII) until the
-operation completes. Allocated pages remain reflected in
-`available_small_pages`, so releasing a reservation does not make consumed
-memory appear free; holding the full charge for the whole operation
-double-counts pages the operation already allocated, which can refuse another
-request early but cannot admit too much.
+The allocator keeps the used-page count, the state (Idle, Killing or
+Latched), the System block and a generation counter in one atomic word, so
+each charge checks the rules and updates the count in one compare-and-swap.
+The counter advances whenever killing starts or ends, so a waiter can tell
+whether the killing it waited for is over.
 
-Checking availability and publishing the reservation are two separate atomic
-steps, and the counter alone cannot order them: other operations can admit,
-allocate, and release inside the window, restoring the counter to its
-compared value while the sampled availability is stale (an ABA race that host
-vCPU deschedules stretch to milliseconds). The check is therefore repeated
-after the reservation is published, reading the counter before availability;
-if it no longer holds, the reservation is released and the request refused.
-Near the floor this can refuse concurrent requests where serially one would
-pass; refusing early is the accepted bias.
+1. **Start.** Killing starts when a charge takes free memory below 512
+   pages, or, from Idle, when a request is refused at its floor with fewer
+   than 768 pages free. A User charge never crosses 512: it is refused at
+   its floor, which starts killing. While killing, a System request refused
+   at its floor, or a kernel charge that leaves fewer than 128 pages, sets
+   the System block: protected allocations wait too until killing ends.
+2. **Choose a victim.** A scheduler job picks the newest unprotected None
+   process by kernel PID; when none is left, the newest unprotected
+   Interactive process. Processes created but not yet started count.
+   Processes paused by a debugger are skipped. Processes already exiting,
+   or left without threads, count as memory about to come back.
+3. **Kill it.** The victim is killed through the normal kill path and its
+   memory returns when its exit completes ([kernel-mm.md](kernel-mm.md),
+   "Release at process exit"). A kill whose victim has a debugger-paused
+   thread still completes. One victim at a time: the next choice waits for
+   the previous victim's exit, even across recovery.
+4. **Stop.** A release that reaches 768 pages ends killing: the state
+   returns to Idle, the System block clears and every blocked allocation
+   retries. If nothing is left to kill with 512 to 767 pages free, killing
+   ends in Latched: System allocations that fit proceed, User allocations
+   fail, and a later charge below 512 starts killing again. If nothing is
+   left to kill below 512 pages, the kernel prints every remaining process
+   and aborts the guest.
 
-Participants: eager, fixed, shared, and contiguous mappings, lazy faults,
-stacks, address-space/process/thread creation, sys-objects, IPC, and the
-io-manager-only paths (contiguous, MMIO — MMIO is not RAM, but its
-descriptors and page tables are charged against the small pool). A remote operation is charged against the *target* address
-space's class, so sys-io loading an ordinary process never widens that
-process's guard band. Small per-syscall bookkeeping (wait-object
-registration, URL strings) is not individually admitted; it belongs to the
-bounded runtime work the floors absorb, and the measurements include it.
+Floors and killing are armed just before sys-io starts. Before that every
+floor is zero and an allocation that cannot be satisfied fails with
+`E_OUT_OF_MEMORY`; the boot self-tests run in that state.
 
-### Conservative charges
+Victims are ordered by kernel PID, a monotonic `u64` that never repeats.
+The public `i32` PID that userspace sees wraps to 4,096 and skips IDs still
+in use; the two are equal until the first wrap.
 
-For a mapping adding `D` physical data pages and `P` page descriptors
-(counted at both ends for shared mappings):
+## What a process sees
 
-```text
-charge = D + ceil((D + P) / 32) + 64 pages
-```
+- An allocating syscall blocked by killing waits until killing ends, then
+  retries. If it still cannot allocate, it returns `E_OUT_OF_MEMORY`. A
+  request that fails although at least 768 pages are free after its own
+  rollback returns `E_OUT_OF_MEMORY` at once. Large requests get no
+  exemption from the floors.
+- A page fault on valid memory waits for memory and retries; it never
+  returns an error. In Latched, faults in unprotected processes keep
+  waiting until free memory recovers to 768 pages. Invalid faults stay
+  fatal.
+- An executable page that sys-io fills into a protected process retries
+  physical shortages until they clear; it never becomes a fatal pager error.
+  A fill into an unprotected process that still fails after killing ends is
+  a fatal page fault for that process. When sys-io itself cannot allocate
+  the buffer for a one-page fill, it yields and retries later instead of
+  failing the page.
+- A victim is terminated like any killed process; its parent sees the
+  killed status.
+- Below 4 MiB free, spawns fail with `E_OUT_OF_MEMORY` and memfs mutations
+  with `StorageFull`.
+- Error codes are unchanged: `E_OUT_OF_MEMORY` for an unsatisfied
+  allocation, quota or address-space limit, `E_INVALID_ARGUMENT` for bad
+  arguments, `E_NOT_ALLOWED` for a missing capability, `E_ALREADY_IN_USE`
+  for a second process on one address space. Kernel-heap exhaustion stays
+  fatal.
 
-The divisor buys 128 bytes of metadata per touched page; compile-time
-assertions in `phys.rs` and `virt_intrusive.rs` hold the two largest
-consumers (`Frame`, `Page`) to 7/8 of that, leaving the rest for page tables
-(measured worst case ~104 bytes). The flat 64 pages cover unfavorable slab
-and page-table boundaries. Unmapped reservations use `D = 0` with `P` their
-page count. Lazy reservations are sparse, with no descriptors until first
-touch, so they are charged the flat `mapping_charge(0, 0)` whatever their
-size; each lazy fault is admitted separately at `mapping_charge(1, 1)`, one
-data page and its descriptor. Fixed charges:
-process 256 pages (applied at address-space creation and again in
-`Process::new_child`), thread 64, sys-object and IPC 16. If a structure grows
-enough to invalidate an allowance, the build or test must fail; the guard
-band must not silently shrink.
+## Observing it
 
-### What refusal means
+`KernelStaticPage::free_pages` (offset 72) is the allocator's live free-page
+count, kept with one relaxed atomic add or subtract per allocation and free.
+Userspace reads it with `moto_sys::free_pages()`; `moto_sys::low_memory()`
+compares it with `LOW_MEMORY_PAGES`. The word at offset 60 is reserved.
+There is no published pressure flag: the 2 MiB and 3 MiB thresholds live in
+the kernel's atomic state.
 
-- Syscalls return `E_OUT_OF_MEMORY` before the operation starts; refusal has
-  no side effects.
-- A refused lazy fault cannot return an error to the faulting instruction:
-  the faulting thread is killed, which kills its process. This is the
-  accepted cost of having no OOM killer — the victim is whichever process
-  faults while availability is below its floor. It is stated here so it is
-  not mistaken for a bug.
-
-### Kernel work outside admission
-
-Boot allocations are not admitted. Runtime kernel activity not caused by a
-newly admitted operation (interrupts, scheduler, TLB shootdowns, logging,
-completion of in-flight work, on every CPU) consumes the final reserve and
-must stay bounded once new userspace work has stopped. If that bounded-work
-assumption ever fails to hold within `SYS_IO_FLOOR`, the floor must be raised
-or the unbounded allocation removed — never a recovery class that can consume
-the pool to zero.
-
-## Pressure mode
-
-The floors alone cannot keep sys-io alive: its heap grows through
-`SysMem::alloc` in the vdso allocator, and a failed Rust global-allocator
-call aborts the process. The floors convert a kernel panic into a sys-io
-abort; pressure mode exists to stop sys-io's demand before the kernel refuses
-it.
-
-The kernel owns the state: a `memory_pressure` flag in `KernelStaticPage`
-(read-only, mapped into every process), maintained wherever
-free-for-admission changes — admission checks, reservation releases, and the
-small-page free path (so the flag clears when an aggressor dies without
-anyone allocating). A CAS picks a single transition winner. Watermarks, with
-hysteresis so one allocation or free cannot flap service:
+The kernel logs each transition it observes and each kill:
 
 ```text
-raise when:  free_for_admission <= PRESSURE_LOW_PAGES   (512 pages, 2 MiB)
-clear when:  free_for_admission >= PRESSURE_HIGH_PAGES  (768 pages, 3 MiB)
+OOM: start generation 7, 509 free pages
+OOM: generation 7, 503 free pages, kill 'name' pid=1234 kernel_pid=1234
+OOM: end generation 7, 801 free pages
+OOM: no victims, stopping below 768 pages (600 free)
 ```
 
-Any process observes pressure with one shared-page load
-(`moto_sys::memory_pressure()`), no syscall. While the flag is up:
+Before an abort it prints `OOM: remaining processes, N free physical pages`,
+one `OOM: 'name' pid=.. kernel_pid=.. user_bytes=.. kernel_bytes=..` line
+per process (tracked virtual memory, not resident usage) and panics with
+`OOM: no eligible victims or pending reclamation below 512 free pages`.
 
-- rt.vdso refuses process spawns at the top of `spawn_impl` — the parent gets
-  a recoverable `E_OUT_OF_MEMORY` before any work is done;
-- sys-io refuses TCP listener binds, outbound TCP connects, UDP binds, and
-  ICMP echo, allocation-free, at the top of the handlers;
-- sys-io refuses every FS request except releasing a lock at the top of the
-  FS dispatch (`runtime/fs.rs`, `on_msg`). The gate itself does not
-  allocate; the refused message has already cost its spawned dispatch task —
-  transient, ticket-bounded work of the class the floors absorb. Reads and
-  stats are refused too: they walk the block cache and allocate on a miss,
-  and a refusal set that assumes a full cache would break the moment the
-  cache grows or the machine shrinks. `UNLOCK` is exempt because it only
-  removes lock-manager state and hands queued waiters pre-encoded responses;
-  refusing it would strand locks past the episode, as `Drop`-based unlock on
-  file close never retries. A refused request frees the io_pages it donated
-  (`api_fs::release_donated_pages`) — a handler frees them by decoding, which
-  never happens here, and the channel's 64-slot page pool would otherwise
-  leak a slot per refusal;
-- sys-io drops new service client connections at accept, in both the net and
-  fs listeners. The client dies — deliberately: a new client is exactly the
-  load being shed, and spawns are refused even earlier. The consumed accept
-  slot is replaced so refusals stay prompt;
-- listening-pool refills park (one entry per pool); a recovery task re-arms
-  them after the flag clears.
+| Metric                    | Meaning                                     |
+|---------------------------|---------------------------------------------|
+| `mem.oom_runs`            | Times killing started                       |
+| `mem.oom_kills`           | Committed kills                             |
+| `mem.oom_parked_syscalls` | Syscall waits registered, re-parks included |
+| `mem.oom_parked_faults`   | Fault waits registered, re-parks included   |
 
-Two rules with teeth, both learned the hard way:
+System totals use stats scope 0; the two wait counters also have per-process
+values. `fs.memory_refused` counts memfs refusals.
 
-- **Nothing that must run during an episode may allocate.** The refusal paths
-  are allocation-free by construction; the constraint extends to observers.
-  The metrics RPC allocates per query, so even the regression reads refusal
-  counters only after recovery — an episode runs ~430 pages from empty, and
-  a mid-episode metrics query is itself refused.
-- **A fresh client under pressure dies at one of two hands.** An io_channel
-  client maps ~130 eager pages (charge ~200) — most of the 256-page gap
-  between the user floor and the low watermark — so kernel admission usually
-  refuses the mapping before sys-io can accept and drop the connection. Both
-  refusers are correct; which fires depends on where in the gap the pool
-  sits.
+## Code
 
-Bounded growth matters beyond socket rings: any sys-io structure that can
-keep growing while pressure is active (client bookkeeping, containers, async
-tasks, filesystem caches, device buffers) must be bounded, reclaimed, or
-added to the refusal set. Entering pressure mode or reporting
-`E_OUT_OF_MEMORY` must not allocate.
+Under `src/sys/kernel/src`: `mm/phys_blocks/policy.rs` holds the atomic word
+with its floors and transitions, `mm/allocation.rs` the refusal receipts and
+retry decisions, `uspace/oom.rs` and `uspace/oom/wait.rs` the scheduler
+jobs, victim choice and wait queues, and `init.rs` the arming point. sys-io's
+fill-buffer retry is in `src/sys/sys-io/src/runtime/fs/spawn/pager.rs`. The
+memory manager itself is described in [kernel-mm.md](kernel-mm.md).
 
-Measurement decides which of the three applies, and it has surprised us
-once. The FS block cache looked like the dominant grower — its ceiling of up
-to 16 MiB (~4096 pages; sized from RAM, see sys-io's `block_cache_blocks`)
-is far more than the band between the low watermark and the
-sys-io floor — but it grows sys-io by **0 pages** under a 16 MiB write
-hammer: it is capacity-bounded *and* filled by boot-time binary loads, after
-which every miss recycles an evicted buffer. The actual unbounded grower was
-the FS lock manager, at ~22 bytes of sys-io heap per held lock (100,000 held
-locks grow sys-io by 546 pages, returned on unlock; 40,000 open handles cost
-1 page). Structure size is not evidence of growth; only measurement is.
+## Tests
 
-When sys-io does lose an allocation, the victim is arbitrary. The refused
-allocation is rarely the one that grew: growth consumes the heap's slack and
-whichever allocation asks next gets nothing. Both observed shapes are fatal —
-an unwrapped null in the block cache (`exit 0xbadc0de`) and a refused lazy
-fault killing the faulting thread (`exit 0xffffffff`) — so a panic location
-says nothing about which structure was responsible.
+Every test runs inside Motor OS from `src/tests/full-test.sh`. Debug kernels
+run boot self-tests for the floors and transitions, the wait queues, victim
+cleanup, pager retry, class propagation and unarmed exhaustion. systest
+covers the error codes, release at exit, killing debugger-paused threads and
+memfs refusals. Pressure itself is exercised from the System console of
+`test-system-tty.sh` by `systest system-oom-tests`: spawn refusal, victim
+order, repeated recovery, a paused victim, Latched refusals and System
+progress, fault and syscall waits and their cancellation. `full-test.sh`
+ends with `src/tests/test-oom-abort.sh`, which drains a separate disposable
+guest below 512 pages and requires the exact report and panic above.
 
-## The safety argument, measured
+Changes here are gated like other core work: `full-test.sh` three times in
+debug and three in release, including at least one `--cpus 1` run per
+build, then `full-test-dev.sh --release`.
 
-(2026-08-06, QEMU/KVM, 4 vCPUs, 1 GiB RAM; full suite including the all-CPU
-fault storm.)
+### Reproducing the abort by hand
 
-**The pool's true minimum never crosses the user floor.** With the floor at
-256 pages, the physical low water across the suite is 321; at a provisional
-4096-page floor the same measurement read 4161 — the trough tracks the floor,
-not the machine. The conservative charges stop admission with a ~65-page
-cushion above the floor (the last refused charge exceeds what the last
-admitted operation actually consumed), and unadmitted kernel bookkeeping drew
-zero new pages at the trough: steady-state churn is absorbed by kernel-heap
-slab slack. The measured overlap of unadmitted work below the floor is **0
-pages**. The final reserve is still required: a heap at a fresh slab boundary
-can pull pages, which is what `SYS_IO_FLOOR` absorbs.
+Build and boot a fresh System-console image. Test images need an absolute
+`TEST_IMAGE_ROOT` outside the repository's `vm_images`:
 
-**Residual demand under pressure is zero.** From flag-raise to release, no
-sample of free-for-admission sank below the episode's entry value: refusals
-stop new growth immediately, and surviving traffic (established TCP round
-trips) allocates nothing.
+```sh
+root="$(mktemp -d)"
+make -j"$(nproc)" system-tty.img systest BUILD=release TEST_IMAGE_ROOT="$root"
+MOTO_IMAGE=motor-os-system-tty.img MOTO_MEMORY_MIB=256 "$root/vm_images/release/run-qemu.sh"
+```
 
-**Concurrent lazy faults bias, they do not endanger.** Each in-flight fault
-reserves 66 pages, so 4 CPUs transiently hold up to 264 pages of
-reservations — more than the 128-page band between the floors. Reservations
-consume no memory; the effect is only that concurrent faults near the floor
-refuse each other earlier than a serial ordering would. Machines with many
-more CPUs widen that bias proportionally and should raise the floors with CPU
-count.
+From another terminal, copy `build/bin/release/systest` into the guest as
+`/none/tmp/oom-abort` with the repository's test key:
 
-**Admission costs nothing measurable.** Release-build A/B against the
-pre-admission baseline (three boots per side, alternating; benched via a
-temporary `systest bench-alloc`, since reverted):
+```sh
+chmod 600 src/tests/test.key
+scp -F /dev/null -P 2222 -i src/tests/test.key -o IdentitiesOnly=yes \
+  -o StrictHostKeyChecking=yes -o UserKnownHostsFile=src/tests/test-known-hosts \
+  build/bin/release/systest motor@192.168.4.2:/none/tmp/oom-abort
+```
 
-| metric | baseline | with admission |
-|---|---:|---:|
-| eager 16-page alloc+free | ~20.3 us/op | ~19.5 us/op |
-| lazy fault (warm) | ~3008 ns/page | ~3018 ns/page |
-| kernel up (median) | 162 ms | 162 ms |
-| boot to ssh-ready | 1.16-1.23 s | 1.19-1.21 s |
-
-Both workload deltas are inside run-to-run noise (the two global-atomic RMWs
-per lazy fault are not measurable at this scale); boot latency is unchanged.
-
-**An actual allocator OOM is always a defect.** Admission refusals are
-ordinary operation; the physical allocator running dry means a charge or a
-bounded-work assumption is wrong. Production code must not retry the
-operation or increase a timeout to paper over either.
-
-The block allocator behind the small-page pool reports its own gauges at the
-system scope: `mem.blocks_total`, `mem.blocks_whole`, `mem.blocks_split`,
-`mem.blocks_taken`, `mem.blocks_whole_low`, `mem.pages_reserved` and
-`mem.pages_free_low`, with the cumulative events `mem.block_splits`,
-`mem.block_recombined`, `mem.huge_pages_mapped` and `mem.huge_fallbacks`.
-They are collected without a common lock, so only their bounds hold at any
-moment; `mem.pages_reserved` is constant after boot. A pressure episode that
-drains the pool leaves most blocks split (pages allocated by other processes
-during the squeeze pin them), so huge-page availability afterwards is best
-effort until those pages die; see docs/kernel-mm.md.
-
-Observability: kernel metrics `mem.admission_refused_user`,
-`mem.admission_refused_sys_io`, `mem.admission_reserved_pages`,
-`mem.small_pages_low_water` (availability at admission checks),
-`mem.phys_small_pages_low_water` (the allocator's true minimum — floor
-validation reads this one), and the two floor gauges; sys-io metrics
-`net.pressure_active`, `net.pressure_entries`, `net.pressure_refused`,
-`net.pressure_refused_clients`, `net.pressure_deferred_replenish`, the
-watermark gauges, and the FS counterparts `fs.pressure_refused` and
-`fs.pressure_refused_clients` (there is no FS episode counter, and
-`net.pressure_entries` moves only on net-side refusals, so an episode in
-which only FS traffic was refused shows up solely as `fs.pressure_*`
-deltas). The `F_QUERY_ADMISSION_STATS` syscall
-(`moto_sys::stats::AdmissionStats`) reports availability, reservations,
-floors, and watermarks in one call, for tests and observability —
-`MemoryStats` has no reservation or floor figures, and the metrics RPC
-allocates and is unavailable at sys-io startup.
-
-## Regression coverage
-
-`systest` covers: oversized-mapping refusal without drift; the same request
-issued simultaneously on every CPU; charge boundaries at slab-unfavorable
-mapping sizes (warm pass first — global `Frame` slabs are never freed, so
-first-touch growth is permanent); lazy faults at the floor (single-process
-and the all-CPU storm, which prints the floor-sizing measurements); the full
-pressure episode (flag up, socket and spawn refusals, a client refused by
-either refuser, service continuing on an established connection,
-kernel-driven recovery from the free path, and refusal counters after
-recovery). Every admission regression asserts the floors held, including the
-physical low water staying above the sys-io floor.
-
-`test_fs_under_pressure` covers the FS side within its own episode: writes,
-lock acquires, and metadata refused; `UNLOCK` still served; a fresh FS client
-refused by either hand; service resuming on the same handles after recovery.
-Its write hammer alternates the single-page and multi-page `CMD_WRITE`
-formats and its stat hammer exercises the path-carrying commands, each arm
-far longer than the channel's 64-slot page pool; a refusal that failed to
-free a donated page would exhaust the pool and leave the client blocked in
-`alloc_page`, so the run dies on the harness timeout — that is what a page
-leak looks like, and that is the coverage for `release_donated_pages`. A
-lock waiter queued before the squeeze, granted by the one `UNLOCK` served
-mid-episode, covers the grant half of the carve-out. Every mid-episode probe
-records its outcome and is judged after recovery: an assertion inside the
-episode would both allocate and, on a regressed build, stop at the first
-served request instead of reaching the rest. The squeeze child keeps its
-target rather than holding a fixed amount: under pressure the rt.vdso
-housekeeping tick returns every process's allocator slack, and one return
-can lift the pool past the high watermark and clear the flag for the
-moment until the child drains again. The child holds each such dip open
-for at least 50 ms before draining, so a dip that could have influenced a
-request outlasts that request's reply; a request is issued only while the
-flag is up, and a served one is classified by the flag read right after it
-returns: down is a dip (the request goes again once the flag is back), up
-is a real serve that fails the test after recovery. The standalone form
-(`systest test-fs-pressure [n]`, default 100,000 lock acquires) drives a
-build *without* the refusal set into a sys-io abort; use it on a disposable
-release boot when changing this machinery.
-
-Two arms are covered by review and soak counters rather than
-per-run-deterministically: listening-pool refills parking *during* pressure
-(loopback connects are refused, so the test cannot accept a connection then),
-and sys-io's client-drop path (usually preempted by kernel admission at the
-final floors). Watch `net.pressure_deferred_replenish` and
-`net.pressure_refused_clients` in soak.
-
-Tests must not add retries, longer timeouts, ignored failures, or workload
-changes that conceal a crossed threshold.
-
-## Open follow-ups
-
-- The per-address-space sys-io memory-usage gauge (from the kernel's existing
-  per-pid `pages_user`/`pages_kernel` accounting) is not yet exported on
-  sys-io's own provider, and soak does not sample the pressure counters
-  periodically — so refining the refusal set still has no recorded
-  observations to work from.
-- The fault-injection acceptance test — drive an admitted operation past its
-  charge and require the invariant failure to surface — needs a
-  fault-injection seam the kernel does not have.
-
-## Deliberately not built
-
-- A `KernelRecovery` class (or anything else) that may allocate the pool to
-  zero.
-- Exact per-process attribution of page tables, shared slabs, or kernel-heap
-  objects.
-- A per-address-space memory-limit policy (the existing `max_memory` knob
-  remains orthogonal).
-- sys-io self-usage watermarks and allocator-backend instrumentation (the
-  global watermark subsumes them, merely later — acceptable for a stability
-  mechanism).
-- An OOM killer.
-- A configurable kernel physical reserve.
-- Retrying refused allocations.
-- Making every low-level mapping operation newly fallible.
-
-The design spends a fixed memory margin in exchange for a small
-implementation, deterministic refusal, and a safety argument validated by
-direct measurement.
+In the guest's System serial console run `chmod r-xr-xr-x /none/tmp/oom-abort`
+and then `/none/tmp/oom-abort system-oom-abort`. Expect the protected-process
+inventory, `oom-abort: READY`, the kernel's report and panic, and the VM
+exiting. The helper keeps its memory until the guest dies, so use only a
+disposable guest.

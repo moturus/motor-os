@@ -434,8 +434,9 @@ SSH. The <a href="architecture.html">Architecture</a> page describes each piece.
   userspace scheduling with a 10 ms tick.</li>
   <li>SMP with per-CPU ready queues and work stealing, up to 16 vCPUs.</li>
   <li>4 KiB pages, guarded lazily-allocated stacks, page faults handled in userspace
-  mappings, and admission control that keeps the machine out of physical memory
-  exhaustion (see <a href="memory.html">Memory</a>).</li>
+  mappings, and physical memory-pressure reporting. Kernel OOM handling parks
+  allocating operations and kills eligible processes to reclaim memory
+  (see <a href="memory.html">Memory</a>).</li>
 </ul>
 
 <h3>I/O, in userspace</h3>

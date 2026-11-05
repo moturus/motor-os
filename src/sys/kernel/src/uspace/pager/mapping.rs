@@ -1,4 +1,4 @@
-use crate::mm::{admission::Commitment, PAGE_SIZE_SMALL};
+use crate::mm::PAGE_SIZE_SMALL;
 use crate::uspace::process::Thread;
 use alloc::collections::BTreeSet;
 use alloc::sync::Weak;
@@ -12,8 +12,6 @@ pub(super) struct Waiter {
 
 pub(super) struct Mapping {
     pub(super) id: u64,
-    /// Admission for every page not yet filled.
-    pub(super) reservation: Commitment,
     pub(super) start: u64,
     pub(super) end: u64,
     /// Pages at or after this address are zero-filled without sys-io.

@@ -1,9 +1,9 @@
 # Kernel memory
 
 The design of physical and virtual memory management in the Motor OS
-kernel: `src/sys/kernel/src/mm`. Low-memory admission control and the
-memory-pressure flag are specified in [oom-handling.md](oom-handling.md);
-this document covers what they sit on.
+kernel: `src/sys/kernel/src/mm`. The published free-page count and OOM
+handling are described in [oom-handling.md](oom-handling.md); this document
+covers what they sit on.
 
 All sizes use binary units. A small page is 4 KiB; a block or huge page is
 2 MiB, containing 512 small pages. "Huge" means an ordinary allocation
@@ -24,12 +24,14 @@ is redesigned or its case is recorded as untested.
 | `mm/slab.rs` | Fixed-size slabs with intrusive refcounts (`SlabArc`); used for `Frame`, `Page` and segment descriptors, never deallocated. |
 | `mm/phys.rs` | The physical allocator facade: `Frame` ownership, stage-2 release, metrics and statistics. |
 | `mm/phys_blocks/` | The block pool: descriptors, free lists, search, boot shaping and the production instance. |
+| `mm/phys_blocks/policy.rs` | Packed accounting and OOM phase/generation, class-aware charge/release and scheduler attention. |
+| `mm/allocation.rs` | Internal allocation failures and generation-dependent retry decisions. |
 | `mm/virt.rs` | The kernel address space, its fixed virtual layout, mapping primitives, kernel self-tests. |
 | `mm/virt_intrusive.rs` | Segment trees and per-page descriptors built on intrusive collections, so virtual allocation never recurses into the heap. |
 | `mm/user.rs` | User address spaces: heaps, stacks, lazy and shared mappings, huge-page sizing, user-memory access. |
 | `mm/mmio.rs` | MMIO mapping for the kernel's own devices. |
-| `mm/admission.rs` | Admission floors, charges and the pressure flag (see oom-handling.md). |
 | `mm/cache.rs` | A cache of freed same-size virtual segments. |
+| `uspace/oom.rs`, `uspace/oom/wait.rs` | Scheduler jobs, victim/exit bookkeeping and syscall/fault waiter queues. |
 
 ## Physical memory
 
@@ -126,7 +128,9 @@ used < 512 is a panic, not a stranded block.
 
 All of these run under the owning block's lock, which is a leaf: no other
 lock is taken and nothing is allocated while it is held. Owning `Frame`
-handles are created, and admission notified, only after the lock is dropped.
+handles are created after the lock is dropped. Charges and releases may set
+OOM attention and poke a scheduler while holding it; they never post jobs,
+wake threads, log, allocate or acquire the OOM bookkeeping lock.
 
 - Push: validate alignment, bounds, split state, the allocatable interval,
   used > 0, position outside the unused range, and a clear list bit. Encode
@@ -154,13 +158,25 @@ production panics with the reason and the physical address.
 ### Accounting and indexes
 
 `total_pages = free_pages + used_pages` in small-page units. `total_pages` is
-normalized managed RAM, excluding the kernel heap, and is constant after
-init. `used_pages` is allocated plus reserved RAM; a
+normalized managed RAM, excluding the kernel image and boot heap, and is
+constant after init. `used_pages` is allocated plus reserved RAM; a
 taken block contributes 512; initrd and the list-state table count as
 allocated. `reserved_pages` is the reserved subset: boot reservations before
 stage 2, then permanent reservations and discarded free runs, constant after
 stage 2. Non-RAM positions contribute to no global counter. A high-water used
-count backs `min_free_small_pages`.
+count backs `min_free_small_pages`. Used pages occupy 25 bits of one atomic
+word alongside a 2-bit OOM phase, System block, armed bit and 35-bit generation.
+Count readers mask that word. `StateSnapshot` is a copied observation of this
+pool state; allocation/refusal/recovery decisions commit a new word by CAS.
+
+The allocation class comes from the recipient address space. Its one-process
+claim atomically records System for System-role processes and sys-io's children
+and grandchildren, using the actual parent even for delegated spawns. sys-io
+itself also uses System. Other processes and unclaimed spaces use User. Both
+stacks, page tables and MM slab growth use that class even when their virtual
+addresses are in kernel space. Kernel-owned allocations have no floor.
+Allocation floors, gates and the boot arming point are described in
+[oom-handling.md](oom-handling.md).
 
 Two atomic bitmaps index blocks: F for split blocks with free pages and W for
 whole blocks, including small-only ones. Bits match the descriptor whenever
@@ -168,17 +184,19 @@ its lock is released; a scan always revalidates under the lock. Updates are
 AcqRel read-modify-writes, since different block locks protect bits in one
 word. Split and taken counts are separate atomics; whole is W's popcount.
 
-Publication order is fixed: descriptor changes and index updates happen in
-the same critical section, and G (the global used counter) is updated with
-Release RMWs.
+Publication order is fixed. Descriptor changes and index updates happen
+under the same block lock. After all fallible ownership checks, a successful
+AcqRel CAS charges G (the used field) before changing ownership; a refusal
+may change OOM state but consumes no pages. Freeing publishes capacity before
+its releasing CAS. Count changes also update the relaxed userspace mirror.
 
 | Operation | Order |
 |---|---|
-| Small pop or run of n | Update ownership; G += n and the high-water; clear F if the block is now full. |
+| Small pop or run of n | Charge G += n and the high-water; update ownership; clear F if the block is now full. |
 | Push, block stays split | Update ownership; set F; G -= 1. |
 | Push and re-combine | Update ownership, clear CLAIMED and list metadata; set W; clear F; G -= 1. |
-| Split | Update descriptor; set F; clear W. G unchanged. |
-| Huge take | Update ownership; G += 512 and the high-water; clear W. |
+| Split during a small allocation | After its charge, initialize descriptor/list state; set F before clearing W. |
+| Huge take | Charge G += 512 and the high-water; update ownership; clear W. |
 | Huge return | Update ownership; set W; G -= 512. |
 | Stage-2 release of n | Reshape the descriptor; publish its final F or W; reduce reserved and G by n. |
 
@@ -189,7 +207,7 @@ is what makes the exhaustion protocol sound: after a failed complete scan of
 F then W, the allocator Acquire-loads G. If G equals `total_pages` the pool
 is out of memory at that observation. If G is smaller, a free has published
 its bit before its counter decrement, so a rescan will find it. This is the
-concurrent search protocol, not a retry loop; admission does not bound it.
+concurrent search protocol, not a retry loop; no fixed rescan bound applies.
 
 ### Search
 
@@ -305,7 +323,7 @@ region below the direct map, laid out so a single L3 table covers it:
 static (4 GiB), kernel stacks (8 GiB), kernel heap (8 GiB), MMIO (1 GiB),
 slabs (7 GiB), then the kernel's copy of sys-io. User addresses run from zero
 to 1 << 45. Two shared pages sit just below kernel data at fixed user
-addresses: the kernel static page (which carries the pressure flag) and the
+addresses: the kernel static page (which carries the free-page count) and the
 process static page. There is no KASLR.
 
 ### Segments and pages
@@ -313,13 +331,16 @@ process static page. There is no KASLR.
 An address space is a red-black tree of `VmemSegment`s; each segment holds
 its `Page` descriptors. Both live in slabs of intrusive nodes so that
 allocating virtual memory never allocates from the heap. `Page` and
-`SegmentNode` are 72 bytes each, and admission's per-page metadata budget
-(128 bytes per data page) is asserted at compile time to cover `Page`,
-`Frame` and page-table growth.
+`SegmentNode` are 72 bytes each.
 
 A map of zero pages is refused at the syscall entry with
 `E_INVALID_ARGUMENT`: every mapping path builds a segment, and an empty
-segment is a kernel assertion.
+segment is a kernel assertion. So is a size that overflows, and a size
+above a terabyte is refused there as `E_OUT_OF_MEMORY`. Past the entry
+checks of flags and addresses, the syscall layer returns the memory
+manager's code unchanged: a bad fixed address or an overlap is
+`E_INVALID_ARGUMENT`, a closed space `E_BAD_HANDLE`, and only a shortage,
+of address space included, `E_OUT_OF_MEMORY`.
 
 A `Page`'s kind is derived from its `Frame`; a page without a frame is a
 small guard page or unmapped reservation. Lookup finds the greatest page
@@ -341,13 +362,52 @@ sharing into a lazy segment is refused. A lazy segment can be a share source
 once every page of the shared range has been touched; a share is validated
 in full before the first destination page changes.
 
-Neither frame allocation nor page-table growth can fail: admission keeps the
-kernel away from an empty pool, and `phys::allocate_frame` and the
-page-table allocator panic if it is reached anyway. `PageTable::map_page`
-fails only for mapping options it does not accept; eager construction rolls
-a segment back at its boundary on that error, and a fault that meets it
-leaves its fresh descriptor frameless, which is a hole. Nothing in the
-mapping paths has an allocation failure branch.
+Every page acquired for a process's mappings is acquired fallibly: data
+frames, page and segment descriptors (their
+slabs grow one frame at a time, and a segment node is secured before its
+segment is built), page-table pages, the process static page and the
+frame-descriptor slab's growth, which takes all its pages before mapping
+any and gives them all back on failure, under a lock that also keeps a
+failed growth from consuming the slab region, and which refuses the same
+way once that region is full. The exception is the kernel heap, which
+still panics on exhaustion. The allocator logs nothing on exhaustion;
+a process can provoke it at will. `PageTable::map_page` retires the
+page-table pages it created before it failed, as it retires emptied ones,
+so a failed mapping leaves no trace once flushed. Eager construction rolls
+the whole segment back at its boundary; a refused fault leaves a sparse
+segment without the descriptor, so every descriptor of a sparse segment
+carries a frame, and leaves a dense page's descriptor as it was; a pager
+fill reports the pages it did install; a stack whose first page cannot be
+faulted in is unmapped again; address-space construction maps its static
+pages before the space exists and undoes them on failure. A share first
+maps the source frames behind the destination pages that have none, the
+only step that needs page-table pages, and unmaps them again if one cannot
+be had; the pages that had frames are then switched in place by
+`PageTable::remap_page`, which keeps the tables and so needs no memory. A
+failed share leaves the destination as it was.
+
+Internal `AllocationFailure` values preserve the recipient class, physical
+refusal kind and state observed at refusal. Ordinary validation, quota and
+virtual-region errors stay distinct. Outer syscall retries unwind temporary
+resources and sample the post-rollback state before parking. Ordinary syscalls
+wait for an active OOM run and retry when it ends in Idle or Latched, or when
+the generation changes. A gate refusal whose run already ended retries without
+parking. In Latched, User requests and System requests that do not fit return
+`E_OUT_OF_MEMORY`; neither waits for a finished run. An ordinary physical
+failure whose rollback restores at least 768 pages still returns
+`E_OUT_OF_MEMORY`. Retry revalidates the target and preserves an earlier floor
+refusal through huge-to-small fallback. No owned syscall resource relies on
+Rust destructors running when a killed thread's stack is discarded.
+
+Valid faults keep class-based waits on pressure; invalid faults keep their
+fatal handling. Pager fills retain their completed prefix, release source
+pins before waiting and revalidate mapping identity before resuming. A fill
+for a System-class process retries physical pressure even if recovery happened
+before wait registration, and can retry through the System gate in Latched.
+It does not turn that pressure into a fatal pager error; the existing
+victimless-abort rule still applies below 512 free pages.
+Fault waiters use the pager's preempted-thread resume path; syscall waiters
+preserve ordinary userspace wakes. Queue removal owns each single resume.
 
 `VmemKind` distinguishes boot, MM slab, MMIO, heap, stack, static, user,
 user-stack and unmapped segments. `VaddrMapStatus` reports unallocated,
@@ -365,6 +425,32 @@ process or from kernel-static memory, so a concurrent unmap cannot remove
 or replace the reservation in between, and a rollback never removes a
 segment another thread has since put at the same address. Any two region
 locks are taken in that one order, the higher region address first.
+
+### Release at process exit
+
+A process's memory goes back when it exits, not when the last handle to it
+is dropped. Threads leave the process's thread map before their stacks are
+unmapped, so the exit completes under whichever thread finishes the last
+stack cleanup of an emptied map. That thread retires the pager mappings,
+closes the IPC endpoints and calls `UserAddressSpace::release_user_memory`
+before the exit becomes visible to waiters: every CPU is moved off the page
+table, which is marked dead so that the unmaps need no further shootdowns;
+the normal and custom regions free their segments (private frames go back,
+shared frames live on in their other mappings), and the page descriptors,
+the process static page and the cached kernel stacks, with the cache's own
+pages, are released, leaving the process's user and kernel memory
+statistics at zero. The regions are
+closed under their locks, so a handle that outlives the process cannot map
+or share new pages into the dead space, and the pager cannot fill it: the
+region answers `E_BAD_HANDLE`, which `SysMem::map` still reports as
+`E_OUT_OF_MEMORY`. Only the page-table root with its kernel entries and the
+kernel static page mapping remain until the address space is dropped. The
+release is idempotent; drop retires and releases again, which also covers
+spaces no process exited from, such as a failed spawn's. An address space
+hosts one process in its lifetime: `Process::new_child` claims it and
+answers `E_ALREADY_IN_USE` for a second process, before or after the first
+one's exit, as that exit frees the stacks and static page a second process
+would use.
 
 ### User heaps and huge pages
 
@@ -393,9 +479,7 @@ An eligible segment is 2 MiB aligned. Huge entries are stored first, then
 the small tail. A refused huge candidate becomes 512 small mappings, and
 after the first refusal every remaining candidate is served small without
 asking again; the segment keeps its policy bit either way. Returned size,
-statistics and admission all use `mapped_pages`; the charge is
-`mapping_charge(M, M)` aggregated over the request, which conservatively
-covers full fallback and needs no refund on huge success. `SysMem::map2`
+statistics use `mapped_pages`. `SysMem::map2`
 exposes the returned size; `free` frees the complete segment.
 
 Huge availability is best effort. After a pressure episode most blocks are
@@ -411,7 +495,7 @@ its start (the lower guard) and its full size, and `free` takes that start.
 A guard has no frame and refuses every fault, which kills the faulting
 thread as a stack guard does, and a guarded segment is refused at either
 end of a share. The guards count toward reserved but not resident memory; the eager
-kind is charged for its pages plus a descriptor per guard, the lazy kind
+kind allocates its data and descriptors up front; the lazy kind allocates
 per touched page.
 
 ### Sharing
@@ -438,23 +522,13 @@ descriptor is allocated before `map_page` and installed only on success. On
 failure the virtual segment is removed and its accounting reversed once.
 Kernel LAPIC, IOAPIC and sys-io BAR mappings use the same path.
 
-## Admission and pressure
+## Published free memory
 
-Admission is specified in [oom-handling.md](oom-handling.md). The parts
-that touch the allocator directly:
-
-- `available_small_pages` is the pool's free count; `min_free_small_pages`
-  is derived from the pool's high-water mark and includes allocations made
-  outside any admission window.
-- Every successful free notifies admission after the block lock is dropped.
-- Pressure sampling and publication are serialized by one `SpinLock<()>`,
-  taken with interrupts disabled and holding nothing else. Every update site
-  samples the reservation count (Acquire) and then physical availability
-  inside the lock; callers cannot pass a stale count, and small-page frees
-  participate even while the flag is clear. Only real transitions across the
-  512/768-page hysteresis write the shared flag. This guarantees that a
-  delayed publisher cannot restore an older observation over newer completed
-  updates; it does not make the two counters an instantaneous snapshot.
+`KernelStaticPage::free_pages` is specified in [oom-handling.md](oom-handling.md).
+The block allocator mirrors its free-page count into that field: one snapshot
+when the kernel address space is created, then a relaxed atomic add or
+subtract in `charge` and `release` for every allocation and free. No lock or
+sampling is involved; the kernel's own checks read the allocator directly.
 
 ## Process memory statistics
 
@@ -471,7 +545,7 @@ coverage is unchanged: not all boot mappings are captured, fixed per-process
 static pages are excluded, and kernel bookkeeping is not charged to each
 process. Reservation and resident counters are sampled independently; a
 concurrent mapping change can make a snapshot temporarily inconsistent.
-Memory limits and admission retain their existing reservation-based policy.
+Per-process memory limits continue to apply to reserved virtual memory.
 
 ## Validation
 
@@ -489,7 +563,23 @@ and checks that sharing is refused at either eligible endpoint. A
 guarded-heap self-test checks the exact shape of both kinds, including the
 one-page minimum and a size an ordinary heap would round, guard refusals,
 share refusal at either end with the refused destination intact, and
-teardown.
+teardown. An exhaustion self-test holds every whole block, dual-purpose
+ones as huge frames and small-only ones as untouched runs, drains the
+remaining free pages into a list threaded through the pages themselves,
+and checks at exact page counts that a heap, a fault, a pager fill, a
+contiguous request, a share, both stacks and a new address space refuse
+with `E_OUT_OF_MEMORY` and leave nothing behind, in page descriptors,
+resident and reserved pages and the process charge, when the frame, a
+page-table page or, in a fresh space, a descriptor slab is missing,
+including after partial progress: a fill that installed its first page, a
+contiguous run found before its page tables, a share that mapped its first
+page, a kernel stack half built. Each then succeeds with exactly the pages
+it needs, and a 4 MiB fallback mapping that runs out midway returns every
+page it mapped. The frame-descriptor slab is filled to its boundary, with
+the growth placed across a page-table boundary: every growth short of a
+page returns its pages and leaves the cursor in place and nothing mapped,
+the one that had mapped its prefix included, and the full growth takes
+exactly the slab's pages and the one page-table page.
 
 Systest (`mem_blocks.rs`, reached by full-test.sh) covers placement of fresh
 1 MiB pieces within `10 + 2 * CPUs` blocks on the plain 1 GiB guest, mixed
@@ -506,6 +596,11 @@ refused flag combinations, a child killed on touching either guard, and a
 guarded IPC listener buffer refused with its guards and bytes intact.
 
 Pool-squeezing cases run only in plain systest, never under load.
+The armed System-console cases cover allocation floors, victims, syscall and
+fault waits, completed-run retries, Latched refusals, cancellation, recovery
+and reclamation of debugger-paused victims. A separate disposable guest verifies
+the victimless report and abort after the ordinary full suite; commands and
+expected diagnostics are in [oom-handling.md](oom-handling.md).
 Benchmarks are user-owned.
 
 ## Accepted costs and non-goals

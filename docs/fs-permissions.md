@@ -16,9 +16,10 @@ Tests that need Motor FS storage, or data that survives a reboot, use
 `/user/test-tmp` instead. Memfs charges live data and metadata against each
 mount's configured capacity. With
 the default configuration the cap is guest RAM rounded down to 16 MiB, minus
-16 MiB, with an 8 MiB minimum. Allocating requests also preserve a sampled
-16 MiB memory reserve (8 MiB below 32 MiB RAM); cached free pages are reclaimed
-before a memory refusal. A large explicit capacity does not reserve RAM.
+16 MiB, with an 8 MiB minimum. Allocating requests return `StorageFull` below
+4 MiB of actual free physical
+memory, after reclaiming unused cached blocks and checking again. Reads, stat,
+list, sparse resize, and delete remain allowed. A large explicit capacity does not reserve RAM.
 Sparse logical length and holes do not consume data storage.
 
 Copies between disk and memfs work normally. Renaming between them returns

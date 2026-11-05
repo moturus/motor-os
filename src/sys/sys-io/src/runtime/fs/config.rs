@@ -1,5 +1,5 @@
 //! Bounded boot configuration, fully validated before applying any mount.
-use super::{FS, admission, mounts};
+use super::{FS, memory, mounts};
 use moto_sdk::async_fs::{
     AccessPermissions, EntryKind, FileSystem, ROOT_ID, Role, RolePermissions,
 };
@@ -187,7 +187,7 @@ pub(crate) async fn read_root_file(
 
 async fn mount_one(
     table: &Rc<RefCell<mounts::MountTable>>,
-    caches: &admission::FreeCaches,
+    caches: &memory::FreeCaches,
     config: ValidatedMount,
     role: Role,
 ) -> Result<()> {
@@ -216,8 +216,8 @@ async fn mount_one(
     let memfs = memfs::MemFs::new(memfs::MemFsConfig {
         max_size: config
             .max_size
-            .unwrap_or_else(|| admission::default_capacity(ram)),
-        free_cache_cap: admission::cache_capacity(ram),
+            .unwrap_or_else(|| memory::default_capacity(ram)),
+        free_cache_cap: memory::cache_capacity(ram),
         root_mode: mode,
     })?;
     let cache = memfs.free_block_cache();
@@ -238,7 +238,7 @@ async fn mount_one(
 
 pub(super) async fn load(
     table: &Rc<RefCell<mounts::MountTable>>,
-    caches: &admission::FreeCaches,
+    caches: &memory::FreeCaches,
 ) -> Result<()> {
     let Some(bytes) = read_root_file(table, "/system/cfg/sys-fs.toml").await? else {
         return Ok(());

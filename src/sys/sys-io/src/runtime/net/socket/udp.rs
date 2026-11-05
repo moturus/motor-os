@@ -380,8 +380,6 @@ impl MotoSocket {
             return Err(ErrorKind::InvalidInput.into());
         }
         let subchannel_mask = api_net::io_subchannel_mask(subchannel_idx);
-
-        runtime.pressure.admit()?;
         let mut runtime_mut = runtime.inner.borrow_mut();
         let mut resp = msg;
         let ip_addr = socket_addr.ip();

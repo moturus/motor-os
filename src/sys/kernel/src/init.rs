@@ -315,6 +315,7 @@ fn copy_sys_io(sys_io_bytes: &[u8]) {
     let seg = crate::mm::virt::vmem_allocate_pages(
         crate::mm::virt::VmemKind::KernelStatic,
         crate::mm::align_up(sys_io_bytes.len() as u64, PAGE_SIZE_SMALL) >> PAGE_SIZE_SMALL_LOG2,
+        crate::mm::AllocationClass::Kernel,
     )
     .unwrap();
 
@@ -345,7 +346,13 @@ fn cpu_main(this_cpu: u64) -> ! {
         crate::mm::init_mm_bsp_stage2();
         crate::xray::stats::init();
         #[cfg(debug_assertions)]
+        crate::xray::stats::tests::run();
+        #[cfg(debug_assertions)]
         crate::mm::phys_blocks::test();
+        #[cfg(debug_assertions)]
+        crate::uspace::oom::test();
+        #[cfg(debug_assertions)]
+        crate::uspace::pager::test();
         #[cfg(debug_assertions)]
         crate::mm::virt::self_test();
         #[cfg(debug_assertions)]
@@ -361,7 +368,11 @@ fn cpu_main(this_cpu: u64) -> ! {
         #[cfg(debug_assertions)]
         crate::mm::user::shared_alloc_cleanup_self_test();
         #[cfg(debug_assertions)]
+        crate::mm::user::exit_release_self_test();
+        #[cfg(debug_assertions)]
         crate::arch::paging::retired_tables_self_test();
+        #[cfg(debug_assertions)]
+        crate::mm::user::exhaustion_self_test();
         crate::uspace::init();
 
         // If we print the boot logo before init_clock(), KVM in the host misbehaves and
@@ -412,6 +423,10 @@ pub fn start_userspace_processes() {
     }
     let entry_point = result.unwrap();
 
+    address_space
+        .claim_for_process(crate::mm::AllocationClass::System)
+        .unwrap();
+
     let (process, _object) = crate::uspace::Process::new(
         crate::xray::stats::kernel_stats(),
         address_space,
@@ -431,6 +446,8 @@ pub fn start_userspace_processes() {
     log::set_max_level(log::LevelFilter::Info);
 
     log::debug!("starting sys-io");
+    // Schedulers and OOM consumers are ready; boot exhaustion stayed unarmed.
+    crate::mm::phys::arm_oom();
     process.start();
 
     let _ = alloc::sync::Arc::into_raw(process);

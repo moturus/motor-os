@@ -1,16 +1,11 @@
 //! Sparse lazy reservations: an untouched `F_LAZY` map costs the same at any
-//! size, its pages behave as before once touched, and the admission rules
-//! still hold at the floor.
+//! size, and its pages behave as before once touched.
 
 use moto_sys::sys_mem::{PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
 use moto_sys::syscalls::do_syscall;
 use moto_sys::{SysHandle, SysMem, SysObj};
 
-use moto_sys::stats::PID_KERNEL;
-
-use crate::admission::{
-    DRIFT_TOLERANCE_PAGES, assert_floors_held, assert_recovered, kernel_metric_at,
-};
+use crate::memory::{DRIFT_TOLERANCE_PAGES, assert_recovered, kernel_metric_at};
 
 const GIB: u64 = 1 << 30;
 const TIB: u64 = 1 << 40;
@@ -293,11 +288,12 @@ fn shared_alloc_rollback_race(check_recovery: bool) {
             ready.wait();
             go.wait();
             let (mut strays, mut stray_count) = ([0_u64; MAX_STRAYS], 0_usize);
-            let mut refused = 0_u32;
+            let (mut undone, mut occupied) = (0_u32, 0_u32);
             for _ in 0..ROUNDS {
                 // The target side takes the hole, the caller's side finds
-                // no room, and the whole call is undone; or the hole is the
-                // mapper's for the moment and the call is refused at once.
+                // no room, and the whole call is undone as out of memory;
+                // or the hole is the mapper's for the moment and the fixed
+                // address is refused at once as invalid.
                 match SysMem::map2(
                     target,
                     SysMem::F_SHARE_SELF | SysMem::F_READABLE | SysMem::F_WRITABLE,
@@ -306,7 +302,8 @@ fn shared_alloc_rollback_race(check_recovery: bool) {
                     PAGE_SIZE_SMALL,
                     PAGES,
                 ) {
-                    Err(moto_rt::E_OUT_OF_MEMORY) => refused += 1,
+                    Err(moto_rt::E_OUT_OF_MEMORY) => undone += 1,
+                    Err(moto_rt::E_INVALID_ARGUMENT) => occupied += 1,
                     // The caller's side found a gap the runtime freed: keep
                     // it, so the next call fails again. The mapper takes
                     // the hole back, as it does with anything there.
@@ -320,7 +317,7 @@ fn shared_alloc_rollback_race(check_recovery: bool) {
                 }
             }
             done.store(true, Ordering::Release);
-            (refused, strays, stray_count)
+            (undone, occupied, strays, stray_count)
         })
     };
     let mapper = {
@@ -366,7 +363,7 @@ fn shared_alloc_rollback_race(check_recovery: bool) {
     }
 
     go.wait();
-    let (refused, strays, stray_count) = sharer.join().unwrap();
+    let (undone, occupied, strays, stray_count) = sharer.join().unwrap();
     let (rounds, misses) = mapper.join().unwrap();
     let _ = SysMem::unmap(target, 0, u64::MAX, HOLE);
     for addr in strays.iter().take(stray_count).chain(fillers.iter()) {
@@ -375,7 +372,7 @@ fn shared_alloc_rollback_race(check_recovery: bool) {
     SysMem::free(source).unwrap();
     SysObj::put(target).unwrap();
     assert!(rounds > 0, "the mapper never mapped");
-    assert!(refused > 0, "no shared allocation was ever undone");
+    assert!(undone > 0, "no shared allocation was ever undone");
     // The hole is taken at the mapper's map only by what a stray success
     // left there, once each. A rollback that reaches the mapper's
     // half-built mapping, as it could when the locks were released in
@@ -389,7 +386,8 @@ fn shared_alloc_rollback_race(check_recovery: bool) {
     }
     println!(
         "test_sparse_shared_alloc_rollback_race PASS: {rounds} maps and {misses} misses \
-         against {refused} refused shared allocations, {stray_count} stray gaps"
+         against {undone} undone and {occupied} refused shared allocations, \
+         {stray_count} stray gaps"
     );
 }
 
@@ -413,49 +411,6 @@ fn test_exit_with_reservations() {
     println!("test_sparse_exit_with_reservations PASS");
 }
 
-/// A process holding a large sparse reservation drives the machine to the
-/// user floor and then touches more of it: the faulting thread is killed,
-/// the kernel stays alive, and the pool comes back. The child reports each
-/// phase on its stdout, so a death before the fault phase, whatever its
-/// cause, fails here rather than passing as the kill under test.
-fn test_fault_at_floor() {
-    use std::io::Read;
-    let refused_before = kernel_metric_at("mem.admission_refused_user", PID_KERNEL);
-    let used_before = used_pages();
-    let mut child = crate::subcommand::spawn();
-    child.sparse_fault_at_floor();
-    let status = child.wait().unwrap();
-    let mut stdout = child.std_child().stdout.take().unwrap();
-    drop(child);
-    // Nothing allocates until the pool is back; see `assert_recovered`.
-    assert_recovered(
-        used_before,
-        DRIFT_TOLERANCE_PAGES,
-        "the sparse aggressor died",
-    );
-
-    let mut phases = String::new();
-    stdout.read_to_string(&mut phases).unwrap();
-    assert_eq!(
-        phases, "setup\ndrained\n",
-        "the child did not reach the fault phase"
-    );
-    // A kernel kill, not an exit or an abort of the child's own.
-    assert_eq!(
-        status.code(),
-        Some(-1),
-        "not killed by the kernel: {status:?}"
-    );
-    // Two refusals end the drain loops; the killing fault is at least one more.
-    let refusals = kernel_metric_at("mem.admission_refused_user", PID_KERNEL) - refused_before;
-    assert!(
-        refusals >= 3,
-        "{refusals} refusals, expected the drains' two and a fault's"
-    );
-    assert_floors_held();
-    println!("test_sparse_fault_at_floor PASS");
-}
-
 /// The child side of `test_exit_with_reservations`.
 pub fn run_exit_child() -> ! {
     let big = map_lazy(64 * GIB).unwrap();
@@ -463,35 +418,6 @@ pub fn run_exit_child() -> ! {
     for idx in 0..16 {
         touch(big + idx * (64 * GIB / 16));
         touch(huge + idx * (TIB / 16));
-    }
-    std::process::exit(0);
-}
-
-/// The child side of `test_fault_at_floor`. Never returns: it is killed on a
-/// refused fault, or it exits zero so the parent's assertion fires. Each
-/// phase is reported with a static line; the first one, written while
-/// memory is plentiful, is what allocates stdout's buffer.
-pub fn run_fault_at_floor_child() -> ! {
-    use std::io::Write;
-    let mut stdout = std::io::stdout();
-    // The reservation costs nothing until touched; its first pages are
-    // faulted in while memory is plentiful.
-    let lazy = map_lazy(64 * GIB).unwrap();
-    for idx in 0..8 {
-        touch(lazy + idx * PAGE_SIZE_SMALL);
-    }
-    stdout.write_all(b"setup\n").unwrap();
-    stdout.flush().unwrap();
-    // Drain to the user floor: coarsely first, then one page at a time, so
-    // that what is left of the band is smaller than a lazy fault's charge.
-    while SysMem::alloc(PAGE_SIZE_SMALL, 256).is_ok() {}
-    while SysMem::alloc(PAGE_SIZE_SMALL, 1).is_ok() {}
-    stdout.write_all(b"drained\n").unwrap();
-    stdout.flush().unwrap();
-    // Each admitted fault takes one more page; at most a handful succeed
-    // before the rest are refused and this thread is killed.
-    for idx in 8..(64 * GIB / PAGE_SIZE_SMALL) {
-        touch(lazy + idx * PAGE_SIZE_SMALL);
     }
     std::process::exit(0);
 }
@@ -607,25 +533,6 @@ pub fn run_guard_touch_child(case: u64) -> ! {
     touch(guard);
     println!("guard_touch {case}: still alive");
     std::process::exit(0);
-}
-
-/// The first pressure event of a boot grows the pool once, by about a
-/// thousand pages, and the floor test expects it to be steady afterwards.
-/// An OOM child, like `test_oom` in the full suite, absorbs it, cheaply
-/// when it has happened already; the tests then start once the pressure
-/// it caused has cleared.
-fn warm_up_pool() {
-    let mut child = crate::subcommand::spawn();
-    child.oom();
-    assert!(!child.wait().unwrap().success());
-    drop(child);
-    for _ in 0..300 {
-        if !moto_sys::memory_pressure() {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    panic!("memory pressure did not clear after the warm-up child died");
 }
 
 /// Bounded resident memory, widely scattered descriptors, and simultaneous
@@ -775,14 +682,12 @@ pub fn run_soak_tests() {
 }
 
 pub fn run_all_tests() {
-    warm_up_pool();
     test_process_memory_stats();
     test_large_reservations();
     test_lazy_share_source();
     test_guarded_maps();
     test_shared_alloc_rollback_race();
     test_exit_with_reservations();
-    test_fault_at_floor();
     soak_first_touch();
     soak_table_churn();
 }

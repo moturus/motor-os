@@ -134,7 +134,9 @@ if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   testing_seconds=$((SECONDS - testing_started))
   if [ "$status" -eq 124 ]; then
     echo "full-test: timed out after $TIMEOUT seconds of testing" >&2
-  elif [ "$status" -eq 0 ]; then
+  elif [ "$status" -ne 0 ]; then
+    echo "FULL TEST FAIL: status $status after $(minutes "$testing_seconds") minutes of testing" >&2
+  else
     printf 'FULL TEST PASS: preparation steps: %s minutes, testing: %s minutes\n' \
       "$(minutes "$preparation_seconds")" "$(minutes "$testing_seconds")"
     for boot_vmm in "${SKIPPED_BOOT_VMMS[@]}"; do
@@ -145,8 +147,15 @@ if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   exit "$status"
 fi
 
-# abort on error
-set -e
+# Abort on error and name the command that failed. Until the EXIT trap below
+# is installed, a failing host-only phase would otherwise end the suite with
+# no diagnostic at all; errtrace carries the trap into functions.
+set -eE
+report_failed_command() {
+  local command="${3%%$'\n'*}"
+  echo "full-test: FAILED: $2${4:+ in $4()}: ${command:0:160} (status $1)" >&2
+}
+trap 'report_failed_command "$?" "${BASH_SOURCE[0]}:$LINENO" "$BASH_COMMAND" "${FUNCNAME[0]:-}"' ERR
 
 # The repo root is two levels up from src/tests/.
 ROOT_DIR="$WD/../.."
@@ -513,6 +522,7 @@ cleanup_full_test() {
   local status="$1"
   local cleanup_status=0
   trap - EXIT
+  trap - ERR
   set +e
   if [ -n "$RMUX_TITLE_IN_FD" ]; then
     exec {RMUX_TITLE_IN_FD}>&-
@@ -1648,4 +1658,12 @@ vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/tokio-tests"
 kill -0 "$VMM_PID" 2>/dev/null ||
   fail "owned $TEST_VM_LABEL exited before final teardown"
 cleanup_full_test 0 || exit "$?"
+# The expected OOM panic belongs to a separate guest, after ordinary tests.
+# Teardown removed the ERR trap, so name this phase on failure.
+oom_args=(--vmm "$VMM")
+if [ "$BUILD" = release ]; then
+  oom_args+=(--release)
+fi
+"$WD/test-oom-abort.sh" "${oom_args[@]}" ||
+  fail "test-oom-abort.sh failed (status $?)"
 echo "-------- MOTOR OS FULL TEST PASS ---------"
