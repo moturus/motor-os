@@ -4,8 +4,9 @@ use std::{
 };
 
 use gix::bstr::ByteSlice;
+use gix_transport::{Protocol, Service, client::blocking_io::Transport};
 
-use crate::{cancellation::Cancellation, http::Adapter, https_url::HttpsUrl, ssh};
+use crate::{cancellation::Cancellation, http::Adapter, https_url::HttpsUrl, prompt, ssh};
 
 const MAX_RESPONSE_BYTES: u64 = 128 * 1024 * 1024;
 
@@ -49,12 +50,33 @@ impl Policy {
         })
     }
 
+    /// A transport for clone and fetch.
     pub fn transport(
         &self,
         url: gix::url::Url,
         staging: &Path,
         registrar: &ssh::Registrar,
-    ) -> crate::Result<Box<dyn gix_transport::client::blocking_io::Transport + Send>> {
+    ) -> crate::Result<Box<dyn Transport + Send>> {
+        self.connect(url, staging, registrar, Service::UploadPack)
+    }
+
+    /// A transport for push.
+    pub fn push_transport(
+        &self,
+        url: gix::url::Url,
+        staging: &Path,
+        registrar: &ssh::Registrar,
+    ) -> crate::Result<Box<dyn Transport + Send>> {
+        self.connect(url, staging, registrar, Service::ReceivePack)
+    }
+
+    fn connect(
+        &self,
+        url: gix::url::Url,
+        staging: &Path,
+        registrar: &ssh::Registrar,
+        service: Service,
+    ) -> crate::Result<Box<dyn Transport + Send>> {
         self.cancellation.check()?;
         if url.scheme == gix::url::Scheme::Ssh {
             return Ok(Box::new(
@@ -62,18 +84,23 @@ impl Policy {
             ));
         }
         validate_url(&url)?;
+        let cancellation = self.cancellation.clone();
         let adapter = Adapter::new(
             &self.ca_bundle,
             staging,
             MAX_RESPONSE_BYTES,
+            service,
+            Box::new(move |origin| prompt::ask(origin, &cancellation)),
             self.cancellation.clone(),
         )?;
+        // Receive-pack has no protocol V2, and V1 sends no Git-Protocol header.
+        let protocol = match service {
+            Service::UploadPack => Protocol::V2,
+            Service::ReceivePack => Protocol::V1,
+        };
         Ok(Box::new(
             gix_transport::client::blocking_io::http::Transport::new_http(
-                adapter,
-                url,
-                gix_transport::Protocol::V2,
-                false,
+                adapter, url, protocol, false,
             ),
         ))
     }

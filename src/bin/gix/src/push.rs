@@ -2,7 +2,7 @@ use std::io::{self, Write};
 
 use crate::{
     cancellation::Cancellation,
-    network::Failure,
+    network::{self, Failure},
     push_discovery, push_objects, push_pack,
     push_policy::{self, Spec},
     push_protocol,
@@ -17,26 +17,38 @@ enum Publication {
     Report(Report),
 }
 
+/// What `gix push` was asked to publish, and where.
+pub struct Request<'a> {
+    pub remote: &'a str,
+    pub refspec: &'a str,
+    pub lease: Option<&'a str>,
+    pub dry_run: bool,
+}
+
 pub fn run(
     repo: &gix::Repository,
-    remote: &str,
-    refspec: &str,
-    lease: Option<&str>,
-    dry_run: bool,
+    request: Request<'_>,
+    policy: &network::Policy,
     cancellation: &Cancellation,
     out: impl Write,
 ) -> crate::Result {
+    let Request {
+        remote,
+        refspec,
+        lease,
+        dry_run,
+    } = request;
     let spec = Spec::parse(refspec, lease)?;
     let source = spec
         .resolve(repo, cancellation)
         .map_err(|error| cancellation.normalize_error(error))?;
-    let prepared = push_policy::remote(repo, remote)?;
+    let url = push_policy::remote(repo, remote)?;
     let (operation, registrar) = ssh::Operation::new(cancellation);
     let mut update_started = false;
     let transfer = (|| -> crate::Result<Publication> {
-        let mut transport = prepared.transport(registrar);
+        let mut transport = policy.push_transport(url, repo.git_dir(), &registrar)?;
         let advertised =
-            push_discovery::discover(&mut transport, spec.destination.as_ref(), cancellation)?;
+            push_discovery::discover(&mut *transport, spec.destination.as_ref(), cancellation)?;
         let command = push_protocol::command(
             advertised.destination_old,
             source,
@@ -44,7 +56,7 @@ pub fn run(
         )?;
         let no_op = spec.validate_update(repo, source, advertised.destination_old, cancellation)?;
         if no_op || dry_run {
-            push_protocol::finish_discovery(&mut transport, cancellation)?;
+            push_protocol::finish_discovery(&mut *transport, cancellation)?;
             return Ok(if no_op {
                 Publication::NoOp
             } else {
@@ -54,7 +66,7 @@ pub fn run(
         let selection = push_objects::select(repo, source, &advertised.advertised, cancellation)?;
         let pack = push_pack::write(repo, &selection, repo.git_dir(), cancellation)?;
         let report = push_protocol::send(
-            &mut transport,
+            &mut *transport,
             &command,
             spec.destination.as_ref(),
             pack.into_reader()?,

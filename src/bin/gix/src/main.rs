@@ -154,7 +154,7 @@ fn run() -> Result {
         )
         .subcommand(
             Command::new("push")
-                .about("Push one explicit branch or tag to an SSH remote")
+                .about("Push one explicit branch or tag to an HTTPS or SSH remote")
                 .arg(
                     Arg::new("dry-run")
                         .long("dry-run")
@@ -370,17 +370,22 @@ fn run() -> Result {
         }
         Some("push") => {
             let command = matches.subcommand_matches("push").expect("matched push");
+            let policy = network::Policy::new(&overrides, &cancellation)?;
+            let request = push::Request {
+                remote: command
+                    .get_one::<String>("remote")
+                    .expect("required remote"),
+                refspec: command
+                    .get_one::<String>("refspec")
+                    .expect("required refspec"),
+                lease: command.get_one::<String>("lease").map(String::as_str),
+                dry_run: command.get_flag("dry-run"),
+            };
             // Push retains confirmed publication facts across late cancellation itself.
             return push::run(
                 &opened.repo,
-                command
-                    .get_one::<String>("remote")
-                    .expect("required remote"),
-                command
-                    .get_one::<String>("refspec")
-                    .expect("required refspec"),
-                command.get_one::<String>("lease").map(String::as_str),
-                command.get_flag("dry-run"),
+                request,
+                &policy,
                 &cancellation,
                 io::stdout().lock(),
             );

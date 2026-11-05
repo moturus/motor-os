@@ -3,8 +3,10 @@ use std::{io, path::Path, process::Command};
 #[cfg(not(target_os = "motor"))]
 use std::{fs::File, io::Read};
 
-use crate::https_url::HttpsUrl;
+use crate::{https_url::HttpsUrl, prompt::Credential};
 
+/// Carries the `Authorization` value into curl, so argv holds only this name.
+const AUTHORIZATION_VARIABLE: &str = "GIX_HTTP_AUTHORIZATION";
 const MAX_HEADER_BYTES: usize = 8 * 1024;
 const MAX_CONTROL_BYTES: usize = 16 * 1024;
 const MAX_DIAGNOSTIC_BYTES: usize = 64 * 1024;
@@ -23,15 +25,17 @@ pub struct Metadata {
     pub size: u64,
 }
 
-/// Prepare fixed anonymous HTTPS curl arguments. The caller bounds capture and validates the nonce trailer.
+/// Prepare fixed HTTPS curl arguments, anonymous unless `credential` is given.
+/// The caller bounds capture and validates the nonce trailer.
 pub fn command(
     url: &HttpsUrl,
     ca_bundle: &Path,
     headers: &[String],
     has_body: bool,
+    credential: Option<&Credential>,
 ) -> io::Result<(Command, String)> {
     let nonce = nonce()?;
-    let prepared = command_with_nonce(url, ca_bundle, headers, has_body, &nonce)?;
+    let prepared = command_with_nonce(url, ca_bundle, headers, has_body, credential, &nonce)?;
     Ok((prepared, nonce))
 }
 
@@ -40,6 +44,7 @@ fn command_with_nonce(
     ca_bundle: &Path,
     headers: &[String],
     has_body: bool,
+    credential: Option<&Credential>,
     nonce: &str,
 ) -> io::Result<Command> {
     validate_headers(headers)?;
@@ -85,6 +90,16 @@ fn command_with_nonce(
     }
     if has_body {
         command.args(["--data-binary", "@-"]);
+    }
+    if let Some(credential) = credential {
+        command
+            .env(AUTHORIZATION_VARIABLE, credential.authorization())
+            .args([
+                "--variable",
+                "%GIX_HTTP_AUTHORIZATION",
+                "--expand-header",
+                "Authorization: {{GIX_HTTP_AUTHORIZATION}}",
+            ]);
     }
     command
         .arg("--cacert")
@@ -297,7 +312,7 @@ mod tests {
             collect_headers(headers.iter().map(String::as_str)).expect("bounded headers"),
             headers
         );
-        let prepared = command_with_nonce(&url, Path::new("/ca.pem"), &headers, true, NONCE)
+        let prepared = command_with_nonce(&url, Path::new("/ca.pem"), &headers, true, None, NONCE)
             .expect("valid request");
         assert_eq!(prepared.get_program(), CURL);
         assert_eq!(
@@ -321,7 +336,7 @@ mod tests {
         );
 
         let (without_body, random) =
-            command(&url, Path::new("/ca.pem"), &[], false).expect("random request");
+            command(&url, Path::new("/ca.pem"), &[], false, None).expect("random request");
         assert_eq!(random.len(), 32);
         assert!(
             random
@@ -342,7 +357,8 @@ mod tests {
             vec![oversized],
         ] {
             assert!(
-                command_with_nonce(&url, Path::new("/ca.pem"), &rejected, false, NONCE).is_err()
+                command_with_nonce(&url, Path::new("/ca.pem"), &rejected, false, None, NONCE)
+                    .is_err()
             );
         }
     }
@@ -412,6 +428,43 @@ mod tests {
         ] {
             assert!(parse_metadata(&stderr, nonce, size).is_err());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn credentials_reach_curl_only_through_its_environment() -> io::Result<()> {
+        let url = HttpsUrl::parse("https://example.com/repo.git")?;
+        let credential = Credential::new("user", "s3cret-token")?;
+        let prepared = command_with_nonce(
+            &url,
+            Path::new("/ca.pem"),
+            &[],
+            true,
+            Some(&credential),
+            NONCE,
+        )?;
+        let arguments = prepared.get_args().map(OsString::from).collect::<Vec<_>>();
+        let position = |pair: [&str; 2]| arguments.windows(2).position(|values| values == pair);
+        let variable = position(["--variable", "%GIX_HTTP_AUTHORIZATION"]).expect("import");
+        let header = [
+            "--expand-header",
+            "Authorization: {{GIX_HTTP_AUTHORIZATION}}",
+        ];
+        assert!(position(header).expect("expansion") > variable);
+        let authorization = credential.authorization();
+        let encoded = authorization
+            .strip_prefix("Basic ")
+            .expect("basic credentials");
+        for argument in &arguments {
+            let argument = argument.to_string_lossy();
+            assert!(!argument.contains("s3cret") && !argument.contains(encoded));
+        }
+        let environment = prepared.get_envs().collect::<Vec<_>>();
+        assert_eq!(environment.len(), 2);
+        assert!(environment.contains(&(
+            OsStr::new(AUTHORIZATION_VARIABLE),
+            Some(OsStr::new(authorization))
+        )));
         Ok(())
     }
 }

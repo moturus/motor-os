@@ -2,7 +2,7 @@ use std::io;
 
 use gix::{bstr::ByteSlice, remote::Direction};
 
-use crate::{cancellation::Cancellation, object_database::Reader, ssh::Prepared};
+use crate::{cancellation::Cancellation, network, object_database::Reader};
 
 pub struct Spec {
     source: String,
@@ -135,15 +135,17 @@ impl Spec {
 }
 
 /// Resolve exactly one push-direction URL, validating it before and after rewrites.
-pub fn remote(repo: &gix::Repository, requested: &str) -> crate::Result<Prepared> {
+pub fn remote(repo: &gix::Repository, requested: &str) -> crate::Result<gix::url::Url> {
     let mut remote = match repo.try_find_remote_without_url_rewrite(requested.as_bytes().as_bstr())
     {
         Some(remote) => remote?,
         None => repo.remote_at_without_url_rewrite(requested)?,
     };
-    Prepared::new(one_url(&remote)?)?;
+    network::validate_url(&one_url(&remote)?)?;
     remote.rewrite_urls()?;
-    Prepared::new(one_url(&remote)?)
+    let url = one_url(&remote)?;
+    network::validate_url(&url)?;
+    Ok(url)
 }
 
 fn one_url(remote: &gix::Remote<'_>) -> crate::Result<gix::url::Url> {
