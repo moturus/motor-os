@@ -404,7 +404,12 @@ impl Process {
 
         // A space hosts one process in its lifetime; see
         // UserAddressSpace::claim_for_process.
-        address_space.claim_for_process(moto_sys::caps::ProcessRole::from_caps(capabilities))?;
+        let class = super::oom::allocation_class(
+            moto_sys::caps::ProcessRole::from_caps(capabilities),
+            parent.pid().as_u64(),
+            parent.stats.parent().map(|p| p.pid().as_u64()),
+        );
+        address_space.claim_for_process(class)?;
         let (_process, object) = Self::new(
             parent.stats.clone(),
             address_space.clone(),
@@ -616,14 +621,8 @@ impl Process {
                 self.threads.is_empty(),
             )
         };
-        // Actual immutable parentage, which remains available after a parent
-        // dies. SYSTEM_STATS' flat child index is not the ancestry tree.
-        let parent = self.stats.parent();
-        let grandparent = parent.as_ref().and_then(|p| p.parent());
         super::oom::classify(
-            self.pid().as_u64(),
-            parent.as_ref().map(|p| p.pid().as_u64()),
-            grandparent.as_ref().map(|p| p.pid().as_u64()),
+            self.address_space.allocation_class(),
             moto_sys::caps::ProcessRole::from_caps(self.capabilities()),
             status,
             paused,

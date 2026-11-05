@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use moto_sys::caps::ProcessRole;
 
 pub(crate) mod wait;
-use crate::mm::WaitReason;
+use crate::mm::{AllocationClass, WaitReason};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Disposition {
@@ -18,11 +18,23 @@ pub(super) enum Disposition {
     Ineligible,
 }
 
-// Bootstrap protection uses public PIDs, which are never reused for sys-io.
-pub(super) fn classify(
-    user_pid: u64,
-    parent_pid: Option<u64>,
+// Use actual parentage, including for delegated spawns. System allocation
+// privilege is not inherited beyond sys-io's grandchildren.
+pub(super) fn allocation_class(
+    role: ProcessRole,
+    parent_pid: u64,
     grandparent_pid: Option<u64>,
+) -> AllocationClass {
+    let sys_io = moto_sys::stats::PID_SYS_IO;
+    if role == ProcessRole::System || parent_pid == sys_io || grandparent_pid == Some(sys_io) {
+        AllocationClass::System
+    } else {
+        AllocationClass::User
+    }
+}
+
+pub(super) fn classify(
+    class: AllocationClass,
     role: ProcessRole,
     status: ProcessStatus,
     paused: bool,
@@ -36,11 +48,8 @@ pub(super) fn classify(
     {
         return Disposition::Exiting;
     }
-    let sys_io = moto_sys::stats::PID_SYS_IO;
     if !matches!(status, ProcessStatus::Created | ProcessStatus::Running)
-        || user_pid == sys_io
-        || parent_pid == Some(sys_io)
-        || grandparent_pid == Some(sys_io)
+        || class == AllocationClass::System
     {
         return Disposition::Ineligible;
     }
@@ -365,8 +374,15 @@ pub(crate) fn test() {
     use Disposition::*;
     use ProcessRole::*;
     use ProcessStatus::{Created, Exited, Exiting as ProcessExiting, PausedDebuggee, Running};
-    let classify = |role, status, paused, empty, parent, grandparent| {
-        self::classify(100, parent, grandparent, role, status, paused, empty)
+    for role in [None, Interactive, System] {
+        assert_eq!(allocation_class(role, 2, Some(1)), AllocationClass::System);
+        assert_eq!(allocation_class(role, 3, Some(2)), AllocationClass::System);
+        assert_eq!(allocation_class(role, 10, Some(3)), role.into());
+        assert_eq!(allocation_class(role, 10, Option::None), role.into());
+    }
+    let classify = |role, status, paused, empty, parent: Option<u64>, grandparent| {
+        let class = allocation_class(role, parent.unwrap(), grandparent);
+        self::classify(class, role, status, paused, empty)
     };
     assert_eq!(
         classify(None, Running, false, false, Some(10), Some(3)),
@@ -413,7 +429,7 @@ pub(crate) fn test() {
         Ineligible
     );
     assert_eq!(
-        self::classify(2, Some(1), Option::None, None, Running, false, false),
+        self::classify(AllocationClass::System, None, Running, false, false),
         Ineligible
     );
     assert!(preferred(0, 10, 1, u64::MAX));

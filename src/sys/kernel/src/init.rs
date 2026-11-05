@@ -424,7 +424,7 @@ pub fn start_userspace_processes() {
     let entry_point = result.unwrap();
 
     address_space
-        .claim_for_process(moto_sys::caps::ProcessRole::System)
+        .claim_for_process(crate::mm::AllocationClass::System)
         .unwrap();
 
     let (process, _object) = crate::uspace::Process::new(

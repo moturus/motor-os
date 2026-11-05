@@ -168,9 +168,9 @@ impl UserAddressSpace {
     /// would run on freed memory.
     pub(crate) fn claim_for_process(
         &self,
-        role: moto_sys::caps::ProcessRole,
+        class: AllocationClass,
     ) -> Result<(), AllocationFailure> {
-        self.inner.claim_for_process(role)
+        self.inner.claim_for_process(class)
     }
 
     /// Undoes claim_for_process() for a process that could not be built.

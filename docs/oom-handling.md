@@ -41,13 +41,16 @@ queues, and `init.rs` the arming point. The module map in
 
 All sizes are binary; a small page is 4 KiB. The recipient address space
 determines the allocation class, including remote mappings, both stacks,
-page tables and MM metadata. A process-less address space counts as None.
-Request size and the caller's privilege do not change the recipient's class.
+page tables and MM metadata. System processes, sys-io and its children and
+grandchildren use System class. All other processes and process-less
+address spaces use User class. The class is recorded when a process claims
+its space, using its actual parent even for a delegated spawn. Request size
+and the caller's privilege do not change the recipient's class.
 
 | Recipient | Minimum free after a charge | Allocation gate |
 |-----------|-----------------------------|-----------------|
-| None or Interactive | 512 pages (2 MiB) | Closed during Killing and Latched |
-| System | 128 pages (512 KiB) | Closed once the run's System block is set |
+| User class (unprotected processes and process-less spaces) | 512 pages (2 MiB) | Closed during Killing and Latched |
+| System class (protected processes) | 128 pages (512 KiB) | Closed once the run's System block is set |
 | Kernel | 0 | Always open |
 
 The physical pool keeps the used-page count, the phase (Idle, Killing or
@@ -57,7 +60,7 @@ compare-and-swap:
 
 - A charge that takes free memory below 512 pages while Idle or Latched
   starts Killing and advances the generation. Only System and kernel
-  charges can cross that line; a None or Interactive charge is refused at
+  charges can cross that line; a User-class charge is refused at
   its floor instead.
 - A floor refusal below 768 pages while Idle also starts Killing, without
   changing the count.
@@ -103,9 +106,10 @@ While the pool is Killing, scheduler jobs select one victim at a time: the
 newest eligible None process by monotonic kernel PID, then the newest
 eligible Interactive process once no eligible None remains. Processes
 created but not yet started are eligible. System processes, sys-io and its
-direct children and grandchildren are protected; actual ancestry supplies
-that protection, and it grants no allocation privilege to protected None or
-Interactive processes. Paused debuggees are skipped. Processes already
+direct children and grandchildren are protected and use System allocation
+class, including protected None and Interactive processes. Their process
+roles and capabilities are unchanged. Protection is not inherited beyond
+sys-io's grandchildren. Paused debuggees are skipped. Processes already
 exiting, or left without threads, count as pending reclamation rather than
 as candidates.
 
@@ -121,7 +125,7 @@ When no candidate remains, the job waits for pending exits to finish, then
 rechecks the state. At 768 free pages (3 MiB), a release returns the pool to
 Idle, clears the System block and advances the generation; scheduler
 dispatch then wakes the waiters whose gates allow it. At 512–767 pages the
-run ends in Latched: System reopens, None and Interactive stay blocked, and
+run ends in Latched: System reopens, User stays blocked, and
 a later charge below 512 starts a new run. Below 512 pages, with no victim
 and no pending reclamation, the kernel prints every remaining process and
 aborts the VM, after a final check that the same run is still active below
