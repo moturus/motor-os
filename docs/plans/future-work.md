@@ -12,6 +12,26 @@ unless the source establishes that its cause was fixed.
 
 Find what regressed.
 
+## Optional change to the victimless OOM abort policy
+
+The completed OOM follow-up retains the agreed abort rule: with no eligible
+victim and no pending exit cleanup below 512 free pages, the kernel reports
+the remaining processes and panics. Protected processes can legitimately
+hold that memory while nothing is blocked, since System allocations can
+continue down to 128 free pages.
+
+An optional alternative would end such a run in Latched, keep the User gate
+closed and release System callers. Ordinary allocating syscalls could return
+`E_OUT_OF_MEMORY` if their retry still fails. Missing-page faults need a
+separate policy because they cannot return an error to the program. The rule
+that a charge below 512 pages while Latched starts a new run would also need
+changing to avoid repeated scans of the same process set.
+
+This alternative remains outside the completed implementation scope.
+`src/tests/test-oom-abort.sh` and its `systest system-oom-abort` helper assert
+the current rule and would change with it. Current behavior is documented in
+[OOM handling](../oom-handling.md).
+
 ## Host SSH full-duplex test reports a channel-send error (2026-11-05)
 
 The OOM follow-up's debug full gate failed before booting a guest in

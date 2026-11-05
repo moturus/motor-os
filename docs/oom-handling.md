@@ -1,217 +1,145 @@
 # Physical memory pressure and OOM handling
 
-The kernel decides from the actual number of free physical pages whether an
-allocation proceeds, waits or fails, and below a floor it kills eligible
-processes, newest first, until memory recovers. Reservation-based admission
-and guaranteed executable commitments are gone. Per-process memory limits,
-filesystem capacities, capabilities, socket/channel limits and ordinary
-backpressure remain independent of this mechanism.
+The kernel decides from the live count of free physical pages whether an
+allocation proceeds, waits or fails. When free memory gets low, it kills
+unprotected processes, newest first, until enough memory comes back. There
+is no reservation or admission control. Per-process memory limits,
+filesystem capacities, capabilities and socket or channel limits are
+separate and unchanged.
 
-What a process observes:
+All sizes below are binary; a page is 4 KiB.
 
-- An allocating syscall blocked by an active OOM run waits and retries
-  when the run ends. If the retry still cannot allocate, it returns
-  `E_OUT_OF_MEMORY`. Page faults keep waiting for usable memory.
-- A victim is terminated like any killed process: its threads stop, its
-  memory goes back at exit, and its parent sees the killed status.
-- Below 4 MiB free, process spawns fail with `E_OUT_OF_MEMORY` and memfs
-  mutations with `StorageFull`.
-- A request that still cannot be satisfied although at least 3 MiB is free
-  after its own rollback fails with `E_OUT_OF_MEMORY` rather than waiting.
-  If nothing can be killed and free memory stays below 2 MiB, the kernel
-  reports every process on the console and aborts the VM.
+## Protected services
 
-The mapping paths acquire frames, descriptors and page-table pages fallibly
-and unwind partial mappings before deciding whether to wait or return an
-error (see [kernel-mm.md](kernel-mm.md)). Existing error codes remain:
-`E_OUT_OF_MEMORY` for an unsatisfied allocation, quota or address-space limit,
-`E_INVALID_ARGUMENT` for a bad address, size or flag, `E_NOT_ALLOWED` for a
-missing capability or an entry point outside user space, and
-`E_ALREADY_IN_USE` for a second process on an address space. Kernel-heap
-exhaustion remains fatal.
+A process is protected if any of these holds:
 
-The code lives under `src/sys/kernel/src`: `mm/phys_blocks/policy.rs` holds
-the accounting word with its floors, gates and transitions,
-`mm/allocation.rs` the pressure receipts and retry decisions, `uspace/oom.rs`
-and `uspace/oom/wait.rs` the scheduler jobs, victim selection and wait
-queues, and `init.rs` the arming point. The module map in
-[kernel-mm.md](kernel-mm.md) describes the surrounding memory manager.
+- it has the System role;
+- it is sys-io;
+- its parent or grandparent is sys-io.
 
-## Allocation floors and waiting
+Everything else is unprotected. Protection is not inherited further: a
+great-grandchild of sys-io is unprotected unless it has the System role.
+Parentage is the actual one, also for a spawn that sys-io performs on
+another process's behalf. In the shipped image the protected set is sys-io,
+sys-init and strobe (System), sys-tty and russhd (Interactive) and
+dns-resolver (None). Every program a user starts is a great-grandchild of
+sys-io and can be killed.
 
-All sizes are binary; a small page is 4 KiB. The recipient address space
-determines the allocation class, including remote mappings, both stacks,
-page tables and MM metadata. System processes, sys-io and its children and
-grandchildren use System class. All other processes and process-less
-address spaces use User class. The class is recorded when a process claims
-its space, using its actual parent even for a delegated spawn. Request size
-and the caller's privilege do not change the recipient's class.
+Protected processes are never chosen as OOM victims and allocate under the
+smaller System floor below. Protection changes neither roles nor
+capabilities.
 
-| Recipient | Minimum free after a charge | Allocation gate |
-|-----------|-----------------------------|-----------------|
-| User class (unprotected processes and process-less spaces) | 512 pages (2 MiB) | Closed during Killing and Latched |
-| System class (protected processes) | 128 pages (512 KiB) | Closed once the run's System block is set |
-| Kernel | 0 | Always open |
+The kernel does not defend the guest against a protected service that
+misbehaves. If protected services alone use up memory, nothing can be
+killed: the guest stays latched or aborts, as described below. An optional
+change to that abort policy is recorded in
+[future-work.md](plans/future-work.md#optional-change-to-the-victimless-oom-abort-policy).
 
-The physical pool keeps the used-page count, the phase (Idle, Killing or
+## Floors
+
+Every physical allocation is charged to the address space that receives the
+memory, including mappings made by another process, both stacks, page
+tables and memory-manager metadata. The recipient decides the class:
+
+| Recipient                          | Class  | Must leave free     | Blocked                      |
+|------------------------------------|--------|---------------------|------------------------------|
+| Unprotected process, or an address | User   | 512 pages (2 MiB)   | While killing or latched     |
+| space with no process yet          |        |                     |                              |
+| Protected process                  | System | 128 pages (512 KiB) | When the System block is set |
+| Kernel                             | Kernel | Nothing             | Never                        |
+
+The class is fixed when a process claims its address space. An address
+space without a process is User, so sys-io sets up every new executable
+image under the User floor, protected or not. Once the process exists its
+own class applies, also to the executable pages sys-io fills later.
+
+Two more limits matter:
+
+- 768 pages (3 MiB): killing ends and every blocked allocation retries when
+  free memory comes back to this level.
+- 1,024 pages (4 MiB), `moto_sys::LOW_MEMORY_PAGES`: below it, process
+  creation and start fail with `E_OUT_OF_MEMORY`, memfs refuses allocating
+  mutations with `StorageFull` after dropping unused cache blocks (see
+  [fs-permissions.md](fs-permissions.md)), and every process's allocator
+  returns idle pages eagerly.
+
+## How OOM killing works
+
+The allocator keeps the used-page count, the state (Idle, Killing or
 Latched), the System block and a generation counter in one atomic word, so
-every charge checks policy and changes the count in the same
-compare-and-swap:
+each charge checks the rules and updates the count in one compare-and-swap.
+The counter advances whenever killing starts or ends, so a waiter can tell
+whether the killing it waited for is over.
 
-- A charge that takes free memory below 512 pages while Idle or Latched
-  starts Killing and advances the generation. Only System and kernel
-  charges can cross that line; a User-class charge is refused at
-  its floor instead.
-- A floor refusal below 768 pages while Idle also starts Killing, without
-  changing the count.
-- A System floor refusal below 768 pages while Idle or Killing sets the
-  System block for the run, starting the run first if Idle. A kernel charge
-  that leaves fewer than 128 pages does the same from any phase. Rising
-  above 128 alone does not clear the block.
-- A release that reaches 768 pages (3 MiB) while Killing or Latched returns
-  the pool to Idle, clears the System block and advances the generation.
+1. **Start.** Killing starts when a charge takes free memory below 512
+   pages, or, from Idle, when a request is refused at its floor with fewer
+   than 768 pages free. A User charge never crosses 512: it is refused at
+   its floor, which starts killing. While killing, a System request refused
+   at its floor, or a kernel charge that leaves fewer than 128 pages, sets
+   the System block: protected allocations wait too until killing ends.
+2. **Choose a victim.** A scheduler job picks the newest unprotected None
+   process by kernel PID; when none is left, the newest unprotected
+   Interactive process. Processes created but not yet started count.
+   Processes paused by a debugger are skipped. Processes already exiting,
+   or left without threads, count as memory about to come back.
+3. **Kill it.** The victim is killed through the normal kill path and its
+   memory returns when its exit completes ([kernel-mm.md](kernel-mm.md),
+   "Release at process exit"). A kill whose victim has a debugger-paused
+   thread still completes. One victim at a time: the next choice waits for
+   the previous victim's exit, even across recovery.
+4. **Stop.** A release that reaches 768 pages ends killing: the state
+   returns to Idle, the System block clears and every blocked allocation
+   retries. If nothing is left to kill with 512 to 767 pages free, killing
+   ends in Latched: System allocations that fit proceed, User allocations
+   fail, and a later charge below 512 starts killing again. If nothing is
+   left to kill below 512 pages, the kernel prints every remaining process
+   and aborts the guest.
 
-Every generation change invalidates the waits and jobs of the previous one,
-even when recovery and renewed pressure both happen before any scheduler
-looks at the word.
+Floors and killing are armed just before sys-io starts. Before that every
+floor is zero and an allocation that cannot be satisfied fails with
+`E_OUT_OF_MEMORY`; the boot self-tests run in that state.
 
-A valid allocating syscall blocked by an active run waits for that run to
-end. Recovery to Idle and stopping in Latched both release the wait, even
-when the recipient's gate is still closed. After a physical shortage, the
-syscall first rolls back and releases its temporary resources. Below 768
-free pages it joins reclamation; if rollback restored at least 768 pages,
-an ordinary allocating syscall returns `E_OUT_OF_MEMORY`. A large request
-does not get a special exemption from the floors. An unsatisfied contiguous request returns
-`E_OUT_OF_MEMORY`; an opportunistic huge-page miss falls back to small pages
-and keeps the reason of its first refusal. Permanent validation, quota and
-virtual address-space errors return their existing codes even under pressure.
-Retries re-resolve handles and mappings, so a target closed during a wait
-retains its normal error behavior. In Latched, User allocations and System
-requests that do not fit return `E_OUT_OF_MEMORY`; smaller System requests
-that fit proceed. These refusals do not rescan the same process set. Process
-creation and start use the separate 4 MiB refusal described below.
+Victims are ordered by kernel PID, a monotonic `u64` that never repeats.
+The public `i32` PID that userspace sees wraps to 4,096 and skips IDs still
+in use; the two are equal until the first wrap.
 
-Valid lazy and pager zero-fill faults park on physical pressure and retry
-after recovery; invalid faults retain fatal handling. Pager fills keep
-completed pages and retry only their unfinished suffix after validating the
-mapping identity. A pager fill for a protected process retries physical
-shortages after recovery, including recovery before wait registration, or
-after the run stops in Latched. Such a fill does not turn physical pressure
-into a fatal pager error. Invalid mappings and I/O errors retain their
-normal handling. Wait registration and draining share one lock, preventing
-lost recovery notifications and duplicate resumes. Syscall OOM waits preserve
-ordinary wakes intended for the thread's next userspace wait. Killing a
-waiter uses normal thread cleanup; no owned resources depend on unwinding its
-discarded syscall stack.
+## What a process sees
 
-Before filling a page, sys-io allocates its read and relocation buffers.
-Read-ahead failures fall back to the one required page. If buffer preparation
-for that page runs out of memory, the request yields to the async runtime
-and retries later. It checks for mapping retirement before retrying. This
-temporary buffer failure does not call `pager_fail`; other read errors and
-errors returned by the kernel fill retain their normal handling.
+- An allocating syscall blocked by killing waits until killing ends, then
+  retries. If it still cannot allocate, it returns `E_OUT_OF_MEMORY`. A
+  request that fails although at least 768 pages are free after its own
+  rollback returns `E_OUT_OF_MEMORY` at once. Large requests get no
+  exemption from the floors.
+- A page fault on valid memory waits for memory and retries; it never
+  returns an error. In Latched, faults in unprotected processes keep
+  waiting until free memory recovers to 768 pages. Invalid faults stay
+  fatal.
+- An executable page that sys-io fills into a protected process retries
+  physical shortages until they clear; it never becomes a fatal pager error.
+  A fill into an unprotected process that still fails after killing ends is
+  a fatal page fault for that process. When sys-io itself cannot allocate
+  the buffer for a one-page fill, it yields and retries later instead of
+  failing the page.
+- A victim is terminated like any killed process; its parent sees the
+  killed status.
+- Below 4 MiB free, spawns fail with `E_OUT_OF_MEMORY` and memfs mutations
+  with `StorageFull`.
+- Error codes are unchanged: `E_OUT_OF_MEMORY` for an unsatisfied
+  allocation, quota or address-space limit, `E_INVALID_ARGUMENT` for bad
+  arguments, `E_NOT_ALLOWED` for a missing capability, `E_ALREADY_IN_USE`
+  for a second process on one address space. Kernel-heap exhaustion stays
+  fatal.
 
-## Victims and recovery
+## Observing it
 
-While the pool is Killing, scheduler jobs select one victim at a time: the
-newest eligible None process by monotonic kernel PID, then the newest
-eligible Interactive process once no eligible None remains. Processes
-created but not yet started are eligible. System processes, sys-io and its
-direct children and grandchildren are protected and use System allocation
-class, including protected None and Interactive processes. Their process
-roles and capabilities are unchanged. Protection is not inherited beyond
-sys-io's grandchildren. Paused debuggees are skipped. A kill that encounters
-a paused thread still completes: it wakes a saved syscall context or posts
-exit cleanup for a preempted thread. A syscall still saving its context owns
-its cleanup until the pause completes. Processes already
-exiting, or left without threads, count as pending reclamation rather than
-as candidates.
+`KernelStaticPage::free_pages` (offset 72) is the allocator's live free-page
+count, kept with one relaxed atomic add or subtract per allocation and free.
+Userspace reads it with `moto_sys::free_pages()`; `moto_sys::low_memory()`
+compares it with `LOW_MEMORY_PAGES`. The word at offset 60 is reserved.
+There is no published pressure flag: the 2 MiB and 3 MiB thresholds live in
+the kernel's atomic state.
 
-Selection validates Killing and the generation immediately before committing
-a kill. Recovery before that validation cancels the selection; a kill already
-committed finishes after recovery. The victim is terminated through the
-normal kill path and its memory returns at exit, as described below. Only
-one committed victim awaits exit cleanup at a time; the next selection waits
-for that cleanup, even across recovery and a new run. Each kill is logged
-with the generation, the free count and the victim's name and both PIDs.
-
-When no candidate remains, the job waits for pending exits to finish, then
-rechecks the state. At 768 free pages (3 MiB), a release returns the pool to
-Idle, clears the System block and advances the generation; scheduler
-dispatch then wakes the waiters. At 512–767 pages the run ends in Latched:
-System reopens, User stays blocked, and all allocating syscalls waiting for
-that run retry. Fault waits still require an open recipient gate. A later
-charge below 512 starts a new run. Below 512 pages, with no victim
-and no pending reclamation, the kernel prints every remaining process and
-aborts the VM, after a final check that the same run is still active below
-512 pages.
-
-Floors and runtime OOM transitions are armed immediately before sys-io
-starts, after scheduler publication and all wait consumers are installed.
-Before that, every class has floor 0 and an allocation that cannot be
-satisfied fails with `E_OUT_OF_MEMORY`; the boot exhaustion tests run in
-that state. Arming adds no process scan or pool drain; it samples the
-initial count in its own compare-and-swap and starts Killing at once if free
-memory is already below 512 pages.
-
-## Process identities
-
-Each process has a monotonic `u64` kernel PID and a public user PID.
-Kernel PIDs never wrap or repeat; exhausting that counter panics the kernel.
-Public PIDs keep their existing positive-i32 range, wrap to 4,096, and skip
-IDs still in use. Both IDs are equal before the first public-PID wrap.
-
-The statistics tree keeps kernel-PID and user-PID indexes under the same
-children lock, along with the system node's PID counters. Internal child
-traversal uses kernel-PID order. Public lookup, process-list pagination, metric
-scopes, and per-CPU process statistics continue to use user PIDs and their order.
-The shared-page and syscall process-identity formats are unchanged.
-
-## Memory release at exit
-
-The kernel returns a process's memory when it exits rather than when the last
-handle to it is dropped. The kernel completes an exit only after every
-thread's stacks are unmapped, then retires the executable pager's mappings,
-closes the process's IPC endpoints and releases its address space before
-waiters see the exit: private frames, page descriptors, the process static
-page and cached kernel stacks go back, shared frames stay alive through their
-other mappings, and the process's user and kernel memory statistics read
-zero. The emptied regions are closed, so a retained process or address-space
-handle cannot map or share pages into the dead space, and the pager cannot
-fill it; only the page-table root and its kernel entries stay until the last
-handle goes. An address space hosts one process: a second process on the
-same space is refused with `E_ALREADY_IN_USE`, as the first one's exit frees
-what the second would run on. The mechanics are in
-[kernel-mm.md](kernel-mm.md).
-
-## Published free memory
-
-`KernelStaticPage::free_pages` is the physical allocator's live count of free
-4 KiB pages. The kernel stores one snapshot when the kernel address space is
-created, on the BSP before other CPUs allocate, and from then on the block
-allocator's `charge` and `release` apply the delta of every small, huge, and
-contiguous allocation and free with a relaxed atomic add or subtract. Nothing
-samples, no lock is involved, and no stale copy can overwrite a newer one: the
-value is exact up to the operations still in flight on other CPUs. Userspace
-reads it with one relaxed load through `moto_sys::free_pages()`. Kernel policy
-checks use the allocator's authoritative packed word, not this mirror.
-
-There is no published pressure flag. `moto_sys::LOW_MEMORY_PAGES` (1,024
-pages, 4 MiB) is the one limit services compare the count against, through
-`moto_sys::low_memory()`; the 2 MiB and 3 MiB OOM thresholds belong to the
-kernel's atomic OOM state, where recovery and renewed pressure advance the
-generation even if no scheduler observed the intervening recovery.
-The word at offset 60 that held the flag is reserved, so the boot identity at
-offset 64 and `free_pages` at offset 72 keep their offsets.
-
-The `AdmissionStats` query and admission metrics have been removed. Physical
-memory statistics, the physical low-water mark, block allocator metrics, and
-per-process user/kernel memory statistics remain available.
-
-## Diagnostics and remaining limitations
-
-The kernel logs every transition the scheduler notices and every committed
-kill:
+The kernel logs each transition it observes and each kill:
 
 ```text
 OOM: start generation 7, 509 free pages
@@ -220,137 +148,51 @@ OOM: end generation 7, 801 free pages
 OOM: no victims, stopping below 768 pages (600 free)
 ```
 
-Start and end lines are written when the scheduler observes the new
-generation, so a run that starts and ends between two scheduler visits leaves
-only its `mem.oom_runs` increment. Before a victimless abort the kernel
-prints `OOM: remaining processes, N free physical pages`, one
-`OOM: 'name' pid=.. kernel_pid=.. user_bytes=.. kernel_bytes=..` line per
-process, and panics with `OOM: no eligible victims or pending reclamation
-below 512 free pages`. The per-process byte counts describe tracked virtual
-memory, including lazy reservations; they are not resident physical usage,
-and shared memory can appear in several processes.
+Before an abort it prints `OOM: remaining processes, N free physical pages`,
+one `OOM: 'name' pid=.. kernel_pid=.. user_bytes=.. kernel_bytes=..` line
+per process (tracked virtual memory, not resident usage) and panics with
+`OOM: no eligible victims or pending reclamation below 512 free pages`.
 
-| Metric | Meaning |
-|--------|---------|
-| `mem.oom_runs` | Started Killing generations, including runs completed before dispatch |
-| `mem.oom_kills` | Committed OOM kill requests |
-| `mem.oom_parked_syscalls` | Syscall wait registrations |
-| `mem.oom_parked_faults` | Fault wait registrations |
+| Metric                    | Meaning                                     |
+|---------------------------|---------------------------------------------|
+| `mem.oom_runs`            | Times killing started                       |
+| `mem.oom_kills`           | Committed kills                             |
+| `mem.oom_parked_syscalls` | Syscall waits registered, re-parks included |
+| `mem.oom_parked_faults`   | Fault waits registered, re-parks included   |
 
-System totals use stats scope 0. The two wait counters also have process
-attribution; they count registrations, including re-parks, not current queue
-lengths or unique threads. `mem.oom_kills` is system-wide only.
+System totals use stats scope 0; the two wait counters also have per-process
+values. `fs.memory_refused` counts memfs refusals.
 
-The abort rule can still terminate a guest whose protected processes
-legitimately hold the memory while nothing is blocked. Changing that policy
-is deferred in [plans/oom-handling.md](plans/oom-handling.md).
+## Code
 
-## Services and spawning
+Under `src/sys/kernel/src`: `mm/phys_blocks/policy.rs` holds the atomic word
+with its floors and transitions, `mm/allocation.rs` the refusal receipts and
+retry decisions, `uspace/oom.rs` and `uspace/oom/wait.rs` the scheduler
+jobs, victim choice and wait queues, and `init.rs` the arming point. sys-io's
+fill-buffer retry is in `src/sys/sys-io/src/runtime/fs/spawn/pager.rs`. The
+memory manager itself is described in [kernel-mm.md](kernel-mm.md).
 
-Below 4 MiB free, sys-io rejects spawn requests with `E_OUT_OF_MEMORY`,
-including those from System processes. The kernel refuses runtime child
-creation and the first `Created` to `Running` transition at the same limit,
-against its own allocator count, so a delayed wake or queued start cannot
-bypass the check. Bootstrap construction stays separate.
+## Tests
 
-Other memory-based refusals have been removed from sys-io networking and
-filesystem services, client runtime spawning, russhd, and strobe. Socket errors
-and actual allocation failures retain their normal handling. Below the same
-4 MiB, every process's allocator returns idle pages eagerly and sys-io releases
-unused memfs cache blocks.
+Every test runs inside Motor OS from `src/tests/full-test.sh`. Debug kernels
+run boot self-tests for the floors and transitions, the wait queues, victim
+cleanup, pager retry, class propagation and unarmed exhaustion. systest
+covers the error codes, release at exit, killing debugger-paused threads and
+memfs refusals. Pressure itself is exercised from the System console of
+`test-system-tty.sh` by `systest system-oom-tests`: spawn refusal, victim
+order, repeated recovery, a paused victim, Latched refusals and System
+progress, fault and syscall waits and their cancellation. `full-test.sh`
+ends with `src/tests/test-oom-abort.sh`, which drains a separate disposable
+guest below 512 pages and requires the exact report and panic above.
 
-## Memfs
+Changes here are gated like other core work: `full-test.sh` three times in
+debug and three in release, including at least one `--cpus 1` run per
+build, then `full-test-dev.sh --release`.
 
-For every guest size, memfs write, copy, create, and move requests check the
-free-page count. Below 1,024 pages (4 MiB), sys-io releases unused cached
-memfs blocks and checks again; if still below 4 MiB it returns `StorageFull`.
-At exactly 4 MiB allocating mutations are allowed. This is a check, not a
-reservation: it does not promise a lower bound after the request completes.
+### Reproducing the abort by hand
 
-Reads, stat, list, resize, and delete are served independently of this check.
-Memfs resize changes sparse logical length without allocating data blocks.
-Deleting or shrinking below the limit releases unused cached blocks. Capability
-checks and donated-page cleanup still apply on rejected requests. Mount capacity
-and cache sizing are unchanged; `fs.memory_refused` counts memfs refusals after
-cache reclamation.
-
-## Validation
-
-Every test runs inside Motor OS and is reached from `src/tests/full-test.sh`.
-Debug kernel boots run self-tests on private scratch pools and the production
-bookkeeping: `phys_blocks policy tests` cover the floors, gates and every
-transition at the 127/128, 511/512 and 767/768 boundaries, plus arming;
-`OOM waiter tests` and `OOM dispatch tests` cover registration and draining,
-generations, victim cleanup and exit interest; `pager retry tests` cover
-completed prefixes and mapping identity; `allocation role tests` cover
-recipient-class propagation and claim rollback; the unarmed `exhaustion
-tests` cover allocation failure and rollback at every boundary, contiguous
-failure and huge-page fallback. `process PID tests` exercise isolated
-counter/index state across public-PID wrap and reuse, kernel-ID exhaustion
-and both traversal orders. A further self-test releases a populated address
-space and checks that every later reservation is refused while a peer's
-shared frame survives.
-
-systest covers the exact syscall error codes, mapping and accounting,
-concurrent frame churn and public listing pagination. It spawns a child that
-maps 8 MiB and exits normally or is killed, and verifies with the handle
-still held that its user pages read zero, the pool recovered, a shared page
-survived and the dead space takes no new mapping; it also checks that an
-address space refuses a second process before and after the first one's
-exit. Debugger tests kill paused userspace and syscall threads, race pause
-against kill, and check reclamation while process and debugger handles remain
-open. Memfs tests cover mutation classification, the 4 MiB boundary and cache
-reclamation; filesystem, network, logging and spawn regressions run with the
-old admission gates gone. Quiescent kernel checks compare the shared count
-with the allocator's after small, huge and contiguous allocations and frees.
-
-Pressure itself is exercised from the System console of
-`test-system-tty.sh` by `systest system-oom-tests`, whose helper holds
-`CAP_SYS` from that parent: process creation and delayed-start refusal, large
-eager rollback, newest None selection before Interactive, repeated recovery,
-reclamation of a victim whose thread is still debugger-paused,
-victimless syscall refusal with the userspace wake retained, System progress
-in Latched without rescanning, permanent size refusal under pressure, lazy-fault
-survival and cancellation, System syscall and fault waits, and cleanup of a
-killed waiter. The System cases kill four small victims and one larger one
-and require all five kills in a single run, which proves the small cleanups
-did not reach recovery first. A pressure window that was missed may be
-retried at most three times, each miss reported with evidence of a
-successful operation and recovery before entry; an observed wait followed by
-a wrong result, a leak, a hang or a lost wake is a failure, never a retry.
-Pressure tests stay outside `--under-load`.
-
-`full-test.sh` finishes with `test-oom-abort.sh` in a separate guest. Its
-System helper inventories roles and ancestry, requires no earlier OOM runs
-or kills (hence no pending OOM victim), and drains below 512 pages. Success
-requires the helper's setup marker, a below-threshold memory report including
-the helper's two PIDs and memory counts, the exact victimless kernel panic,
-and guest termination. An arbitrary crash or timeout fails the test.
-
-Changes to this mechanism are gated like other core work: `full-test.sh`
-three times in debug and three in release, including at least one real
-one-vCPU run per build (`--cpus 1`; the `systest --host-cpus=1` hint only
-sizes workloads), then `full-test-dev.sh --release`. The one-vCPU debug gate
-currently runs at its 50-minute budget because of a systest poll test
-unrelated to memory; see [plans/future-work.md](plans/future-work.md).
-
-### Reproducing the victimless abort
-
-The automated disposable-guest check is:
-
-```sh
-src/tests/test-oom-abort.sh --release
-```
-
-Standalone, it defaults to 256 MiB and four vCPUs; `MOTO_MEMORY_MIB`,
-`MOTO_SMP` and `--vmm qemu|chv|fc` select other guest shapes/runners. Under
-`full-test.sh` it inherits the suite's exported guest size: 1 GiB in the
-default main gates and 8 GiB under `full-test-dev.sh`. Omit `--release` for
-debug. The test deliberately terminates its guest.
-
-For a manual run, build and boot a fresh System-console image. Test images
-need an absolute `TEST_IMAGE_ROOT` outside the repository's `vm_images`; the
-image and its runners are written under that root:
+Build and boot a fresh System-console image. Test images need an absolute
+`TEST_IMAGE_ROOT` outside the repository's `vm_images`:
 
 ```sh
 root="$(mktemp -d)"
@@ -358,8 +200,8 @@ make -j"$(nproc)" system-tty.img systest BUILD=release TEST_IMAGE_ROOT="$root"
 MOTO_IMAGE=motor-os-system-tty.img MOTO_MEMORY_MIB=256 "$root/vm_images/release/run-qemu.sh"
 ```
 
-From another host terminal, copy `build/bin/release/systest` to
-`/none/tmp/oom-abort` using the repository's test SSH key:
+From another terminal, copy `build/bin/release/systest` into the guest as
+`/none/tmp/oom-abort` with the repository's test key:
 
 ```sh
 chmod 600 src/tests/test.key
@@ -368,15 +210,8 @@ scp -F /dev/null -P 2222 -i src/tests/test.key -o IdentitiesOnly=yes \
   build/bin/release/systest motor@192.168.4.2:/none/tmp/oom-abort
 ```
 
-Then run in that guest's System serial console:
-
-```sh
-chmod r-xr-xr-x /none/tmp/oom-abort
-/none/tmp/oom-abort system-oom-abort
-```
-
-Expect the protected-process inventory and `oom-abort: READY`, followed by
-`OOM: remaining processes`, per-process memory lines, and a kernel panic
-stating that no eligible victims or pending reclamation remain below 512
-free pages. The VM then exits. Do this only in the fresh disposable guest;
-the helper intentionally retains its pressure allocations until termination.
+In the guest's System serial console run `chmod r-xr-xr-x /none/tmp/oom-abort`
+and then `/none/tmp/oom-abort system-oom-abort`. Expect the protected-process
+inventory, `oom-abort: READY`, the kernel's report and panic, and the VM
+exiting. The helper keeps its memory until the guest dies, so use only a
+disposable guest.
