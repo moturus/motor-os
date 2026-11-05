@@ -40,13 +40,16 @@ pub(super) fn classify(
     paused: bool,
     threads_empty: bool,
 ) -> Disposition {
-    if paused || status == ProcessStatus::PausedDebuggee {
-        return Disposition::Ineligible;
-    }
     if matches!(status, ProcessStatus::Exiting(_))
-        || (status == ProcessStatus::Running && threads_empty)
+        || (matches!(
+            status,
+            ProcessStatus::Running | ProcessStatus::PausedDebuggee
+        ) && threads_empty)
     {
         return Disposition::Exiting;
+    }
+    if paused || status == ProcessStatus::PausedDebuggee {
+        return Disposition::Ineligible;
     }
     if !matches!(status, ProcessStatus::Created | ProcessStatus::Running)
         || class == AllocationClass::System
@@ -413,8 +416,12 @@ pub(crate) fn test() {
         Ineligible
     );
     assert_eq!(
+        classify(None, PausedDebuggee, true, true, Some(10), Some(3)),
+        Exiting
+    );
+    assert_eq!(
         classify(None, ProcessExiting(0), true, false, Some(10), Some(3)),
-        Ineligible
+        Exiting
     );
     assert_eq!(
         classify(System, ProcessExiting(0), false, false, Some(2), Some(1)),

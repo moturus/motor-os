@@ -583,6 +583,40 @@ fn child_wait(metrics: &Metrics, mode: &str) -> bool {
     true
 }
 
+fn paused_victim(metrics: &Metrics) {
+    let child = Child::new("paused", false);
+    let debug = SysRay::dbg_attach(child.pid).unwrap();
+    map(child.handle, 8192).unwrap();
+    let target = SysObj::create(SysHandle::NONE, 0, "address_space:debug_name=oom-paused").unwrap();
+    SysRay::dbg_pause_process(debug).unwrap();
+    let tid = child.control().ready.load(Ordering::Acquire);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while SysRay::dbg_get_thread_data_v1(debug, tid)
+        .unwrap()
+        .paused_debuggee
+        == 0
+    {
+        assert!(Instant::now() < deadline, "OOM victim did not pause");
+        SysCpu::sched_yield();
+    }
+    // Make the process eligible again, leaving its thread paused. OOM must
+    // complete the kill without relying on the debugger to resume the thread.
+    SysRay::dbg_resume_process(debug).unwrap();
+    let kills = metrics.read(metrics.kills, PID_SYSTEM);
+    let mut pressure = Pressure::new();
+    pressure.drain_to(640);
+    let addr = map(target, 256).unwrap();
+    crate::raw_spawn::wait_exit(child.handle, "OOM paused victim cleanup");
+    assert_eq!(metrics.read(metrics.kills, PID_SYSTEM), kills + 1);
+    assert_eq!(crate::kernel_metric("pages_user", child.pid), 0);
+    drop(pressure);
+    SysMem::unmap(target, 0, u64::MAX, addr).unwrap();
+    SysObj::put(target).unwrap();
+    SysRay::dbg_detach(debug).unwrap();
+    drop(child);
+    println!("oom: debugger-paused victim reclamation PASS");
+}
+
 pub fn run_all_tests() {
     assert_eq!(
         moto_sys::caps::ProcessRole::from_caps(moto_sys::ProcessStaticPage::get().capabilities),
@@ -592,6 +626,7 @@ pub fn run_all_tests() {
     spawn_refusal();
     large_rollback();
     victims(&metrics);
+    paused_victim(&metrics);
     victimless_syscalls(&metrics);
     child_wait(&metrics, "fault");
     child_wait(&metrics, "fault-kill");
