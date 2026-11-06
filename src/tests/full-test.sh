@@ -1299,14 +1299,17 @@ esac
 rmux_caps /user/bin/rmux kill-session -t priv
 
 # sysbox ls colors directory names orange, executable files bright red, and
-# non-executable files with the terminal's default color. A pane
-# supplies the terminal that enables colors; the child names do not appear in
-# the command, so they only match ls output.
+# other files with the terminal's default color. A file counts as executable
+# here only when the Interactive or None role may execute it, so System-only
+# executables stay uncolored. A pane supplies the terminal that enables colors;
+# the child names do not appear in the command, so they only match ls output.
 vm_ssh /system/bin/mkdir "$TEST_TMP/sysbox-ls-color"
 vm_ssh /system/bin/mkdir "$TEST_TMP/sysbox-ls-color/amber-dir"
 vm_ssh /system/bin/mkdir "$TEST_TMP/sysbox-ls-color/z-directory"
 vm_ssh /system/bin/cp /system/bin/ls "$TEST_TMP/sysbox-ls-color/a-file"
 vm_ssh /system/bin/cp /system/bin/ls "$TEST_TMP/sysbox-ls-color/default-file"
+# A runtime-created regular file grants execute to System only.
+vm_ssh "echo system-only > $TEST_TMP/sysbox-ls-color/system-only-file"
 rmux_ls() {
   sleep 3
   # Debug rt.vdso diagnostics intentionally share the pane's terminal. Start
@@ -1326,7 +1329,7 @@ check_ls_colors() {
 
   output="$(rmux_ls "$option" "$TEST_TMP/sysbox-ls-color" | vm_rmux 2>&1)"
   case "$output" in
-    *"amber-dir"*"a-file"*) ;;
+    *"amber-dir"*"a-file"*"system-only-file"*) ;;
     *) fail "ls $option did not list the color-test entries: '$output'" ;;
   esac
   prefix="${output%%amber-dir*}"
@@ -1337,6 +1340,12 @@ check_ls_colors() {
   style="$(printf '%s' "$prefix" | grep -Eao $'\033''\[[0-9;]*m' | tail -1)"
   [ "$style" = $'\033'"[0;91m" ] ||
     fail "ls $option executable style was '$style'"
+  prefix="${output%%system-only-file*}"
+  style="$(printf '%s' "$prefix" | grep -Eao $'\033''\[[0-9;]*m' | tail -1)"
+  case "$style" in
+    ""|$'\033'"[0m") ;;
+    *) fail "ls $option System-only executable style was '$style'" ;;
+  esac
 
   output="$(rmux_ls "$option" /user/cfg | vm_rmux 2>&1)"
   case "$output" in
@@ -1358,7 +1367,7 @@ check_ls_colors "-l"
 for option in "" "-l"; do
   sorted_ls="$(vm_ssh_stdout /system/bin/ls $option "$TEST_TMP/sysbox-ls-color")"
   case "$sorted_ls" in
-    *"amber-dir"*"z-directory"*"a-file"*"default-file"*) ;;
+    *"amber-dir"*"z-directory"*"a-file"*"default-file"*"system-only-file"*) ;;
     *) fail "ls $option did not sort directories before files: '$sorted_ls'" ;;
   esac
 done
@@ -1373,6 +1382,10 @@ esac
 case "$long_ls" in
   *"-rwxr-xr-x"*"default-file"*) ;;
   *) fail "ls -l did not report file permissions: '$long_ls'" ;;
+esac
+case "$long_ls" in
+  *"-rwxrw-r--"*"system-only-file"*) ;;
+  *) fail "ls -l did not report System-only executable permissions: '$long_ls'" ;;
 esac
 
 # rmux: scrollback and copy mode on the real thing (M8, rmux/details.md §7.5,
