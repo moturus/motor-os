@@ -14,6 +14,8 @@ use russh::{Channel, ChannelId};
 mod forwarding;
 #[path = "client_protocol/forwarding_jump.rs"]
 mod forwarding_jump;
+#[path = "client_protocol/forwarding_progress.rs"]
+mod forwarding_progress;
 #[path = "client_protocol/local_forwarding.rs"]
 mod local_forwarding;
 #[path = "client_protocol/tunnel_lifetime.rs"]
