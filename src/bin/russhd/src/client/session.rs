@@ -11,7 +11,8 @@ use super::terminal::{InputEvent, InputFilter};
 use super::transport;
 
 pub async fn run_ssh(args: SshArgs) -> Result<i32, russh::Error> {
-    let mut session = connect_authenticated(&args.connection, &args.destination).await?;
+    let session = connect_authenticated(&args.connection, &args.destination).await?;
+    session.share_connection();
     let result = async {
         let terminal = std::io::stdin().is_terminal();
         let pty = match args.pty {
@@ -30,7 +31,7 @@ pub async fn run_ssh(args: SshArgs) -> Result<i32, russh::Error> {
             ));
         }
         let command = (!args.command.is_empty()).then(|| args.command.join(" "));
-        run_channel(&mut session, command, pty).await
+        run_channel(&session, command, pty).await
     }
     .await;
     let close = session.close().await;
@@ -223,11 +224,11 @@ async fn authenticate(
 }
 
 async fn run_channel(
-    session: &mut transport::Peer,
+    session: &transport::Peer,
     command: Option<String>,
     pty: bool,
 ) -> Result<i32, russh::Error> {
-    let channel = session.channel_open_session().await?;
+    let channel = session.open_session().await?;
     let mut terminal_mode = if pty {
         TerminalMode::enable()?
     } else {
@@ -249,7 +250,7 @@ async fn run_channel(
     let (input_tx, input_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
     #[cfg(target_os = "motor")]
     if pty {
-        start_ctrl_c(input_tx.clone())?;
+        start_ctrl_c(input_tx.clone(), session.interrupt())?;
     }
     std::thread::spawn(move || {
         let mut stdin = std::io::stdin().lock();
@@ -277,24 +278,30 @@ async fn run_channel(
         }
     });
 
-    let input = forward_stdin(&writer, input_rx, pty);
-    tokio::pin!(input);
+    let mut input = Some(Box::pin(forward_stdin(&writer, input_rx, pty)));
+    let stopped = session.wait_session_closed();
+    tokio::pin!(stopped);
     let (output_tx, output_done) = output_writer();
     let result = {
         let output = forward_output(reader, output_tx);
         tokio::pin!(output);
-        let mut input_done = false;
         loop {
             tokio::select! {
+                () = &mut stopped, if input.is_some() => input = None,
                 result = &mut output => break result,
-                result = &mut input, if !input_done => {
+                result = async {
+                    match input.as_mut() {
+                        Some(work) => work.as_mut().await,
+                        None => std::future::pending().await,
+                    }
+                }, if input.is_some() => {
                     match result {
                         Ok(true) => break Ok(None),
-                        Ok(false) => input_done = true,
+                        Ok(false) => input = None,
                         // Remote closure stops stdin before buffered output has
                         // necessarily reached stdout or supplied the exit status.
                         Err(russh::Error::SendError) if session.is_channel_closed() => {
-                            input_done = true;
+                            input = None;
                         }
                         Err(error) => break Err(error),
                     }
@@ -526,7 +533,10 @@ impl Drop for TerminalMode {
 }
 
 #[cfg(target_os = "motor")]
-fn start_ctrl_c(input: tokio::sync::mpsc::Sender<Vec<u8>>) -> std::io::Result<()> {
+fn start_ctrl_c(
+    input: tokio::sync::mpsc::Sender<Vec<u8>>,
+    interrupt: impl FnOnce() + Send + 'static,
+) -> std::io::Result<()> {
     use moto_sdk::rt::process::{ctrl_c_register_handler, ctrl_c_wait};
 
     let (setup_tx, setup_rx) = std::sync::mpsc::sync_channel(0);
@@ -540,6 +550,9 @@ fn start_ctrl_c(input: tokio::sync::mpsc::Sender<Vec<u8>>) -> std::io::Result<()
                 while let Ok(next) = ctrl_c_wait(last) {
                     for _ in last..next {
                         if input.blocking_send(vec![3]).is_err() {
+                            // After the session ends, Ctrl+C cancels the tunnel
+                            // instead of targeting its already-closed stdin.
+                            interrupt();
                             return;
                         }
                     }

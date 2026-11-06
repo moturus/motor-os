@@ -2,7 +2,6 @@ use std::borrow::Cow;
 use std::future::Future;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::Instant;
@@ -43,6 +42,13 @@ impl std::fmt::Display for Aborted {
 impl std::error::Error for Aborted {}
 
 struct AbortOnDrop(TransportControl);
+
+struct ChannelState {
+    single: bool,
+    opening_session: bool,
+    session: Option<russh::ChannelId>,
+    closed: bool,
+}
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
@@ -161,12 +167,12 @@ pub struct Handler {
     known_hosts: std::path::PathBuf,
     policy: HostKeyPolicy,
     batch_mode: bool,
-    channel_closed: Arc<AtomicBool>,
+    channels: tokio::sync::watch::Sender<ChannelState>,
 }
 
 pub struct Peer {
     handle: client::Handle<Handler>,
-    channel_closed: Arc<AtomicBool>,
+    channels: tokio::sync::watch::Sender<ChannelState>,
     shutdown: AbortOnDrop,
     ended: tokio::sync::watch::Receiver<()>,
 }
@@ -196,14 +202,52 @@ impl Peer {
         let _ = ended.changed().await;
     }
 
+    pub(super) fn share_connection(&self) {
+        self.channels.send_modify(|state| state.single = false);
+    }
+
+    pub(super) async fn open_session(&self) -> Result<russh::Channel<client::Msg>, russh::Error> {
+        // Listener accept tasks start after this open. Its confirmation is the
+        // only locally initiated open during session setup.
+        self.channels
+            .send_modify(|state| state.opening_session = true);
+        let result = self.handle.channel_open_session().await;
+        if result.is_err() {
+            self.channels
+                .send_modify(|state| state.opening_session = false);
+        }
+        result
+    }
+
+    pub(super) async fn wait_session_closed(&self) {
+        let mut channels = self.channels.subscribe();
+        tokio::select! {
+            _ = async {
+                while !channels.borrow().closed {
+                    if channels.changed().await.is_err() { break; }
+                }
+            } => {}
+            _ = self.wait_closed() => {}
+        }
+    }
+
+    #[cfg(target_os = "motor")]
+    pub(super) fn interrupt(&self) -> impl FnOnce() + Send + 'static {
+        let control = self.shutdown.0.clone();
+        move || control.abort()
+    }
+
     pub(super) fn is_channel_closed(&self) -> bool {
-        self.channel_closed.load(Ordering::Acquire)
+        self.channels.borrow().closed || self.handle.is_closed()
     }
 
     pub async fn close(self) -> Result<(), russh::Error> {
         let aborted = self.shutdown.0.is_aborted();
-        let requested =
-            !aborted && !self.handle.is_closed() && !self.channel_closed.load(Ordering::Acquire);
+        let already_disconnecting = {
+            let state = self.channels.borrow();
+            state.single && state.closed
+        };
+        let requested = !aborted && !self.handle.is_closed() && !already_disconnecting;
         let enqueue = if requested {
             self.handle
                 .disconnect(russh::Disconnect::ByApplication, "", "")
@@ -212,7 +256,7 @@ impl Peer {
             Ok(())
         };
         let result = self.handle.await;
-        let channel_closed = self.channel_closed.load(Ordering::Acquire);
+        let channel_closed = self.channels.borrow().closed;
         if !channel_closed && !aborted {
             enqueue?;
         }
@@ -235,13 +279,41 @@ impl client::Handler for Handler {
 
     async fn channel_close(
         &mut self,
-        _channel: russh::ChannelId,
+        channel: russh::ChannelId,
         session: &mut client::Session,
     ) -> Result<(), Self::Error> {
-        // Each peer owns one session or forwarding channel. A queued disconnect
-        // could wait forever behind stdin for a channel the server has closed.
-        session.disconnect(russh::Disconnect::ByApplication, "", "")?;
-        self.channel_closed.store(true, Ordering::Release);
+        let mut disconnect = false;
+        self.channels.send_if_modified(|state| {
+            disconnect = state.single;
+            if state.single || state.session == Some(channel) {
+                state.closed = true;
+                true
+            } else {
+                false
+            }
+        });
+        if disconnect {
+            // A jump owns one transport channel, so its closure ends the hop.
+            session.disconnect(russh::Disconnect::ByApplication, "", "")?;
+        }
+        Ok(())
+    }
+
+    async fn channel_open_confirmation(
+        &mut self,
+        id: russh::ChannelId,
+        _: u32,
+        _: u32,
+        _: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        self.channels.send_if_modified(|state| {
+            if !state.opening_session {
+                return false;
+            }
+            state.opening_session = false;
+            state.session = Some(id);
+            true
+        });
         Ok(())
     }
 
@@ -397,7 +469,12 @@ async fn connect_stream<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
             .map_err(|_| russh::Error::InvalidConfig("ServerAliveCountMax is too large".into()))?,
         ..Default::default()
     };
-    let channel_closed = Arc::new(AtomicBool::new(false));
+    let (channels, _) = tokio::sync::watch::channel(ChannelState {
+        single: true,
+        opening_session: false,
+        session: None,
+        closed: false,
+    });
     let (running, ended) = tokio::sync::watch::channel(());
     let handler = Handler {
         control,
@@ -407,12 +484,12 @@ async fn connect_stream<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         known_hosts,
         policy: options.host_key_policy,
         batch_mode: options.batch_mode,
-        channel_closed: channel_closed.clone(),
+        channels: channels.clone(),
     };
     let handle = client::connect_stream(Arc::new(config), stream, handler).await?;
     Ok(Peer {
         handle,
-        channel_closed,
+        channels,
         shutdown,
         ended,
     })
@@ -465,6 +542,112 @@ fn attempt_addresses<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    struct ScopeServer(
+        tokio::sync::mpsc::UnboundedSender<(
+            russh::Channel<russh::server::Msg>,
+            russh::server::ChannelOpenHandle,
+        )>,
+    );
+
+    #[cfg(unix)]
+    impl russh::server::Handler for ScopeServer {
+        type Error = russh::Error;
+        async fn auth_none(&mut self, _: &str) -> Result<russh::server::Auth, Self::Error> {
+            Ok(russh::server::Auth::Accept)
+        }
+        async fn channel_open_session(
+            &mut self,
+            channel: russh::Channel<russh::server::Msg>,
+            reply: russh::server::ChannelOpenHandle,
+            _: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            self.0.send((channel, reply)).unwrap();
+            Ok(())
+        }
+        async fn channel_open_direct_tcpip(
+            &mut self,
+            channel: russh::Channel<russh::server::Msg>,
+            _: &str,
+            _: u32,
+            _: &str,
+            _: u32,
+            reply: russh::server::ChannelOpenHandle,
+            _: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            self.0.send((channel, reply)).unwrap();
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn final_session_is_tracked_before_resume_and_forward_closes_stay_independent() {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            for immediate in [false, true] {
+                let root = std::env::temp_dir().join(format!("motor-peer-scope-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+                std::fs::create_dir(&root).unwrap();
+                let (socket, remote) = tokio::io::duplex(64 * 1024);
+                let (opened, mut opens) = tokio::sync::mpsc::unbounded_channel();
+                let starting = tokio::spawn(russh::server::run_stream(Arc::new(russh::server::Config {
+                    keys: vec![russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::ssh_key::Algorithm::Ed25519).unwrap()],
+                    inactivity_timeout: None,
+                    ..Default::default()
+                }), socket, ScopeServer(opened)));
+                let mut options = ConnectionOptions::default();
+                options.known_hosts = Some(root.join("known_hosts"));
+                options.host_key_policy = HostKeyPolicy::AcceptNew;
+                let destination = Destination::parse_with_default("127.0.0.1", "user").unwrap();
+                let mut peer = connect_stream(&options, &destination, remote, None).await.unwrap();
+                let server = starting.await.unwrap().unwrap();
+                assert!(peer.authenticate_none("user").await.unwrap().success());
+                peer.share_connection();
+                let peer = Arc::new(peer);
+                let retained = peer.clone();
+                let mut opening = Box::pin(peer.open_session());
+                let (session, reply) = tokio::select! {
+                    opened = opens.recv() => opened.unwrap(),
+                    result = opening.as_mut() => panic!("session opened before acceptance: {result:?}"),
+                };
+                reply.accept().await;
+                if immediate {
+                    session.close().await.unwrap();
+                    // The confirmation callback records the ID before the
+                    // opener resumes, so even this close stops stdin.
+                    peer.wait_session_closed().await;
+                }
+                let _channel = opening.await.unwrap();
+                if !immediate {
+                    let mut forwarding = Box::pin(peer.channel_open_direct_tcpip_with_credit("target", 80, "origin", 0));
+                    let (forward, reply) = tokio::select! {
+                        opened = opens.recv() => opened.unwrap(),
+                        result = forwarding.as_mut() => panic!("forward opened before acceptance: {result:?}"),
+                    };
+                    reply.accept().await;
+                    let (mut channel, _credit) = forwarding.await.unwrap();
+                    forward.close().await.unwrap();
+                    assert!(matches!(channel.wait().await, Some(russh::ChannelMsg::Close)));
+                    assert!(!peer.is_channel_closed());
+                    session.close().await.unwrap();
+                    peer.wait_session_closed().await;
+                }
+                assert!(peer.is_channel_closed());
+                assert!(!peer.handle.is_closed());
+                peer.send_ping().await.unwrap();
+                server.handle().disconnect(russh::Disconnect::ByApplication, "".into(), "".into()).await.unwrap();
+                peer.wait_closed().await;
+                // Observing transport termination must not require exclusive
+                // ownership; a forward may still retain its peer reference.
+                assert!(Arc::strong_count(&peer) > 1);
+                drop(retained);
+                drop(_channel);
+                Arc::try_unwrap(peer).ok().unwrap().close().await.unwrap();
+                assert!(matches!(server.await, Ok(()) | Err(russh::Error::Disconnect)));
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }).await.expect("shared peer lifetime stalled");
+    }
 
     #[tokio::test]
     async fn abort_wakes_stalled_read_and_write_without_peer_progress() {
