@@ -31,10 +31,7 @@ impl Config {
                         return Err(ParseError::new("Host requires nonempty patterns"));
                     }
                 } else {
-                    if values.len() != 1 {
-                        return Err(ParseError::new(format!("{key} requires one argument")));
-                    }
-                    ConnectionOptions::default().apply(&key, &values[0])?;
+                    ConnectionOptions::default().apply_values(&key, &values)?;
                 }
                 Ok(Some((key, values)))
             })()
@@ -88,7 +85,7 @@ impl Config {
             if key.eq_ignore_ascii_case("Host") {
                 active = matches_host(&destination.host, values);
             } else if active {
-                options.apply(key, &values[0])?;
+                options.apply_values(key, values)?;
             }
         }
         let host = options.hostname.as_deref().unwrap_or(&destination.host);
@@ -345,6 +342,71 @@ pub(crate) fn jump_hosts(value: &str) -> Result<Vec<JumpHost>, ParseError> {
 mod tests {
     use super::option;
     use crate::client::args::ConnectionOptions;
+
+    #[test]
+    fn forwards_accumulate_and_scalar_options_keep_the_first_value() {
+        let config = super::Config::parse(
+            "Host target\n ProxyJump jump\n LocalForward [::1]:8080 [::2]:80\n GatewayPorts yes\n ExitOnForwardFailure yes\nHost *\n LocalForward 8081 localhost.:443\n GatewayPorts no\n ExitOnForwardFailure no\nHost jump\n LocalForward 9090 remote:90\n",
+            std::path::Path::new("config"),
+        ).unwrap();
+        let mut options = ConnectionOptions::default();
+        options.add_local_forward("8082:cli:22").unwrap();
+        options.apply_o("GatewayPorts=no").unwrap();
+        let route = config
+            .resolve(
+                &options,
+                &crate::client::args::Destination::parse_with_default("target", "motor").unwrap(),
+            )
+            .unwrap();
+        assert_eq!(route.len(), 2);
+        let target = &route[1].options;
+        assert_eq!(
+            target
+                .local_forwards
+                .iter()
+                .map(|forward| forward.listen.port)
+                .collect::<Vec<_>>(),
+            [8082, 8080, 8081]
+        );
+        assert!(!target.gateway_ports);
+        assert!(target.exit_on_forward_failure);
+        let jump = &route[0].options;
+        assert_eq!(
+            jump.local_forwards
+                .iter()
+                .map(|forward| forward.listen.port)
+                .collect::<Vec<_>>(),
+            [8081, 9090]
+        );
+        assert!(!jump.gateway_ports);
+        assert!(!jump.exit_on_forward_failure);
+    }
+
+    #[test]
+    fn forwarding_o_options_share_config_arity_and_deduplicate() {
+        let mut options = ConnectionOptions::default();
+        options.add_local_forward("8080:[target]:80").unwrap();
+        options.apply_o("LocalForward=8080 target:80").unwrap();
+        options
+            .apply_o("LocalForward [::1]:8081 [::2]:81 # comment")
+            .unwrap();
+        options.apply_o("ExitOnForwardFailure yes").unwrap();
+        options.apply_o("ExitOnForwardFailure no").unwrap();
+        assert_eq!(options.local_forwards.len(), 2);
+        assert_eq!(options.local_forwards[1].target.host, "::2");
+        assert!(options.exit_on_forward_failure);
+        for bad in [
+            "LocalForward 8080:target:80",
+            "LocalForward 8080 target:80 extra",
+            "LocalForward 0 target:80",
+            "GatewayPorts yes no",
+            "ExitOnForwardFailure maybe",
+        ] {
+            assert!(options.apply_o(bad).is_err(), "{bad}");
+            let error = super::Config::parse(bad, std::path::Path::new("config")).unwrap_err();
+            assert!(error.to_string().starts_with("config:1:"));
+        }
+    }
 
     #[test]
     fn option_syntax_accepts_separators_patterns_and_comments() {

@@ -2,6 +2,8 @@ use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use super::forward_args::LocalForward;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Applet {
     Ssh,
@@ -78,6 +80,11 @@ pub enum HostKeyPolicy {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionOptions {
+    pub local_forwards: Vec<LocalForward>,
+    pub gateway_ports: bool,
+    gateway_ports_set: bool,
+    pub exit_on_forward_failure: bool,
+    exit_on_forward_failure_set: bool,
     pub config_file: Option<PathBuf>,
     pub hostname: Option<String>,
     pub user: Option<String>,
@@ -105,6 +112,11 @@ pub struct ConnectionOptions {
 impl Default for ConnectionOptions {
     fn default() -> Self {
         Self {
+            local_forwards: Vec::new(),
+            gateway_ports: false,
+            gateway_ports_set: false,
+            exit_on_forward_failure: false,
+            exit_on_forward_failure_set: false,
             config_file: None,
             hostname: None,
             user: None,
@@ -176,10 +188,32 @@ impl ConnectionOptions {
     pub fn apply_o(&mut self, value: &str) -> Result<(), ParseError> {
         let (key, values) = super::config::option(value)?
             .ok_or_else(|| ParseError::new("-o requires a connection option"))?;
-        if values.len() != 1 {
-            return Err(ParseError::new(format!("{key} requires one argument")));
+        self.apply_values(&key, &values)
+    }
+
+    pub fn add_local_forward(&mut self, value: &str) -> Result<(), ParseError> {
+        self.push_forward(LocalForward::parse(value)?);
+        Ok(())
+    }
+
+    fn push_forward(&mut self, forward: LocalForward) {
+        if !self.local_forwards.contains(&forward) {
+            self.local_forwards.push(forward);
         }
-        self.apply(&key, &values[0])
+    }
+
+    pub(crate) fn apply_values(&mut self, key: &str, values: &[String]) -> Result<(), ParseError> {
+        if key.eq_ignore_ascii_case("LocalForward") {
+            let [listen, target] = values else {
+                return Err(ParseError::new(format!("{key} requires two arguments")));
+            };
+            self.push_forward(LocalForward::parse_config(listen, target)?);
+            return Ok(());
+        }
+        let [value] = values else {
+            return Err(ParseError::new(format!("{key} requires one argument")));
+        };
+        self.apply(key, value)
     }
 
     pub(crate) fn apply(&mut self, key: &str, value: &str) -> Result<(), ParseError> {
@@ -213,6 +247,16 @@ impl ConnectionOptions {
             set_first(
                 &mut self.identities_only,
                 &mut self.identities_only_set,
+                parsed,
+            );
+        } else if key.eq_ignore_ascii_case("GatewayPorts") {
+            let parsed = parse_yes_no(key, value)?;
+            set_first(&mut self.gateway_ports, &mut self.gateway_ports_set, parsed);
+        } else if key.eq_ignore_ascii_case("ExitOnForwardFailure") {
+            let parsed = parse_yes_no(key, value)?;
+            set_first(
+                &mut self.exit_on_forward_failure,
+                &mut self.exit_on_forward_failure_set,
                 parsed,
             );
         } else if key.eq_ignore_ascii_case("StrictHostKeyChecking") {
