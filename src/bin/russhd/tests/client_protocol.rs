@@ -246,9 +246,9 @@ impl russh::server::Handler for JumpHandler {
     async fn auth_publickey(
         &mut self,
         user: &str,
-        key: &russh::keys::PublicKey,
+        key: russh::server::VerifiedPublicKey<'_>,
     ) -> Result<Auth, Self::Error> {
-        Ok(if user == self.user && key == &self.identity {
+        Ok(if user == self.user && key.public_key == &self.identity {
             Auth::Accept
         } else {
             Auth::reject()

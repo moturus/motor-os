@@ -915,7 +915,6 @@ version = "1.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab4e5aa225bc56696909483320f0ff9b600f1a971b52e07a17d70f3d9b43254b"
 dependencies = [
- "generic-array 0.14.7",
  "rustversion",
  "typenum",
 ]
@@ -1072,18 +1071,6 @@ checksum = "4250ce6452e92010fdf7268ccc5d14faa80bb12fc741938534c58f16804e03c7"
 dependencies = [
  "block-padding",
  "hybrid-array",
-]
-
-[[package]]
-name = "internal-russh-num-bigint"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae8e22120c32fb4d19ec55fba35015f57095cd95a2e3b732e44457f5915b2ee8"
-dependencies = [
- "num-integer",
- "num-traits",
- "rand",
- "rand_core",
 ]
 
 [[package]]
@@ -1280,12 +1267,14 @@ dependencies = [
 
 [[package]]
 name = "num-bigint"
-version = "0.4.6"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
+checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
 dependencies = [
  "num-integer",
  "num-traits",
+ "rand",
+ "rand_core",
 ]
 
 [[package]]
@@ -1380,8 +1369,8 @@ dependencies = [
 
 [[package]]
 name = "pageant"
-version = "0.2.2"
-source = "git+https://github.com/moturus/russh.git?branch=server-window#042db50cf72626b464caf63f1c0d2b76c7272e18"
+version = "0.2.5"
+source = "git+https://github.com/moturus/russh.git?branch=motor-v0.65.1#2a07f3a882cbe80aa71f0fb543b31bbb370162cd"
 dependencies = [
  "base16ct",
  "byteorder",
@@ -1696,8 +1685,8 @@ dependencies = [
 
 [[package]]
 name = "russh"
-version = "0.63.1"
-source = "git+https://github.com/moturus/russh.git?branch=server-window#042db50cf72626b464caf63f1c0d2b76c7272e18"
+version = "0.65.1"
+source = "git+https://github.com/moturus/russh.git?branch=motor-v0.65.1#2a07f3a882cbe80aa71f0fb543b31bbb370162cd"
 dependencies = [
  "aes",
  "bitflags",
@@ -1725,7 +1714,6 @@ dependencies = [
  "hex-literal",
  "hmac",
  "inout",
- "internal-russh-num-bigint",
  "keccak",
  "log",
  "md5",
@@ -1768,7 +1756,7 @@ dependencies = [
 [[package]]
 name = "russh-cryptovec"
 version = "0.62.0"
-source = "git+https://github.com/moturus/russh.git?branch=server-window#042db50cf72626b464caf63f1c0d2b76c7272e18"
+source = "git+https://github.com/moturus/russh.git?branch=motor-v0.65.1#2a07f3a882cbe80aa71f0fb543b31bbb370162cd"
 dependencies = [
  "log",
  "nix",
@@ -1796,7 +1784,7 @@ dependencies = [
 [[package]]
 name = "russh-util"
 version = "0.52.0"
-source = "git+https://github.com/moturus/russh.git?branch=server-window#042db50cf72626b464caf63f1c0d2b76c7272e18"
+source = "git+https://github.com/moturus/russh.git?branch=motor-v0.65.1#2a07f3a882cbe80aa71f0fb543b31bbb370162cd"
 dependencies = [
  "chrono",
  "tokio",

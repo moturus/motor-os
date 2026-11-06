@@ -492,9 +492,9 @@ impl server::Handler for ConnectionHandler {
     async fn auth_publickey_offered(
         &mut self,
         user: &str,
-        public_key: &keys::ssh_key::PublicKey,
+        offer: server::PublicKeyOffer<'_>,
     ) -> Result<server::Auth, Self::Error> {
-        if self.check_key(user, public_key).await.accepted {
+        if self.check_key(user, offer.public_key).await.accepted {
             Ok(server::Auth::Accept)
         } else {
             Ok(rejected())
@@ -504,7 +504,7 @@ impl server::Handler for ConnectionHandler {
     async fn auth_publickey(
         &mut self,
         user: &str,
-        key: &keys::ssh_key::PublicKey,
+        key: server::VerifiedPublicKey<'_>,
     ) -> Result<server::Auth, Self::Error> {
         let name = logged_name(user);
         if let Some(authenticated) = self.authenticated_user.as_ref() {
@@ -514,7 +514,7 @@ impl server::Handler for ConnectionHandler {
             return Ok(rejected());
         }
 
-        if self.check_key(user, key).await.accepted {
+        if self.check_key(user, key.public_key).await.accepted {
             log::info!("User {name} authenticated.");
             self.authenticated_user = Some(user.to_owned());
             Ok(server::Auth::Accept)
