@@ -13,13 +13,14 @@ const REGISTRY_VERSION: &str = "1";
 const MAX_USER_NAME_BYTES: usize = 64;
 // russhd refuses a whole registry past this, which denies every login.
 const MAX_USERS: usize = 1024;
-const SERVICE_FIELDS: [&str; 6] = [
+const SERVICE_FIELDS: [&str; 7] = [
     "version",
     "listen_on",
     "path",
     "host_key",
     "users_file",
     "authorized_keys_dir",
+    "allow_tcp_forwarding",
 ];
 
 struct Table<'a> {
@@ -448,6 +449,18 @@ mod tests {
         }
         for name in ["", " a", "a b", "a.b", "a/b", "é", &"n".repeat(65)] {
             assert!(!valid_user_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn preserves_forwarding_policy_when_replacing_the_host_key() {
+        for policy in ["true", "false"] {
+            let source = format!("{SERVICE}allow_tcp_forwarding = {policy}\n");
+            check_service(&source).unwrap();
+            assert_eq!(
+                text(set_host_key(&source, "new").unwrap()),
+                source.replace("\"\"\"old\"\"\"", "\"new\"")
+            );
         }
     }
 

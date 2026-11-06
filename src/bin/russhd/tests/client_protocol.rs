@@ -10,6 +10,9 @@ use std::time::{Duration, Instant};
 use russh::server::{Auth, Session};
 use russh::{Channel, ChannelId};
 
+#[path = "client_protocol/forwarding.rs"]
+mod forwarding;
+
 const RUSSHD: &str = env!("CARGO_BIN_EXE_russhd");
 const SSH: &str = env!("CARGO_BIN_EXE_ssh");
 const SHIPPED_USERS: &str =
@@ -33,6 +36,10 @@ struct Fixture {
 
 impl Fixture {
     fn start() -> Self {
+        Self::configured("")
+    }
+
+    fn configured(extra: &str) -> Self {
         static ID: AtomicU64 = AtomicU64::new(0);
         // Credentials must sit in a private tree, which a shared /tmp cannot be.
         let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
@@ -57,7 +64,7 @@ impl Fixture {
             )
             .replace("/user/cfg/ssh", root.to_str().unwrap());
         let config_path = root.join("sshd.toml");
-        std::fs::write(&config_path, config).unwrap();
+        std::fs::write(&config_path, format!("{config}\n{extra}")).unwrap();
 
         let mut child = Command::new(RUSSHD)
             .arg(&config_path)

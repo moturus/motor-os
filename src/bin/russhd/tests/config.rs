@@ -4,13 +4,39 @@ use russhd::config::*;
 
 const CONFIG: &str = include_str!("sshd.toml");
 
-fn check(name: &str, text: &str) -> Result<(), String> {
+fn check(name: &str, text: &str) -> Result<bool, String> {
     let path: PathBuf = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("russhd-config-{}-{name}.toml", std::process::id()));
     std::fs::write(&path, text).unwrap();
     let result = read_from_file(path.to_str().unwrap());
     std::fs::remove_file(&path).unwrap();
-    result.map(|_| ()).map_err(|error| error.to_string())
+    result
+        .map(|config| config.allow_tcp_forwarding())
+        .map_err(|error| error.to_string())
+}
+
+#[test]
+fn forwarding_is_an_optional_boolean_in_version_2() {
+    assert!(!check("absent", CONFIG).unwrap());
+    for (value, expected) in [("true", true), ("false", false)] {
+        assert_eq!(
+            check(
+                "policy",
+                &format!("allow_tcp_forwarding = {value}\n{CONFIG}")
+            )
+            .unwrap(),
+            expected
+        );
+    }
+    for value in ["1", "'true'", "[]"] {
+        assert!(
+            check(
+                "bad-policy",
+                &format!("allow_tcp_forwarding = {value}\n{CONFIG}")
+            )
+            .is_err()
+        );
+    }
 }
 
 #[test]

@@ -16,8 +16,8 @@ use russh::*;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use russhd::auth_store::{self, Verdict};
-use russhd::config;
 use russhd::local_session::{self, ChannelCloseGuard, StdinTx};
+use russhd::{config, forward};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -195,10 +195,8 @@ struct PtyRequest {
     modes: Vec<(Pty, u32)>,
 }
 
-/// Handles a client connection, which can _potentially_ have multiple channels
-/// (multiple shell sessions, port forwarding, sftp, etc.). But in our current
-/// implementation we support only one channel at a time: a second channel is
-/// refused until the first has been closed by either side.
+/// A connection supports one session channel and independent TCP forwards.
+/// A second session is refused until the first has closed on either side.
 struct ConnectionHandler {
     id: u64,
     config: Arc<config::Config>,
@@ -217,6 +215,7 @@ struct ConnectionHandler {
     close_guard: Option<ChannelCloseGuard>,
     receive_credit: Option<ReceiveCredit>,
     login: Arc<login::Grace>,
+    forwards: Option<forward::Tasks>,
 }
 
 impl ConnectionHandler {
@@ -237,6 +236,7 @@ impl ConnectionHandler {
             close_guard: None,
             receive_credit: None,
             login,
+            forwards: None,
         }
     }
 
@@ -517,7 +517,7 @@ impl server::Handler for ConnectionHandler {
             self.release_channel();
         }
         if self.active_channel.is_some() {
-            // One channel at a time. Dropping `reply` rejects this one.
+            // One session at a time. Dropping `reply` rejects this one.
             log::info!("Refusing a second channel {:?}", channel.id());
             return Ok(());
         }
@@ -534,11 +534,55 @@ impl server::Handler for ConnectionHandler {
         Ok(())
     }
 
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        channel: Channel<Msg>,
+        host: &str,
+        port: u32,
+        _origin: &str,
+        _origin_port: u32,
+        reply: server::ChannelOpenHandle,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        if !self.config.allow_tcp_forwarding() {
+            return Ok(());
+        }
+        let port = match forward::validate_target(host, port) {
+            Ok(port) => port,
+            Err(reason) => {
+                reply.reject(reason).await;
+                return Ok(());
+            }
+        };
+        let tasks = self.forwards.get_or_insert_with(forward::Tasks::default);
+        let Some(reservation) = tasks.reserve(forward::memory_pressure()) else {
+            reply.reject(ChannelOpenFailure::ResourceShortage).await;
+            return Ok(());
+        };
+        let credit = session
+            .receive_credit(channel.id())
+            .ok_or(russh::Error::Inconsistent)?;
+        log::info!("Forward {:?} to {host}:{port}", channel.id());
+        // The connection owns cancellation across DNS, connect, reply and relay.
+        reservation.spawn(forward::direct_tcpip(
+            channel,
+            reply,
+            host.to_owned(),
+            port,
+            credit,
+            local_session::SSH_RECEIVE_WINDOW as usize,
+        ));
+        Ok(())
+    }
+
     async fn channel_eof(
         &mut self,
         channel_id: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        if self.active_channel != Some(channel_id) {
+            return Ok(());
+        }
         // An EOF means the client will send no more stdin. It does not mean the
         // channel can be closed: the command may still have output to send, and
         // its exit status has not been reported yet. `ssh host cmd` sends EOF as
@@ -726,6 +770,9 @@ impl server::Handler for ConnectionHandler {
         _data: &[u8],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
+        if self.active_channel != Some(channel_id) {
+            return Ok(());
+        }
         let Some(stdin_tx) = self.stdin_tx.as_ref() else {
             if let Some(sftp_channel_id) = self.sftp_channel_id
                 && sftp_channel_id == channel_id
