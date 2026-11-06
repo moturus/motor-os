@@ -21,6 +21,7 @@ use crate::util::map_native_error;
 
 mod block_io;
 mod config;
+mod devices;
 mod entry_ids;
 mod lock_manager;
 mod mbr;
@@ -42,6 +43,7 @@ pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
     config::self_test::TESTS,
     memory::self_test::TESTS,
     mbr::self_test::TESTS,
+    devices::self_test::TESTS,
     virtio_partition::self_test::TESTS,
     self_test::TESTS,
     &[
@@ -454,58 +456,25 @@ pub(super) async fn init(
     block_devices: Vec<Result<virtio_async::VirtioDevice>>,
     channel_budget: Rc<channel_budget::ChannelBudget>,
 ) -> Result<FsRuntime> {
-    let root_device = block_devices
-        .into_iter()
-        .next()
-        .ok_or(ErrorKind::NotFound)??;
-    let block_device = virtio_async::BlockDevice::from(root_device)?;
     let fs_stats = Rc::new(stats::FsStats::default());
-
-    if block_device.capacity() < 8 {
-        return Err(ErrorKind::InvalidData.into());
-    }
-
-    use zerocopy::FromZeros;
-
-    let first_block = moto_sdk::iobuf::VirtioIoBuf::new_from_size_align(4096).unwrap();
-    let (first_block, res) =
-        virtio_async::BlockDevice::post_read(block_device.clone(), 0, first_block)
-            .await
-            .await;
-    res?;
-
-    let mbr = mbr::Mbr::parse(
-        &AsRef::<[u8]>::as_ref(&first_block)[..512],
-        block_device.capacity(),
-    )
-    .map_err(|err| {
-        log::error!("Mbr::parse() failed: {err:?}.");
-        std::io::Error::from(ErrorKind::InvalidData)
-    })?;
-
-    // The boot-time MBR read has completed; all later I/O shares this owner.
-    let (block_io, inbox) = moto_sdk::async_runtime::channel::channel(64);
-    moto_sdk::async_runtime::LocalRuntime::spawn(block_io::run(
-        block_device.clone(),
-        inbox,
-        fs_stats.clone(),
-    ));
-    let (slot, pte) = mbr.first_motor_fs()?;
-    log::info!("Root filesystem: virtio0p{slot}");
-    let partition = Box::new(
-        virtio_partition::VirtioPartition::from_virtio_bd(
-            block_io,
-            block_device.flush_supported(),
-            u64::from(pte.lba),
-            u64::from(pte.sectors),
-        )
-        .await?,
-    );
-    let fs = FS::MotorFs(
-        motor_fs::MotorFs::open_with_cache_size(partition, block_cache_blocks()).await?,
-    );
+    let mut devices = devices::Devices::new(block_devices, fs_stats.clone());
+    let source = devices
+        .root()
+        .await
+        .map_err(|error| std::io::Error::new(error.kind(), format!("root /, virtio0: {error}")))?;
+    log::info!("Root filesystem: {:?}", source.identity);
+    let fs = devices
+        .open(source, block_cache_blocks())
+        .await
+        .map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("root /, {:?}: {error}", source.identity),
+            )
+        })?;
 
     let mounts = Rc::new(RefCell::new(mounts::MountTable::new(fs)));
+    mounts.borrow_mut().find_mut(0).unwrap().source = Some(source.identity);
     let free_caches = Rc::new(memory::FreeCaches::default());
     config::load(&mounts, &free_caches)
         .await

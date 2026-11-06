@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use moto_sdk::async_fs::block_cache::CheckpointedBlock;
 use moto_sdk::async_runtime::channel;
 use moto_sdk::iobuf::VirtioIoBuf;
+use std::cell::RefCell;
 use std::io::{ErrorKind, Result};
 
 const FS_BLOCK_SIZE: usize = 4096;
@@ -15,6 +16,7 @@ pub(super) struct VirtioPartition {
     // This partition starts at `virtio_block_offset` and contains `virtio_blocks`.
     virtio_block_offset: u64,
     virtio_blocks: u64,
+    first_block: RefCell<Option<VirtioIoBuf>>,
 }
 
 impl VirtioPartition {
@@ -40,7 +42,13 @@ impl VirtioPartition {
             flush_supported,
             virtio_block_offset,
             virtio_blocks,
+            first_block: RefCell::new(None),
         })
+    }
+
+    pub(super) fn seed_first_block(&mut self, block: VirtioIoBuf) {
+        assert_eq!(self.virtio_block_offset, 0);
+        *self.first_block.get_mut() = Some(block);
     }
 
     fn first_sector(&self, block_no: u64, count: usize) -> Result<u64> {
@@ -73,6 +81,12 @@ impl moto_sdk::async_fs::AsyncBlockDevice for VirtioPartition {
             Err(error) => return (block, Err(error)),
         };
         assert_eq!(block.as_mut().len(), FS_BLOCK_SIZE);
+        if block_no == 0
+            && let Some(first) = self.first_block.borrow_mut().take()
+        {
+            AsMut::<[u8]>::as_mut(block.as_mut()).copy_from_slice(AsRef::<[u8]>::as_ref(&first));
+            return (block, Ok(()));
+        }
         let pages = vec![block.as_mut().phys_addr() as u64];
         let reply = block_io::send(&self.inbox, block, |reply| Message::Read {
             first_sector,
@@ -133,6 +147,9 @@ impl moto_sdk::async_fs::AsyncBlockDevice for VirtioPartition {
             Ok(sector) => sector,
             Err(error) => return (block, Err(error)),
         };
+        if block_no == 0 {
+            self.first_block.borrow_mut().take();
+        }
         assert_eq!(block.as_ref().len(), FS_BLOCK_SIZE);
         let pages = vec![block.as_ref().phys_addr() as u64];
         match block_io::send(&self.inbox, block, |reply| Message::Write {
@@ -154,6 +171,9 @@ impl moto_sdk::async_fs::AsyncBlockDevice for VirtioPartition {
         blocks: Vec<CheckpointedBlock>,
     ) -> Result<Self::Completion> {
         let first_sector = self.first_sector(first_block_no, blocks.len())?;
+        if first_block_no == 0 && !blocks.is_empty() {
+            self.first_block.borrow_mut().take();
+        }
         let pages = blocks
             .iter()
             .map(|block| {
@@ -230,6 +250,24 @@ pub(super) mod self_test {
                     .await
                     .is_err_and(|error| error.kind() == ErrorKind::InvalidInput)
             );
+            let (sender, receiver) = channel::channel(4);
+            drop(receiver);
+            let mut whole = VirtioPartition::from_virtio_bd(sender, false, 0, 16)
+                .await
+                .unwrap();
+            let mut header = buffer();
+            AsMut::<[u8]>::as_mut(&mut header).fill(0x5a);
+            whole.seed_first_block(header);
+            let (block, result) = whole.read_block(0, buffer()).await;
+            st_assert!(result.is_ok());
+            st_assert!(
+                AsRef::<[u8]>::as_ref(&block)
+                    .iter()
+                    .all(|byte| *byte == 0x5a)
+            );
+            // The probe read seeds only the first open, never later reads.
+            let (_, result) = whole.read_block(0, block).await;
+            st_assert_eq!(result.unwrap_err().kind(), ErrorKind::NotConnected);
             Ok(())
         })
     }

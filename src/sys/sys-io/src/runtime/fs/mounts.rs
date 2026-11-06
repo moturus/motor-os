@@ -3,7 +3,7 @@
 use super::FS;
 use moto_sdk::async_fs::{EntryId, EntryKind, FileSystem, ROOT_ID, Role};
 use moto_sdk::async_runtime::{LocalRwLock, LocalRwLockReadGuard, LocalRwLockWriteGuard};
-use moto_sdk::sys_io::api_fs::{MountInfo, MountKind};
+use moto_sdk::sys_io::api_fs::{MountBlockSource, MountInfo, MountKind};
 use std::cell::RefCell;
 use std::io::{ErrorKind, Result};
 use std::rc::Rc;
@@ -30,6 +30,7 @@ pub(super) struct Mount {
     pub kind: MountKind,
     pub parent: Option<MountPoint>,
     pub corrupted: bool,
+    pub source: Option<MountBlockSource>,
 }
 
 pub(super) struct MountPoint {
@@ -60,6 +61,7 @@ impl MountTable {
                 fs: Rc::new(LocalRwLock::new(root)),
                 parent: None,
                 corrupted: false,
+                source: None,
             }],
             next_id: 1,
         }
@@ -67,6 +69,10 @@ impl MountTable {
 
     pub(super) fn find(&self, id: MountId) -> Option<&Mount> {
         self.mounts.iter().find(|mount| mount.id == id)
+    }
+
+    pub(super) fn find_mut(&mut self, id: MountId) -> Option<&mut Mount> {
+        self.mounts.iter_mut().find(|mount| mount.id == id)
     }
 
     pub(super) fn find_by_mount_point(&self, parent: MountId, shadowed: EntryId) -> Option<&Mount> {
@@ -106,6 +112,7 @@ impl MountTable {
             fs: Rc::new(LocalRwLock::new(fs)),
             parent: Some(parent),
             corrupted: false,
+            source: None,
         });
         self.next_id += 1;
         Ok(id)
@@ -342,7 +349,7 @@ pub(super) async fn info(table: &Rc<RefCell<MountTable>>, cursor: u32) -> Result
             path: mount.path().to_owned(),
             corrupted: mount.corrupted,
             read_only: false,
-            source: None,
+            source: mount.source,
             used: None,
             entries: None,
             cap: None,

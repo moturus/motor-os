@@ -27,5 +27,8 @@ pub(crate) use txn::*;
 pub use fs::*;
 pub use layout::{ROOT_DIR_ID, has_superblock_magic};
 
+/// Superblock, root, journal and at least one allocatable filesystem block.
+pub const MIN_BLOCKS: u64 = layout::RESERVED_BLOCKS as u64 + 1;
+
 #[cfg(test)]
 mod tests;
