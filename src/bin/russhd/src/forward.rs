@@ -3,6 +3,9 @@
 use std::collections::VecDeque;
 use std::io;
 
+mod tasks;
+pub use tasks::Tasks;
+
 const BLOCK_SIZE: usize = 32 * 1024;
 
 /// Coalesces SSH packets without retaining an allocation for each packet.
