@@ -12,14 +12,15 @@ All 151 host tests, all-target clippy, both Motor OS release builds, three debug
 and three release main-image gates, and the complete developer-image release
 gate pass without local overrides, retries, or source changes between runs.
 Step 2b's bounded queue, connection-owned cancellation, and generic relay are
-committed and pass 21 focused tests. Direct-open helpers pass 24 host tests and
-clippy, but their Motor build exposed a published/in-tree SDK API difference.
+committed. The direct-open helpers exposed a published/in-tree SDK API difference.
 The user chose to publish updated system and SDK crates. Release metadata
 is committed, and the user published `moto-sys 0.4.0`. The SDK package lock
 is refreshed. The pre-existing OOM cancellation-test race exposed by the
 deferred gates is repaired, and all three debug and three release image gates
-pass on the repaired sources. The next handoff is SDK publication. Direct
-opens and configuration are not yet integrated in the binary.
+pass on the repaired sources. The user has now published `moto-sdk 0.2.0` from
+`f8f22e77`; its registry source matches the in-tree SDK. Russhd now resolves
+that release and `moto-sys 0.4.0` from crates.io. Direct opens and configuration
+are not yet integrated in the binary.
 See "Implementation progress" below and "Decisions" at the end.
 
 ## Implementation progress
@@ -31,7 +32,7 @@ Developer-image validation remains release-only.
 | Step | Progress | Remaining |
 |---|---|---|
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
-| 2 | Step 2a complete: published `2a07f3a`, 151 main host tests, clean clippy, native builds, 3+3 main-image passes and complete developer-image release gate. Step 2b: relay and 21 focused tests committed through `4ffd3369`; direct-open draft passes 24 host tests. System crate published; SDK package lock and OOM test repair pass 3+3 image gates | Publish SDK, direct opens, configuration, integrated milestone gates |
+| 2 | Step 2a complete: published `2a07f3a`, 151 main host tests, clean clippy, native builds, 3+3 main-image passes and complete developer-image release gate. Step 2b: relay foundation committed through `4ffd3369`; published SDK and sys releases now resolve from crates.io. SDK package lock and OOM test repair pass 3+3 image gates | Direct opens, configuration, integrated milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
@@ -248,10 +249,18 @@ immediate cancellation and `completed=true` for ordered recovery. The release
 build repeats the existing kloader pointer-comparison lint at `loader.rs:177`,
 also present in `step2a-login-release-1.log`; the patch adds no warnings.
 
-The SDK publication checkpoint is ready. After pushing this change, the
-user publishes `moto-sdk 0.2.0`; then update russhd's registry dependency and
-resume step 2b. These release-preparation gates do not replace step 2b's
+The user pushed the release changes and published `moto-sdk 0.2.0`. Russhd's
+registry dependency now selects it and `moto-sys 0.4.0`, without unrelated
+lockfile changes. The SDK archive records `f8f22e77` and its source matches
+the in-tree package. These release-preparation gates do not replace step 2b's
 integrated forwarding gates.
+
+The direct-open helpers now build against those published releases. All 175
+russhd host tests pass, including 25 forwarding tests; all-target clippy and
+both Motor OS release binaries pass. The helpers include hermetic resolver
+failure/empty-result checks and deterministic loopback address fallback.
+Evidence uses `step2b-open-published-sdk-*` in `build/russh-rebase/`.
+Binary integration follows in the next patch.
 
 ### Commit count and delivered functionality
 

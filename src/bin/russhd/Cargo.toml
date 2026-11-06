@@ -7,7 +7,7 @@ edition = "2024"
 env_logger   = "=0.11.8"
 hex          = "0.4.3"
 log          = "=0.4.28"
-moto-sdk     = "0.1"
+moto-sdk     = "0.2"
 rand         = "0.10"
 russh        = { git = "https://github.com/moturus/russh.git", branch = "motor-v0.65.1", default-features = false, features = ["flate2", "ring", "rsa"] }
 russh-sftp   = "=2.1.1"

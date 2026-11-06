@@ -6,7 +6,9 @@ use std::io;
 use russh::{Channel, ChannelId, ChannelMsg, ReceiveCredit};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
+mod open;
 mod tasks;
+pub use open::{direct_tcpip, memory_pressure, validate_target};
 pub use tasks::{Reservation, Tasks};
 
 const BLOCK_SIZE: usize = 32 * 1024;
