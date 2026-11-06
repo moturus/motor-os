@@ -3,17 +3,15 @@
 Status: v6, rebase review incorporated on 2026-11-05. Milestone 1 is complete with
 three debug and three release passes and the complete developer-image release
 gate, including both 256 MiB Wasm VMs.
-Milestone 2's external v0.65.1 rebase is committed and tested on branch
-`motor-v0.65.1`, tip `bc44c5d`. Its complete fork suite passes 289 tests, including
-the repaired pending-delivery close stall. The user published it; the remote
-revision is verified. The user approved repairing the diagnosed login-deadline
-bug. That repair is prepared and tested: its external session-abort prerequisite
-is commit `2a07f3a`, and the main draft passes 151 host tests, clippy, and both
-Motor OS release builds using a temporary local fork override. Work stops for
-user publication of `2a07f3a` before the pin update and full image gates. The main
-deadline patch is saved for application after publication; the active working tree
-retains the buildable `bc44c5d` pin/API/contract changes, with their 147-test pass.
-The committed pin remains `042db50`. Relay integration has not started.
+Step 2a is complete. The user published the external v0.65.1 rebase and
+session-abort prerequisite on `motor-v0.65.1` at `2a07f3a`; the remote revision
+is verified and its 291-test fork suite passes. Main commits `6ef2101d`,
+`fbf63baa`, and `0338a922` update the real git pin, enforce the approved login
+deadline with a production abort call, and cover compression and channel close.
+All 151 host tests, all-target clippy, both Motor OS release builds, three debug
+and three release main-image gates, and the complete developer-image release
+gate pass without local overrides, retries, or source changes between runs.
+Step 2b's relay integration is next.
 See "Implementation progress" below and "Decisions" at the end.
 
 ## Implementation progress
@@ -25,7 +23,7 @@ Developer-image validation remains release-only.
 | Step | Progress | Remaining |
 |---|---|---|
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
-| 2 | Rebase published at `bc44c5d`; session-abort addition `2a07f3a` passes 291 fork tests and awaits publication. Main deadline draft passes 151 host tests, clippy, and both Motor OS release builds against the local fork | User publishes `2a07f3a`; update pin, apply saved deadline fix, run 3+3 main-image and developer-image release gates, commit patches. Step 2b: relay, direct opens, configuration, milestone gates |
+| 2 | Step 2a complete: published `2a07f3a` pinned by `6ef2101d`, deadline repair `fbf63baa`, close tests `0338a922`; 151 main host tests, clean clippy, native builds, 3+3 main-image passes and complete developer-image release gate | Step 2b: relay, direct opens, configuration, integrated milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
@@ -44,9 +42,10 @@ plan commit `be3e43b7`. They represent:
 | Motor OS: plan only | 13 | Failure diagnosis, test evidence and pass counts, external-fork progress, and the review/push handoff |
 | External russh checkout | 5, separate from those 17 | Baseline test signature correction, approved compression fix, peer-close fix, local-close cleanup, and live-transport regressions |
 
-The completed main-repository work is the prerequisite test/harness milestone.
-Milestone 2's original external-fork prerequisite passed on v0.63.1; the rebase
-review adds the step 2a work below before forwarding integration in `russhd`.
+At that checkpoint, the completed main-repository work was the prerequisite
+test/harness milestone. Milestone 2's original external-fork prerequisite passed
+on v0.63.1; the rebase review added the now-complete step 2a before forwarding
+integration in `russhd`.
 Milestones 3–8 have not started. The test totals above include existing tests;
 they are not counts of newly added tests.
 
@@ -69,9 +68,9 @@ cover the new rebase checkpoint.
   leaves `server-window` at `042db50`.
 - [x] Prepare the approved login-deadline repair and its external session-abort
   prerequisite; pass 291 fork tests and 151 main draft tests.
-- [ ] User publishes the additional fork commit `2a07f3a`, then update the pin
+- [x] User publishes the additional fork commit `2a07f3a`, then update the pin
   and apply the saved main deadline patch.
-- [ ] Update the actual git pin with Cargo, adapt authentication callbacks,
+- [x] Update the actual git pin with Cargo, adapt authentication callbacks,
   restore close contract tests, strengthen compression coverage, and pass the
   separate step 2a main-image and developer-image gates.
 - [ ] Implement the bounded block queue and event-driven relay, including credit,
@@ -80,10 +79,10 @@ cover the new rebase checkpoint.
   validation, handler isolation, and configuration with the imager field.
 - [x] `bc39a586`, now merged from `dev`, adds the 120 s login deadline and removes
   the application idle timeout; preserve it through the API migration.
-- [ ] Complete the controlled-clock authentication/idle coverage below against
+- [x] Complete the controlled-clock authentication/idle coverage below against
   the rebased dependency.
 - [ ] Pass the integrated milestone's three debug and three release main-image
-  gates. No milestone-2 main-image gate pass is claimed yet.
+  gates after step 2b. Step 2a's completed gates are a separate prerequisite.
 
 ### Rebase prerequisite (step 2a)
 
@@ -145,8 +144,8 @@ prerequisite for updating the main pin is satisfied.
 and update the lockfile with `cargo update -p russh`. Adapt `auth_publickey_offered`
 to `PublicKeyOffer<'_>` and `auth_publickey` to `VerifiedPublicKey<'_>`, using
 `.public_key`, in the real handler and `client_protocol.rs` fixture. Preserve the
-current credential checks and `auth_succeeded`/`GracedStream` login protection;
-the saved API patch predates the latest `dev` merge. Correct the branch description
+current credential checks and the supervised login protection from the approved
+deadline repair; the saved API patch predates the latest `dev` merge. Correct the branch description
 in `img_files/motor-os-dev/devtools/www/rust.html` in this pin patch, rather than
 waiting for step 4.
 
@@ -408,6 +407,57 @@ After verifying published `2a07f3a`, update Cargo with the real git revision,
 apply `build/russh-rebase/pending-main-login.patch`, and resume the main pin's
 unchanged 3+3 image gates and developer-image release gate. Preserve the original
 diagnostic failure and deliberately interrupted debug run; neither is a pass.
+
+### Published deadline repair and image validation (2026-11-05)
+
+`session-abort-published-refs.txt` verifies `motor-v0.65.1` at
+`2a07f3a882cbe80aa71f0fb543b31bbb370162cd`, with `server-window` still at `042db50`.
+Cargo updated the four git-source revisions to that commit without dependency
+version changes relative to the first published rebase. The complete lockfile
+diff also drops `generic-array`'s 0.14 compatibility edge because upstream
+v0.65.1 removed its `compat-0_14` feature request; the crate version stays fixed.
+The main patch is committed: `main.rs` calls
+`login::run`, and the production expiry branch in `src/bin/russhd/src/login.rs`
+calls `session.abort()` and awaits cleanup. The production caller is in commit
+`fbf63baa`.
+
+Against the actual git pin, all **151 main host tests** pass, all-target clippy
+and formatting pass without warnings, and both Motor OS release binaries build
+without warnings. Logs are `login-published-pin-update.log`,
+`login-published-main-host-tests.log`, `login-published-main-clippy.log`, and
+`login-published-motor-release.log`. No local Cargo override is used. The four
+controlled-clock tests run transitively from `full-test.sh` through the russhd
+binary tests.
+
+The earlier interrupted debug run and its source checksums are retained. All
+seven new gates completed with status 0. Source checksums before and after each
+run match; no retries, source changes, longer timeouts, or ignored failures were
+needed. Logs and matching `-evidence/` directories are in `build/russh-rebase/`.
+
+| Gate log prefix | Preparation (minutes) | Testing (minutes) |
+|---|---:|---:|
+| `step2a-login-debug-1` | 0.4 | 27.6 |
+| `step2a-login-debug-2` | 0.2 | 27.4 |
+| `step2a-login-debug-3` | 0.1 | 27.5 |
+| `step2a-login-release-1` | 4.1 | 13.5 |
+| `step2a-login-release-2` | 0.9 | 13.6 |
+| `step2a-login-release-3` | 0.9 | 13.6 |
+| `step2a-login-dev-release-1` (inner full repository test) | 11.3 | 18.4 |
+
+The complete developer-image release gate also passed HTTP component tests,
+native source builds, native toolchain installation, the bounded Lorry product
+suite, and both 256 MiB Wasm VMs. Ordinary Wasm evidence is saved separately in
+`step2a-login-wasm-ordinary-evidence/`: 70 Javy commands on `wasm:256`, 62 on
+`dev:256`, 141 Wasmtime commands on each, and four outputs equal to Linux Javy's.
+The service logs in `step2a-login-dev-release-1-evidence/wasm/` show 56 role
+commands and all four role launchers passing on each VM, plus both sys-init
+services and the workflow checks. The outer log ends with
+`full-test-dev.sh ALL PASS`.
+
+The tested code is committed in three focused patches: `6ef2101d` pins the
+published fork and covers compressed transfers, `fbf63baa` repairs the login
+deadline with four controlled-clock tests, and `0338a922` adds the two close
+liveness contract tests. All three commit messages are one line.
 
 Step 1 focused checks: `cargo test` for `wasm-smoke-suite` (two tests),
 `test-wasm-selection.sh`, `test-full-test-size.sh`, and `test-dev-memory-contract.sh`
@@ -956,11 +1006,15 @@ Retain the approved 16,384-forward ceiling and no smaller Motor-specific count c
   that forward. Check before each new block, use fallible allocation where available, and
   release drained blocks. Avoid geometrically growing a contiguous backlog: a 1-to-2 MiB
   reallocation can need both allocations at once, exceeding the margin after the check.
-  sys-io also refuses outbound connects during pressure, reported as `ConnectFailed`.
+  The merged SDK exposes a live free-page count instead of the former pressure
+  flag. Keep this forwarding policy at 2 MiB with a local helper reading
+  `moto_sdk::sys::free_pages() < 512`; pages are 4 KiB. Do not substitute
+  `low_memory()`, whose 4 MiB threshold serves other admission policies.
+  Socket allocation/connect failures are reported as `ConnectFailed`.
 
 Pressure shedding is best effort, not a guarantee that other sessions survive arbitrary
-system-wide exhaustion. The flag is not a reservation, and fallible allocation cannot
-recover from a refused lazy page fault (`docs/oom-handling.md`). Unlike a process per
+system-wide exhaustion. A free-page reading is not a reservation, and fallible
+allocation cannot recover from a refused lazy page fault (`docs/oom-handling.md`). Unlike a process per
 connection, russhd's single process shares this risk across all sessions. A guest test of
 this behaviour is deferred; see "Deferred: guest pressure test" under "Acceptance". This
 adds no boot-time work.
@@ -998,17 +1052,17 @@ on `ConnectionHandler`.
 
 ### Authentication and idle connections
 
-`bc39a586`, merged from `dev`, already sets `inactivity_timeout` to `None` and
-provides a 120 s `LOGIN_GRACE` through `GracedStream`, cleared by `auth_succeeded`.
-Preserve that behavior during step 2a's callback migration. TCP keepalive only
-detects dead peers; it cannot replace the login deadline for a live unauthenticated peer.
+`bc39a586`, merged from `dev`, sets `inactivity_timeout` to `None` and introduced
+the 120 s `LOGIN_GRACE`. Step 2a's approved repair replaces its read-only
+`GracedStream` timer with `login::Grace` and a supervisor around the real session.
+`auth_succeeded` rejects completion at or after the deadline. Expiry aborts and
+awaits the session task, including a suspended authentication callback.
 
 The contract remains a 120 s deadline from TCP accept through successful
 authentication, following OpenSSH's
-[`LoginGraceTime`](https://man.openbsd.org/sshd_config#LoginGraceTime). Use connection-local
-deadline state and the transport-wrapper pattern already used by the client. Clear it only
-on authentication completed before the deadline. Expiry must terminate the actual russh
-session and transport; dropping a `RunningSession` join wrapper alone is insufficient.
+[`LoginGraceTime`](https://man.openbsd.org/sshd_config#LoginGraceTime). Keep the
+connection-local deadline and completed-before-expiry check through forwarding work.
+Dropping a `RunningSession` join wrapper alone is insufficient.
 After authentication, sys-io's 20 s keepalive and 300 s timeout detect dead TCP peers.
 Test silent identification, stalled authentication, and authenticated idle connections
 with a controlled clock; do not add a wall-clock wait of minutes to the suite.
@@ -1218,8 +1272,8 @@ fix and validation status.
    relay with focused tests; then integrate connection cancellation and direct
    opens with stalled-peer tests. Add the
    config and imager fields together, with forwarding enabled only in the new host fixtures.
-   Preserve the existing login deadline/idle policy and add its missing controlled-clock
-   tests. Gate patches with `cargo test` in `src/bin/russhd` and, when affected, `src/imager`.
+   Retain step 2a's login deadline/idle policy and controlled-clock tests. Gate
+   patches with `cargo test` in `src/bin/russhd` and, when affected, `src/imager`.
 3. Add guest coverage, then enable shipped configs and existing forwarding fixtures together
    with replacement of their refusal assertions. Keep the policy-off refusal test in a
    dedicated fixture. Gate with `full-test.sh`, debug and release, and
@@ -1411,8 +1465,9 @@ host test above covers that logic.
 The test should exercise backlog block growth and shedding under controlled pressure,
 followed by cleanup and recovery, and an existing shell must survive it. Record memory
 before and after the episode, and do not query allocating metrics during pressure. A failure
-requires diagnosis, not retries or weaker assertions. Holding pressure through the flag's
-dips is the hard part; see the header of `src/sys/tests/systest/src/pressure.rs`.
+requires diagnosis, not retries or weaker assertions. Holding pressure while the
+free-page count fluctuates is the hard part; see
+`src/sys/tests/systest/src/pressure.rs`.
 `full-test.sh` already uploads `systest` to the guest, but its squeeze is an internal child
 mode. So the test needs either a small `systest` change, under `src/sys`, or a helper crate
 in `src/tests`.
@@ -1450,7 +1505,13 @@ in `src/tests`.
     close contracts, and repair/test the stale pending-delivery guard. The user
     reviews and publishes; then gate the actual pin with 3+3 main-image passes
     and the complete developer-image release run. This replaces the old-base
-    publication handoff, without claiming the rebase has been implemented.
+    publication handoff; step 2a is now implemented and validated.
+11. **Repair the diagnosed login-deadline bug before continuing forwarding.**
+    The approved fix includes the external `RunningSession::abort()` prerequisite
+    and a main supervisor that aborts and awaits an unauthenticated session at
+    the original deadline. Timely authentication keeps the session alive without
+    an application idle timeout. The user published the prerequisite and the
+    complete main patch has passed step 2a's gates.
 
 These differences from OpenSSH remain:
 
