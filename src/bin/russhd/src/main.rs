@@ -778,7 +778,7 @@ impl server::Handler for ConnectionHandler {
         _data: &[u8],
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
-        let Some(stdin_tx) = self.stdin_tx.as_ref() else {
+        let Some(_) = self.stdin_tx.as_ref() else {
             if let Some(sftp_channel_id) = self.sftp_channel_id
                 && sftp_channel_id == channel_id
             {
@@ -791,11 +791,9 @@ impl server::Handler for ConnectionHandler {
         // Russh queued these bytes on the channel before invoking this
         // callback. The session's stdin task consumes that bounded queue and
         // returns receive credit only after writing the bytes to the child.
-        if !stdin_tx.is_open() {
-            log::warn!("Got remote data after the local input task stopped.");
-            return Err(russh::Error::Disconnect);
-        }
-
+        // A child may close stdin while it still produces output. Its dropped
+        // reader discards late input within the remaining receive window;
+        // output completion still owns the channel's exit status and close.
         Ok(())
     }
 }

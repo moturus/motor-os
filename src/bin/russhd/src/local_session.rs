@@ -11,10 +11,6 @@ pub struct StdinTx {
 }
 
 impl StdinTx {
-    pub fn is_open(&self) -> bool {
-        !self.coordinator.is_closed()
-    }
-
     pub async fn send(
         &self,
         message: SessionMessage,
