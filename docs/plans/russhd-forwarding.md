@@ -36,7 +36,7 @@ Developer-image validation remains release-only.
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
 | 2 | Complete: step 2a published `2a07f3a` and passed its separate 3+3 and developer-image gates. Step 2b integrates direct opens and optional configuration, resolves SDK/sys from crates.io, and passes 183 host tests, clippy, native builds, and its own 3+3 image gates | None |
 | 3 | Complete: guest jump transfers, native server forwarding/DNS/100-channel probe, shipped configuration and docs pass 3/3 release, 3/3 debug, and the complete developer-image release gate | None |
-| 4 | External `motor-v0.65.1` has committed client accounting, nonblocking dispatch and incoming credit handoff; 301 fork tests pass, including credit during rekey. A draft using the actual Motor relay also passes | Outgoing cancellation policy and handoff, user publication, pin and main-repo gates |
+| 4 | External `motor-v0.65.1` is ready through `d4a1cc4`, including outgoing handoff with OpenSSH's pending-open lifecycle. All 307 fork tests and four drafted main contracts pass | User publication, actual pin, integrate contracts, 3+3 main-image and complete developer-image release gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
 | 6 | Not started | SOCKS parser, `-D` integration and guest coverage, milestone gates |
 | 7 | Not started | Server remote listeners, credit handoff, `gateway_ports`, host/guest coverage, milestone gates |
@@ -408,12 +408,24 @@ acknowledgement. Restoring a blocking reservation makes the progress regression
 fail at its unchanged five-second watchdog. The restored fork passes all 297
 tests and selected clippy (`step4-client-dispatch-*`).
 
-Incoming credit handoff reuses the already-approved server design. Outgoing
-cancellation has one policy choice awaiting guidance: discard canceled-open
-state and close late/unmatched confirmations, or retain a minimal pending entry
-until its reply to preserve strict handling of other unmatched confirmations.
-Only that outgoing handoff remains paused; independent incoming work and
-step 3's image gates are complete.
+Incoming credit handoff reuses the already-approved server design. The user
+resolved outgoing cancellation by requesting OpenSSH's behavior. OpenSSH
+retains `SSH_CHANNEL_OPENING` records until the reply, does no ordinary socket
+I/O in that state, and rejects confirmations for nonexistent/non-opening
+channels. Its multiplexed-client cleanup also leaves opening channels
+registered while closing their local I/O. See `channel_handler_init`,
+`channel_input_open_confirmation`, and `mux_master_control_cleanup_cb` in
+[OpenSSH revision 5dba72ad](https://github.com/openssh/openssh-portable/tree/5dba72adacbd39736960543373737bc01e35f778).
+The pinned reference sources are saved under `build/russh-rebase/openssh-reference`.
+
+Match that pending-open lifecycle in russh: cancellation releases the
+application channel and credit handoff immediately, retaining only the
+unconfirmed protocol parameters until refusal, confirmation, or disconnect.
+A late success closes the channel through the existing close path, without
+calling the application confirmation callback. Unknown confirmations retain
+their existing protocol-error behavior. A peer that never replies can retain
+this small protocol entry until disconnect, as with OpenSSH; add no new timer
+or payload queue. The temporary handoff itself must never survive cancellation.
 
 `8f247c3` registers incoming unconfirmed parameters before the callback,
 reuses the server's cleanup guard, confirms only on acceptance, and removes
@@ -423,18 +435,22 @@ builder loses only its unused `None` field). Three tests cover the first manual
 window, explicit/default rejection with late credit, and a lost reply's guard.
 Removing early registration fails inside the callback as expected. Restored
 sources pass all 300 fork tests and selected clippy with the same external
-warnings (`step4-incoming-credit-*`). Outgoing handoff remains paused for the
-policy choice above; these commits are not published or pinned by Motor OS yet.
+warnings (`step4-incoming-credit-*`). Outgoing handoff now follows the policy
+above; these commits are not published or pinned by Motor OS yet.
 
 An isolated harness at `build/russh-rebase/client-contract` uses the actual
-`russhd::forward::relay` with the local client changes; the main dependency pin
-is untouched. Its encrypted in-memory test fills a 1 KiB socket, exhausts the
-8 KiB receive window, confirms that only actual socket writes return credit,
+`russhd::forward::relay` through the new outgoing-credit API; the main dependency
+pin is untouched. Its encrypted in-memory test fills a 1 KiB socket, exhausts
+the 8 KiB receive window, confirms that only actual socket writes return credit,
 and completes rekey without premature credit before draining all bytes after
-the peer sends EOF and close while the socket is blocked. The test and clippy
-pass. The 197-line test is saved as `pending-main-client-credit-contract.patch`
-and passes `git apply --check`. Keep it as a draft until the fork is published,
-then integrate it into the main crate and its existing full-test host gate.
+the peer sends EOF and close while the socket is blocked. Three more encrypted
+contracts cover the paused opener, cancellation, refusal and transport loss.
+All four tests and clippy pass. The drafts are split into the 188-line
+`pending-main-client-credit-contract.patch` and the 282-line
+`pending-main-client-open-credit-contract.patch`; both pass `git apply --check`.
+After publication, integrate them into the main crate's tests directory, where
+the existing `full-test.sh` host gate discovers them automatically. Preserve
+the independent relay and handoff test patches.
 
 `ae81319` adds a deterministic encrypted regression that queues consumption
 while the rekey completion callback owns the client session. Once the explicit
@@ -442,6 +458,39 @@ barrier releases, the sender must resume without any further application
 message. The complete fork suite passes: 301 active tests, including three
 doc tests, plus selected clippy; eight existing doc tests remain ignored.
 Evidence uses `step4-client-rekey-*`. No additional production change is needed.
+
+`404d3a8` adds `Handle::channel_open_direct_tcpip_with_credit`, installing
+manual accounting before the open packet can leave the session. The queued
+handoff owns a cancellation guard even before its receiver is polled. On
+cancellation the session drops the channel receiver and credit state, retains
+only unconfirmed protocol parameters, and closes a late success without
+invoking the application confirmation callback. Confirmed cancellation also
+clears a parked delivery packet. Three unit tests cover cancellation before
+dispatch, late confirmation/refusal with strict unknown-confirmation rejection,
+and a full delivery queue after confirmation. All 304 tests at that checkpoint
+and selected clippy pass (`step4-outgoing-handoff-*`).
+
+`d4a1cc4` adds three encrypted contracts: the first manual window and rekey
+while the opener remains deliberately unpolled; cancellation on either side
+of confirmation while keeping the transport alive; and refusal/transport-loss
+completion. The first fixture mistakenly expected a received protocol
+disconnect to fail the client join; the default handler treats that as normal
+shutdown, so the corrected fixture explicitly requires success. No timeout or
+production behavior changes to accommodate that test. Discarding the pending
+protocol record instead makes the late-confirmation contract fail because
+the channel ends without a close; the original implementation is restored
+byte-for-byte. Evidence uses `step4-outgoing-wire-*` and
+`step4-outgoing-discard-counterfactual.*`.
+
+The completed external series passes all 307 active tests, including three
+doc tests; eight existing doc tests remain ignored. Selected clippy passes
+with the same 11 existing external warnings. The four main-repository draft
+contracts and their clippy check also pass (`step4-main-outgoing-contracts*`).
+The six fork commits after published `2a07f3a` are ready for the user to push
+from `build/russh-rebase/fork` to `motor-v0.65.1`. Stop at this publication
+handoff. Only after publication update the real dependency pin and Rust
+branch description, integrate the two contract patches, and run step 4's
+own 3+3 main-image gates and complete developer-image release gate.
 
 ### Commit count and delivered functionality
 
@@ -1924,6 +1973,10 @@ in `src/tests`.
     the original deadline. Timely authentication keeps the session alive without
     an application idle timeout. The user published the prerequisite and the
     complete main patch has passed step 2a's gates.
+12. **Follow OpenSSH for canceled outgoing opens.** Retain the small unconfirmed
+    protocol record until the reply or disconnect, free application handoff
+    state immediately, close a late success, and preserve strict rejection of
+    unknown confirmations. This resolves the step 4 cancellation choice.
 
 These differences from OpenSSH remain:
 
