@@ -11,7 +11,9 @@ deadline with a production abort call, and cover compression and channel close.
 All 151 host tests, all-target clippy, both Motor OS release builds, three debug
 and three release main-image gates, and the complete developer-image release
 gate pass without local overrides, retries, or source changes between runs.
-Step 2b's relay integration is next.
+Step 2b is in progress: the bounded queue, connection-owned cancellation, and
+generic relay are committed and pass focused tests. Direct opens and binary
+integration are next, after the remaining relay contract tests.
 See "Implementation progress" below and "Decisions" at the end.
 
 ## Implementation progress
@@ -23,13 +25,43 @@ Developer-image validation remains release-only.
 | Step | Progress | Remaining |
 |---|---|---|
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
-| 2 | Step 2a complete: published `2a07f3a` pinned by `6ef2101d`, deadline repair `fbf63baa`, close tests `0338a922`; 151 main host tests, clean clippy, native builds, 3+3 main-image passes and complete developer-image release gate | Step 2b: relay, direct opens, configuration, integrated milestone gates |
+| 2 | Step 2a complete: published `2a07f3a`, 151 main host tests, clean clippy, native builds, 3+3 main-image passes and complete developer-image release gate. Step 2b: bounded queue `0d712c1a`, task scope `2f0c7323`, relay `9eddbbab`; 13 focused tests pass | Remaining relay contract tests, direct opens, configuration, integrated milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
 | 6 | Not started | SOCKS parser, `-D` integration and guest coverage, milestone gates |
 | 7 | Not started | Server remote listeners, credit handoff, `gateway_ports`, host/guest coverage, milestone gates |
 | 8 | Not started | Client remote-forward authorization and ordering, `-R` integration and guest coverage, milestone gates |
+
+### Step 2b: relay foundation
+
+`0d712c1a` coalesces incoming packets into lazy 32 KiB blocks, bounds bytes by
+the receive window, reserves bounded bookkeeping, checks pressure before every
+new block, and releases drained blocks. Four tests cover tiny packets, partial
+ends, overflow, and pressure during growth.
+
+`2f0c7323` gives each connection a `Tasks` owner with 16,384 slots. A reservation
+counts before spawning. Its watcher wraps the complete operation future, so
+dropping the connection cancels resolution, connecting, relaying, and cleanup
+independently of a blocked write. Jobs hold only watch receivers. Tokio releases
+each detached task and result on completion; the owner retains no completed job
+records. Four tests cover exhaustion, late results, cancellation before first
+poll, and repeated completion without retained slots or watch receivers.
+
+`9eddbbab` adds the shared generic relay. Its outbound copy/write future survives
+select iterations; channel events remain enabled while socket writes stall.
+Receive credit follows actual socket writes. The first real SSH test transfers
+twice the receive window and drains both half-closes. All nine focused tests,
+formatting, and all-target clippy pass. Logs use `forward-queue-*`,
+`forward-task-*`, and `forward-relay-basic-*` in `build/russh-rebase/`.
+These library foundations do not yet enable direct opens in the binary.
+
+Further protocol tests cover both EOF orders, peer-close draining, rekey, and
+socket-consumption credit: **13 focused tests**, formatting and clippy pass.
+Premature-close and early-credit counterfactuals fail, with logs retained.
+The original reverse-EOF timeout was fixture teardown: 100 unread window
+updates blocked client close. Draining through close fixes this fixture; the
+known client dispatch defect stays in step 4. Diagnostics and failure are kept.
 
 ### Commit count and delivered functionality
 
