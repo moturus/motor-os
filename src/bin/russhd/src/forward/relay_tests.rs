@@ -1,10 +1,11 @@
 use super::*;
 use std::future::{Future, poll_fn};
+use std::pin::Pin;
 use std::sync::Arc;
-use std::task::Poll;
+use std::task::{Context, Poll};
 
 use russh::{client, server};
-use tokio::io::{AsyncReadExt, DuplexStream};
+use tokio::io::{AsyncReadExt, DuplexStream, ReadBuf};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, timeout};
 
@@ -81,7 +82,7 @@ impl client::Handler for Client {
 
 struct Fixture {
     client: client::Handle<Client>,
-    server: tokio::task::JoinHandle<Result<(), russh::Error>>,
+    server: server::RunningSession<Server>,
     opened: mpsc::UnboundedReceiver<Opened>,
     socket: DuplexStream,
     target: DuplexStream,
@@ -118,11 +119,11 @@ impl Fixture {
             tasks: Tasks::default(),
             opened,
         };
-        let server =
-            tokio::spawn(async move { server::run_stream(config, socket, handler).await?.await });
+        let starting = tokio::spawn(server::run_stream(config, socket, handler));
         let mut client = client::connect_stream(Arc::new(client_config), peer, Client)
             .await
             .unwrap();
+        let server = starting.await.unwrap().unwrap();
         assert!(client.authenticate_none("user").await.unwrap().success());
         Self {
             client,
@@ -134,10 +135,7 @@ impl Fixture {
     }
 }
 
-async fn finish(
-    client: client::Handle<Client>,
-    server: tokio::task::JoinHandle<Result<(), russh::Error>>,
-) {
+async fn finish(client: client::Handle<Client>, server: server::RunningSession<Server>) {
     client
         .disconnect(russh::Disconnect::ByApplication, "", "")
         .await
@@ -147,9 +145,67 @@ async fn finish(
         Ok(()) | Err(russh::Error::Disconnect)
     ));
     assert!(matches!(
-        server.await.unwrap(),
+        server.await,
         Ok(()) | Err(russh::Error::Disconnect)
     ));
+}
+
+async fn aborted_peer(client: client::Handle<Client>) {
+    match client.await {
+        Ok(()) | Err(russh::Error::Disconnect) => {}
+        Err(russh::Error::IO(error)) => assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof),
+        Err(error) => panic!("unexpected peer termination: {error:?}"),
+    }
+}
+
+struct ObservedSocket {
+    inner: DuplexStream,
+    read: Option<oneshot::Sender<usize>>,
+    write_blocked: Option<oneshot::Sender<()>>,
+}
+
+impl AsyncRead for ObservedSocket {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let before = buffer.filled().len();
+        let result = Pin::new(&mut this.inner).poll_read(cx, buffer);
+        if matches!(result, Poll::Ready(Ok(())))
+            && buffer.filled().len() > before
+            && let Some(read) = this.read.take()
+        {
+            let _ = read.send(buffer.filled().len() - before);
+        }
+        result
+    }
+}
+
+impl AsyncWrite for ObservedSocket {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.inner).poll_write(cx, data);
+        if result.is_pending()
+            && let Some(blocked) = this.write_blocked.take()
+        {
+            let _ = blocked.send(());
+        }
+        result
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
 }
 
 #[tokio::test]
@@ -373,6 +429,138 @@ async fn receive_credit_tracks_socket_writes_instead_of_queued_bytes() {
         }
         assert!(eof);
         finish(fixture.client, fixture.server).await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn socket_and_window_stalls_leave_another_channel_receiving() {
+    timeout(Duration::from_secs(5), async {
+        let config = client::Config {
+            window_size: 0,
+            ..Default::default()
+        };
+        let mut fixture = Fixture::connect_with(config, 4096, 1).await;
+        let first = fixture.client.channel_open_session().await.unwrap();
+        let opened = fixture.opened.recv().await.unwrap();
+        let other = fixture.client.channel_open_session().await.unwrap();
+        let mut other_server = fixture.opened.recv().await.unwrap();
+        let (read, read_seen) = oneshot::channel();
+        let (write_blocked, write_seen) = oneshot::channel();
+        let finished = opened.start(
+            ObservedSocket {
+                inner: fixture.socket,
+                read: Some(read),
+                write_blocked: Some(write_blocked),
+            },
+            || false,
+        );
+        fixture.target.write_all(&[91]).await.unwrap();
+        assert_eq!(read_seen.await.unwrap(), 1);
+        first.data_bytes(vec![5; 8]).await.unwrap();
+        write_seen.await.unwrap();
+        for _ in 0..256 {
+            first.data_bytes(vec![7]).await.unwrap();
+        }
+        other.eof().await.unwrap();
+        loop {
+            match other_server.channel.wait().await {
+                Some(ChannelMsg::Eof) => break,
+                None => panic!("other channel ended before its EOF arrived"),
+                _ => {}
+            }
+        }
+        fixture.client.send_ping().await.unwrap();
+        fixture.server.abort();
+        assert!(matches!(
+            fixture.server.await,
+            Err(russh::Error::Disconnect)
+        ));
+        assert!(finished.await.is_err());
+        let mut output = Vec::new();
+        fixture.target.read_to_end(&mut output).await.unwrap();
+        assert_eq!(output, [5]);
+        assert!(fixture.target.write_all(&[1]).await.is_err());
+        aborted_peer(fixture.client).await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn peer_close_ends_a_window_blocked_writer_without_disconnect() {
+    timeout(Duration::from_secs(5), async {
+        let config = client::Config {
+            window_size: 0,
+            ..Default::default()
+        };
+        let mut fixture = Fixture::connect_with(config, 4096, 1024).await;
+        let channel = fixture.client.channel_open_session().await.unwrap();
+        let opened = fixture.opened.recv().await.unwrap();
+        let (read, read_seen) = oneshot::channel();
+        let finished = opened.start(
+            ObservedSocket {
+                inner: fixture.socket,
+                read: Some(read),
+                write_blocked: None,
+            },
+            || false,
+        );
+        fixture.target.write_all(&[31]).await.unwrap();
+        assert_eq!(read_seen.await.unwrap(), 1);
+        channel.close().await.unwrap();
+        finished.await.unwrap().unwrap();
+        let mut output = Vec::new();
+        fixture.target.read_to_end(&mut output).await.unwrap();
+        assert!(output.is_empty());
+        assert!(fixture.target.write_all(&[1]).await.is_err());
+        fixture.client.send_ping().await.unwrap();
+        finish(fixture.client, fixture.server).await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn transport_loss_releases_a_full_inbound_queue_and_socket() {
+    timeout(Duration::from_secs(5), async {
+        let mut fixture = Fixture::connect_with(client::Config::default(), 32 * 1024, 0).await;
+        let channel = fixture.client.channel_open_session().await.unwrap();
+        let opened = fixture.opened.recv().await.unwrap();
+        channel.data_bytes(vec![11; WINDOW as usize]).await.unwrap();
+        fixture.client.send_ping().await.unwrap();
+        let mut work = Box::pin(relay(
+            opened.channel,
+            fixture.socket,
+            opened.credit,
+            WINDOW as usize,
+            || false,
+        ));
+        // Both data packets are queued; a zero-capacity target accepts none.
+        // This poll must consume the whole window before parking on the write.
+        poll_fn(|cx| {
+            assert!(work.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(channel.writable_packet_size().await, 0);
+        let (done, finished) = oneshot::channel();
+        opened.reservation.spawn(async move {
+            let _ = done.send(work.await);
+            Ok(())
+        });
+        fixture.server.abort();
+        assert!(matches!(
+            fixture.server.await,
+            Err(russh::Error::Disconnect)
+        ));
+        assert!(finished.await.is_err());
+        let mut output = Vec::new();
+        fixture.target.read_to_end(&mut output).await.unwrap();
+        assert!(output.is_empty());
+        assert!(fixture.target.write_all(&[1]).await.is_err());
+        aborted_peer(fixture.client).await;
     })
     .await
     .unwrap();

@@ -63,6 +63,14 @@ The original reverse-EOF timeout was fixture teardown: 100 unread window
 updates blocked client close. Draining through close fixes this fixture; the
 known client dispatch defect stays in step 4. Diagnostics and failure are kept.
 
+Three further stall/teardown cases bring the focused total to **16**, with
+clean formatting and clippy. They establish blocked socket writes and zero
+outbound credit with event barriers, then verify another channel receives EOF,
+peer close ends the blocked writer, and transport loss frees a full inbound
+queue and socket. `forward-naive-copy-counterfactual.log` records the plain
+bidirectional copy deadlocking at the original five-second watchdog; the
+restored relay passes (`forward-relay-stall-final-*`).
+
 ### Commit count and delivered functionality
 
 At checkpoint `fea26785`, the Motor OS branch has 17 commits after the original
