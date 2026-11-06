@@ -306,6 +306,7 @@ impl TxnLogger {
         let sb_block = block_cache.get_block(0).await?;
         let superblock_ref = sb_block.block();
         let superblock = superblock_ref.get_at_offset::<Superblock>(0);
+        superblock.validate(block_cache.total_blocks())?;
         let last_checkpointed_txn_id = superblock.txn_log_data.txn_id;
         drop(superblock_ref);
 

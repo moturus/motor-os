@@ -4636,3 +4636,43 @@ fn lookup_unchecked() {
     let rt = tokio::runtime::LocalRuntime::new().unwrap();
     rt.block_on(lookup_unchecked_test()).unwrap();
 }
+
+#[test]
+fn superblock_header_validation() {
+    use std::io::{Read, Seek, SeekFrom};
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+    rt.block_on(async {
+        const TAG: &str = "motor_fs_superblock_header_validation";
+        let mut fs = create_fs(TAG, 1024).await?;
+        fs.flush().await?;
+        drop(fs);
+        let path = std::env::temp_dir().join(TAG);
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        let mut original = [0; 24];
+        file.read_exact(&mut original)?;
+        assert!(crate::has_superblock_magic(&original));
+        assert!(!crate::has_superblock_magic(&original[..7]));
+        for (offset, value) in [(0, crate::MAGIC ^ 1), (8, 2), (16, 1023), (16, 1025)] {
+            let mut bad = original;
+            bad[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+            file.seek(SeekFrom::Start(0))?;
+            file.write_all(&bad)?;
+            assert!(
+                matches!(open_fs(TAG).await, Err(error) if error.kind() == ErrorKind::InvalidData)
+            );
+        }
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(&original)?;
+        drop(open_fs(TAG).await?);
+        // Extending the backing file must not silently move the journal.
+        file.set_len(1025 * 4096)?;
+        assert!(matches!(open_fs(TAG).await, Err(error) if error.kind() == ErrorKind::InvalidData));
+        drop(file);
+        std::fs::remove_file(path)?;
+        Ok::<(), std::io::Error>(())
+    })
+    .unwrap();
+}

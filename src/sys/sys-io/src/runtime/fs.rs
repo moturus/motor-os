@@ -41,6 +41,7 @@ pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
     mounts::self_test::TESTS,
     config::self_test::TESTS,
     memory::self_test::TESTS,
+    virtio_partition::self_test::TESTS,
     self_test::TESTS,
     &[
         ("fs::spawn::queued_mutations", stats::test_executable_locks),
