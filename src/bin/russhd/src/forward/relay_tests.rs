@@ -20,6 +20,7 @@ struct Opened {
     channel: Channel<server::Msg>,
     credit: ReceiveCredit,
     reservation: Reservation,
+    handle: server::Handle,
 }
 
 impl Opened {
@@ -58,7 +59,8 @@ impl server::Handler for Server {
                 .send(Opened {
                     channel,
                     credit,
-                    reservation
+                    reservation,
+                    handle: session.handle(),
                 })
                 .is_ok()
         );
@@ -561,6 +563,110 @@ async fn transport_loss_releases_a_full_inbound_queue_and_socket() {
         assert!(output.is_empty());
         assert!(fixture.target.write_all(&[1]).await.is_err());
         aborted_peer(fixture.client).await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn local_close_aborts_a_window_blocked_relay_when_its_receiver_ends() {
+    timeout(Duration::from_secs(5), async {
+        let config = client::Config {
+            window_size: 0,
+            ..Default::default()
+        };
+        let mut fixture = Fixture::connect_with(config, 4096, 1024).await;
+        let channel = fixture.client.channel_open_session().await.unwrap();
+        let opened = fixture.opened.recv().await.unwrap();
+        let handle = opened.handle.clone();
+        let id = opened.channel.id();
+        let (read, read_seen) = oneshot::channel();
+        let finished = opened.start(
+            ObservedSocket {
+                inner: fixture.socket,
+                read: Some(read),
+                write_blocked: None,
+            },
+            || false,
+        );
+        fixture.target.write_all(&[31]).await.unwrap();
+        read_seen.await.unwrap();
+        handle.close(id).await.unwrap();
+        assert_eq!(
+            finished.await.unwrap().unwrap_err().kind(),
+            io::ErrorKind::ConnectionAborted
+        );
+        assert_eq!(
+            fixture.target.read_u8().await.unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        assert!(fixture.target.write_all(&[1]).await.is_err());
+        drop(channel);
+        fixture.client.send_ping().await.unwrap();
+        finish(fixture.client, fixture.server).await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn unsupported_and_post_eof_data_close_only_the_forward() {
+    timeout(Duration::from_secs(5), async {
+        for after_eof in [false, true] {
+            let mut fixture = Fixture::connect().await;
+            let channel = fixture.client.channel_open_session().await.unwrap();
+            let opened = fixture.opened.recv().await.unwrap();
+            let finished = opened.start(fixture.socket, || false);
+            if after_eof {
+                channel.eof().await.unwrap();
+                channel.data_bytes(vec![1]).await.unwrap();
+            } else {
+                channel.extended_data_bytes(1, vec![1]).await.unwrap();
+            }
+            assert_eq!(
+                finished.await.unwrap().unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert_eq!(
+                fixture.target.read_u8().await.unwrap_err().kind(),
+                io::ErrorKind::UnexpectedEof
+            );
+            assert!(fixture.target.write_all(&[1]).await.is_err());
+            drop(channel);
+            fixture.client.send_ping().await.unwrap();
+            finish(fixture.client, fixture.server).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn pressure_during_queue_growth_closes_only_the_forward() {
+    timeout(Duration::from_secs(5), async {
+        let mut fixture = Fixture::connect().await;
+        let channel = fixture.client.channel_open_session().await.unwrap();
+        let opened = fixture.opened.recv().await.unwrap();
+        // Admission succeeded before the injected signal changes for growth.
+        let finished = opened.start(fixture.socket, || true);
+        channel.data_bytes(vec![1; 512]).await.unwrap();
+        assert_eq!(
+            finished.await.unwrap().unwrap_err().kind(),
+            io::ErrorKind::OutOfMemory
+        );
+        assert_eq!(
+            fixture.target.read_u8().await.unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        drop(channel);
+        let other = fixture.client.channel_open_session().await.unwrap();
+        let mut other_server = fixture.opened.recv().await.unwrap();
+        other.eof().await.unwrap();
+        assert!(matches!(
+            other_server.channel.wait().await,
+            Some(ChannelMsg::Eof)
+        ));
+        finish(fixture.client, fixture.server).await;
     })
     .await
     .unwrap();

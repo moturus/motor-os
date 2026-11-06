@@ -25,7 +25,7 @@ Developer-image validation remains release-only.
 | Step | Progress | Remaining |
 |---|---|---|
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
-| 2 | Step 2a complete: published `2a07f3a`, 151 main host tests, clean clippy, native builds, 3+3 main-image passes and complete developer-image release gate. Step 2b: bounded queue `0d712c1a`, task scope `2f0c7323`, relay `9eddbbab`; 13 focused tests pass | Remaining relay contract tests, direct opens, configuration, integrated milestone gates |
+| 2 | Step 2a complete: published `2a07f3a`, 151 main host tests, clean clippy, native builds, 3+3 main-image passes and complete developer-image release gate. Step 2b: bounded queue `0d712c1a`, task scope `2f0c7323`, relay `9eddbbab`; 19 focused tests pass | Remaining relay contract tests, direct opens, configuration, integrated milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
@@ -70,6 +70,10 @@ peer close ends the blocked writer, and transport loss frees a full inbound
 queue and socket. `forward-naive-copy-counterfactual.log` records the plain
 bidirectional copy deadlocking at the original five-second watchdog; the
 restored relay passes (`forward-relay-stall-final-*`).
+
+Local receiver termination, extended/post-EOF data, and injected pressure during
+growth also release their sockets while leaving the connection usable. All
+**19 focused tests** and clippy pass (`forward-relay-refusal-*`).
 
 ### Commit count and delivered functionality
 
