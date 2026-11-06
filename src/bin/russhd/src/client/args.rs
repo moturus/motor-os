@@ -154,6 +154,11 @@ fn default_known_hosts() -> Option<PathBuf> {
 }
 
 impl ConnectionOptions {
+    pub(crate) fn force_gateway_ports(&mut self) {
+        self.gateway_ports = true;
+        self.gateway_ports_set = true;
+    }
+
     pub(crate) fn force_batch_mode(&mut self) {
         self.batch_mode = true;
         self.batch_mode_set = true;
@@ -399,6 +404,7 @@ pub struct SshArgs {
     pub destination: Destination,
     pub command: Vec<String>,
     pub pty: PtyMode,
+    pub no_session: bool,
 }
 
 #[cfg(test)]

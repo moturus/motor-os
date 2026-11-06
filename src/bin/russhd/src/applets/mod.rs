@@ -170,6 +170,7 @@ fn runtime() -> Result<tokio::runtime::Runtime, AppletError> {
 fn parse_ssh(args: &[String]) -> Result<SshArgs, ParseError> {
     let mut connection = ConnectionOptions::default();
     let mut pty = PtyMode::Auto;
+    let mut no_session = false;
     let mut index = 0;
     let mut options = true;
     while index < args.len() {
@@ -179,6 +180,23 @@ fn parse_ssh(args: &[String]) -> Result<SshArgs, ParseError> {
             continue;
         }
         if options && parse_common(args, &mut index, &mut connection, 'p', true)? {
+            continue;
+        }
+        if options
+            && option_value(args, &mut index, 'L', |value| {
+                connection.add_local_forward(value)
+            })?
+        {
+            continue;
+        }
+        if options && args[index] == "-N" {
+            no_session = true;
+            index += 1;
+            continue;
+        }
+        if options && args[index] == "-g" {
+            connection.force_gateway_ports();
+            index += 1;
             continue;
         }
         if options && args[index] == "-t" {
@@ -205,6 +223,7 @@ fn parse_ssh(args: &[String]) -> Result<SshArgs, ParseError> {
         destination,
         command: args[index + 1..].to_vec(),
         pty,
+        no_session,
     })
 }
 
@@ -516,6 +535,70 @@ mod tests {
 
         let parsed = parse_ssh(&strings(&["host", "command", "--help"])).unwrap();
         assert_eq!(parsed.command, ["command", "--help"]);
+    }
+
+    #[test]
+    fn ssh_forwarding_flags_and_o_forms_share_the_endpoint_parser() {
+        let parsed = parse_ssh(&strings(&[
+            "-N",
+            "-g",
+            "-L",
+            "8080:target:80",
+            "-L[::1]:8081:[::2]:81",
+            "-o",
+            "LocalForward=8082 localhost.:82",
+            "-oExitOnForwardFailure=yes",
+            "host",
+        ]))
+        .unwrap();
+        assert!(parsed.no_session);
+        assert!(parsed.connection.gateway_ports);
+        assert!(parsed.connection.exit_on_forward_failure);
+        assert_eq!(
+            parsed
+                .connection
+                .local_forwards
+                .iter()
+                .map(|forward| forward.listen.port)
+                .collect::<Vec<_>>(),
+            [8080, 8081, 8082]
+        );
+        assert_eq!(parsed.connection.local_forwards[1].target.host, "::2");
+        for flags in [["-oGatewayPorts=no", "-g"], ["-g", "-oGatewayPorts=no"]] {
+            let args = [flags.as_slice(), &["host"]].concat();
+            assert!(parse_ssh(&strings(&args)).unwrap().connection.gateway_ports);
+        }
+        let command = parse_ssh(&strings(&["host", "-N", "-L8080:target:80"])).unwrap();
+        assert!(!command.no_session);
+        assert!(command.connection.local_forwards.is_empty());
+        assert_eq!(command.command, ["-N", "-L8080:target:80"]);
+    }
+
+    #[test]
+    fn forwarding_flags_are_ssh_only_but_copy_applets_accept_config_options() {
+        for flag in ["-N", "-g", "-L8080:target:80"] {
+            assert!(parse_scp(&strings(&[flag, "local", "u@host:remote"])).is_err());
+            assert!(parse_sftp(&strings(&[flag, "host"])).is_err());
+        }
+        let scp = parse_scp(&strings(&[
+            "-oLocalForward=8080 target:80",
+            "local",
+            "u@host:remote",
+        ]))
+        .unwrap();
+        let sftp = parse_sftp(&strings(&["-oLocalForward=8080 target:80", "host"])).unwrap();
+        assert_eq!(
+            scp.connection.local_forwards,
+            sftp.connection.local_forwards
+        );
+        assert_eq!(scp.connection.local_forwards.len(), 1);
+        for bad in [
+            ["-L", "host"],
+            ["-L0:target:80", "host"],
+            ["-L8080:::1:80", "host"],
+        ] {
+            assert!(parse_ssh(&strings(&bad)).is_err());
+        }
     }
 
     #[test]
