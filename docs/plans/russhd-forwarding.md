@@ -35,8 +35,8 @@ Developer-image validation remains release-only.
 |---|---|---|
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
 | 2 | Complete: step 2a published `2a07f3a` and passed its separate 3+3 and developer-image gates. Step 2b integrates direct opens and optional configuration, resolves SDK/sys from crates.io, and passes 183 host tests, clippy, native builds, and its own 3+3 image gates | None |
-| 3 | Guest jump transfers, native server forwarding/DNS/100-channel probe, shipped configuration and docs pass their first release image gate | Two more release and three debug passes; complete developer-image release gate |
-| 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
+| 3 | Complete: guest jump transfers, native server forwarding/DNS/100-channel probe, shipped configuration and docs pass 3/3 release, 3/3 debug, and the complete developer-image release gate | None |
+| 4 | External `motor-v0.65.1` has committed client accounting, nonblocking dispatch and incoming credit handoff; 301 fork tests pass, including credit during rekey. A draft using the actual Motor relay also passes | Outgoing cancellation policy and handoff, user publication, pin and main-repo gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
 | 6 | Not started | SOCKS parser, `-D` integration and guest coverage, milestone gates |
 | 7 | Not started | Server remote listeners, credit handoff, `gateway_ports`, host/guest coverage, milestone gates |
@@ -361,12 +361,87 @@ before/after markers. The 100-forward and EOF completion assertions stay intact.
 The second failure and fixture remain preserved as `step3-route-fixed-release-1`
 and `build/host-tests/ssh-config.vGLBYk/`; it also does not count toward gates.
 
-The final sources pass `step3-shell-probe-release-1`: preparation 0.1 minutes,
-testing 13.6 minutes, test status and source checks zero. The log records both
-jump directions, `100 simultaneous forwards PASS`, and `test-ssh-config: PASS`.
-The first successful release pass counts toward step 3's separate 3+3 sequence;
-two release and three debug passes and the complete developer-image release
-gate remain. No source changes follow this successful run.
+The final sources are committed as `e638dbed` and pass all three
+`step3-shell-probe-release-*` runs (13.6, 13.7 and 13.6 minutes) and all three
+debug runs (27.9, 28.1 and 27.7 minutes). Every test status and source check is
+zero. The logs record both jump directions, `100 simultaneous forwards PASS`,
+and `test-ssh-config: PASS`. No source changes follow the first successful run.
+
+The developer-image repository suite passes on its 8 GiB VM: preparation
+1.8 minutes, testing 18.4 minutes, including native analyzer/formatter
+acceptance, guest forwarding and OOM-abort. All eight `httpd-axum` Motor
+component targets, the complete native developer-source release phase and
+native toolchain installation also pass. The installed toolchain remains
+`x86_64-unknown-motor-1.99.1`. The complete Lorry product suite and both ordinary
+and service Wasm matrices on `wasm:256` and `dev:256` also pass, including the
+ordinary Linux identity checks. The outer gate ends with
+`full-test-dev.sh ALL PASS`; test and final source-check statuses are zero.
+Evidence is retained in `step3-dev-release-1-evidence` and separately in
+`step3-dev-wasm-evidence/run-1` (ordinary) and `run-2` (services), under
+`build/russh-rebase/`. Step 3 is complete.
+
+### Step 4: external client accounting
+
+The separate russh checkout at `build/russh-rebase/fork`, branch
+`motor-v0.65.1`, has client `Session::receive_credit` in `ba75855`, credit-event
+wakeups, and shared receive-window validation/accounting for ordinary and extended
+data. The old private automatic-accounting helper is removed. Automatic channels
+retain the configured-window policy and existing adjustment callback behavior.
+This first patch is slightly larger than the usual range because its encrypted
+in-memory fixture covers consumption, last-handle release, and automatic mode
+without relying on sleeps. The original client data path fails the new manual
+test by returning credit prematurely (`step4-client-accounting-counterfactual.log`).
+Restored sources pass all 294 fork tests, including three new cases. Production
+and new-integration clippy pass with existing external warnings; all-target
+clippy also encounters existing upstream unit-test lint denials. Evidence uses
+`step4-client-accounting-*` under `build/russh-rebase/`. Step 3's image gates
+validate the published `2a07f3a` pin; the new fork commits are not yet published.
+
+`a59d1d1` replaces awaited client-channel deliveries with one reserved pending
+packet. It pauses network reads while capacity is unavailable, keeps outbound
+work selectable, and clears a pending packet on local close. The reservation
+precedes protocol mutation, so deferred packets are processed exactly once.
+Data and control messages share this path; informational window notifications
+retain their existing best-effort policy. Three deterministic tests cover
+outbound progress, data/EOF/close ordering after drain, and cleanup without an
+acknowledgement. Restoring a blocking reservation makes the progress regression
+fail at its unchanged five-second watchdog. The restored fork passes all 297
+tests and selected clippy (`step4-client-dispatch-*`).
+
+Incoming credit handoff reuses the already-approved server design. Outgoing
+cancellation has one policy choice awaiting guidance: discard canceled-open
+state and close late/unmatched confirmations, or retain a minimal pending entry
+until its reply to preserve strict handling of other unmatched confirmations.
+Only that outgoing handoff remains paused; independent incoming work and
+step 3's image gates are complete.
+
+`8f247c3` registers incoming unconfirmed parameters before the callback,
+reuses the server's cleanup guard, confirms only on acceptance, and removes
+rejected/abandoned state. Both sides now use registered parameters, so the
+obsolete field in the shared pending-open record is removed (the server's
+builder loses only its unused `None` field). Three tests cover the first manual
+window, explicit/default rejection with late credit, and a lost reply's guard.
+Removing early registration fails inside the callback as expected. Restored
+sources pass all 300 fork tests and selected clippy with the same external
+warnings (`step4-incoming-credit-*`). Outgoing handoff remains paused for the
+policy choice above; these commits are not published or pinned by Motor OS yet.
+
+An isolated harness at `build/russh-rebase/client-contract` uses the actual
+`russhd::forward::relay` with the local client changes; the main dependency pin
+is untouched. Its encrypted in-memory test fills a 1 KiB socket, exhausts the
+8 KiB receive window, confirms that only actual socket writes return credit,
+and completes rekey without premature credit before draining all bytes after
+the peer sends EOF and close while the socket is blocked. The test and clippy
+pass. The 197-line test is saved as `pending-main-client-credit-contract.patch`
+and passes `git apply --check`. Keep it as a draft until the fork is published,
+then integrate it into the main crate and its existing full-test host gate.
+
+`ae81319` adds a deterministic encrypted regression that queues consumption
+while the rekey completion callback owns the client session. Once the explicit
+barrier releases, the sender must resume without any further application
+message. The complete fork suite passes: 301 active tests, including three
+doc tests, plus selected clippy; eight existing doc tests remain ignored.
+Evidence uses `step4-client-rekey-*`. No additional production change is needed.
 
 ### Commit count and delivered functionality
 
