@@ -25,7 +25,7 @@ Developer-image validation remains release-only.
 | Step | Progress | Remaining |
 |---|---|---|
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
-| 2 | Step 2a complete: published `2a07f3a`, 151 main host tests, clean clippy, native builds, 3+3 main-image passes and complete developer-image release gate. Step 2b: bounded queue `0d712c1a`, task scope `2f0c7323`, relay `9eddbbab`; 19 focused tests pass | Remaining relay contract tests, direct opens, configuration, integrated milestone gates |
+| 2 | Step 2a complete: published `2a07f3a`, 151 main host tests, clean clippy, native builds, 3+3 main-image passes and complete developer-image release gate. Step 2b: bounded queue `0d712c1a`, task scope `2f0c7323`, relay `9eddbbab`; 21 focused tests pass | Remaining relay contract tests, direct opens, configuration, integrated milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
@@ -75,6 +75,13 @@ Local receiver termination, extended/post-EOF data, and injected pressure during
 growth also release their sockets while leaving the connection usable. All
 **19 focused tests** and clippy pass (`forward-relay-refusal-*`).
 
+The wire fixture negotiates plaintext only between local test peers, then
+injects a data byte past the fully advertised window into a stalled target.
+Russh accepts this within its documented overrun allowance; the relay rejects
+overflow and the SSH connection still answers pings. A separate empty-packet
+injection leaves the stream usable. All **21 focused tests**, formatting and
+clippy pass (`forward-relay-wire-*`). Direct-open integration is next.
+
 ### Commit count and delivered functionality
 
 At checkpoint `fea26785`, the Motor OS branch has 17 commits after the original
@@ -117,7 +124,7 @@ cover the new rebase checkpoint.
 - [x] Update the actual git pin with Cargo, adapt authentication callbacks,
   restore close contract tests, strengthen compression coverage, and pass the
   separate step 2a main-image and developer-image gates.
-- [ ] Implement the bounded block queue and event-driven relay, including credit,
+- [x] Implement the bounded block queue and event-driven relay, including credit,
   half-close, peer-close draining, pressure shedding, and cancellation tests.
 - [ ] Integrate task ownership/reaping, direct opens, admission limits and host
   validation, handler isolation, and configuration with the imager field.

@@ -11,6 +11,8 @@ use tokio::time::{Duration, timeout};
 
 const WINDOW: u32 = 64 * 1024;
 
+mod wire;
+
 struct Server {
     tasks: Tasks,
     opened: mpsc::UnboundedSender<Opened>,
@@ -101,6 +103,20 @@ impl Fixture {
         capacity: usize,
     ) -> Self {
         let (socket, peer) = tokio::io::duplex(32 * 1024);
+        Self::connect_streams(client_config, packet_size, capacity, socket, peer).await
+    }
+
+    async fn connect_streams<R, C>(
+        client_config: client::Config,
+        packet_size: u32,
+        capacity: usize,
+        socket: R,
+        peer: C,
+    ) -> Self
+    where
+        R: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         let (target, target_peer) = tokio::io::duplex(capacity);
         let (opened, requests) = mpsc::unbounded_channel();
         let config = Arc::new(server::Config {
@@ -115,6 +131,7 @@ impl Fixture {
             maximum_packet_size: packet_size,
             channel_buffer_size: 4,
             inactivity_timeout: None,
+            preferred: client_config.preferred.clone(),
             ..Default::default()
         });
         let handler = Server {
