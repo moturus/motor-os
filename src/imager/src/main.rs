@@ -1121,10 +1121,7 @@ mod tests {
         for role in ["user", "none"] {
             for path in ["cache", "vendor", "vendor/.staging"] {
                 let path = format!("/devtools/lorry/{role}/{path}");
-                assert!(config
-                    .directories
-                    .iter()
-                    .any(|candidate| *candidate == path));
+                assert!(config.directories.contains(&path));
             }
         }
         for path in ["/devtools/lorry/cache", "/devtools/lorry/vendor"] {
