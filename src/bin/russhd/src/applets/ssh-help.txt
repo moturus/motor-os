@@ -10,6 +10,10 @@ Options:
   -i file             Private key file (may be repeated)
   -t                  Require an interactive terminal
   -T                  Disable terminal allocation
+  -L [bind:]port:host:hostport
+                      Forward a local TCP port through the remote host
+  -N                  Run no command or shell (tunnel only)
+  -g                  Default local forwards to all interfaces
   -o Key=Value        Set a connection option (listed below)
   -F file             Select a config file (none or /dev/null: disable config)
   -J [user@]host[:port][,...]
@@ -30,6 +34,9 @@ Connection options for -o:
   ConnectTimeout=seconds                Connection setup timeout (0: disabled)
   ServerAliveInterval=seconds           Keepalive interval (0: disabled)
   ServerAliveCountMax=count             Unanswered keepalives (default: 3)
+  LocalForward="[bind:]port host:port"   Add a local TCP forward
+  GatewayPorts=yes|no                   Default to all interfaces (default: no)
+  ExitOnForwardFailure=yes|no           Exit on setup failure (default: no)
 
 Configuration (Motor OS):
   Config file:         /user/cfg/ssh/config (OpenSSH syntax)
@@ -38,7 +45,8 @@ Configuration (Motor OS):
   The default user is $USER, or motor if USER is unset or empty.
   Host blocks support aliases, multiple patterns, *, ? and ! negation.
   Supported settings are listed above. Command-line settings take priority;
-  otherwise the first matching value wins. IdentityFile entries accumulate.
+  otherwise the first matching scalar wins. IdentityFile and LocalForward
+  entries accumulate. Forwards run only on the final SSH destination.
   Include, Match, ProxyCommand, agents and value expansion are unsupported.
   Paths are literal; use /user/cfg/ssh/key rather than ~/.ssh/key.
 
@@ -47,6 +55,7 @@ Examples:
   ssh -p 2222 motor@host /system/bin/echo hello
   ssh -i /user/cfg/ssh/id_ed25519 -o BatchMode=yes motor@host command
   ssh -J motor@gateway motor@private-host
+  ssh -N -L 8080:localhost:80 motor@host
 
 Key installation:
   ssh-copy-id -i key.pub user@host

@@ -25,6 +25,26 @@ exit status (0–255); client errors or a missing usable status return 255.
 Interactive sessions forward Ctrl+C and terminal size changes. At the
 start of a line, `~.` disconnects and `~~` sends a literal tilde.
 
+## Local TCP forwarding
+
+`ssh -N -L 8080:localhost:80 user@host` listens on local port 8080 and connects
+to `localhost:80` from the remote host. `-N` runs without a command, terminal,
+or stdin forwarding. Omit `-N` to use forwards alongside a command or shell.
+Use `[bind:]port:host:port`, bracketing IPv6 addresses. Ports must be 1–65535.
+Target names resolve at the remote host. Forwards also work through `-J`.
+
+Listeners default to loopback. `-g` or `GatewayPorts yes` changes the default
+to all interfaces; an explicit bind address takes priority. Empty binds and
+`*` select all interfaces. Any local process that can reach a listener can
+use the SSH connection to reach its target.
+
+Setup failures warn and leave other forwards running. `ExitOnForwardFailure yes`
+instead exits 255 and releases earlier listeners. A later refused target closes
+only that connection. After a command finishes, listeners close and admitted
+forwards drain before SSH returns its status. Ctrl+C or transport loss cancels
+the forwards. A blocked command-output pipe can also pause forwarding; use
+`-N` for a tunnel without command-output backpressure.
+
 ## Shared connection options and authentication
 
 `ssh`, `scp`, `sftp`, and `ssh-copy-id` share authentication, host-key checks,
@@ -297,6 +317,9 @@ Supported settings (also accepted through `-o Key=Value`):
 | `ConnectTimeout` | Setup timeout in integer seconds; 0 (default) disables it. |
 | `ServerAliveInterval` | Keepalive interval in integer seconds; 0 (default) disables it. |
 | `ServerAliveCountMax` | Maximum unanswered keepalives; 3. |
+| `LocalForward` | `[bind:]port host:port`; repeatable, SSH final destination only. |
+| `GatewayPorts` | Default local binds to all interfaces; `no`. |
+| `ExitOnForwardFailure` | Exit on forward setup failure; `no`. |
 
 Command-line settings take priority. Otherwise the first matching scalar
 setting wins; put specific blocks before `Host *` defaults. Identity files
@@ -319,8 +342,8 @@ The supported settings are also accepted with `-o Key=Value`.
 Paths are literal. Use `/user/cfg/ssh/key`, not `~/.ssh/key`. `Include`,
 `Match`, `ProxyCommand`, value expansion, SSH URI jump syntax, agents,
 certificates, multiplexing, and system-wide config are not supported.
-General port forwarding (`-L`, `-R`, `-D`), agent forwarding, and X11
-forwarding are also unsupported; `ProxyJump` provides gateway routing.
+Remote (`-R`) and dynamic (`-D`) forwarding, agent forwarding, and X11
+forwarding are unsupported.
 Unsupported directives and malformed settings report a filename and line;
 they are not silently ignored. A missing default config is allowed, while
 a missing file explicitly selected with `-F` is an error.

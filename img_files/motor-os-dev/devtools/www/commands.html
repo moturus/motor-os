@@ -486,6 +486,26 @@ exit status (0–255); client errors or a missing usable status return 255.
 Interactive sessions forward Ctrl+C and terminal size changes. At the
 start of a line, <code>~.</code> disconnects and <code>~~</code> sends a literal tilde.</p>
 
+<h3 id="local-tcp-forwarding">Local TCP forwarding</h3>
+
+<p><code>ssh -N -L 8080:localhost:80 user@host</code> listens on local port 8080 and connects
+to <code>localhost:80</code> from the remote host. <code>-N</code> runs without a command, terminal,
+or stdin forwarding. Omit <code>-N</code> to use forwards alongside a command or shell.
+Use <code>[bind:]port:host:port</code>, bracketing IPv6 addresses. Ports must be 1–65535.
+Target names resolve at the remote host. Forwards also work through <code>-J</code>.</p>
+
+<p>Listeners default to loopback. <code>-g</code> or <code>GatewayPorts yes</code> changes the default
+to all interfaces; an explicit bind address takes priority. Empty binds and
+<code>*</code> select all interfaces. Any local process that can reach a listener can
+use the SSH connection to reach its target.</p>
+
+<p>Setup failures warn and leave other forwards running. <code>ExitOnForwardFailure yes</code>
+instead exits 255 and releases earlier listeners. A later refused target closes
+only that connection. After a command finishes, listeners close and admitted
+forwards drain before SSH returns its status. Ctrl+C or transport loss cancels
+the forwards. A blocked command-output pipe can also pause forwarding; use
+<code>-N</code> for a tunnel without command-output backpressure.</p>
+
 <h3 id="shared-connection-options-and-authentication">Shared connection options and authentication</h3>
 
 <p><code>ssh</code>, <code>scp</code>, <code>sftp</code>, and <code>ssh-copy-id</code> share authentication, host-key checks,
@@ -757,6 +777,9 @@ the command, even when <code>HostName</code> specifies a different network addre
   <tr><td><code>ConnectTimeout</code></td><td>Setup timeout in integer seconds; 0 (default) disables it.</td></tr>
   <tr><td><code>ServerAliveInterval</code></td><td>Keepalive interval in integer seconds; 0 (default) disables it.</td></tr>
   <tr><td><code>ServerAliveCountMax</code></td><td>Maximum unanswered keepalives; 3.</td></tr>
+  <tr><td><code>LocalForward</code></td><td><code>[bind:]port host:port</code>; repeatable, SSH final destination only.</td></tr>
+  <tr><td><code>GatewayPorts</code></td><td>Default local binds to all interfaces; <code>no</code>.</td></tr>
+  <tr><td><code>ExitOnForwardFailure</code></td><td>Exit on forward setup failure; <code>no</code>.</td></tr>
 </table>
 </div>
 
@@ -781,8 +804,8 @@ The supported settings are also accepted with <code>-o Key=Value</code>.</p>
 <p>Paths are literal. Use <code>/user/cfg/ssh/key</code>, not <code>~/.ssh/key</code>. <code>Include</code>,
 <code>Match</code>, <code>ProxyCommand</code>, value expansion, SSH URI jump syntax, agents,
 certificates, multiplexing, and system-wide config are not supported.
-General port forwarding (<code>-L</code>, <code>-R</code>, <code>-D</code>), agent forwarding, and X11
-forwarding are also unsupported; <code>ProxyJump</code> provides gateway routing.
+Remote (<code>-R</code>) and dynamic (<code>-D</code>) forwarding, agent forwarding, and X11
+forwarding are unsupported.
 Unsupported directives and malformed settings report a filename and line;
 they are not silently ignored. A missing default config is allowed, while
 a missing file explicitly selected with <code>-F</code> is an error.</p>

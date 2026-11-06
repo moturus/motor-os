@@ -5,15 +5,60 @@ use russh::ChannelMsg;
 use russh::keys::{PrivateKeyWithHashAlg, load_secret_key};
 
 use super::args::{ConnectionOptions, Destination, PtyMode, SshArgs};
+use super::forwarding::Listeners;
 use super::local::safe_identity;
 use super::prompt;
 use super::terminal::{InputEvent, InputFilter};
 use super::transport;
+use crate::forward::Tasks;
 
 pub async fn run_ssh(args: SshArgs) -> Result<i32, russh::Error> {
-    let session = connect_authenticated(&args.connection, &args.destination).await?;
-    session.share_connection();
-    let result = async {
+    let mut route = connect_authenticated(&args.connection, &args.destination).await?;
+    let peer = Arc::new(route.handles.pop().unwrap());
+    peer.share_connection();
+    let result = run_forwarding(&peer, &route.options, args).await;
+    if result.is_err() || matches!(result, Ok(SessionEnd::Escape)) {
+        peer.abort();
+        route.abort();
+    }
+    let close = match Arc::try_unwrap(peer) {
+        Ok(peer) => peer.close().await,
+        Err(peer) => {
+            peer.abort();
+            Err(std::io::Error::other("forwarding retained an SSH peer").into())
+        }
+    };
+    let route_close = route.close().await;
+    let result = result?;
+    close?;
+    route_close?;
+    Ok(match result {
+        SessionEnd::Status(status) => status,
+        SessionEnd::Escape => 255,
+    })
+}
+
+enum SessionEnd {
+    Status(i32),
+    Escape,
+}
+
+async fn run_forwarding(
+    peer: &Arc<transport::Peer>,
+    options: &ConnectionOptions,
+    args: SshArgs,
+) -> Result<SessionEnd, russh::Error> {
+    let mut listeners = Some(Listeners::bind(options).await?);
+    let tasks = Tasks::default();
+    let (ready, mut opened) = tokio::sync::oneshot::channel();
+    let no_session = args.no_session;
+    let work = async {
+        if no_session {
+            #[cfg(target_os = "motor")]
+            start_ctrl_c(None, peer.interrupt())?;
+            let _ = ready.send(());
+            return std::future::pending().await;
+        }
         let terminal = std::io::stdin().is_terminal();
         let pty = match args.pty {
             PtyMode::Force if !terminal => {
@@ -31,19 +76,55 @@ pub async fn run_ssh(args: SshArgs) -> Result<i32, russh::Error> {
             ));
         }
         let command = (!args.command.is_empty()).then(|| args.command.join(" "));
-        run_channel(&session, command, pty).await
+        run_channel(peer, command, pty, ready).await
+    };
+    tokio::pin!(work);
+    let mut accepting = false;
+    let mut result = loop {
+        tokio::select! {
+            result = &mut work => break result,
+            () = peer.wait_closed() => {
+                listeners = None;
+                tasks.cancel();
+                break if no_session { Err(russh::Error::Disconnect) } else { work.await };
+            }
+            _ = &mut opened, if !accepting => accepting = true,
+            () = peer.wait_session_closed(), if !no_session && listeners.is_some() => {
+                listeners = None;
+            }
+            socket = async {
+                match listeners.as_mut() {
+                    Some(listeners) => listeners.accept().await,
+                    None => std::future::pending().await,
+                }
+            }, if accepting && listeners.is_some() => match socket {
+                Ok(socket) => socket.spawn(peer.clone(), &tasks),
+                Err(error) => break Err(error.into()),
+            }
+        }
+    };
+    drop(listeners);
+    if matches!(result, Ok(SessionEnd::Status(_))) && !peer.is_closed() {
+        tokio::select! {
+            () = tasks.wait_idle() => {}
+            () = peer.wait_closed() => {
+                tasks.cancel();
+                tasks.wait_idle().await;
+                result = Err(russh::Error::Disconnect);
+            }
+        }
+    } else {
+        tasks.cancel();
+        tasks.wait_idle().await;
     }
-    .await;
-    let close = session.close().await;
-    let status = result?;
-    close?;
-    Ok(status)
+    result
 }
 
 type Handle = transport::Peer;
 
 pub struct Connection {
     handles: Vec<Handle>,
+    options: ConnectionOptions,
 }
 
 impl std::ops::Deref for Connection {
@@ -109,6 +190,7 @@ pub async fn connect_authenticated(
         .map_err(|error| russh::Error::InvalidConfig(error.to_string()))?;
     let mut connection = Connection {
         handles: Vec::new(),
+        options: route.last().unwrap().options.clone(),
     };
     for hop in route {
         let result = async {
@@ -227,8 +309,10 @@ async fn run_channel(
     session: &transport::Peer,
     command: Option<String>,
     pty: bool,
-) -> Result<i32, russh::Error> {
+    ready: tokio::sync::oneshot::Sender<()>,
+) -> Result<SessionEnd, russh::Error> {
     let channel = session.open_session().await?;
+    let _ = ready.send(());
     let mut terminal_mode = if pty {
         TerminalMode::enable()?
     } else {
@@ -250,7 +334,7 @@ async fn run_channel(
     let (input_tx, input_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
     #[cfg(target_os = "motor")]
     if pty {
-        start_ctrl_c(input_tx.clone(), session.interrupt())?;
+        start_ctrl_c(Some(input_tx.clone()), session.interrupt())?;
     }
     std::thread::spawn(move || {
         let mut stdin = std::io::stdin().lock();
@@ -282,6 +366,7 @@ async fn run_channel(
     let stopped = session.wait_session_closed();
     tokio::pin!(stopped);
     let (output_tx, output_done) = output_writer();
+    let mut escaped = false;
     let result = {
         let output = forward_output(reader, output_tx);
         tokio::pin!(output);
@@ -296,7 +381,11 @@ async fn run_channel(
                     }
                 }, if input.is_some() => {
                     match result {
-                        Ok(true) => break Ok(None),
+                        Ok(true) => {
+                            session.abort();
+                            escaped = true;
+                            break Ok(None);
+                        }
                         Ok(false) => input = None,
                         // Remote closure stops stdin before buffered output has
                         // necessarily reached stdout or supplied the exit status.
@@ -315,10 +404,15 @@ async fn run_channel(
         .await
         .map_err(|error| std::io::Error::other(error.to_string()))??;
     terminal_mode.disable();
-    Ok(result?
+    let status = result?
         .and_then(|status| i32::try_from(status).ok())
         .filter(|status| *status <= 255)
-        .unwrap_or(255))
+        .unwrap_or(255);
+    Ok(if escaped {
+        SessionEnd::Escape
+    } else {
+        SessionEnd::Status(status)
+    })
 }
 
 fn output_writer() -> (
@@ -534,7 +628,7 @@ impl Drop for TerminalMode {
 
 #[cfg(target_os = "motor")]
 fn start_ctrl_c(
-    input: tokio::sync::mpsc::Sender<Vec<u8>>,
+    input: Option<tokio::sync::mpsc::Sender<Vec<u8>>>,
     interrupt: impl FnOnce() + Send + 'static,
 ) -> std::io::Result<()> {
     use moto_sdk::rt::process::{ctrl_c_register_handler, ctrl_c_wait};
@@ -549,7 +643,10 @@ fn start_ctrl_c(
                 }
                 while let Ok(next) = ctrl_c_wait(last) {
                     for _ in last..next {
-                        if input.blocking_send(vec![3]).is_err() {
+                        if input
+                            .as_ref()
+                            .is_none_or(|input| input.blocking_send(vec![3]).is_err())
+                        {
                             // After the session ends, Ctrl+C cancels the tunnel
                             // instead of targeting its already-closed stdin.
                             interrupt();
