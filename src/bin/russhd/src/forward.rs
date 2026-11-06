@@ -3,13 +3,111 @@
 use std::collections::VecDeque;
 use std::io;
 
+use russh::{Channel, ChannelId, ChannelMsg, ReceiveCredit};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+
 mod tasks;
-pub use tasks::Tasks;
+pub use tasks::{Reservation, Tasks};
 
 const BLOCK_SIZE: usize = 32 * 1024;
 
+/// Run inside a connection-owned `Tasks` reservation: its cancellation covers
+/// every await here, including cleanup while the session's send queue is full.
+pub async fn relay<S, R>(
+    channel: Channel<S>,
+    socket: R,
+    credit: ReceiveCredit,
+    window: usize,
+    mut pressure: impl FnMut() -> bool,
+) -> io::Result<()>
+where
+    S: From<(ChannelId, ChannelMsg)> + Send + Sync + 'static,
+    R: AsyncRead + AsyncWrite + Unpin,
+{
+    let (mut incoming, outgoing) = channel.split();
+    let mut writer = outgoing.make_writer();
+    let (mut from_socket, mut to_socket) = tokio::io::split(socket);
+    // Preserve this future and its window reservation through every select.
+    let mut sending = Some(Box::pin(async move {
+        tokio::io::copy(&mut from_socket, &mut writer).await?;
+        writer.shutdown().await
+    }));
+    let mut queue = Queue::new(window);
+    let mut eof = false;
+    let mut closed = false;
+    let mut sent_eof = false;
+    let mut socket_shutdown = false;
+    let result = async {
+        loop {
+            if (closed && queue.is_empty()) || (sent_eof && socket_shutdown) {
+                break Ok(());
+            }
+            tokio::select! {
+                // Keep receiving at the byte limit and after EOF, so control
+                // events and russh's tolerated window overrun cannot park reads.
+                message = incoming.wait(), if !closed => match message {
+                    Some(ChannelMsg::Data { data }) if !eof => {
+                        queue.append(&data, &mut pressure)?;
+                    }
+                    Some(ChannelMsg::Eof) => eof = true,
+                    Some(ChannelMsg::Close) => {
+                        closed = true;
+                        sending = None;
+                    }
+                    Some(ChannelMsg::Data { .. } | ChannelMsg::ExtendedData { .. }) => {
+                        break Err(io::Error::new(io::ErrorKind::InvalidData,
+                            "unexpected forwarding channel data"));
+                    }
+                    None => break Err(io::ErrorKind::ConnectionAborted.into()),
+                    _ => {}
+                },
+                result = async {
+                    match sending.as_mut() {
+                        Some(work) => work.as_mut().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    result?;
+                    sending = None;
+                    sent_eof = true;
+                },
+                written = async {
+                    match queue.front() {
+                        Some(data) => to_socket.write(data).await,
+                        None => to_socket.shutdown().await.map(|()| 0),
+                    }
+                }, if !queue.is_empty() || (eof && !socket_shutdown) => {
+                    let written = written?;
+                    if queue.is_empty() {
+                        socket_shutdown = true;
+                    } else {
+                        if written == 0 {
+                            break Err(io::ErrorKind::WriteZero.into());
+                        }
+                        queue.consume(written);
+                        credit.consumed(written as u32);
+                    }
+                },
+            }
+        }
+    }
+    .await;
+    // Release TCP and payload before awaiting a close message. A peer close
+    // has already been acknowledged by russh and needs no application reply.
+    drop(sending);
+    drop(to_socket);
+    drop(incoming);
+    drop(queue);
+    if !closed {
+        let closing = outgoing.close().await.map_err(io::Error::other);
+        result.and(closing)
+    } else {
+        result
+    }
+}
+
 /// Coalesces SSH packets without retaining an allocation for each packet.
-pub struct Queue {
+struct Queue {
     blocks: VecDeque<Vec<u8>>,
     offset: usize,
     len: usize,
@@ -17,7 +115,7 @@ pub struct Queue {
 }
 
 impl Queue {
-    pub fn new(limit: usize) -> Self {
+    fn new(limit: usize) -> Self {
         Self {
             blocks: VecDeque::new(),
             offset: 0,
@@ -26,25 +124,17 @@ impl Queue {
         }
     }
 
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    pub fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.len == 0
     }
 
-    pub fn front(&self) -> Option<&[u8]> {
+    fn front(&self) -> Option<&[u8]> {
         self.blocks.front().map(|block| &block[self.offset..])
     }
 
     /// Check pressure before each new block, while using existing tail space.
     /// On error, the relay ends and discards any partially appended data.
-    pub fn append(
-        &mut self,
-        mut data: &[u8],
-        mut pressure: impl FnMut() -> bool,
-    ) -> io::Result<()> {
+    fn append(&mut self, mut data: &[u8], mut pressure: impl FnMut() -> bool) -> io::Result<()> {
         if data.len() > self.limit - self.len {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -84,7 +174,7 @@ impl Queue {
     }
 
     /// Retire bytes written from `front()`, releasing each drained block.
-    pub fn consume(&mut self, count: usize) {
+    fn consume(&mut self, count: usize) {
         if count == 0 {
             return;
         }
@@ -98,6 +188,9 @@ impl Queue {
     }
 }
 
+#[cfg(all(test, unix))]
+mod relay_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,7 +201,7 @@ mod tests {
         for byte in 0..40_000 {
             queue.append(&[byte as u8], || false).unwrap();
         }
-        assert_eq!(queue.len(), 40_000);
+        assert_eq!(queue.len, 40_000);
         assert_eq!(queue.blocks.len(), 2);
         let first = queue.front().unwrap();
         assert_eq!(first.len(), BLOCK_SIZE);
@@ -134,13 +227,13 @@ mod tests {
             queue.append(&vec![1; 2 * BLOCK_SIZE], || false).unwrap();
             queue.consume(1);
             queue.append(&[2], || false).unwrap();
-            assert_eq!(queue.len(), 2 * BLOCK_SIZE);
+            assert_eq!(queue.len, 2 * BLOCK_SIZE);
             assert_eq!(queue.blocks.len(), 3);
             assert_eq!(
                 queue.append(&[3], || false).unwrap_err().kind(),
                 io::ErrorKind::InvalidData
             );
-            assert_eq!(queue.len(), 2 * BLOCK_SIZE);
+            assert_eq!(queue.len, 2 * BLOCK_SIZE);
             queue.consume(BLOCK_SIZE - 1);
             queue.consume(BLOCK_SIZE);
             assert_eq!(queue.front(), Some(&[2][..]));
@@ -163,7 +256,7 @@ mod tests {
             queue.append(&[3], || true).unwrap_err().kind(),
             io::ErrorKind::OutOfMemory
         );
-        assert_eq!(queue.len(), BLOCK_SIZE);
+        assert_eq!(queue.len, BLOCK_SIZE);
         queue.consume(BLOCK_SIZE);
         assert!(queue.blocks.is_empty());
 
@@ -176,7 +269,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::OutOfMemory);
         assert_eq!(checks, 2);
-        assert_eq!(queue.len(), BLOCK_SIZE);
+        assert_eq!(queue.len, BLOCK_SIZE);
         assert_eq!(queue.blocks.len(), 1);
     }
 
