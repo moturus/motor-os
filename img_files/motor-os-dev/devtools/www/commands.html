@@ -634,8 +634,8 @@ refused until the first closes. Independent TCP forwards can share the connectio
 
 <p>To use <code>russhd</code> as a jump host or accept local forwards from another SSH client,
 set <code>allow_tcp_forwarding = true</code> in <code>sshd.toml</code> and restart the service. This
-optional version 2 setting defaults to false and is currently off in shipped
-images. It allows connections to any destination reachable by the server.</p>
+optional version 2 setting defaults to false; shipped images enable it. It
+allows connections to any destination reachable by the server.</p>
 
 <p>A key file holds <code>KEYTYPE BASE64 [COMMENT]</code> lines, blank lines, and <code>#</code>
 comments, with LF or CRLF line endings. A key listed for two names is listed in

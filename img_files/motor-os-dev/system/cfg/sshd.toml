@@ -9,6 +9,7 @@
 version = 2
 listen_on = '0.0.0.0:2222'
 path = "/system/bin:/user/bin:/devtools/bin"
+allow_tcp_forwarding = true
 
 # the default/test host key
 

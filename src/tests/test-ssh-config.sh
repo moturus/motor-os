@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# Config aliases from Motor OS, against the host russhd of test-ssh-client-host.sh.
-# russhd forwards nothing, so ProxyJump goes as far as the jump's refusal here;
-# client_protocol.rs carries it through a real jump.
+# Config aliases and TCP forwarding in both directions across the private tap.
 set -euo pipefail
 WD="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$WD/../.." && pwd)"
 TEST_TMP="${MOTOR_TEST_TMP:-/user/tmp/motor-tests}"
 target_port="$MOTOR_SSH_TARGET_PORT"
+BUILD="$MOTOR_SSH_BUILD"
+. "$WD/test-ssh-client-host.sh"
 mkdir -p "$ROOT_DIR/build/host-tests"
 fixture="$(mktemp -d "$ROOT_DIR/build/host-tests/ssh-config.XXXXXX")"
 guest="$TEST_TMP/ssh-config"
 config=/user/cfg/ssh/config
 staged=0
+loopback_log_pid="" shell_pid=""
 SSH=(ssh -F /dev/null -p 2222 -i "$WD/test.key" -o IdentitiesOnly=yes -o BatchMode=yes
   -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" motor@192.168.4.2)
 SFTP=(sftp -F /dev/null -P 2222 -i "$WD/test.key" -o IdentitiesOnly=yes -o BatchMode=yes
@@ -21,6 +22,9 @@ cleanup() {
   local status=$?
   trap - EXIT
   set +e
+  if [ -n "$shell_pid" ]; then kill "$shell_pid" 2>/dev/null; wait "$shell_pid"; fi
+  stop_ssh_client_host
+  if [ -n "$loopback_log_pid" ]; then wait "$loopback_log_pid" || status=1; fi
   if [ "$staged" -eq 1 ]; then
     "${SSH[@]}" "/system/bin/rm $config" || status=1
     "${SSH[@]}" "/system/bin/rm -r $guest" || status=1
@@ -31,6 +35,12 @@ cleanup() {
 # The owning full-test harness supplies a fresh guest, never a personal config.
 if "${SSH[@]}" "[ -e $config ]"; then fail "config fixture path already exists"; fi
 trap cleanup EXIT
+SSH_CLIENT_HOST_ROOT="$fixture/loopback"
+mkdir -m 700 "$SSH_CLIENT_HOST_ROOT"
+start_ssh_client_host "$WD/test.key" 0 /bin:/usr/bin 127.0.0.1
+loopback_port="$SSH_CLIENT_HOST_PORT"
+cat <&"$SSH_CLIENT_HOST_OUTPUT_FD" > "$fixture/loopback.log" &
+loopback_log_pid="$!"
 cat > "$fixture/client.cfg" <<EOF
 Host moto-hi
   HostName 192.168.4.1
@@ -38,10 +48,20 @@ Host moto-hi
   Port $target_port
   IdentityFile $guest/key
 Host jumped
-  HostName 192.0.2.1
+  HostName 127.0.0.1
   User motor
+  Port $loopback_port
   IdentityFile $guest/key
   ProxyJump moto-hi
+Host password-target
+  HostName 127.0.0.1
+  User motor
+  Port $loopback_port
+  IdentityFile none
+  ProxyJump moto-hi
+  BatchMode no
+  StrictHostKeyChecking ask
+  UserKnownHostsFile $guest/password_hosts
 Host *
   UserKnownHostsFile $guest/known_hosts
   StrictHostKeyChecking accept-new
@@ -52,41 +72,89 @@ printf 'mkdir %s\nput %s %s/key\nchmod 600 %s/key\nput %s %s\nput %s %s/alternat
   "$guest" "$WD/test.key" "$guest" "$guest" "$fixture/client.cfg" "$config" \
   "$fixture/client.cfg" "$guest" | "${SFTP[@]}" >/dev/null
 staged=1
+echo '-- Motor client through a host jump --'
 out="$("${SSH[@]}" /user/bin/ssh moto-hi /bin/echo direct-alias)"
 [ "$out" = direct-alias ] || fail "direct alias returned '$out'"
-out="$("${SSH[@]}" /user/bin/ssh -F "$guest/alternate" moto-hi /bin/echo alternate-config)"
+out="$("${SSH[@]}" /user/bin/ssh jumped /bin/echo jumped-alias)"
+[ "$out" = jumped-alias ] || fail "jump alias returned '$out'"
+out="$("${SSH[@]}" /user/bin/ssh -F "$guest/alternate" jumped /bin/echo alternate-config)"
 [ "$out" = alternate-config ] || fail "alternate config returned '$out'"
 out="$("${SSH[@]}" /user/bin/ssh -F none -p "$target_port" -i "$guest/key" \
   -o BatchMode=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$guest/known_hosts" \
   motor@192.168.4.1 /bin/echo no-config)"
 [ "$out" = no-config ] || fail "-F none returned '$out'"
 
-# The route reached the jump: the target itself is an address nothing answers on.
-refused_by_jump() {
-  local output status=0
-  output="$("${SSH[@]}" /user/bin/ssh "$@" /bin/echo unreachable 2>&1)" || status=$?
-  [ "$status" -eq 255 ] || fail "'$*' returned status $status: '$output'"
-  case "$output" in
-    *AdministrativelyProhibited*) ;;
-    *) fail "'$*' was not refused by the jump: '$output'" ;;
-  esac
-}
-refused_by_jump jumped
-refused_by_jump -J moto-hi -o ProxyJump=none jumped
+# This target is on the host's loopback, reachable from the guest only via the jump.
+out="$("${SSH[@]}" /user/bin/ssh -J moto-hi -o ProxyJump=none jumped /bin/echo cli-jump)"
+[ "$out" = cli-jump ] || fail "-J override returned '$out'"
 
-if "${SSH[@]}" /user/bin/ssh moto-hi exit 7; then fail "remote status was lost"; else
+if "${SSH[@]}" /user/bin/ssh jumped exit 7; then fail "remote status was lost"; else
   [ "$?" -eq 7 ] || fail "remote status was not 7"
 fi
 dd if=/dev/urandom of="$fixture/payload" bs=1M count=4 status=none
-"${SSH[@]}" /user/bin/ssh moto-hi /bin/cat < "$fixture/payload" > "$fixture/returned"
-cmp "$fixture/payload" "$fixture/returned" || fail "alias stream changed data"
+"${SSH[@]}" /user/bin/ssh jumped /bin/cat < "$fixture/payload" > "$fixture/returned"
+cmp "$fixture/payload" "$fixture/returned" || fail "jump stream changed data"
 printf 'put %s %s/source\n' "$fixture/payload" "$guest" | "${SFTP[@]}" >/dev/null
-"${SSH[@]}" /user/bin/scp "$guest/source" "moto-hi:$fixture/upload"
-"${SSH[@]}" /user/bin/scp "moto-hi:$fixture/upload" "$guest/download"
+"${SSH[@]}" /user/bin/scp "$guest/source" "jumped:$fixture/upload"
+"${SSH[@]}" /user/bin/scp "jumped:$fixture/upload" "$guest/download"
 printf 'get %s %s/sftp-download\n' "$fixture/upload" "$guest" |
-  "${SSH[@]}" /user/bin/sftp -b - moto-hi >/dev/null
+  "${SSH[@]}" /user/bin/sftp -b - jumped >/dev/null
 printf 'get %s/download %s/download\n' "$guest" "$fixture" | "${SFTP[@]}" >/dev/null
-cmp "$fixture/payload" "$fixture/download" || fail "alias scp changed data"
+cmp "$fixture/payload" "$fixture/download" || fail "jump scp changed data"
 printf 'get %s/sftp-download %s/sftp-download\n' "$guest" "$fixture" | "${SFTP[@]}" >/dev/null
-cmp "$fixture/payload" "$fixture/sftp-download" || fail "alias sftp changed data"
+cmp "$fixture/payload" "$fixture/sftp-download" || fail "jump sftp changed data"
+
+out="$(printf 'yes\r\nvroomvroom\r\n' | ssh -F /dev/null -tt -p 2222 -i "$WD/test.key" \
+  -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile="$WD/test-known-hosts" motor@192.168.4.2 \
+  '/user/bin/ssh -T password-target /bin/echo jump-password-ok')"
+printf '%s\n' "$out" | tr -d '\r' | grep -qx jump-password-ok || fail "password through jump failed: '$out'"
+
+cat > "$fixture/host.cfg" <<EOF
+Host guest
+  HostName 192.168.4.2
+  Port 2222
+Host tap
+  HostName 192.168.4.1
+  Port $target_port
+Host *
+  User motor
+  IdentityFile $WD/test.key
+  IdentitiesOnly yes
+  UserKnownHostsFile $fixture/host_known
+  StrictHostKeyChecking accept-new
+  BatchMode yes
+  LogLevel ERROR
+EOF
+echo '-- OpenSSH through the Motor jump --'
+out="$(ssh -F "$fixture/host.cfg" -J guest tap /bin/echo guest-jump-ok)"
+[ "$out" = guest-jump-ok ] || fail "Motor jump returned '$out'"
+
+# The local Unix socket avoids reserving a host TCP port. The remote side is
+# TCP: the guest resolves localhost. from its hosts file and dials port 2222.
+echo '-- 100 forwards, local resolution and shell EOF --'
+rustc --edition=2024 -D warnings "$WD/ssh-forwarding-probe.rs" -o "$fixture/probe"
+mkfifo "$fixture/shell.input" "$fixture/shell.output"
+exec {shell_input}<>"$fixture/shell.input"
+exec {shell_output}<>"$fixture/shell.output"
+(
+  exec {shell_input}>&-
+  exec {shell_output}>&-
+  exec ssh -F "$fixture/host.cfg" -T -o ExitOnForwardFailure=yes \
+    -L "$fixture/forward.sock:localhost.:2222" guest \
+    'read before && echo "$before" && read after && echo "$after"' \
+    < "$fixture/shell.input" > "$fixture/shell.output"
+) 2>"$fixture/shell.log" &
+shell_pid="$!"
+printf 'before-forwards\n' >&"$shell_input"
+IFS= read -r -t 5 out <&"$shell_output" || fail "forwarding shell did not start"
+[ "$out" = before-forwards ] || fail "unexpected initial shell output '$out'"
+timeout 10s "$fixture/probe" "$fixture/forward.sock"
+printf 'after-forwards\n' >&"$shell_input"
+IFS= read -r -t 5 out <&"$shell_output" || fail "forwarding EOF closed shell input"
+[ "$out" = after-forwards ] || fail "unexpected later shell output '$out'"
+exec {shell_input}>&-
+wait "$shell_pid" || fail "forwarding shell failed"
+shell_pid=""
+exec {shell_output}>&-
 echo "test-ssh-config: PASS"

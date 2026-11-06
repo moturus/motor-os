@@ -97,6 +97,7 @@ write_ssh_client_host_config() {
   mkdir -m 700 -p "$credentials"
   {
     printf "version = 2\nlisten_on = '%s'\npath = '%s'\n" "$address" "$command_path"
+    printf 'allow_tcp_forwarding = true\n'
     printf 'host_key = """%s"""\n\n' "$(cat "$host_key")"
     printf "users_file = '%s'\nauthorized_keys_dir = '%s'\n" \
       "$credentials/users.toml" "$credentials"
@@ -111,6 +112,7 @@ start_ssh_client_host() {
   local host_key="$1"
   local requested_port="$2"
   local command_path="${3:-/bin:/usr/bin}"
+  local listen_host="${4:-192.168.4.1}"
   local repo_root
   repo_root="$(cd "$ROOT_DIR" && pwd)"
   local host_bin="$repo_root/src/bin/russhd/target/$BUILD/russhd"
@@ -120,7 +122,7 @@ start_ssh_client_host() {
   local deadline
 
   [ -x "$host_bin" ] || fail "host russhd is missing at $host_bin"
-  write_ssh_client_host_config "$config" "192.168.4.1:$requested_port" "$host_key" "$command_path"
+  write_ssh_client_host_config "$config" "$listen_host:$requested_port" "$host_key" "$command_path"
   coproc SSH_CLIENT_HOST_SERVER {
     cd "$SSH_CLIENT_HOST_ROOT"
     exec env HOME="$SSH_CLIENT_HOST_ROOT" "$host_bin" "$config" </dev/null 2>&1
@@ -271,7 +273,7 @@ test_ssh_client_host() {
     fail "terminal Enter was not forwarded once: '$output'"
   vm_ssh "/system/bin/rm $prompt_known" || fail "could not remove prompt known-hosts fixture"
 
-  MOTOR_SSH_TARGET_PORT="$port" bash "$WD/test-ssh-config.sh"
+  MOTOR_SSH_TARGET_PORT="$port" MOTOR_SSH_BUILD="$BUILD" bash "$WD/test-ssh-config.sh"
 
   local copy_id="/user/bin/ssh-copy-id -F /dev/null -p $port -o BatchMode=yes -o StrictHostKeyChecking=yes -i $guest_key.pub motor@$host"
   vm_ssh "$copy_id" >/dev/null || fail "ssh-copy-id failed"

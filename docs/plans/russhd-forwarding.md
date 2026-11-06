@@ -35,7 +35,7 @@ Developer-image validation remains release-only.
 |---|---|---|
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
 | 2 | Complete: step 2a published `2a07f3a` and passed its separate 3+3 and developer-image gates. Step 2b integrates direct opens and optional configuration, resolves SDK/sys from crates.io, and passes 183 host tests, clippy, native builds, and its own 3+3 image gates | None |
-| 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
+| 3 | Guest jump transfers, native server forwarding/DNS/100-channel probe, shipped configuration and docs pass their first release image gate | Two more release and three debug passes; complete developer-image release gate |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
 | 6 | Not started | SOCKS parser, `-D` integration and guest coverage, milestone gates |
@@ -333,6 +333,41 @@ These gates validate the optional forwarding implementation with shipped
 policy still off. Step 3 adds guest forwarding coverage, enables shipped
 policy, and has its own main-image and complete developer-image release gates.
 
+### Step 3: guest forwarding coverage
+
+The prepared patch enables both shipped configurations and restores Motor
+client jump streams, status, scp, sftp, password login, and the CLI override.
+It also checks OpenSSH through the native server and 100 simultaneous native
+forwards to `localhost.` while a shell remains writable after forwarding EOF.
+The host probe uses only Rust's standard library and a private OpenSSH Unix
+listener; the remote side is TCP. The existing full-test host-compatibility
+phase runs all checks transitively. Dedicated Rust fixtures retain policy-off
+coverage. Host tests (183), imager tests (58), syntax and probe compilation pass.
+
+The first release image run fails at the new OpenSSH guest-jump fixture after
+the Motor client jump transfers and password login succeed. Its target was on
+the host's loopback, which the guest cannot reach as its own loopback. The
+corrected guest-jump case uses the parent's host service on `192.168.4.1`;
+Motor-client jumps keep the separate host-loopback target. Original logs and
+fixture files are preserved as `step3-forwarding-release-1` and
+`build/host-tests/ssh-config.jLEbds/`. This failed run does not count toward
+the milestone gates. The watchdogs and assertions remain unchanged.
+
+The corrected route succeeds. Its next new fixture fails before opening any
+forwards because it uses `sysbox cat` for a live echo handshake; that command
+reads stdin to EOF before printing. The probe now uses rush's existing
+`read`/`echo` builtins, which the main suite already exercises, to emit the
+before/after markers. The 100-forward and EOF completion assertions stay intact.
+The second failure and fixture remain preserved as `step3-route-fixed-release-1`
+and `build/host-tests/ssh-config.vGLBYk/`; it also does not count toward gates.
+
+The final sources pass `step3-shell-probe-release-1`: preparation 0.1 minutes,
+testing 13.6 minutes, test status and source checks zero. The log records both
+jump directions, `100 simultaneous forwards PASS`, and `test-ssh-config: PASS`.
+The first successful release pass counts toward step 3's separate 3+3 sequence;
+two release and three debug passes and the complete developer-image release
+gate remain. No source changes follow this successful run.
+
 ### Commit count and delivered functionality
 
 At checkpoint `fea26785`, the Motor OS branch has 17 commits after the original
@@ -377,13 +412,13 @@ cover the new rebase checkpoint.
   separate step 2a main-image and developer-image gates.
 - [x] Implement the bounded block queue and event-driven relay, including credit,
   half-close, peer-close draining, pressure shedding, and cancellation tests.
-- [ ] Integrate task ownership/reaping, direct opens, admission limits and host
+- [x] Integrate task ownership/reaping, direct opens, admission limits and host
   validation, handler isolation, and configuration with the imager field.
 - [x] `bc39a586`, now merged from `dev`, adds the 120 s login deadline and removes
   the application idle timeout; preserve it through the API migration.
 - [x] Complete the controlled-clock authentication/idle coverage below against
   the rebased dependency.
-- [ ] Pass the integrated milestone's three debug and three release main-image
+- [x] Pass the integrated milestone's three debug and three release main-image
   gates after step 2b. Step 2a's completed gates are a separate prerequisite.
 
 ### Rebase prerequisite (step 2a)
