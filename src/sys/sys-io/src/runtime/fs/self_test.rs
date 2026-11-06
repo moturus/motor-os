@@ -593,6 +593,8 @@ fn records() -> std::result::Result<(), String> {
                 kind: MountKind::MemFs,
                 path: path.clone(),
                 corrupted,
+                read_only: false,
+                source: None,
                 used: (!corrupted).then_some(0),
                 entries: None,
                 cap: (!corrupted).then_some(u64::MAX),
@@ -603,6 +605,47 @@ fn records() -> std::result::Result<(), String> {
             st_assert!(MountInfo::decode(&bytes[..len + 1]).is_err());
             bytes[5] = 255;
             st_assert!(MountInfo::decode(&bytes[..len]).is_err());
+        }
+    }
+    for partition in [None, Some(1), Some(4)] {
+        for read_only in [false, true] {
+            for corrupted in [false, true] {
+                let mut record = MountInfo {
+                    id: 0,
+                    kind: MountKind::MotorFs,
+                    path: "/".into(),
+                    corrupted,
+                    read_only,
+                    source: Some(api_fs::MountBlockSource {
+                        device: u32::MAX,
+                        partition,
+                    }),
+                    used: (!corrupted).then_some(0),
+                    entries: None,
+                    cap: (!corrupted).then_some(u64::MAX),
+                };
+                let len = record.encode(&mut bytes).map_err(|err| err.to_string())?;
+                st_assert_eq!(MountInfo::decode(&bytes[..len]).unwrap(), record.clone());
+                for (offset, value) in [(5, 64), (36, 5), (37, 1), (38, 1), (39, 1)] {
+                    let saved = bytes[offset];
+                    bytes[offset] = value;
+                    st_assert!(MountInfo::decode(&bytes[..len]).is_err());
+                    bytes[offset] = saved;
+                }
+                // A source payload without its presence bit is not canonical.
+                bytes[5] &= !32;
+                st_assert!(MountInfo::decode(&bytes[..len]).is_err());
+                record.kind = MountKind::MemFs;
+                st_assert!(record.encode(&mut bytes).is_err());
+                record.kind = MountKind::MotorFs;
+                record.source.as_mut().unwrap().partition = Some(0);
+                st_assert!(record.encode(&mut bytes).is_err());
+                record.source.as_mut().unwrap().partition = Some(5);
+                st_assert!(record.encode(&mut bytes).is_err());
+                record.source = None;
+                let len = record.encode(&mut bytes).map_err(|err| err.to_string())?;
+                st_assert_eq!(MountInfo::decode(&bytes[..len]).unwrap(), record);
+            }
         }
     }
     let mut malformed = api_fs::get_mounts_req_encode(0);

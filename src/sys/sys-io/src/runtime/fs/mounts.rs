@@ -341,6 +341,8 @@ pub(super) async fn info(table: &Rc<RefCell<MountTable>>, cursor: u32) -> Result
             kind: mount.kind,
             path: mount.path().to_owned(),
             corrupted: mount.corrupted,
+            read_only: false,
+            source: None,
             used: None,
             entries: None,
             cap: None,

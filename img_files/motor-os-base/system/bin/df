@@ -1,8 +1,4 @@
 #!/system/bin/rush
 
-echo -n "Total disk capacity: "
-/system/bin/sysbox stats get -h 2:1000
-
-echo -n "     Available bytes:"
-/system/bin/sysbox stats get -h 2:1001
+/system/bin/sysbox findmnt "$@"
 

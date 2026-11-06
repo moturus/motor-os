@@ -67,6 +67,7 @@ mod sysbox_cat;
 mod sysbox_chmod;
 mod sysbox_diff;
 mod sysbox_find;
+mod sysbox_findmnt;
 mod sysbox_head;
 mod sysbox_less;
 mod sysbox_ls;
@@ -1327,6 +1328,10 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "mounts" {
         mounts::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "findmnt" {
+        sysbox_findmnt::run_test();
         return;
     }
     if args.len() == 2 && args[1] == "mounts-none" {

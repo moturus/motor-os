@@ -12,7 +12,7 @@ extern crate alloc;
 
 use crate::ipc::io_channel::Msg;
 use crate::sys_io::api_fs;
-pub use crate::sys_io::api_fs::{MountInfo, MountKind};
+pub use crate::sys_io::api_fs::{MountBlockSource, MountInfo, MountKind};
 use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::rc::Rc;

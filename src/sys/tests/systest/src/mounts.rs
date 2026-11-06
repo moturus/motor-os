@@ -19,12 +19,16 @@ async fn memfs_mount(client: &std::rc::Rc<FsClient>) -> Result<MountInfo, String
 }
 
 pub fn run_all_tests() {
+    crate::sysbox_findmnt::run_test();
     namespace();
     let child = std::process::Command::new(std::env::current_exe().unwrap())
         .arg("mounts-none")
         .env(
             moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
-            format!("0x{:x}", moto_sys::caps::CAP_FS_WRITE),
+            format!(
+                "0x{:x}",
+                moto_sys::caps::CAP_FS_WRITE | moto_sys::caps::CAP_SPAWN
+            ),
         )
         .output()
         .unwrap();
@@ -34,6 +38,7 @@ pub fn run_all_tests() {
 }
 
 pub fn none_role() {
+    crate::sysbox_findmnt::run_test();
     moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().unwrap();
         let mount = memfs_mount(&client).await.unwrap();

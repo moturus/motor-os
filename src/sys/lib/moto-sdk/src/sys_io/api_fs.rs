@@ -74,6 +74,13 @@ pub enum MountKind {
     MemFs = 1,
 }
 
+/// Boot-time virtio-block ordinal and optional one-based MBR primary slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MountBlockSource {
+    pub device: u32,
+    pub partition: Option<u8>,
+}
+
 /// The configured path can become stale if an ancestor is renamed. Unknown
 /// numbers are represented explicitly, including all usage on corrupt mounts.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,13 +89,15 @@ pub struct MountInfo {
     pub kind: MountKind,
     pub path: String,
     pub corrupted: bool,
+    pub read_only: bool,
+    pub source: Option<MountBlockSource>,
     pub used: Option<u64>,
     pub entries: Option<u64>,
     pub cap: Option<u64>,
 }
 
 pub const MOUNTS_END: u32 = u32::MAX;
-const MOUNT_HEADER: usize = 32;
+const MOUNT_HEADER: usize = 40;
 const _: () = assert!(MOUNT_HEADER + MAX_PATH_LEN <= PAGE_SIZE);
 
 impl MountInfo {
@@ -99,6 +108,12 @@ impl MountInfo {
             || self.path.len() > MAX_PATH_LEN
             || len > bytes.len()
             || self.id >= 1 << 24
+            || (self.kind == MountKind::MemFs && (self.read_only || self.source.is_some()))
+            || self.source.is_some_and(|source| {
+                source
+                    .partition
+                    .is_some_and(|slot| !(1..=4).contains(&slot))
+            })
             || (self.corrupted
                 && (self.used.is_some() || self.entries.is_some() || self.cap.is_some()))
         {
@@ -108,6 +123,12 @@ impl MountInfo {
         bytes[..4].copy_from_slice(&self.id.to_le_bytes());
         bytes[4] = self.kind as u8;
         bytes[5] = self.corrupted as u8;
+        bytes[5] |= (self.read_only as u8) << 4;
+        if let Some(source) = self.source {
+            bytes[5] |= 32;
+            bytes[32..36].copy_from_slice(&source.device.to_le_bytes());
+            bytes[36] = source.partition.unwrap_or(0);
+        }
         bytes[6..8].copy_from_slice(&(self.path.len() as u16).to_le_bytes());
         for (index, value) in [self.used, self.entries, self.cap].into_iter().enumerate() {
             if let Some(value) = value {
@@ -128,8 +149,11 @@ impl MountInfo {
         let id = u32::from_le_bytes(bytes[..4].try_into().unwrap());
         if path_len == 0
             || MOUNT_HEADER + path_len != bytes.len()
-            || flags & !15 != 0
-            || (flags & 1 != 0 && flags != 1)
+            || flags & !63 != 0
+            || (flags & 1 != 0 && flags & 14 != 0)
+            || bytes[37..40] != [0; 3]
+            || (flags & 32 == 0 && bytes[32..37] != [0; 5])
+            || bytes[36] > 4
             || id >= 1 << 24
         {
             return Err(moto_rt::Error::InvalidData);
@@ -139,6 +163,13 @@ impl MountInfo {
             1 => MountKind::MemFs,
             _ => return Err(moto_rt::Error::InvalidData),
         };
+        if kind == MountKind::MemFs && flags & 48 != 0 {
+            return Err(moto_rt::Error::InvalidData);
+        }
+        let source = (flags & 32 != 0).then(|| MountBlockSource {
+            device: u32::from_le_bytes(bytes[32..36].try_into().unwrap()),
+            partition: (bytes[36] != 0).then_some(bytes[36]),
+        });
         let path = core::str::from_utf8(&bytes[MOUNT_HEADER..])
             .map_err(|_| moto_rt::Error::InvalidData)?
             .into();
@@ -152,6 +183,8 @@ impl MountInfo {
             kind,
             path,
             corrupted: flags & 1 != 0,
+            read_only: flags & 16 != 0,
+            source,
             used: value(0),
             entries: value(1),
             cap: value(2),

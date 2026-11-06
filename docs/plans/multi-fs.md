@@ -4,7 +4,8 @@ Status: iteration 1 (memfs over the three tmp directories, configured in
 `/system/cfg/sys-fs.toml`) is committed; [fs-permissions.md](../fs-permissions.md)
 describes it and `git show b686d5e6:docs/plans/multi-fs.md` records it
 (requirements and design: `c1890b6a`). Iteration 2 was reviewed against
-`4fcde583` on 2026-11-06; D1–D5 are accepted; not started. Do not commit unasked.
+`4fcde583` on 2026-11-06; D1–D5 are accepted. Implementation is in progress,
+starting with step 0; test each patch and commit it with a one-line message.
 
 ## Iteration 2: findmnt, Motor FS mounts, read-only mounts
 
