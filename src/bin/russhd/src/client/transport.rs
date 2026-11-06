@@ -172,6 +172,7 @@ pub struct Handler {
 
 pub struct Peer {
     handle: client::Handle<Handler>,
+    receive_window: usize,
     channels: tokio::sync::watch::Sender<ChannelState>,
     shutdown: AbortOnDrop,
     ended: tokio::sync::watch::Receiver<()>,
@@ -191,6 +192,10 @@ impl std::ops::DerefMut for Peer {
 }
 
 impl Peer {
+    pub fn receive_window(&self) -> usize {
+        self.receive_window
+    }
+
     /// Interrupt transport I/O independently of SSH windows and message queues.
     pub fn abort(&self) {
         self.shutdown.0.abort();
@@ -486,9 +491,11 @@ async fn connect_stream<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         batch_mode: options.batch_mode,
         channels: channels.clone(),
     };
+    let receive_window = config.window_size as usize;
     let handle = client::connect_stream(Arc::new(config), stream, handler).await?;
     Ok(Peer {
         handle,
+        receive_window,
         channels,
         shutdown,
         ended,

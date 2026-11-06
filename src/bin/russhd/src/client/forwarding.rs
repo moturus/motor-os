@@ -2,12 +2,15 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::task::Poll;
 
 use tokio::net::{TcpListener, TcpStream};
 
 use super::args::ConnectionOptions;
 use super::forward_args::{ListenAddress, TargetAddress};
+use super::transport::Peer;
+use crate::forward::{Tasks, memory_pressure, relay};
 
 #[derive(Default)]
 pub struct Listeners {
@@ -19,6 +22,41 @@ pub struct Accepted {
     pub socket: TcpStream,
     pub originator: SocketAddr,
     pub target: TargetAddress,
+}
+
+impl Accepted {
+    pub fn spawn(self, peer: Arc<Peer>, tasks: &Tasks) {
+        let Some(job) = tasks.reserve(memory_pressure()) else {
+            eprintln!("ssh: cannot admit another forwarded connection");
+            return;
+        };
+        job.spawn(async move {
+            let result = async {
+                self.socket.set_nodelay(true)?;
+                let window = peer.receive_window();
+                let (channel, credit) = peer
+                    .channel_open_direct_tcpip_with_credit(
+                        &self.target.host,
+                        u32::from(self.target.port),
+                        self.originator.ip().to_string(),
+                        u32::from(self.originator.port()),
+                    )
+                    .await
+                    .map_err(io::Error::other)?;
+                // An established relay owns its channel, not the connection.
+                drop(peer);
+                relay(channel, self.socket, credit, window, memory_pressure).await
+            }
+            .await;
+            if let Err(error) = &result {
+                eprintln!(
+                    "ssh: forward to {}:{}: {error}",
+                    self.target.host, self.target.port
+                );
+            }
+            result
+        });
+    }
 }
 
 impl Listeners {
