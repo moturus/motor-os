@@ -3,6 +3,7 @@ pub mod applets;
 pub mod auth_store;
 pub mod client;
 pub mod config;
+pub mod forward;
 pub mod local_session;
 pub mod permissions;
 pub mod sftp_extensions;
