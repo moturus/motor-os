@@ -9,14 +9,14 @@ const MAX_FORWARDS: usize = 16_384;
 /// The SSH connection owns this scope. Dropping it cancels every reserved job.
 pub struct Tasks {
     slots: Arc<Semaphore>,
-    cancel: watch::Sender<()>,
+    cancel: watch::Sender<bool>,
 }
 
 impl Default for Tasks {
     fn default() -> Self {
         Self {
             slots: Arc::new(Semaphore::new(MAX_FORWARDS)),
-            cancel: watch::channel(()).0,
+            cancel: watch::channel(false).0,
         }
     }
 }
@@ -24,20 +24,30 @@ impl Default for Tasks {
 impl Tasks {
     /// Connecting jobs count too; admission never waits for a slot.
     pub fn reserve(&self, pressure: bool) -> Option<Reservation> {
-        if pressure {
+        let cancelled = self.cancel.subscribe();
+        if pressure || *cancelled.borrow() {
             return None;
         }
         Some(Reservation {
             _slot: self.slots.clone().try_acquire_owned().ok()?,
-            cancelled: self.cancel.subscribe(),
+            cancelled,
         })
+    }
+
+    pub fn cancel(&self) {
+        self.cancel.send_replace(true);
+    }
+
+    /// Stop accepting sockets before waiting. Pending opens count as active.
+    pub async fn wait_idle(&self) {
+        let _slots = self.slots.acquire_many(MAX_FORWARDS as u32).await.unwrap();
     }
 }
 
 /// A job owns its slot and a receiver that keeps no connection owner alive.
 pub struct Reservation {
     _slot: OwnedSemaphorePermit,
-    cancelled: watch::Receiver<()>,
+    cancelled: watch::Receiver<bool>,
 }
 
 impl Reservation {
@@ -51,7 +61,11 @@ impl Reservation {
             } = self;
             tokio::select! {
                 biased;
-                _ = cancelled.changed() => {}
+                _ = async {
+                    if !*cancelled.borrow() {
+                        let _ = cancelled.changed().await;
+                    }
+                } => {}
                 result = work => {
                     if let Err(error) = result {
                         log::debug!("forward failed: {error}");
@@ -163,5 +177,64 @@ mod tests {
             assert_eq!(tasks.slots.available_permits(), MAX_FORWARDS);
             assert_eq!(tasks.cancel.receiver_count(), 0);
         }
+    }
+
+    #[tokio::test]
+    async fn drain_waits_for_pending_and_running_work_without_cancelling_it() {
+        let tasks = Tasks::default();
+        let mut releases = Vec::new();
+        for _ in 0..2 {
+            let (release, released) = oneshot::channel();
+            let (entered, started) = oneshot::channel();
+            let (dropped, gone) = oneshot::channel();
+            let guard = Dropped(Some(dropped));
+            tasks.reserve(false).unwrap().spawn(async move {
+                let _guard = guard;
+                entered.send(()).unwrap();
+                released.await.unwrap();
+                Ok(())
+            });
+            started.await.unwrap();
+            releases.push((release, gone));
+        }
+        let mut draining = Box::pin(tasks.wait_idle());
+        for (release, gone) in releases {
+            tokio::select! {
+                biased;
+                () = draining.as_mut() => panic!("drained with a live job"),
+                () = std::future::ready(()) => {}
+            }
+            release.send(()).unwrap();
+            gone.await.unwrap();
+        }
+        timeout(Duration::from_secs(1), draining).await.unwrap();
+        assert_eq!(tasks.slots.available_permits(), MAX_FORWARDS);
+        assert_eq!(tasks.cancel.receiver_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn explicit_cancellation_reaps_work_and_refuses_later_admission() {
+        let tasks = Tasks::default();
+        let reservation = tasks.reserve(false).unwrap();
+        let (entered, started) = oneshot::channel();
+        let (dropped, gone) = oneshot::channel();
+        let guard = Dropped(Some(dropped));
+        tasks.reserve(false).unwrap().spawn(async move {
+            let _guard = guard;
+            entered.send(()).unwrap();
+            std::future::pending::<()>().await;
+            Ok(())
+        });
+        started.await.unwrap();
+        tasks.cancel();
+        assert!(tasks.reserve(false).is_none());
+        // A reservation created before cancellation must never poll its open.
+        reservation.spawn(async { panic!("cancelled work was polled") });
+        timeout(Duration::from_secs(1), tasks.wait_idle())
+            .await
+            .unwrap();
+        gone.await.unwrap();
+        assert_eq!(tasks.slots.available_permits(), MAX_FORWARDS);
+        assert_eq!(tasks.cancel.receiver_count(), 0);
     }
 }
