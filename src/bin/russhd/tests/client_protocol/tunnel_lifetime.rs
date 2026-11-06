@@ -222,3 +222,111 @@ fn command_close_drains_an_open_that_has_not_yet_been_confirmed() {
     server.ended();
     assert!(TcpStream::connect(local).is_err());
 }
+
+fn connect_when_listening(address: std::net::SocketAddr, client: &mut Client) -> TcpStream {
+    // -N has no command-output readiness marker. Wait only for the listener's
+    // startup; the successful socket is the one used by the contract below.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match TcpStream::connect(address) {
+            Ok(socket) => return socket,
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                assert!(
+                    client.0.try_wait().unwrap().is_none(),
+                    "tunnel exited before listening"
+                );
+                assert!(Instant::now() < deadline, "tunnel never listened");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("connecting to local tunnel: {error}"),
+        }
+    }
+}
+
+#[test]
+fn tunnel_without_session_cancels_pending_and_window_blocked_work_on_loss_or_interrupt() {
+    use std::os::unix::process::ExitStatusExt;
+
+    for interrupt in [false, true] {
+        for confirmed in [false, true] {
+            let fixture = Fixture::start();
+            let server = Server::start(0);
+            let available = TcpListener::bind("127.0.0.1:0").unwrap();
+            let local = available.local_addr().unwrap();
+            drop(available);
+            let mut args = fixture.ssh_args();
+            args[3] = server.port.to_string();
+            args.extend([
+                "-N".into(),
+                "-t".into(),
+                "-L".into(),
+                format!("127.0.0.1:{}:unchanged.invalid:80", local.port()),
+                "motor@127.0.0.1".into(),
+            ]);
+            // The forced terminal would fail on this pipe if -N opened a session.
+            let mut client = Client::start(&args);
+            client
+                .0
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(b"ignored stdin\n~.\n")
+                .unwrap();
+            let mut socket = connect_when_listening(local, &mut client);
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut forward = server.opened();
+            assert!(forward.destination.is_some(), "-N opened a session channel");
+            socket.write_all(b"waiting-for-window").unwrap();
+            if confirmed {
+                block_on(async {
+                    forward.reply.take().unwrap().accept().await;
+                    assert_eq!(
+                        forward
+                            .transport
+                            .forward_tcpip("barrier.invalid".into(), 1)
+                            .await,
+                        Err(())
+                    );
+                    tokio::select! {
+                        biased;
+                        event = forward.channel.wait() => panic!("client sent without window credit: {event:?}"),
+                        () = std::future::ready(()) => {}
+                    }
+                });
+            }
+            if interrupt {
+                assert_eq!(
+                    unsafe { libc::kill(client.0.id() as libc::pid_t, libc::SIGINT) },
+                    0
+                );
+                assert_eq!(client.wait().signal(), Some(libc::SIGINT));
+            } else {
+                block_on(async {
+                    forward
+                        .transport
+                        .disconnect(
+                            russh::Disconnect::ByApplication,
+                            "test transport loss".into(),
+                            "".into(),
+                        )
+                        .await
+                        .unwrap();
+                });
+                assert_eq!(client.wait().code(), Some(255));
+            }
+            server.ended();
+            match socket.read(&mut [0]) {
+                Ok(0) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+                result => panic!("forwarded socket survived shutdown: {result:?}"),
+            }
+            assert!(TcpStream::connect(local).is_err());
+            assert!(
+                server.opens.try_recv().is_err(),
+                "-N opened another channel"
+            );
+        }
+    }
+}
