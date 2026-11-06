@@ -177,6 +177,59 @@ async fn aborted_peer(client: client::Handle<Client>) {
     }
 }
 
+#[tokio::test]
+async fn forward_survives_the_handle_data_path_used_by_a_window_starved_shell() {
+    timeout(Duration::from_secs(5), async {
+        let mut fixture = Fixture::connect_with(
+            client::Config {
+                window_size: 0,
+                ..Default::default()
+            },
+            4096,
+            1024,
+        )
+        .await;
+        let shell = fixture.client.channel_open_session().await.unwrap();
+        let shell_opened = fixture.opened.recv().await.unwrap();
+        // The last send needs room from dispatching the first into pending
+        // zero-window data, exactly the Handle::data path used by shells.
+        for _ in 0..=server::Config::default().event_buffer_size {
+            shell_opened
+                .handle
+                .data(shell_opened.channel.id(), vec![1])
+                .await
+                .unwrap();
+        }
+        let mut channel = fixture.client.channel_open_session().await.unwrap();
+        let opened = fixture.opened.recv().await.unwrap();
+        let finished = opened.start(fixture.socket, || false);
+        channel.data_bytes(b"request".to_vec()).await.unwrap();
+        channel.eof().await.unwrap();
+        let mut request = Vec::new();
+        fixture.target.read_to_end(&mut request).await.unwrap();
+        assert_eq!(request, b"request");
+
+        fixture.target.shutdown().await.unwrap();
+        // Closing the shell releases its unsent output and queued control
+        // messages, so the forward can deliver EOF and close without credit.
+        shell.close().await.unwrap();
+        let mut eof = false;
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Eof) => eof = true,
+                Some(ChannelMsg::Close) => break,
+                None => panic!("forward ended without close"),
+                Some(_) => {}
+            }
+        }
+        assert!(eof);
+        finished.await.unwrap().unwrap();
+        finish(fixture.client, fixture.server).await;
+    })
+    .await
+    .unwrap();
+}
+
 struct ObservedSocket {
     inner: DuplexStream,
     read: Option<oneshot::Sender<usize>>,

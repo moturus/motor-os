@@ -46,6 +46,27 @@ fn direct_forwarding_requires_opt_in_and_reports_open_failures() {
         let fixture = Fixture::configured(extra);
         block_on(async {
             let session = fixture.connect().await;
+            if !enabled {
+                let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                target.set_nonblocking(true).unwrap();
+                assert!(matches!(
+                    session
+                        .channel_open_direct_tcpip(
+                            "127.0.0.1",
+                            u32::from(target.local_addr().unwrap().port()),
+                            "127.0.0.1",
+                            1
+                        )
+                        .await,
+                    Err(Error::ChannelOpenFailure(
+                        ChannelOpenFailure::AdministrativelyProhibited
+                    ))
+                ));
+                assert_eq!(
+                    target.accept().unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+            }
             let refused = TcpSocket::new_v4().unwrap();
             refused.bind("127.0.0.1:0".parse().unwrap()).unwrap();
             let overlong = "a".repeat(256);

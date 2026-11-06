@@ -12,6 +12,8 @@ use russh::{Channel, ChannelId};
 
 #[path = "client_protocol/forwarding.rs"]
 mod forwarding;
+#[path = "client_protocol/forwarding_jump.rs"]
+mod forwarding_jump;
 
 const RUSSHD: &str = env!("CARGO_BIN_EXE_russhd");
 const SSH: &str = env!("CARGO_BIN_EXE_ssh");

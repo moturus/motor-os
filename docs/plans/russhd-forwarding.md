@@ -20,7 +20,8 @@ deferred gates is repaired, and all three debug and three release image gates
 pass on the repaired sources. The user has now published `moto-sdk 0.2.0` from
 `f8f22e77`; its registry source matches the in-tree SDK. Russhd now resolves
 that release and `moto-sys 0.4.0` from crates.io. Direct opens and the optional
-configuration are integrated; broader binary coverage and milestone gates follow.
+configuration are integrated, and all 183 host tests pass. The integrated
+three-debug/three-release milestone gates follow.
 See "Implementation progress" below and "Decisions" at the end.
 
 ## Implementation progress
@@ -32,7 +33,7 @@ Developer-image validation remains release-only.
 | Step | Progress | Remaining |
 |---|---|---|
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
-| 2 | Step 2a complete: published `2a07f3a`, 151 main host tests, clean clippy, native builds, 3+3 main-image passes and complete developer-image release gate. Step 2b: direct-open helpers `1ad61aa1`, binary handler and optional configuration integrated; SDK and sys resolve from crates.io | Binary scale, coexistence, jump and teardown coverage; integrated milestone gates |
+| 2 | Step 2a complete: published `2a07f3a`, 151 main host tests, clean clippy, native builds, 3+3 main-image passes and complete developer-image release gate. Step 2b: direct opens and optional configuration integrated, 183 host tests and clean clippy; SDK and sys resolve from crates.io | Integrated milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
@@ -297,6 +298,18 @@ in 0.51 seconds. Original failures and diagnostics remain under
 `step2b-binary-*`; all temporary markers are removed.
 The restored sources pass all 181 russhd host tests and all-target clippy
 (`step2b-binary-lifetime-all-tests.log` and `step2b-binary-lifetime-clippy.log`).
+
+The real-jump fixture now runs both our SSH client and OpenSSH through an
+opted-in `russhd`, preserving stdin, stdout, stderr, and status. An 8 MiB
+bidirectional stream, scp upload/download, and sftp download also pass through
+that jump. The policy-off fixture refuses a reachable listener without dialing.
+A separate relay contract queues shell-style `Handle::data` into an established
+zero-window stall, opens a forward, delivers its input and EOF, then closes
+the shell and verifies the forward's outbound EOF/close can finish.
+All 183 host tests, including 26 focused forwarding tests, and all-target
+clippy pass. Logs use `step2b-real-jump-*`, `step2b-shell-pending-data-*`, and
+`step2b-jump-*`. These complete the host integration coverage before step 2b's
+three-debug/three-release main-image gate sequence.
 
 ### Commit count and delivered functionality
 
