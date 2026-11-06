@@ -1,6 +1,6 @@
 [package]
 name = "moto-sdk"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["The Motor OS Project Developers", "crossbeam-channel Developers"]
 license = "MIT OR Apache-2.0"
 keywords = ["motor", "motor-os"]
@@ -25,7 +25,7 @@ lru = "0.14.0"
 crossbeam = { version = "0.8.4", default-features = false, features = ["alloc", "crossbeam-queue"] }
 crossbeam-utils = { version = "0.8.18", default-features = false }
 moto-rt = { version = "0.17.9", path = "../moto-rt" }
-moto-sys = { version = "0.3.2", path = "../moto-sys" }
+moto-sys = { version = "0.4.0", path = "../moto-sys" }
 
 # The std filesystem implementation off Motor OS. Motor OS never builds tokio:
 # in the native test workspace that the developer image stages, an empty

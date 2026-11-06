@@ -14,8 +14,9 @@ gate pass without local overrides, retries, or source changes between runs.
 Step 2b's bounded queue, connection-owned cancellation, and generic relay are
 committed and pass 21 focused tests. Direct-open helpers pass 24 host tests and
 clippy, but their Motor build exposed a published/in-tree SDK API difference.
-The draft is preserved pending the SDK source choice below; direct opens and
-configuration are not yet integrated in the binary.
+The user chose to publish updated system and SDK crates. Release metadata
+is prepared below; direct opens and configuration are not yet integrated
+in the binary.
 See "Implementation progress" below and "Decisions" at the end.
 
 ## Implementation progress
@@ -27,7 +28,7 @@ Developer-image validation remains release-only.
 | Step | Progress | Remaining |
 |---|---|---|
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
-| 2 | Step 2a complete: published `2a07f3a`, 151 main host tests, clean clippy, native builds, 3+3 main-image passes and complete developer-image release gate. Step 2b: relay and 21 focused tests committed through `4ffd3369`; direct-open draft passes 24 host tests | SDK source choice, direct opens, configuration, integrated milestone gates |
+| 2 | Step 2a complete: published `2a07f3a`, 151 main host tests, clean clippy, native builds, 3+3 main-image passes and complete developer-image release gate. Step 2b: relay and 21 focused tests committed through `4ffd3369`; direct-open draft passes 24 host tests | Publish updated system/SDK crates, direct opens, configuration, integrated milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
@@ -84,7 +85,7 @@ overflow and the SSH connection still answers pings. A separate empty-packet
 injection leaves the stream usable. All **21 focused tests**, formatting and
 clippy pass (`forward-relay-wire-*`). Direct-open integration is next.
 
-### Direct-open helpers: SDK source choice
+### Direct-open helpers: SDK publication prerequisite
 
 The draft validates the approved hostname/port rules, resolves through Tokio,
 tries resolved addresses in order, sets `TCP_NODELAY`, and accepts only after a
@@ -115,13 +116,51 @@ The registry index checked on 2026-11-05 still lists `moto-sdk 0.1.0` and
 `moto-sdk-registry-index.jsonl` and `moto-sys-registry-index.jsonl`. Selecting
 the in-tree SDK also changes runtime build inputs, so ask for guidance under
 AGENTS.md's non-obvious-decision rule before selecting it. The alternative is
-to wait for an updated published SDK.
+to wait for an updated published SDK. The user subsequently selected
+publication of updated crates instead of the path dependency.
 
 The uncommitted helper file stays at `src/bin/russhd/src/forward/open.rs`; its
 module export is temporarily removed to keep the committed foundation buildable.
 The complete draft and source checksums are saved as `pending-open-helpers.patch`
 and `pending-open-helper-sources.sha256` in `build/russh-rebase/`. No core or
 external-fork source was edited for this diagnosis.
+
+### System and SDK release preparation
+
+The prepared releases are `moto-sys 0.4.0` and `moto-sdk 0.2.0`, with the
+SDK's system dependency floor raised to `0.4.0`. The existing public API
+removals require new semver compatibility ranges. No implementation source
+changes are needed. The sys workspace, imager and existing WireGuard path
+consumer locks change only those two package versions. The SDK package-test
+lock and russhd's crates.io dependency stay unchanged until publication.
+
+Both packages pass the combined Cargo publish dry run on Unix and Motor OS
+(`build/crate-release/publish-dry-run-host.log` and
+`publish-dry-run-motor-online.log`). Cargo verifies the exact release archives,
+staging the unpublished system crate for the SDK while using the published
+runtime. The dry runs stop before upload.
+
+Debug and release host tests pass for both crates, including the SDK without
+default features; host clippy with warnings denied and repository-toolchain
+format checks pass. Packaged Motor builds also pass with SDK `test-support`,
+with the SDK limited to core/alloc and sys `userspace`, and with sys's kernel
+`base` configuration verified separately. Logs are under `build/crate-release/`.
+The initial no-default batch omitted the system runtime feature; the next
+mixed kernel `base` with SDK `userspace`, disabling the runtime time module.
+Those failed probes remain in `package-motor-no-default.log` and
+`package-motor-base.log`. The corrected invocations select the supported
+configurations; no source changes or weakened checks were used.
+
+The crates.io-only package gate is blocked as expected: it cannot resolve
+`moto-sys ^0.4.0` before publication (`registry-package-gate.log`). This also
+blocks the required three debug and three release full-image gates before a
+core patch can be committed. The user approved committing the release
+metadata before these gates and confirmed the compatibility bumps because
+public APIs were removed. After the user
+publishes the system crate, refresh the minimum-version package lock and
+run the gates before the SDK publication checkpoint. Commands and API
+migration notes are in
+[Motor OS crates](../crates.md#prepared-releases-moto-sys-040-and-moto-sdk-020).
 
 ### Commit count and delivered functionality
 

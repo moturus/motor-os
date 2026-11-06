@@ -439,7 +439,7 @@ checksum = "4d8ec4efe5d19efe27a3457f7fabf6a9a68f4ea51b8bc21f7ec494f27e74d1ec"
 
 [[package]]
 name = "moto-sdk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytemuck",
@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "moto-sys"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "moto-rt 0.17.9",
 ]

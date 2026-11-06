@@ -83,3 +83,51 @@ The SDK combines eleven former crates. Paths below are relative to `moto_sdk`.
   package records its commit, and crates.io links to it.
 - Crates the SDK replaced, such as moto-ipc 0.2.4, stay on crates.io. New code
   does not use them.
+
+### Prepared releases: moto-sys 0.4.0 and moto-sdk 0.2.0
+
+These versions are prepared for publication. The version changes follow
+[Cargo's semver rules](https://doc.rust-lang.org/cargo/reference/semver.html):
+removing public APIs requires a new compatibility range, including through
+the SDK's `sys` re-export.
+
+- `moto-sys 0.4.0` exposes `free_pages()` and `low_memory()` for the current
+  kernel's shared-page layout. It removes `memory_pressure()`, the old
+  admission reservation fields, `stats::AdmissionStats`, and
+  `SysMem::query_admission_stats()` and its query flag.
+- `moto-sdk 0.2.0` requires `moto-sys 0.4.0`, re-exports those APIs on Motor
+  OS with `std`, and includes IP-device support and TCP protocol-state stats
+  for the matching sys-io service. The published runtime remains
+  `moto-rt 0.17.9`.
+
+Publish `moto-sys` first, from the pushed release commit. From `src/sys`:
+
+```sh
+cargo publish --locked --target x86_64-unknown-motor -p moto-sys
+```
+
+Once that release is available, regenerate the SDK package-test lock from
+the repository root and run the required image gates:
+
+```sh
+src/tests/test-sdk-package.sh --update-lock
+```
+
+The package test uses crates.io only; it cannot resolve the new system
+crate before publication. Its checked-in lock stays unchanged until the
+registry provides the final package checksum. The required three debug
+and three release full-image gates therefore remain pending; the first
+release-metadata commit is approved to precede those gates, which resume
+after the system crate is published.
+
+After those checks pass and their changes are committed and pushed,
+publish the SDK from `src/sys`:
+
+```sh
+cargo publish --locked --target x86_64-unknown-motor -p moto-sdk
+```
+
+Then raise applications that need the new API to `moto-sdk = "0.2"` and
+update their registry lockfiles. Existing `0.1` consumers keep their current
+requirement until they migrate. No runtime or kernel implementation changes
+are part of the release preparation.
