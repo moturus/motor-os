@@ -1,7 +1,7 @@
 use super::*;
 use std::net::{Shutdown, TcpListener, TcpStream};
 
-struct Client(Child);
+pub(super) struct Client(pub(super) Child);
 
 impl Drop for Client {
     fn drop(&mut self) {
@@ -11,7 +11,7 @@ impl Drop for Client {
 }
 
 impl Client {
-    fn start(args: &[String]) -> Self {
+    pub(super) fn start(args: &[String]) -> Self {
         Self(
             Command::new(SSH)
                 .args(args)
@@ -23,7 +23,7 @@ impl Client {
         )
     }
 
-    fn wait(&mut self) -> std::process::ExitStatus {
+    pub(super) fn wait(&mut self) -> std::process::ExitStatus {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if let Some(status) = self.0.try_wait().unwrap() {
@@ -34,7 +34,7 @@ impl Client {
         }
     }
 
-    fn ready(&mut self) -> std::process::ChildStdout {
+    pub(super) fn ready(&mut self) -> std::process::ChildStdout {
         let mut stdout = self.0.stdout.take().unwrap();
         let (ready, readiness) = std::sync::mpsc::channel();
         let reader = std::thread::spawn(move || {

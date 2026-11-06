@@ -16,6 +16,8 @@ mod forwarding;
 mod forwarding_jump;
 #[path = "client_protocol/local_forwarding.rs"]
 mod local_forwarding;
+#[path = "client_protocol/tunnel_lifetime.rs"]
+mod tunnel_lifetime;
 
 const RUSSHD: &str = env!("CARGO_BIN_EXE_russhd");
 const SSH: &str = env!("CARGO_BIN_EXE_ssh");
