@@ -59,6 +59,12 @@ impl std::ops::DerefMut for Connection {
 }
 
 impl Connection {
+    pub fn abort(&self) {
+        for handle in &self.handles {
+            handle.abort();
+        }
+    }
+
     pub async fn close(mut self) -> Result<(), russh::Error> {
         close_handles(std::mem::take(&mut self.handles)).await
     }
@@ -66,6 +72,7 @@ impl Connection {
 
 impl Drop for Connection {
     fn drop(&mut self) {
+        self.abort();
         if !self.handles.is_empty()
             && let Ok(runtime) = tokio::runtime::Handle::try_current()
         {
@@ -123,6 +130,7 @@ pub async fn connect_authenticated(
                 "{} ({}@{}:{}): {error}",
                 hop.alias, hop.destination.user, hop.destination.host, hop.options.port
             ));
+            connection.abort();
             if let Err(cleanup) = connection.close().await {
                 log::debug!("closing failed SSH route: {cleanup}");
             }

@@ -4,7 +4,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
 use russh::client;
@@ -15,11 +15,42 @@ use super::known_hosts;
 use super::prompt;
 
 #[derive(Clone)]
-struct Deadline {
-    sleep: Arc<Mutex<Option<Pin<Box<tokio::time::Sleep>>>>>,
+struct TransportControl {
+    state: Arc<Mutex<ControlState>>,
 }
 
-impl Deadline {
+struct ControlState {
+    sleep: Option<Pin<Box<tokio::time::Sleep>>>,
+    aborted: bool,
+    wakers: [Option<Waker>; 2],
+}
+
+enum IoOperation {
+    Read,
+    Write,
+    Shutdown,
+}
+
+#[derive(Debug)]
+struct Aborted;
+
+impl std::fmt::Display for Aborted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SSH transport aborted")
+    }
+}
+
+impl std::error::Error for Aborted {}
+
+struct AbortOnDrop(TransportControl);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl TransportControl {
     fn new(deadline: Option<Instant>) -> Self {
         let sleep = deadline.map(|deadline| {
             Box::pin(tokio::time::sleep_until(tokio::time::Instant::from_std(
@@ -27,19 +58,54 @@ impl Deadline {
             )))
         });
         Self {
-            sleep: Arc::new(Mutex::new(sleep)),
+            state: Arc::new(Mutex::new(ControlState {
+                sleep,
+                aborted: false,
+                wakers: [None, None],
+            })),
         }
     }
 
     fn clear(&self) {
-        self.sleep.lock().unwrap().take();
+        self.state.lock().unwrap().sleep.take();
     }
 
-    fn poll(&self, cx: &mut Context<'_>) -> std::io::Result<()> {
-        let mut guard = self.sleep.lock().unwrap();
-        if guard
-            .as_mut()
-            .is_some_and(|sleep| sleep.as_mut().poll(cx).is_ready())
+    fn abort(&self) {
+        let wakers = {
+            let mut state = self.state.lock().unwrap();
+            state.aborted = true;
+            std::mem::take(&mut state.wakers)
+        };
+        for waker in wakers.into_iter().flatten() {
+            waker.wake();
+        }
+    }
+
+    fn is_aborted(&self) -> bool {
+        self.state.lock().unwrap().aborted
+    }
+
+    fn poll(&self, cx: &mut Context<'_>, operation: IoOperation) -> std::io::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        if state.aborted {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                Aborted,
+            ));
+        }
+        // Register both halves even after setup has removed the deadline.
+        let slot = &mut state.wakers[usize::from(!matches!(operation, IoOperation::Read))];
+        if slot
+            .as_ref()
+            .is_none_or(|waker| !waker.will_wake(cx.waker()))
+        {
+            *slot = Some(cx.waker().clone());
+        }
+        if !matches!(operation, IoOperation::Shutdown)
+            && state
+                .sleep
+                .as_mut()
+                .is_some_and(|sleep| sleep.as_mut().poll(cx).is_ready())
         {
             return Err(std::io::ErrorKind::TimedOut.into());
         }
@@ -47,34 +113,34 @@ impl Deadline {
     }
 }
 
-struct DeadlineStream<S> {
+struct ControlledStream<S> {
     stream: S,
-    deadline: Deadline,
+    control: TransportControl,
 }
 
-impl<S: AsyncRead + Unpin> AsyncRead for DeadlineStream<S> {
+impl<S: AsyncRead + Unpin> AsyncRead for ControlledStream<S> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        self.deadline.poll(cx)?;
+        self.control.poll(cx, IoOperation::Read)?;
         Pin::new(&mut self.get_mut().stream).poll_read(cx, buf)
     }
 }
 
-impl<S: AsyncWrite + Unpin> AsyncWrite for DeadlineStream<S> {
+impl<S: AsyncWrite + Unpin> AsyncWrite for ControlledStream<S> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, std::io::Error>> {
-        self.deadline.poll(cx)?;
+        self.control.poll(cx, IoOperation::Write)?;
         Pin::new(&mut self.get_mut().stream).poll_write(cx, buf)
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
-        self.deadline.poll(cx)?;
+        self.control.poll(cx, IoOperation::Write)?;
         Pin::new(&mut self.get_mut().stream).poll_flush(cx)
     }
 
@@ -82,12 +148,14 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for DeadlineStream<S> {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
+        self.control.poll(cx, IoOperation::Shutdown)?;
         Pin::new(&mut self.get_mut().stream).poll_shutdown(cx)
     }
 }
 
 pub struct Handler {
-    deadline: Deadline,
+    control: TransportControl,
+    _running: tokio::sync::watch::Sender<()>,
     destination: Destination,
     port: u16,
     known_hosts: std::path::PathBuf,
@@ -99,6 +167,8 @@ pub struct Handler {
 pub struct Peer {
     handle: client::Handle<Handler>,
     channel_closed: Arc<AtomicBool>,
+    shutdown: AbortOnDrop,
+    ended: tokio::sync::watch::Receiver<()>,
 }
 
 impl std::ops::Deref for Peer {
@@ -115,12 +185,25 @@ impl std::ops::DerefMut for Peer {
 }
 
 impl Peer {
+    /// Interrupt transport I/O independently of SSH windows and message queues.
+    pub fn abort(&self) {
+        self.shutdown.0.abort();
+    }
+
+    /// Remains observable while other tasks retain this peer through an Arc.
+    pub async fn wait_closed(&self) {
+        let mut ended = self.ended.clone();
+        let _ = ended.changed().await;
+    }
+
     pub(super) fn is_channel_closed(&self) -> bool {
         self.channel_closed.load(Ordering::Acquire)
     }
 
     pub async fn close(self) -> Result<(), russh::Error> {
-        let requested = !self.handle.is_closed() && !self.channel_closed.load(Ordering::Acquire);
+        let aborted = self.shutdown.0.is_aborted();
+        let requested =
+            !aborted && !self.handle.is_closed() && !self.channel_closed.load(Ordering::Acquire);
         let enqueue = if requested {
             self.handle
                 .disconnect(russh::Disconnect::ByApplication, "", "")
@@ -130,13 +213,18 @@ impl Peer {
         };
         let result = self.handle.await;
         let channel_closed = self.channel_closed.load(Ordering::Acquire);
-        if !channel_closed {
+        if !channel_closed && !aborted {
             enqueue?;
         }
         match result {
             // russh reports a local disconnect with this sentinel, including
             // the disconnect sent directly from the channel-close callback.
-            Err(russh::Error::Disconnect) if requested || channel_closed => Ok(()),
+            Err(russh::Error::Disconnect) if requested || channel_closed || aborted => Ok(()),
+            Err(russh::Error::IO(error))
+                if aborted && error.get_ref().is_some_and(|error| error.is::<Aborted>()) =>
+            {
+                Ok(())
+            }
             result => result,
         }
     }
@@ -161,7 +249,7 @@ impl client::Handler for Handler {
         &mut self,
         server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        self.deadline.clear();
+        self.control.clear();
         let russh::keys::PublicKeyOrCertificate::PublicKey {
             key: server_public_key,
             ..
@@ -296,10 +384,11 @@ async fn connect_stream<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         options.port,
         &preferred.key,
     )?);
-    let deadline = Deadline::new(setup_deadline);
-    let stream = DeadlineStream {
+    let control = TransportControl::new(setup_deadline);
+    let shutdown = AbortOnDrop(control.clone());
+    let stream = ControlledStream {
         stream,
-        deadline: deadline.clone(),
+        control: control.clone(),
     };
     let config = client::Config {
         preferred,
@@ -309,8 +398,10 @@ async fn connect_stream<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         ..Default::default()
     };
     let channel_closed = Arc::new(AtomicBool::new(false));
+    let (running, ended) = tokio::sync::watch::channel(());
     let handler = Handler {
-        deadline,
+        control,
+        _running: running,
         destination: destination.clone(),
         port: options.port,
         known_hosts,
@@ -322,6 +413,8 @@ async fn connect_stream<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     Ok(Peer {
         handle,
         channel_closed,
+        shutdown,
+        ended,
     })
 }
 
@@ -372,6 +465,79 @@ fn attempt_addresses<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn abort_wakes_stalled_read_and_write_without_peer_progress() {
+        use tokio::io::AsyncWriteExt;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            for writing in [false, true] {
+                let control = TransportControl::new(None);
+                let guard = AbortOnDrop(control.clone());
+                let (socket, _peer) = tokio::io::duplex(1);
+                let mut stream = ControlledStream {
+                    stream: socket,
+                    control: control.clone(),
+                };
+                if writing {
+                    stream.write_all(&[1]).await.unwrap();
+                }
+                let (entered, ready) = tokio::sync::oneshot::channel();
+                let task = tokio::spawn(async move {
+                    let mut entered = Some(entered);
+                    let mut bytes = [0; 1];
+                    let mut buffer = ReadBuf::new(&mut bytes);
+                    std::future::poll_fn(|cx| {
+                        let result = if writing {
+                            Pin::new(&mut stream)
+                                .poll_write(cx, &[2])
+                                .map(|result| result.map(|_| ()))
+                        } else {
+                            Pin::new(&mut stream).poll_read(cx, &mut buffer)
+                        };
+                        if result.is_pending()
+                            && let Some(entered) = entered.take()
+                        {
+                            entered.send(()).unwrap();
+                        }
+                        result
+                    })
+                    .await
+                });
+                ready.await.unwrap();
+                if writing {
+                    drop(guard);
+                } else {
+                    control.abort();
+                }
+                let error = task.await.unwrap().unwrap_err();
+                assert_eq!(error.kind(), std::io::ErrorKind::ConnectionAborted);
+                assert!(error.get_ref().unwrap().is::<Aborted>());
+            }
+        })
+        .await
+        .expect("transport abort did not wake blocked I/O");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn clearing_the_setup_deadline_does_not_add_an_idle_timeout() {
+        let control =
+            TransportControl::new(Some(Instant::now() + std::time::Duration::from_secs(1)));
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        let error = std::future::poll_fn(|cx| Poll::Ready(control.poll(cx, IoOperation::Read)))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        control.clear();
+        tokio::time::advance(std::time::Duration::from_secs(1000)).await;
+        std::future::poll_fn(|cx| Poll::Ready(control.poll(cx, IoOperation::Read)))
+            .await
+            .unwrap();
+        control.abort();
+        let error = std::future::poll_fn(|cx| Poll::Ready(control.poll(cx, IoOperation::Shutdown)))
+            .await
+            .unwrap_err();
+        assert!(error.get_ref().unwrap().is::<Aborted>());
+    }
 
     #[test]
     fn zero_timeout_uses_no_setup_deadline() {
