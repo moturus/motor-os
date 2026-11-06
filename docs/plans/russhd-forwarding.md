@@ -11,9 +11,11 @@ deadline with a production abort call, and cover compression and channel close.
 All 151 host tests, all-target clippy, both Motor OS release builds, three debug
 and three release main-image gates, and the complete developer-image release
 gate pass without local overrides, retries, or source changes between runs.
-Step 2b is in progress: the bounded queue, connection-owned cancellation, and
-generic relay are committed and pass focused tests. Direct opens and binary
-integration are next, after the remaining relay contract tests.
+Step 2b's bounded queue, connection-owned cancellation, and generic relay are
+committed and pass 21 focused tests. Direct-open helpers pass 24 host tests and
+clippy, but their Motor build exposed a published/in-tree SDK API difference.
+The draft is preserved pending the SDK source choice below; direct opens and
+configuration are not yet integrated in the binary.
 See "Implementation progress" below and "Decisions" at the end.
 
 ## Implementation progress
@@ -25,7 +27,7 @@ Developer-image validation remains release-only.
 | Step | Progress | Remaining |
 |---|---|---|
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
-| 2 | Step 2a complete: published `2a07f3a`, 151 main host tests, clean clippy, native builds, 3+3 main-image passes and complete developer-image release gate. Step 2b: bounded queue `0d712c1a`, task scope `2f0c7323`, relay `9eddbbab`; 21 focused tests pass | Remaining relay contract tests, direct opens, configuration, integrated milestone gates |
+| 2 | Step 2a complete: published `2a07f3a`, 151 main host tests, clean clippy, native builds, 3+3 main-image passes and complete developer-image release gate. Step 2b: relay and 21 focused tests committed through `4ffd3369`; direct-open draft passes 24 host tests | SDK source choice, direct opens, configuration, integrated milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
@@ -81,6 +83,45 @@ Russh accepts this within its documented overrun allowance; the relay rejects
 overflow and the SSH connection still answers pings. A separate empty-packet
 injection leaves the stream usable. All **21 focused tests**, formatting and
 clippy pass (`forward-relay-wire-*`). Direct-open integration is next.
+
+### Direct-open helpers: SDK source choice
+
+The draft validates the approved hostname/port rules, resolves through Tokio,
+tries resolved addresses in order, sets `TCP_NODELAY`, and accepts only after a
+successful connect. All **24 focused host tests** and clippy pass, including an
+injected resolver failure and deterministic loopback address fallback. Logs are
+`forward-open-tests.log` and `forward-open-clippy.log`.
+
+The Motor build fails with E0425 at `moto_sdk::sys::free_pages()`
+(`forward-open-motor-release.log`). Cargo resolves published `moto-sdk 0.1.0`
+and `moto-sys 0.3.2`. The in-tree packages use the same versions but newer
+source: the kernel now reserves offset 60 and publishes `free_pages` at offset
+72. The published bindings still expose the old pressure flag at offset 60.
+Using that flag would not implement the approved pressure policy.
+
+An isolated Cargo-tree proposal in `sdk-path-proposal/` resolves an in-tree SDK
+dependency without unrelated version upgrades, adding the in-tree SDK, sys,
+and runtime package sources (`sdk-path-proposal-tree.log`). `wg` already uses
+that SDK source. The proposed manifest entry is
+`moto-sdk = { path = "../../sys/lib/moto-sdk" }`, with Cargo.lock updated only
+for those source changes and package disambiguation. Tokio and Mio retain their
+published runtime dependency. The draft helper and relay compile for Motor OS
+with the proposed SDK in the isolated package
+(`sdk-path-proposal-motor-module-build.log`); this is a library build, not an
+integrated binary or image gate.
+
+The registry index checked on 2026-11-05 still lists `moto-sdk 0.1.0` and
+`moto-sys 0.3.2` as their latest published versions; the saved responses are
+`moto-sdk-registry-index.jsonl` and `moto-sys-registry-index.jsonl`. Selecting
+the in-tree SDK also changes runtime build inputs, so ask for guidance under
+AGENTS.md's non-obvious-decision rule before selecting it. The alternative is
+to wait for an updated published SDK.
+
+The uncommitted helper file stays at `src/bin/russhd/src/forward/open.rs`; its
+module export is temporarily removed to keep the committed foundation buildable.
+The complete draft and source checksums are saved as `pending-open-helpers.patch`
+and `pending-open-helper-sources.sha256` in `build/russh-rebase/`. No core or
+external-fork source was edited for this diagnosis.
 
 ### Commit count and delivered functionality
 
