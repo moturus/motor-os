@@ -41,6 +41,7 @@ pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
     mounts::self_test::TESTS,
     config::self_test::TESTS,
     memory::self_test::TESTS,
+    mbr::self_test::TESTS,
     virtio_partition::self_test::TESTS,
     self_test::TESTS,
     &[
@@ -450,11 +451,19 @@ struct PendingLockResponse {
 }
 
 pub(super) async fn init(
-    block_device: virtio_async::VirtioDevice,
+    block_devices: Vec<Result<virtio_async::VirtioDevice>>,
     channel_budget: Rc<channel_budget::ChannelBudget>,
 ) -> Result<FsRuntime> {
-    let block_device = virtio_async::BlockDevice::from(block_device)?;
+    let root_device = block_devices
+        .into_iter()
+        .next()
+        .ok_or(ErrorKind::NotFound)??;
+    let block_device = virtio_async::BlockDevice::from(root_device)?;
     let fs_stats = Rc::new(stats::FsStats::default());
+
+    if block_device.capacity() < 8 {
+        return Err(ErrorKind::InvalidData.into());
+    }
 
     use zerocopy::FromZeros;
 
@@ -465,7 +474,11 @@ pub(super) async fn init(
             .await;
     res?;
 
-    let mbr = mbr::Mbr::parse(&AsRef::<[u8]>::as_ref(&first_block)[..512]).map_err(|err| {
+    let mbr = mbr::Mbr::parse(
+        &AsRef::<[u8]>::as_ref(&first_block)[..512],
+        block_device.capacity(),
+    )
+    .map_err(|err| {
         log::error!("Mbr::parse() failed: {err:?}.");
         std::io::Error::from(ErrorKind::InvalidData)
     })?;
@@ -477,52 +490,20 @@ pub(super) async fn init(
         inbox,
         fs_stats.clone(),
     ));
-    let mut fs: Option<FS> = None;
-    for pte in &mbr.entries {
-        log::trace!("MBR PTE: {pte:?}");
-        match pte.partition_type {
-            mbr::PartitionType::FlatFs => {
-                log::warn!("FlatFs is not (yet?) supported with async runtime");
-            }
-            mbr::PartitionType::SrFs => {
-                log::warn!("SrFs is not (yet?) supported with async runtime");
-            }
-            mbr::PartitionType::MotorFs => {
-                if fs.is_some() {
-                    log::error!("Found more than one DATA partion.");
-                    panic!();
-                }
-
-                let partition = Box::new(
-                    virtio_partition::VirtioPartition::from_virtio_bd(
-                        block_io.clone(),
-                        block_device.flush_supported(),
-                        pte.lba as u64,
-                        pte.sectors as u64,
-                    )
-                    .await
-                    .map_err(|err| {
-                        log::error!("Mbr::parse() failed: {err:?}.");
-                        std::io::Error::from(ErrorKind::InvalidData)
-                    })?,
-                );
-                fs = Some(FS::MotorFs(
-                    motor_fs::MotorFs::open_with_cache_size(partition, block_cache_blocks())
-                        .await
-                        .map_err(|err| {
-                            log::error!("Mbr::parse() failed: {err:?}.");
-                            std::io::Error::from(ErrorKind::InvalidData)
-                        })?,
-                ));
-            }
-            _ => continue,
-        }
-    }
-
-    let Some(fs) = fs else {
-        log::error!("Couldn't find a data partition.");
-        return Err(std::io::Error::from(ErrorKind::InvalidData));
-    };
+    let (slot, pte) = mbr.first_motor_fs()?;
+    log::info!("Root filesystem: virtio0p{slot}");
+    let partition = Box::new(
+        virtio_partition::VirtioPartition::from_virtio_bd(
+            block_io,
+            block_device.flush_supported(),
+            u64::from(pte.lba),
+            u64::from(pte.sectors),
+        )
+        .await?,
+    );
+    let fs = FS::MotorFs(
+        motor_fs::MotorFs::open_with_cache_size(partition, block_cache_blocks()).await?,
+    );
 
     let mounts = Rc::new(RefCell::new(mounts::MountTable::new(fs)));
     let free_caches = Rc::new(memory::FreeCaches::default());

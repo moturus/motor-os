@@ -51,7 +51,9 @@ pub use pci::le32;
 pub use pci::le64;
 
 pub use virtio_blk::{BlockDevice, RawCompletion};
-pub use virtio_device::{VirtioDevice, VirtioDeviceKind, discover_virtio_devices};
+pub use virtio_device::{
+    DiscoveredDevice, VirtioDevice, VirtioDeviceKind, discover_virtio_devices,
+};
 pub use virtio_queue::WriteCompletion;
 
 pub(crate) use virtio_device::mapper;

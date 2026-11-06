@@ -145,43 +145,49 @@ async fn async_runtime(started: moto_sdk::async_runtime::oneshot::Sender<()>) {
         panic!("VirtIO initialization failed.");
     };
 
-    let mut block_device = None;
+    let mut block_devices = vec![];
     let mut net_devices = vec![];
     let mut vsock_device = None;
 
-    for device in devices {
-        match device.kind() {
+    for discovered in devices {
+        let device = discovered.device;
+        match discovered.kind {
             virtio_async::VirtioDeviceKind::Block => {
-                assert!(
-                    block_device.is_none(),
-                    "Multiple block devices are not supported yet."
+                let (bus, slot, function) = discovered.pci_address;
+                log::info!(
+                    "virtio{}: PCI {bus:02x}:{slot:02x}.{function}, transport {}",
+                    block_devices.len(),
+                    if device.is_ok() { "parsed" } else { "invalid" }
                 );
-                block_device = Some(device);
+                block_devices.push(device);
             }
             virtio_async::VirtioDeviceKind::Net => {
-                match virtio_async::virtio_net::NetDevice::from(device) {
+                match device.and_then(virtio_async::virtio_net::NetDevice::from) {
                     Ok(device) => net_devices.push(device),
                     Err(err) => log::error!("Failed to initialize VirtioNet device: {err:?}."),
                 }
             }
             virtio_async::VirtioDeviceKind::Vsock => {
                 if vsock_device.is_none() {
-                    vsock_device = Some(device);
+                    match device {
+                        Ok(device) => vsock_device = Some(device),
+                        Err(err) => log::error!("Failed to parse VirtioVsock device: {err:?}."),
+                    }
                 } else {
                     log::warn!("Ignoring additional VirtioVsock device.");
                 }
             }
-            _ => log::debug!("Unsupported VirtIO device {:?}", device.kind()),
+            _ => log::debug!("Unsupported VirtIO device {:?}", discovered.kind),
         }
     }
 
-    let Some(block_device) = block_device else {
+    if block_devices.is_empty() {
         panic!("No block devices found")
-    };
+    }
 
-    let Ok(fs) = fs::init(block_device, channel_budget.clone()).await else {
-        panic!("Cannot proceed without a filesystem.");
-    };
+    let fs = fs::init(block_devices, channel_budget.clone())
+        .await
+        .unwrap_or_else(|error| panic!("Cannot proceed without a filesystem: {error}"));
 
     // Config may ignore an initialized NIC, whose running queue tasks still
     // require its device-owned PCI metadata for their lifetime.
