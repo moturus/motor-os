@@ -42,15 +42,15 @@ const INK: Color = Color::Indexed(233);
 ///
 /// Amber under near-black ink for the whole bar, which is the cheapest way to
 /// make a row read as chrome rather than as content. The current window takes
-/// the deeper amber and bold on top of it -- the bar is the lighter of the two,
-/// so what is picked out is the window and not the row -- and keeps its `*` for
-/// a terminal that has neither colour nor bold.
+/// the deeper amber -- the bar is the lighter of the two, so what is picked out
+/// is the window and not the row -- and nothing else: the text is the same
+/// whichever window is current, so a switch moves the highlight and not a
+/// single character. The price is that a terminal with no colour cannot tell.
 pub fn row(session: &Session, cols: usize) -> Vec<Cell> {
     let bar = bar();
     let current = Attrs {
-        fg: INK,
         bg: AMBER_DEEP,
-        flags: Attrs::BOLD,
+        ..bar
     };
 
     let mut cells = Vec::with_capacity(cols);
@@ -60,18 +60,18 @@ pub fn row(session: &Session, cols: usize) -> Vec<Cell> {
         }
     };
 
+    // Every title brings a space either side, so the highlight has a margin
+    // inside it and whatever is next to it keeps its own -- which is why the
+    // session name has one of its own too.
     put(&format!("[{}] ", session.name()), bar);
     let front = session.windows().current().map(|window| window.number());
     for window in session.windows().iter() {
         let is_current = front == Some(window.number());
-        // `*` marks the current window, as tmux marks it -- the bold is for a
-        // terminal that has it, the asterisk for one that does not. `Z` is
-        // tmux's flag for a zoomed window (§7.1), and it is the only thing on
-        // screen that says why the other panes are not.
-        let mark = if is_current { "*" } else { "" };
+        // `Z` is tmux's flag for a zoomed window (§7.1), and it is the only
+        // thing on screen that says why the other panes are not.
         let zoom = if window.is_zoomed() { "Z" } else { "" };
         put(
-            &format!("{}:{}{mark}{zoom} ", window.number(), window.name()),
+            &format!(" {}:{}{zoom} ", window.number(), window.name()),
             if is_current { current } else { bar },
         );
     }
@@ -193,6 +193,15 @@ mod tests {
         cells.iter().map(|cell| cell.ch).collect()
     }
 
+    /// The cells in the current window's amber.
+    fn lit(cells: &[Cell]) -> String {
+        cells
+            .iter()
+            .filter(|cell| cell.attrs.bg == AMBER_DEEP)
+            .map(|cell| cell.ch)
+            .collect()
+    }
+
     #[test]
     fn the_session_name_comes_first_because_that_is_the_question() {
         let (sessions, _rx) = session_with("build", 1);
@@ -211,13 +220,28 @@ mod tests {
     }
 
     #[test]
-    fn the_current_window_is_marked_and_only_that_one() {
+    fn every_title_has_a_space_either_side() {
+        // Two between titles, so a highlighted title has a margin inside the
+        // highlight and the titles next to it keep theirs outside it.
         let (sessions, _rx) = session_with("build", 3);
         let session = sessions.iter().next().unwrap();
-        let line = text(&row(session, 60));
-        assert_eq!(line.matches('*').count(), 1, "{line:?}");
-        // The third window is the one just opened, so it is in front.
-        assert!(line.contains("2:true*"), "{line:?}");
+        assert_eq!(text(&row(session, 32)), "[build]  0:true  1:true  2:true ");
+    }
+
+    #[test]
+    fn a_switch_moves_the_highlight_and_not_a_character() {
+        // A mark on the current title alone would push every title after it
+        // along by its width whenever the current window changed.
+        let (mut sessions, _rx) = session_with("build", 3);
+        let id = sessions.iter().next().unwrap().id();
+        let before = row(sessions.get(id).unwrap(), 60);
+        assert!(sessions.get_mut(id).unwrap().windows_mut().select(0));
+        let after = row(sessions.get(id).unwrap(), 60);
+
+        assert_eq!(text(&before), text(&after));
+        // The third window is the one just opened, so it was in front.
+        assert_eq!(lit(&before), " 2:true ");
+        assert_eq!(lit(&after), " 0:true ");
     }
 
     #[test]
@@ -243,7 +267,7 @@ mod tests {
 
         let session = sessions.iter().next().unwrap();
         assert!(
-            text(&row(session, 60)).contains("0:true*Z"),
+            text(&row(session, 60)).contains(" 0:trueZ "),
             "{:?}",
             text(&row(session, 60))
         );
@@ -315,22 +339,13 @@ mod tests {
 
     #[test]
     fn only_the_current_window_takes_the_deeper_amber() {
-        // The colour and the `*` say the same thing, so a terminal with no
-        // colour at all still reads the bar (see `bar`'s palette).
+        // Margins and all, and in the bar's own weight: the colour is the one
+        // thing that differs.
         let (sessions, _rx) = session_with("build", 3);
         let session = sessions.iter().next().unwrap();
         let cells = row(session, 60);
-        let lit: String = cells
-            .iter()
-            .filter(|cell| cell.attrs.bg == AMBER_DEEP)
-            .map(|cell| cell.ch)
-            .collect();
-        assert_eq!(lit, "2:true* ");
-        assert!(
-            cells
-                .iter()
-                .all(|cell| cell.attrs.has(Attrs::BOLD) == (cell.attrs.bg == AMBER_DEEP))
-        );
+        assert_eq!(lit(&cells), " 2:true ");
+        assert!(cells.iter().all(|cell| cell.attrs.flags == 0));
     }
 
     #[test]

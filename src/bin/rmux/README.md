@@ -120,8 +120,9 @@ quietly fixed or quietly introduced.
   key takes the row back. It is drawn in near-black on amber — one fixed
   palette, carrying its own background so it reads the same on a dark terminal
   and a light one. The current window takes a deeper amber against the lighter
-  bar, and keeps tmux's `*` for a terminal with no colour at all. The lines
-  dividing panes are drawn in the same amber, so the chrome reads as one thing.
+  bar and has no other mark, so a switch moves the highlight and leaves every
+  title where it was. The lines dividing panes are drawn in the same amber, so
+  the chrome reads as one thing.
 - **Rendering**: a frame diff over absolute positioning. A keystroke echoed in a
   pane costs one byte, and moving between panes repaints no pane content.
 - **Resizing**: `prefix C-`arrow moves a border a cell and `prefix M-`arrow

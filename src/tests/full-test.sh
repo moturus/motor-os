@@ -1098,7 +1098,7 @@ printf 'sleep 314159\n' >&"$RMUX_TITLE_IN_FD"
 wait_motor_process "sleep 314159" present "rmux foreground command"
 RMUX_TITLE_OUTPUT=""
 printf '\001r' >&"$RMUX_TITLE_IN_FD"
-wait_rmux_title_output "0:sleep*" "rmux foreground title"
+wait_rmux_title_output "0:sleep" "rmux foreground title"
 
 printf '\003' >&"$RMUX_TITLE_IN_FD"
 wait_motor_process "sleep 314159" absent "interrupted rmux command"
@@ -1107,15 +1107,15 @@ printf 'echo RMUX_TITLE_RESTORED\n' >&"$RMUX_TITLE_IN_FD"
 wait_rmux_title_output "RMUX_TITLE_RESTORED" "rmux shell restoration marker"
 RMUX_TITLE_OUTPUT=""
 printf '\001r' >&"$RMUX_TITLE_IN_FD"
-wait_rmux_title_output "0:rush*" "restored Rush title"
+wait_rmux_title_output "0:rush" "restored Rush title"
 
 RMUX_TITLE_OUTPUT=""
 printf 'sleep 271828 &\n' >&"$RMUX_TITLE_IN_FD"
 wait_motor_process "sleep 271828" present "rmux background command"
 printf '\001r' >&"$RMUX_TITLE_IN_FD"
-wait_rmux_title_output "0:rush*" "background Rush title"
+wait_rmux_title_output "0:rush" "background Rush title"
 case "$RMUX_TITLE_OUTPUT" in
-  *"0:sleep*"*) fail "a background command took rmux's title" ;;
+  *"0:sleep"*) fail "a background command took rmux's title" ;;
 esac
 
 printf 'kill $!\nwait\nexit 0\n' >&"$RMUX_TITLE_IN_FD"

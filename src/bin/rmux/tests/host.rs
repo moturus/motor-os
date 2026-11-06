@@ -233,6 +233,41 @@ impl Pty {
         }
     }
 
+    /// Whether the status line shows `label` as the current window.
+    ///
+    /// The highlight is the only thing that says so: it runs from the margin
+    /// in front of the title to the one behind it, in a colour that is not the
+    /// bar's -- which the session name at the start of the row is always in.
+    fn current(&self, label: &str) -> bool {
+        let lit: Vec<char> = format!(" {label} ").chars().collect();
+        (0..self.grid.rows()).any(|row| {
+            let cells: Vec<_> = (0..self.grid.cols())
+                .map(|col| self.grid.cell(row, col))
+                .collect();
+            let bar = cells[0];
+            bar.ch == '['
+                && cells.windows(lit.len()).any(|run| {
+                    run.iter()
+                        .zip(&lit)
+                        .all(|(cell, ch)| cell.ch == *ch && cell.attrs.bg != bar.attrs.bg)
+                })
+        })
+    }
+
+    /// Wait until the status line shows `label` as the current window.
+    fn wait_current(&mut self, label: &str) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if self.current(label) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            self.pump();
+        }
+    }
+
     /// Change the size of this console, as dragging a terminal window does.
     ///
     /// The replayed screen goes with it, and has to: rmux paints absolute
@@ -519,10 +554,15 @@ fn the_status_line_says_which_session_and_window_you_are_in() {
     // that is a question a user can have. The window list follows it, marked,
     // because `prefix 0`-`9` selects by the numbers shown there.
     let mut pty = shell();
-    // Two checks rather than one needle: the current window is bold, so an SGR
-    // sequence sits between the session name and the window list.
+    // Two checks rather than one needle: the current window has a colour of
+    // its own, so an SGR sequence sits between the session name and the window
+    // list -- and that colour is all that marks it, which only the grid keeps.
     assert!(pty.saw("[0] "), "no session name: {:?}", pty.seen);
-    assert!(pty.saw("0:sh*"), "no window list: {:?}", pty.seen);
+    assert!(
+        pty.wait_current("0:sh"),
+        "no window list:\n{}",
+        pty.picture()
+    );
 
     let mark = pty.mark();
     pty.send(b"\x01c");
@@ -661,9 +701,9 @@ fn a_new_window_is_a_new_shell_and_the_old_one_keeps_running() {
     // fail about one run in ten under load. The window list has to change.
     pty.send(b"\x01c");
     assert!(
-        pty.wait_for("1:sh*"),
-        "prefix c did not open a window: {:?}",
-        pty.seen
+        pty.wait_current("1:sh"),
+        "prefix c did not open a window:\n{}",
+        pty.picture()
     );
     let mark = pty.mark();
     pty.send(b"echo [$WHICH]\r");
@@ -806,7 +846,7 @@ fn a_zoomed_pane_takes_the_whole_window_and_gives_it_back() {
 
     pty.send(b"\x01z");
     assert!(
-        pty.wait_painted("0:sh*Z"),
+        pty.wait_current("0:shZ"),
         "no zoom flag:\n{}",
         pty.picture()
     );
@@ -984,7 +1024,7 @@ fn a_window_nobody_is_looking_at_keeps_its_size() {
     // for it passed until a test was added elsewhere in this file and the
     // machine got busy enough to lose the race.
     assert!(
-        big.wait_painted("1:sh*"),
+        big.wait_current("1:sh"),
         "the second window never came up:\n{}",
         big.picture()
     );
@@ -1003,9 +1043,9 @@ fn a_window_nobody_is_looking_at_keeps_its_size() {
     // again (see the module docs).
     big.send(b"\x010");
     assert!(
-        big.wait_for("0:sh*"),
-        "the first window did not come back: {:?}",
-        big.seen
+        big.wait_current("0:sh"),
+        "the first window did not come back:\n{}",
+        big.picture()
     );
 
     // A small client comes and goes while window 1 is in the background. It
@@ -1157,7 +1197,7 @@ fn a_config_file_can_ask_for_emacs_copy_keys() {
     );
     pty.send(b"\x10\x10\x01\x00\x05\x17");
     assert!(
-        pty.wait_painted("0:sh*"),
+        pty.wait_current("0:sh"),
         "the copy did not leave copy mode:\n{}",
         pty.picture()
     );
@@ -1206,9 +1246,9 @@ fn a_window_can_be_renamed_and_the_status_line_says_so() {
     assert!(pty.saw("(rename-window)"), "no prompt: {:?}", pty.seen);
     pty.send(b"build\r");
     assert!(
-        pty.wait_for("0:build*"),
-        "the rename did not reach the status line: {:?}",
-        pty.seen
+        pty.wait_current("0:build"),
+        "the rename did not reach the status line:\n{}",
+        pty.picture()
     );
 }
 
@@ -1227,7 +1267,7 @@ fn an_outer_terminal_title_hook_does_not_rename_a_bash_window() {
     let mut pty = Pty::spawn(&dir, &[]);
     assert!(pty.wait_for(PROMPT), "no Bash prompt: {:?}", pty.seen);
     assert!(
-        pty.wait_painted("0:bash*"),
+        pty.wait_current("0:bash"),
         "the outer terminal hook renamed the window:\n{}",
         pty.picture()
     );
@@ -1243,7 +1283,7 @@ fn a_bash_window_follows_its_foreground_command() {
     let mut pty = Pty::spawn(&dir, &[]);
     assert!(pty.wait_for(PROMPT), "no Bash prompt: {:?}", pty.seen);
     pty.send(b"sleep 30\r");
-    if !pty.wait_painted("0:sleep*") {
+    if !pty.wait_current("0:sleep") {
         let processes = Command::new("ps")
             .args(["-eo", "pid,ppid,pgrp,sid,tpgid,etimes,stat,args"])
             .output()
@@ -1268,7 +1308,7 @@ fn a_bash_window_follows_its_foreground_command() {
 
     pty.send(b"\x03");
     assert!(
-        pty.wait_painted("0:bash*"),
+        pty.wait_current("0:bash"),
         "the shell did not take its window name back:\n{}",
         pty.picture()
     );
@@ -1334,7 +1374,7 @@ fn a_command_rmux_does_not_have_is_said_on_the_message_line() {
 
     pty.send(b"x");
     assert!(
-        pty.wait_painted("0:sh*"),
+        pty.wait_current("0:sh"),
         "the next key did not take the status row back:\n{}",
         pty.picture()
     );
@@ -1348,9 +1388,9 @@ fn a_prompt_can_be_abandoned_without_renaming_anything() {
     pty.send(b"nonsense\x1b");
     // Esc puts the status line back, name untouched.
     assert!(
-        pty.wait_for("0:sh*"),
-        "Esc did not abandon the prompt: {:?}",
-        pty.seen
+        pty.wait_current("0:sh"),
+        "Esc did not abandon the prompt:\n{}",
+        pty.picture()
     );
 }
 
@@ -1650,21 +1690,21 @@ fn a_console_that_changes_size_is_noticed_and_repainted() {
     // changed (§6.2) and nothing in rmux did.
     let mut pty = split_shell();
     assert!(
-        pty.wait_painted_row(ROWS as usize - 1, "0:sh*"),
+        pty.wait_painted_row(ROWS as usize - 1, "0:sh"),
         "no status line to begin with:\n{}",
         pty.picture()
     );
 
     pty.resize(SMALLER.0, SMALLER.1);
     assert!(
-        pty.wait_painted_row(SMALLER.0 as usize - 1, "0:sh*"),
+        pty.wait_painted_row(SMALLER.0 as usize - 1, "0:sh"),
         "a smaller console did not get its status line back:\n{}",
         pty.picture()
     );
 
     pty.resize(ROWS, COLS);
     assert!(
-        pty.wait_painted_row(ROWS as usize - 1, "0:sh*"),
+        pty.wait_painted_row(ROWS as usize - 1, "0:sh"),
         "the console came back and the status line did not:\n{}",
         pty.picture()
     );
@@ -1679,14 +1719,14 @@ fn a_console_squeezed_to_nothing_does_not_take_the_session_with_it() {
     let mut pty = split_shell();
     pty.resize(2, 12);
     assert!(
-        pty.wait_painted_row(1, "0:sh*"),
+        pty.wait_painted_row(1, "0:sh"),
         "a two-row console lost its status line:\n{}",
         pty.picture()
     );
 
     pty.resize(ROWS, COLS);
     assert!(
-        pty.wait_painted_row(ROWS as usize - 1, "0:sh*"),
+        pty.wait_painted_row(ROWS as usize - 1, "0:sh"),
         "the session did not come back with the window:\n{}",
         pty.picture()
     );
@@ -1705,7 +1745,7 @@ fn a_pane_is_told_the_console_changed_size() {
     // still has, and the answer scrolls into history when the pane shrinks.
     pty.resize(SMALLER.0, SMALLER.1);
     assert!(
-        pty.wait_painted_row(SMALLER.0 as usize - 1, "0:sh*"),
+        pty.wait_painted_row(SMALLER.0 as usize - 1, "0:sh"),
         "the console shrank and rmux did not notice:\n{}",
         pty.picture()
     );
@@ -1768,7 +1808,7 @@ fn a_refresh_is_the_one_key_that_repaints_everything() {
     );
     // The status line comes with it: a full repaint is the whole console.
     assert!(
-        pty.since(mark).contains("0:sh*"),
+        pty.since(mark).contains("0:sh"),
         "a refresh did not repaint the status line: {:?}",
         pty.since(mark)
     );
