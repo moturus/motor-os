@@ -1225,8 +1225,16 @@ impl Fixture {
     }
 
     async fn unauthenticated(&self) -> russh::client::Handle<TestClient> {
+        self.unauthenticated_with(russh::client::Config::default())
+            .await
+    }
+
+    async fn unauthenticated_with(
+        &self,
+        config: russh::client::Config,
+    ) -> russh::client::Handle<TestClient> {
         russh::client::connect(
-            std::sync::Arc::new(russh::client::Config::default()),
+            std::sync::Arc::new(config),
             ("127.0.0.1", self.port),
             TestClient,
         )
@@ -1236,7 +1244,14 @@ impl Fixture {
 
     /// An authenticated connection with no channel open yet.
     async fn connect(&self) -> russh::client::Handle<TestClient> {
-        let mut session = self.unauthenticated().await;
+        self.connect_with(russh::client::Config::default()).await
+    }
+
+    async fn connect_with(
+        &self,
+        config: russh::client::Config,
+    ) -> russh::client::Handle<TestClient> {
+        let mut session = self.unauthenticated_with(config).await;
         let key = russh::keys::load_secret_key(&self.identity, None).unwrap();
         let auth = session
             .authenticate_publickey(

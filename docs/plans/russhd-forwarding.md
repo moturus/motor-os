@@ -278,6 +278,26 @@ running from `src/imager` fixes that invocation without source workarounds.
 Its warning check also found a pre-existing test-only `manual_contains` lint;
 an equivalent assertion cleanup is committed separately.
 
+The next binary tests hold 256 forwards open, exchange data and both half-closes
+on each, and open another batch on the same connection. A shell remains writable
+after a forward's EOF, and the forward remains writable after the shell closes.
+Removing the new EOF guard makes that regression fail at the next shell read
+(`step2b-shell-eof-counterfactual.log`); the original source is restored exactly.
+Channel close and disconnect also release a real TCP target with zero advertised
+outbound credit. The disconnect test explicitly expects russh's `Disconnect`
+result from its transport future, rather than treating it as success.
+
+The first scale fixture timed out after opening all 256 forwards: it serialized
+one-byte exchanges and accumulated TCP Nagle/delayed-ACK latency. Progress logs
+locate the delay in transfers; enabling client `nodelay` halves the steady
+per-exchange delay but still exceeds the unchanged watchdog. The final scale
+fixture exercises all live channels before draining responses, retaining the
+original TCP settings, byte/EOF checks, and watchdog. All six focused cases pass
+in 0.51 seconds. Original failures and diagnostics remain under
+`step2b-binary-*`; all temporary markers are removed.
+The restored sources pass all 181 russhd host tests and all-target clippy
+(`step2b-binary-lifetime-all-tests.log` and `step2b-binary-lifetime-clippy.log`).
+
 ### Commit count and delivered functionality
 
 At checkpoint `fea26785`, the Motor OS branch has 17 commits after the original
