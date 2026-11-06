@@ -840,6 +840,25 @@ fn killing_the_last_window_ends_the_session() {
 }
 
 #[test]
+fn modified_key_reporting_is_enabled_and_restored_on_detach() {
+    let mut pty = shell();
+    assert!(pty.seen.contains("\x1b[>1u"), "{:?}", pty.seen);
+    pty.send(b"\x01d");
+    assert!(pty.wait_for("\x1b[<1u"), "{:?}", pty.seen);
+    assert!(pty.exited(), "{:?}", pty.seen);
+}
+
+#[test]
+fn failed_attachment_restores_the_keyboard_mode_once() {
+    let server = private_tmpdir();
+    let _first = shell_in(&server);
+    let mut pty = Pty::spawn(&server, &["attach", "-t", "missing-session"]);
+    assert!(pty.wait_for("\x1b[<1u"), "{:?}", pty.seen);
+    assert!(pty.exited(), "{:?}", pty.seen);
+    assert_eq!(pty.seen.matches("\x1b[<1u").count(), 1, "{:?}", pty.seen);
+}
+
+#[test]
 fn a_session_outlives_the_client_that_started_it() {
     // M4's whole point (§7.3): a detach leaves the shells running, and that is
     // the only reason a server is worth having. `C-a d` is the binding the
@@ -1024,6 +1043,44 @@ fn an_unbound_key_reaches_the_pane_as_the_bytes_it_was_made_of() {
         "a plain Left did not reach the pane: {:?}",
         pty.since(mark)
     );
+}
+
+/// Inspect the bytes in the child, with the pane's line discipline disabled so
+/// that CR cannot become LF before the assertion sees it.
+fn assert_pane_input(input: &[u8], expected_hex: &str) {
+    let mut pty = shell();
+    pty.send(
+        format!(
+            "stty raw -echo; printf '\\r\\nKEY_''INPUT_READY\\r\\nPANE_BYTES:'; \
+             dd bs=1 count={} 2>/dev/null | od -An -tx1; stty sane\r",
+            expected_hex.split_whitespace().count()
+        )
+        .as_bytes(),
+    );
+    // The split string above keeps the command's echo from satisfying this.
+    assert!(pty.wait_painted("KEY_INPUT_READY"), "{}", pty.picture());
+    pty.send(input);
+    assert!(
+        pty.wait_painted(&format!("PANE_BYTES: {expected_hex}")),
+        "input {input:?} did not reach the pane as {expected_hex}:\n{}",
+        pty.picture()
+    );
+}
+
+#[test]
+fn enter_and_ctrl_j_reach_a_raw_pane_as_distinct_bytes() {
+    assert_pane_input(b"\r", "0d");
+    assert_pane_input(b"\n", "0a");
+    assert_pane_input(b"\x1b[106;5u", "0a");
+}
+
+#[test]
+fn modified_enter_reaches_a_raw_pane_with_its_modifiers() {
+    assert_pane_input(b"\x1b[13;2u", "1b 5b 31 33 3b 32 75");
+    assert_pane_input(b"\x1b[13;4u", "1b 5b 31 33 3b 34 75");
+    assert_pane_input(b"\x1b[13;5u", "1b 5b 31 33 3b 35 75");
+    assert_pane_input(b"\x1b[13;6u", "1b 5b 31 33 3b 36 75");
+    assert_pane_input(b"\x1b[13;8u", "1b 5b 31 33 3b 38 75");
 }
 
 #[test]

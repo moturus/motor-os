@@ -69,6 +69,12 @@ pane. Copy mode is vi by default: `hjklwb0$`, `g`/`G`, `C-u`/`C-d`/`C-f`/`C-b`,
 `Enter` to take it, `q` to leave. `mode-keys = "emacs"` swaps in tmux's other
 table — `C-b`/`C-f`, `M-b`/`M-f`, `C-Space` and `M-w`, `C-r`/`C-s`.
 
+`Ctrl+J` reaches a pane as LF, distinct from Enter. Shift/Ctrl-modified Enter
+reaches it as `CSI 13 ; modifiers u` when the outer terminal sends that distinct
+key sequence. Applications that understand CSI-u can then recognize the modifiers.
+The client requests the Kitty keyboard protocol from capable outer terminals and
+restores the previous keyboard mode on detach or exit.
+
 Overrides go in `/user/cfg/rmux.toml` on Motor OS and `$HOME/.config/rmux.toml`
 on Linux. It is the `key = value` subset of TOML plus three binding tables, and
 a missing file is not a problem — see `details.md` §2.2, whose example config is

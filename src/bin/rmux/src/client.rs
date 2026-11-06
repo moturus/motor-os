@@ -43,10 +43,14 @@ use crossterm::event::DisableBracketedPaste;
 use crossterm::event::EnableBracketedPaste;
 use crossterm::event::Event;
 use crossterm::event::KeyEventKind;
+use crossterm::event::KeyboardEnhancementFlags;
+use crossterm::event::PopKeyboardEnhancementFlags;
+use crossterm::event::PushKeyboardEnhancementFlags;
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
 use crossterm::terminal::disable_raw_mode;
 use crossterm::terminal::enable_raw_mode;
+use crossterm::terminal::is_raw_mode_enabled;
 use crossterm::{cursor, execute};
 
 use crate::keys::Key;
@@ -236,16 +240,22 @@ fn enter_console() -> std::io::Result<()> {
     execute!(
         std::io::stdout(),
         EnterAlternateScreen,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
         DisableBracketedPaste
     )
 }
 
 /// Give back everything [`enter_console`] took.
 fn leave_console() {
+    // The relay can restore before reporting an error, then run restores again.
+    if !is_raw_mode_enabled().unwrap_or(false) {
+        return;
+    }
     let _ = execute!(
         std::io::stdout(),
         cursor::Show,
         EnableBracketedPaste,
+        PopKeyboardEnhancementFlags,
         LeaveAlternateScreen
     );
     let _ = disable_raw_mode();
