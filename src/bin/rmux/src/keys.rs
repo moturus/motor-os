@@ -17,11 +17,14 @@
 //! does not model could be mangled on the way. Decoding and re-encoding is a
 //! deliberate change of that rule: a key rmux has no name for is now dropped
 //! rather than passed through. What that costs is bounded by what can reach a
-//! console rmux owns — it enables neither mouse reporting nor bracketed paste on
-//! its own terminal, and a pane's program asking for either is talking to rmux's
-//! emulator rather than to the terminal, so those bytes never arrive. What is
-//! left is function keys and the like, which [`Code`] names. Modified Enter
-//! uses CSI-u so its shift and control modifiers survive the round trip.
+//! console rmux owns — it enables no mouse reporting on its own terminal, and a
+//! pane's program asking for it is talking to rmux's emulator rather than to the
+//! terminal, so those bytes never arrive. Bracketed paste is the exception, and
+//! deliberately: rmux asks its console for the markers, so that a paste can be
+//! carried as a paste rather than as the keys it looks like (§7.6); it is not a
+//! key that arrives here, though — it is text, and takes the paste path instead.
+//! What is left is function keys and the like, which [`Code`] names. Modified
+//! Enter uses CSI-u so its shift and control modifiers survive the round trip.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 

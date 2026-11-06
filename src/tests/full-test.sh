@@ -6,8 +6,7 @@ ORIGINAL_ARGS=("$@")
 
 BUILD="debug"
 VMM=qemu
-# Guest size. The defaults match the VM launchers; --cpus and --memory pick a
-# smaller guest, e.g. the 1 vCPU / 256 MiB shape cloud providers sell.
+# Guest size. The defaults match the VM launchers; --cpus and --memory pick a different guest.
 CPUS="${MOTO_SMP-4}"
 MEMORY_MIB="${MOTO_MEMORY_MIB-1024}"
 SEEN_RELEASE=0
@@ -1034,6 +1033,13 @@ esac
 case "$out" in
   *$'\033'"[?1049l"*) ;;
   *) fail "rmux did not give the console back" ;;
+esac
+# And it asks the console for bracketed paste, so that a paste reaches a pane as
+# one piece of text rather than as the keys it looks like -- which is what used
+# to turn a multi-line paste into a line at a time (rmux/details.md §7.6).
+case "$out" in
+  *$'\033'"[?2004h"*) ;;
+  *) fail "rmux did not ask its console for bracketed paste" ;;
 esac
 
 # Rush and rmux cooperate on Motor window names: an interactive Rush emits OSC
