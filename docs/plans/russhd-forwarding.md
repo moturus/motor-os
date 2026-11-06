@@ -20,8 +20,9 @@ deferred gates is repaired, and all three debug and three release image gates
 pass on the repaired sources. The user has now published `moto-sdk 0.2.0` from
 `f8f22e77`; its registry source matches the in-tree SDK. Russhd now resolves
 that release and `moto-sys 0.4.0` from crates.io. Direct opens and the optional
-configuration are integrated, and all 183 host tests pass. The integrated
-three-debug/three-release milestone gates follow.
+configuration are integrated, and all 183 host tests pass. Step 2b's separate
+three-debug/three-release milestone gates pass on unchanged sources. Guest
+coverage and shipped configuration enablement follow in step 3.
 See "Implementation progress" below and "Decisions" at the end.
 
 ## Implementation progress
@@ -33,7 +34,7 @@ Developer-image validation remains release-only.
 | Step | Progress | Remaining |
 |---|---|---|
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
-| 2 | Step 2a complete: published `2a07f3a`, 151 main host tests, clean clippy, native builds, 3+3 main-image passes and complete developer-image release gate. Step 2b: direct opens and optional configuration integrated, 183 host tests and clean clippy; SDK and sys resolve from crates.io | Integrated milestone gates |
+| 2 | Complete: step 2a published `2a07f3a` and passed its separate 3+3 and developer-image gates. Step 2b integrates direct opens and optional configuration, resolves SDK/sys from crates.io, and passes 183 host tests, clippy, native builds, and its own 3+3 image gates | None |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
@@ -310,6 +311,27 @@ All 183 host tests, including 26 focused forwarding tests, and all-target
 clippy pass. Logs use `step2b-real-jump-*`, `step2b-shell-pending-data-*`, and
 `step2b-jump-*`. These complete the host integration coverage before step 2b's
 three-debug/three-release main-image gate sequence.
+
+### Step 2b: integrated image gates complete
+
+The committed sources at `6fbf6060` pass the complete sequence without retries
+or source changes. Each test status and before/after source check is zero.
+
+| Gate | Preparation (minutes) | Testing (minutes) |
+|---|---:|---:|
+| Debug 1 | 0.4 | 27.7 |
+| Debug 2 | 0.1 | 27.7 |
+| Debug 3 | 0.1 | 27.6 |
+| Release 1 | 2.3 | 13.6 |
+| Release 2 | 0.1 | 13.5 |
+| Release 3 | 0.1 | 13.6 |
+
+Logs and per-run evidence use `step2b-integrated-*` under
+`build/russh-rebase/`; `step2b-gate-sources.sha256` records the tested inputs.
+Both OOM cancellation cases pass in every run. No new warnings appear.
+These gates validate the optional forwarding implementation with shipped
+policy still off. Step 3 adds guest forwarding coverage, enables shipped
+policy, and has its own main-image and complete developer-image release gates.
 
 ### Commit count and delivered functionality
 
