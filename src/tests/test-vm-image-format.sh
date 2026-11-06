@@ -114,6 +114,8 @@ run_qemu() {
 
 run_chv() {
   PATH="$FAKE_BIN:$PATH" MOTOR_VM_ARG_LOG="$ARG_LOG" \
+    MOTO_QEMU_LOCK="$TEST_ROOT/qemu.lock" \
+    MOTOR_VM_EXPECT_LOCK="$TEST_ROOT/qemu.lock" \
     MOTO_CHV_RUNTIME_DIR="$TEST_ROOT/chv" "$VM_DIR/run-chv.sh" "$@" \
     >/dev/null 2>&1
 }
