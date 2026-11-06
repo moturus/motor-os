@@ -15,8 +15,11 @@ Step 2b's bounded queue, connection-owned cancellation, and generic relay are
 committed and pass 21 focused tests. Direct-open helpers pass 24 host tests and
 clippy, but their Motor build exposed a published/in-tree SDK API difference.
 The user chose to publish updated system and SDK crates. Release metadata
-is prepared below; direct opens and configuration are not yet integrated
-in the binary.
+is committed, and the user published `moto-sys 0.4.0`. The SDK package lock
+is refreshed. The pre-existing OOM cancellation-test race exposed by the
+deferred gates is repaired, and all three debug and three release image gates
+pass on the repaired sources. The next handoff is SDK publication. Direct
+opens and configuration are not yet integrated in the binary.
 See "Implementation progress" below and "Decisions" at the end.
 
 ## Implementation progress
@@ -28,7 +31,7 @@ Developer-image validation remains release-only.
 | Step | Progress | Remaining |
 |---|---|---|
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
-| 2 | Step 2a complete: published `2a07f3a`, 151 main host tests, clean clippy, native builds, 3+3 main-image passes and complete developer-image release gate. Step 2b: relay and 21 focused tests committed through `4ffd3369`; direct-open draft passes 24 host tests | Publish updated system/SDK crates, direct opens, configuration, integrated milestone gates |
+| 2 | Step 2a complete: published `2a07f3a`, 151 main host tests, clean clippy, native builds, 3+3 main-image passes and complete developer-image release gate. Step 2b: relay and 21 focused tests committed through `4ffd3369`; direct-open draft passes 24 host tests. System crate published; SDK package lock and OOM test repair pass 3+3 image gates | Publish SDK, direct opens, configuration, integrated milestone gates |
 | 3 | Not started | Guest coverage, shipped configuration, docs, main/developer-image gates |
 | 4 | Not started | External russh client credit, dispatch and handoff tests, pin, main-repo contract tests, milestone gates |
 | 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
@@ -151,16 +154,104 @@ Those failed probes remain in `package-motor-no-default.log` and
 `package-motor-base.log`. The corrected invocations select the supported
 configurations; no source changes or weakened checks were used.
 
-The crates.io-only package gate is blocked as expected: it cannot resolve
-`moto-sys ^0.4.0` before publication (`registry-package-gate.log`). This also
-blocks the required three debug and three release full-image gates before a
-core patch can be committed. The user approved committing the release
-metadata before these gates and confirmed the compatibility bumps because
-public APIs were removed. After the user
-publishes the system crate, refresh the minimum-version package lock and
-run the gates before the SDK publication checkpoint. Commands and API
-migration notes are in
+Before system-crate publication, the crates.io-only package gate could not
+resolve `moto-sys ^0.4.0` (`registry-package-gate.log`). That also blocked the
+required three debug and three release full-image gates. The user approved
+committing the release metadata first and confirmed the compatibility bumps
+because public APIs were removed. The package-lock refresh and deferred
+validation are complete below. Commands and API migration notes are in
 [Motor OS crates](../crates.md#prepared-releases-moto-sys-040-and-moto-sdk-020).
+
+### Published system crate: SDK gate validation
+
+The user published `moto-sys 0.4.0` from `70da7181`; its registry source
+matches the in-tree source, its VCS record names that commit, and its archive
+checksum is `fe9ac13a36609f3b2055f944aec43be659be8e4946399530dfb466b21d8fe084`.
+The standalone SDK Motor OS publish dry run passes against that published
+crate (`sdk-020-published-sys-dry-run.log` in `build/crate-release/`).
+
+The package-test lock changes only the SDK version to `0.2.0`
+and the system version/checksum to `0.4.0`. All direct dependency floors
+remain covered. The canonical lock regeneration selected newer backtrace
+dependencies; a targeted Cargo update retained their prior versions
+(`sdk-floor-retain-transitives.log`). No unrelated dependency upgrade is
+part of this patch.
+
+The deferred gate sequence stopped after these results, with build inputs
+unchanged before and after both runs:
+
+| Gate | Result | Evidence in `build/crate-release/` |
+|---|---|---|
+| Debug 1 | PASS: preparation 1.9 minutes, testing 27.6 minutes | `sdk-020-debug-1.log` and its evidence directory |
+| Debug 2 | FAIL after 3.2 minutes: System-console OOM helper | `sdk-020-debug-2.log` and its evidence directory |
+| Debug 3 and release 1–3 | Not run | Sequence stops on failure |
+
+Both attempted runs pass the crates.io-only SDK package test. Debug 2 fails
+at `src/sys/tests/systest/src/oom.rs:570`, "cancel: wrong waiter outcome".
+The cancellation case was already present before the release preparation;
+`f5f71357` added its recovery victim. The parent observes a parked allocation,
+then separately reads completion and sends the kill. Reclaiming that victim
+can resume and complete the child between those operations, even while the
+parent retains its pressure allocations.
+
+An existing System-console run with temporary assertion details passed
+(`cancel-outcome-diagnostic.log`), which does not resolve the failure. A
+second diagnostic deliberately lets recovery proceed after the parked
+observation, using the existing deadline and retaining the original assertion.
+It reproduces the assertion with `parked=true, completed=true, waited=true,
+killed=false` (`cancel-recovery-interleaving-diagnostic.log` and its console
+log). This demonstrates that the test rejects a valid recovery-before-kill
+schedule; it does not show a kernel cancellation defect.
+
+All temporary instrumentation is restored, and the source manifest again
+matches. The original failure and both diagnostic logs remain preserved.
+The user approved fixing the test and restarting the SDK gates. The repair
+orders cancellation after the cumulative OOM registration, then checks the
+kill status, absence of allocation errors, and zero remaining threads, user
+pages and kernel pages before releasing pressure or debugger/process handles.
+The completion flag is read after the kill has finished, so recovery may win
+the race without invalidating the observation. A second case explicitly
+waits for recovery and successful allocation before issuing the kill.
+
+The existing System-console suite passes in debug and release with both
+cases (`oom-cancel-fixed-*-console.log`). In each run the immediate case
+finishes with `completed=false`, and the ordered recovery case with
+`completed=true`. Restoring the old no-completion assertion makes the ordered
+case fail (`oom-cancel-old-assertion-counterfactual.log`); the fixed source
+was restored afterward. No kernel implementation, timeout, retry policy or
+boot work changes. The additional case runs transitively in `full-test.sh`.
+
+The edited systest crate passes Motor-target clippy with warnings denied
+and `--no-deps`, plus repository-toolchain formatting. The broader clippy
+invocation reports four existing dependency lints in `virtio-async`, including
+an await/RefCell warning despite an explicit drop before await; its output
+is retained in `oom-cancel-fixed-clippy.log`. No dependency was changed.
+
+The complete three-debug/three-release sequence passes on the repaired
+sources, with no changes between runs and no retries. Every test status and
+before/after source check is zero. The earlier debug pass predates the fix
+and does not count toward this sequence. All original failures and
+diagnostics remain preserved; neither diagnostic counts toward the gates.
+
+| Repaired gate | Preparation (minutes) | Testing (minutes) |
+|---|---:|---:|
+| Debug 1 | 0.1 | 27.6 |
+| Debug 2 | 0.1 | 27.6 |
+| Debug 3 | 0.1 | 27.7 |
+| Release 1 | 4.8 | 13.8 |
+| Release 2 | 0.1 | 13.6 |
+| Release 3 | 0.1 | 13.6 |
+
+Logs and evidence directories use the prefix `sdk-020-oom-fixed-` under
+`build/crate-release/`. Each console log records `completed=false` for the
+immediate cancellation and `completed=true` for ordered recovery. The release
+build repeats the existing kloader pointer-comparison lint at `loader.rs:177`,
+also present in `step2a-login-release-1.log`; the patch adds no warnings.
+
+The SDK publication checkpoint is ready. After pushing this change, the
+user publishes `moto-sdk 0.2.0`; then update russhd's registry dependency and
+resume step 2b. These release-preparation gates do not replace step 2b's
+integrated forwarding gates.
 
 ### Commit count and delivered functionality
 

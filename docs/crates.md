@@ -100,28 +100,19 @@ the SDK's `sys` re-export.
   for the matching sys-io service. The published runtime remains
   `moto-rt 0.17.9`.
 
-Publish `moto-sys` first, from the pushed release commit. From `src/sys`:
+`moto-sys 0.4.0` is published from commit `70da7181`. The SDK package-test
+lock is refreshed with its final registry checksum, retaining all unrelated
+dependency versions and the declared direct dependency floors. The standalone
+SDK Motor OS publish dry run passes against the published system crate.
 
-```sh
-cargo publish --locked --target x86_64-unknown-motor -p moto-sys
-```
+The required three debug and three release full-image gates pass on the
+repaired OOM cancellation test and refreshed SDK package lock. The test now
+covers recovery before cancellation and requires child resources to be
+reclaimed before releasing pressure allocations or retained handles. The
+original failure, diagnosis and complete validation results are recorded in
+the [forwarding plan](plans/russhd-forwarding.md#published-system-crate-sdk-gate-validation).
 
-Once that release is available, regenerate the SDK package-test lock from
-the repository root and run the required image gates:
-
-```sh
-src/tests/test-sdk-package.sh --update-lock
-```
-
-The package test uses crates.io only; it cannot resolve the new system
-crate before publication. Its checked-in lock stays unchanged until the
-registry provides the final package checksum. The required three debug
-and three release full-image gates therefore remain pending; the first
-release-metadata commit is approved to precede those gates, which resume
-after the system crate is published.
-
-After those checks pass and their changes are committed and pushed,
-publish the SDK from `src/sys`:
+After pushing this change, publish the SDK from `src/sys`:
 
 ```sh
 cargo publish --locked --target x86_64-unknown-motor -p moto-sdk

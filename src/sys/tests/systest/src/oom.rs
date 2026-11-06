@@ -262,6 +262,7 @@ struct Control {
     ready: AtomicU64,
     go: AtomicBool,
     done: AtomicBool,
+    map_error: AtomicU64,
     recovered_before_fault: AtomicBool,
     driver_pid: AtomicU64,
     driver_done: AtomicBool,
@@ -337,6 +338,14 @@ impl Child {
     fn control(&self) -> &Control {
         unsafe { &*(self.control_addr as *const Control) }
     }
+
+    fn resources(&self) -> [u64; 3] {
+        [
+            crate::kernel_metric("active_threads", self.pid),
+            crate::kernel_metric("pages_user", self.pid),
+            crate::kernel_metric("pages_kernel", self.pid),
+        ]
+    }
 }
 
 impl Drop for Child {
@@ -344,9 +353,7 @@ impl Drop for Child {
         SysCpu::kill(self.handle).unwrap();
         crate::raw_spawn::wait_exit(self.handle, "OOM child cleanup");
         // Retain the process and shared-page handles through reclamation.
-        assert_eq!(crate::kernel_metric("active_threads", self.pid), 0);
-        assert_eq!(crate::kernel_metric("pages_user", self.pid), 0);
-        assert_eq!(crate::kernel_metric("pages_kernel", self.pid), 0);
+        assert_eq!(self.resources(), [0; 3]);
         SysObj::put(self.handle).unwrap();
         SysMem::free(self.control_addr).unwrap();
     }
@@ -415,15 +422,18 @@ pub fn run_child(mode: &str) -> ! {
         }
     } else {
         ready();
-        map(
+        let result = map(
             space,
-            if matches!(mode, "system" | "cancel") {
+            if mode == "system" || mode.starts_with("cancel") {
                 1024
             } else {
                 256
             },
-        )
-        .unwrap();
+        );
+        if let Err(error) = result {
+            control.map_error.store(u64::from(error), Ordering::Release);
+        }
+        result.unwrap();
     }
     control.done.store(true, Ordering::Release);
     // The parent controls termination and keeps both handles through cleanup.
@@ -434,6 +444,7 @@ pub fn run_child(mode: &str) -> ! {
 
 fn child_wait(metrics: &Metrics, mode: &str) -> bool {
     let fault = mode.starts_with("fault");
+    let cancel = mode.starts_with("cancel");
     let driver = (mode == "system-fault").then(|| Child::new("system", true));
     let child = Child::new(mode, !fault);
     if let Some(driver) = &driver {
@@ -483,6 +494,7 @@ fn child_wait(metrics: &Metrics, mode: &str) -> bool {
     let runs = metrics.read(metrics.runs, PID_SYSTEM);
     let kills = metrics.read(metrics.kills, PID_SYSTEM);
     in_map(debug, child.control().ready.load(Ordering::Acquire)); // Warm observation before pressure.
+    child.resources(); // Warm cleanup observation before pressure too.
     let mut pressure = Pressure::new();
     pressure.drain_to(if mode.starts_with("system") { 576 } else { 640 });
     child.control().go.store(true, Ordering::Release);
@@ -498,12 +510,13 @@ fn child_wait(metrics: &Metrics, mode: &str) -> bool {
                 Ordering::Release,
             );
         }
-        if matches!(mode, "cancel" | "system") {
+        if mode == "system" {
             parked |= metrics.read(metric, child.pid) > before
                 && in_map(debug, child.control().ready.load(Ordering::Acquire));
-            if mode == "cancel" && parked {
-                break;
-            }
+        }
+        // Registration survives recovery; an instantaneous parked snapshot does not.
+        if mode == "cancel" && metrics.read(metric, child.pid) > before {
+            break;
         }
         if (child.control().done.load(Ordering::Acquire)
             && driver
@@ -515,7 +528,7 @@ fn child_wait(metrics: &Metrics, mode: &str) -> bool {
         }
         SysCpu::sched_yield();
     }
-    let completed = child.control().done.load(Ordering::Acquire)
+    let mut completed = child.control().done.load(Ordering::Acquire)
         && driver
             .as_ref()
             .is_none_or(|d| d.control().done.load(Ordering::Acquire));
@@ -528,15 +541,30 @@ fn child_wait(metrics: &Metrics, mode: &str) -> bool {
             .recovered_before_fault
             .load(Ordering::Acquire);
     let killed = SysRay::process_status(child.handle).unwrap().is_some();
-    if mode == "cancel" && parked {
-        // Kill while pressure remains, proving suspension holds no MM resources.
+    if cancel {
+        assert!(waited, "{mode}: child did not register an OOM wait");
+        assert!(!killed, "{mode}: child exited before cancellation");
+        if mode == "cancel-after-recovery" {
+            assert!(completed, "recovery did not finish before cancellation");
+            assert!(metrics.read(metrics.kills, PID_SYSTEM) > kills);
+        }
         SysCpu::kill(child.handle).unwrap();
         crate::raw_spawn::wait_exit(child.handle, "parked syscall cancellation");
+        assert_eq!(SysRay::process_status(child.handle), Ok(Some(u64::MAX)));
+        assert_eq!(child.control().map_error.load(Ordering::Acquire), 0);
+        // Kill/recovery may race. Both must reclaim everything with pressure
+        // and the process, shared-page and debugger handles still retained.
+        assert_eq!(
+            child.resources(),
+            [0; 3],
+            "{mode}: retained child resources"
+        );
+        completed = child.control().done.load(Ordering::Acquire);
     }
     drop(pressure);
     SysRay::dbg_detach(debug).unwrap();
     if let Some(victim) = victim {
-        if mode == "cancel" {
+        if cancel {
             // Cancelling the waiter can recover before OOM selects this helper.
             SysCpu::kill(victim).unwrap();
         }
@@ -567,19 +595,19 @@ fn child_wait(metrics: &Metrics, mode: &str) -> bool {
         return false;
     }
     assert!(waited, "{mode}: tested child did not register an OOM wait");
-    assert!(
-        if mode == "cancel" {
-            parked && !completed
-        } else if mode == "fault-kill" {
-            killed && !completed
-        } else if mode == "system" {
-            parked && completed
-        } else {
-            completed
-        },
-        "{mode}: wrong waiter outcome"
-    );
-    println!("oom: {mode} waiter and reclamation PASS");
+    if !cancel {
+        assert!(
+            if mode == "fault-kill" {
+                killed && !completed
+            } else if mode == "system" {
+                parked && completed
+            } else {
+                completed
+            },
+            "{mode}: wrong waiter outcome"
+        );
+    }
+    println!("oom: {mode} waiter and reclamation PASS (completed={completed})");
     true
 }
 
@@ -642,6 +670,7 @@ pub fn run_all_tests() {
         "all three System fault windows were missed"
     );
     child_wait(&metrics, "cancel");
+    child_wait(&metrics, "cancel-after-recovery");
     println!("oom::run_all_tests PASS");
 }
 
