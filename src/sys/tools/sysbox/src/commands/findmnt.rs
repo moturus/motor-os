@@ -3,7 +3,7 @@ use std::io::{Result, Write};
 
 pub fn write_table(output: &mut impl Write, mounts: &mut [MountInfo]) -> Result<()> {
     mounts.sort_by_key(|mount| mount.id);
-    writeln!(output, "ID TARGET FSTYPE STATE USED CAP ENTRIES")?;
+    writeln!(output, "ID TARGET SOURCE FSTYPE STATE USED CAP ENTRIES")?;
     for mount in mounts {
         let mut path = String::new();
         for byte in mount.path.bytes() {
@@ -17,6 +17,13 @@ pub fn write_table(output: &mut impl Write, mounts: &mut [MountInfo]) -> Result<
             MountKind::MotorFs => "motor-fs",
             MountKind::MemFs => "memfs",
         };
+        let source = mount.source.map_or_else(
+            || "-".into(),
+            |source| match source.partition {
+                Some(slot) => format!("virtio{}p{slot}", source.device),
+                None => format!("virtio{}", source.device),
+            },
+        );
         let state = if mount.corrupted {
             "quarantined"
         } else if mount.read_only {
@@ -27,7 +34,7 @@ pub fn write_table(output: &mut impl Write, mounts: &mut [MountInfo]) -> Result<
         let number = |value: Option<u64>| value.map_or_else(|| "-".into(), |v| v.to_string());
         writeln!(
             output,
-            "{} {path} {kind} {state} {} {} {}",
+            "{} {path} {source} {kind} {state} {} {} {}",
             mount.id,
             number(mount.used),
             number(mount.cap),
