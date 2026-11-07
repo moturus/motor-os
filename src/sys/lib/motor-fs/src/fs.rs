@@ -375,6 +375,16 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
 
     /// [`Self::open`] with a block cache of `cache_blocks` blocks.
     pub async fn open_with_cache_size(dev: Box<BD>, cache_blocks: usize) -> Result<Self> {
+        Self::open_with_recovery_policy(dev, cache_blocks, crate::RecoveryPolicy::Recover).await
+    }
+
+    /// Open with an explicit journal policy, chosen from the backing device's
+    /// write capability. A clean filesystem needs no writes or flushes.
+    pub async fn open_with_recovery_policy(
+        dev: Box<BD>,
+        cache_blocks: usize,
+        recovery: crate::RecoveryPolicy,
+    ) -> Result<Self> {
         let num_blocks = dev.num_blocks();
         if num_blocks <= RESERVED_BLOCKS as u64 {
             return Err(ErrorKind::StorageFull.into());
@@ -393,7 +403,7 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         )
         .await?;
 
-        let txn_logger = crate::txn_log::TxnLogger::open(&mut block_cache).await?;
+        let txn_logger = crate::txn_log::TxnLogger::open(&mut block_cache, recovery).await?;
 
         Ok(Self {
             block_cache,

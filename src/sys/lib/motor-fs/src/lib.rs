@@ -30,5 +30,14 @@ pub use layout::{ROOT_DIR_ID, has_superblock_magic};
 /// Superblock, root, journal and at least one allocatable filesystem block.
 pub const MIN_BLOCKS: u64 = layout::RESERVED_BLOCKS as u64 + 1;
 
+/// Opening a filesystem may need to finish a transaction interrupted by shutdown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveryPolicy {
+    /// Replay the journal and await durable completion before returning.
+    Recover,
+    /// Inspect the journal but reject recovery before submitting any writes.
+    RequireClean,
+}
+
 #[cfg(test)]
 mod tests;
