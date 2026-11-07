@@ -84,7 +84,7 @@ bash "$WD/test-sdk-package.sh" --prepare "${profile_args[@]}"
 host_build frusa --manifest-path "$ROOT_DIR/src/sys/lib/frusa/Cargo.toml"
 # The same feature closure full-test.sh tests the netstack under: a different
 # one compiles different code, and would be built again by the suite.
-NETSTACK_FEATURES="async,assembler-max-segment-count-32,fragmentation-buffer-size-65536,iface-neighbor-cache-count-64,medium-ethernet,medium-ip,proto-ipv4,proto-ipv4-fragmentation,proto-ipv6,proto-ipv6-fragmentation,reassembly-buffer-count-4,reassembly-buffer-size-65536,socket-icmp,socket-tcp,socket-udp"
+NETSTACK_FEATURES="async,assembler-max-segment-count-32,fragmentation-buffer-size-65536,iface-neighbor-cache-count-64,medium-ethernet,medium-ip,proto-ipv4,proto-ipv4-fragmentation,proto-ipv6,proto-ipv6-fragmentation,reassembly-buffer-count-4,reassembly-buffer-size-65536,socket-dhcpv4,socket-icmp,socket-tcp,socket-udp"
 host_build netstack --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \
   --no-default-features --features "$NETSTACK_FEATURES"
 host_build "netstack (SLAAC)" --locked --offline --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \
