@@ -308,4 +308,32 @@ exec {gateway_input}>&-
 wait "$shell_pid" || fail "gateway-forward session failed"
 shell_pid=""
 exec {gateway_result}>&-
+echo '-- Motor client remote TCP forwarding --'
+mkfifo "$fixture/client-remote.input" "$fixture/client-remote.output"
+exec {remote_input}<>"$fixture/client-remote.input"
+exec {remote_output}<>"$fixture/client-remote.output"
+(
+  exec {remote_input}>&-
+  exec {remote_output}>&-
+  exec "${SSH[@]}" "/user/bin/ssh -R 127.0.0.1:34311:localhost.:2222 \
+    -o ExitOnForwardFailure=yes moto-hi \
+    'read before && echo \"\$before\" && read after && echo \"\$after\"'" \
+    < "$fixture/client-remote.input" > "$fixture/client-remote.output"
+) 2>"$fixture/client-remote.log" &
+shell_pid="$!"
+printf 'client-remote-ready\n' >&"$remote_input"
+IFS= read -r -t 5 out <&"$remote_output" || fail "Motor remote-forward session did not start"
+[ "$out" = client-remote-ready ] || fail "unexpected remote-forward session output '$out'"
+# The host listener reaches the guest's SSH server through the Motor client.
+out="$(ssh -F /dev/null -p 34311 -i "$WD/test.key" -o IdentitiesOnly=yes \
+  -o UserKnownHostsFile="$fixture/client-remote-known" -o StrictHostKeyChecking=accept-new \
+  -o BatchMode=yes -o LogLevel=ERROR motor@127.0.0.1 /system/bin/echo motor-client-remote-ok)"
+[ "$out" = motor-client-remote-ok ] || fail "Motor remote forward returned '$out'"
+printf 'client-remote-still-alive\n' >&"$remote_input"
+IFS= read -r -t 5 out <&"$remote_output" || fail "remote-forward EOF stopped the session"
+[ "$out" = client-remote-still-alive ] || fail "unexpected later remote-forward output '$out'"
+exec {remote_input}>&-
+wait "$shell_pid" || fail "Motor remote-forward session failed"
+shell_pid=""
+exec {remote_output}>&-
 echo "test-ssh-config: PASS"
