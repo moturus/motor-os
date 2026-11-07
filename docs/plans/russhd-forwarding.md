@@ -39,8 +39,8 @@ Developer-image validation remains release-only.
 | 4 | Complete: both the original `d4a1cc4` snapshot and subsequent `d16a1df` callback/server-credit repairs pass their main-image 3+3 gates and complete developer-image release gates | None |
 | 5 | Complete: `-L`/`-N`, published fork repairs and guest coverage pass all 218 component tests, clippy, native builds, 3/3 release, 3/3 debug and the complete developer-release gate. The test port-allocation race is fixed by `c1ae1c5e` and `8a9f665d`; the validated snapshot stays unchanged across all runs | None; the subsequent shared close repair is integrated with step 6 |
 | 6 | Complete: bounded SOCKS4/4a/5, `-D`, configuration, shared probe, retained fixture reservations and the published close fix through `9c6dc207`. All 234 component tests, clippy, both Motor release binaries and the separate `step6-main` 3/3 release and 3/3 debug image runs pass. Native guest coverage is committed as `013f22f6` | None |
-| 7 | Integrated through `8bcb223b`, with guest coverage in `43ec0af2`. All 249 component tests, 58 imager tests, clippy, both native builds, 3/3 release and the first debug image run pass. The second debug run times out in an existing jump transfer and exposes the transport-flush deadlock described below | Repair and publish the external transport fix; fresh milestone image gates |
-| 8 | Main-based integration `a18cbf7d` in `step8-integration-worktree` includes the complete `-R` runtime, authorization, ordering, allocated ports, drain, hostile-peer coverage, route/copy isolation, help and docs. It also fixes local-setup and resolver-worker shutdown. All 269 component tests, clippy and both native release binaries pass against published `e9a05c1` | Guest validation; integrate after step 7; separate 3+3 milestone gates |
+| 7 | Integrated through `8bcb223b`, with guest coverage in `43ec0af2` and socket-path repair `1f0c3960`. The first snapshot passes 249 component tests, 58 imager tests, both native builds, 3/3 release and one debug image run, then exposes the transport-flush deadlock below. The tested external repair is committed through `b45bd26`; local integration passes 255 component tests, clippy, native debug/release builds and the complete targeted guest SSH check | User publishes the four fork commits; update the real pin and restart fresh milestone image gates |
+| 8 | Prepared integration `a18cbf7d` includes the complete `-R` runtime, authorization, ordering, allocations, drain, hostile-peer and route/copy coverage, help, docs and the two setup/shutdown fixes. All 269 baseline tests pass against published `e9a05c1`; compatibility with the transport repair passes 275 tests, strict clippy and both native release binaries | Guest validation; integrate after step 7 and fork publication; separate 3+3 milestone gates |
 
 ### Remote forwarding: close-handshake repair in the external fork
 
@@ -133,14 +133,51 @@ and receivers, reproduces the deadlock while both applications actively drain.
 Its initial compile-signature error is preserved separately from the actual
 failing regression in `step7-transport-flush-reproduction-compiled.log`.
 
-The repair is being prepared on the existing external `motor-v0.65.1` branch:
-retain partial-write progress across cancellation, select transport writes
-alongside reads, pause application-output admission while ciphertext remains,
-and bound queued transport output. Preserve packet order, rekey state and the
-existing inactivity timeout. The original failure, stacks, offline core and
-decoded state are retained under `step7-debug2-*`; no retry or longer timeout
-was used. No core OS source changed. A tested fork commit will require user
-publication before updating the real main pin and restarting the affected gates.
+The repair is committed on the existing external `motor-v0.65.1` branch.
+`502b599` retains partial-write and underlying-flush progress across cancellation,
+with amortized compaction of consumed ciphertext. `a9d1a61` selects transport
+writes alongside reads in both session loops and stops admitting application
+output while ciphertext remains. Additional response growth is bounded by twice
+the sum of the configured receive window and maximum packet. Writes restore that
+allowance as they progress. The bound excludes the application's already admitted batch, preserving
+its existing queue policy. Packet order, rekey and inactivity behavior remain
+covered. `6fd808f` and `b45bd26` add deterministic per-peer blocked-write, bounded
+reply, controlled-clock inactivity and read-EOF teardown tests. The full fork
+suite passes 331 active tests with eight existing ignored doctests. Strict library
+and both public-regression clippy targets pass. A broader unit-test clippy attempt
+exposes the fork's existing unwrap/expect lint baseline and is retained separately.
+
+An isolated main checkout, `transport-integration-worktree`, copies both public
+regressions under russhd's tests so the future pin commit runs them transitively
+from `full-test.sh`. All 255 component tests, all-target clippy, both native
+binaries in debug and release, and selected formatting pass. Motor's newer compiler
+reports the existing fork `AtomicU32::fetch_update` deprecation; no new main warning
+was introduced. Only local paths replace the four fork package sources during
+validation; registry versions stay unchanged. The temporary manifest and lock are
+then restored byte-for-byte to the published versions. Do not run the uncommitted
+regressions against that restored old pin before publication and integration.
+
+The prepared final client `-R` implementation also passes all 275 component
+tests, strict all-target clippy and both native release binaries with the repair.
+Its temporary local patch and copied transport tests are then removed, and the
+original prepared-source checksum matches again. Its client-remote guest check
+and milestone image gates still follow publication and the repaired step 7 gate.
+
+A fresh private debug image packages the fixed native server and all SSH applets.
+The existing complete private-network SSH compatibility check passes, including
+the original 4 MiB jump stream, jump SCP/SFTP, 100 forwarded channels, native local
+and SOCKS forwarding, remote listeners and the allocated IPv4/IPv6 gateway port.
+Its first setup lacked the required assembly-root setting; a later run found the
+existing Unix-socket fixture path too long inside a deep checkout. `1f0c3960`
+moves that socket into a short private temporary directory; the corrected complete
+guest check passes. The initial isolated host run also required the test key's
+normal mode 600. Those setup failures and all original failure evidence remain
+separate from final validation in `step7-transport-*` logs.
+
+The original failure, stacks, offline core and decoded state are retained under
+`step7-debug2-*`; no retry or longer timeout was used to accept the original gate.
+No core OS source changed. User publication through `b45bd26` is the remaining
+prerequisite before updating the real pin and starting fresh affected image gates.
 
 ## Implementation history
 
