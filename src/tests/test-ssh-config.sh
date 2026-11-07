@@ -186,4 +186,33 @@ exec {local_input}>&-
 wait "$shell_pid" || fail "Motor local-forward session failed"
 shell_pid=""
 exec {local_output}>&-
+echo '-- Motor SOCKS forwarding --'
+rustc --edition=2024 --target x86_64-unknown-motor -D warnings \
+  "$WD/ssh-socks-probe.rs" -o "$fixture/socks-probe"
+printf 'put %s %s/socks-probe\nchmod 700 %s/socks-probe\n' \
+  "$fixture/socks-probe" "$guest" "$guest" | "${SFTP[@]}" >/dev/null
+mkfifo "$fixture/socks.input" "$fixture/socks.output"
+exec {socks_input}<>"$fixture/socks.input"
+exec {socks_output}<>"$fixture/socks.output"
+(
+  exec {socks_input}>&-
+  exec {socks_output}>&-
+  exec "${SSH[@]}" "/user/bin/ssh -D 127.0.0.1:34308 \
+    -o ExitOnForwardFailure=yes moto-hi \
+    'read before && echo \"\$before\" && read after && echo \"\$after\"'" \
+    < "$fixture/socks.input" > "$fixture/socks.output"
+) 2>"$fixture/socks.log" &
+shell_pid="$!"
+printf 'socks-ready\n' >&"$socks_input"
+IFS= read -r -t 5 out <&"$socks_output" || fail "Motor SOCKS session did not start"
+[ "$out" = socks-ready ] || fail "unexpected SOCKS session output '$out'"
+out="$("${SSH[@]}" "$guest/socks-probe 127.0.0.1:34308 $loopback_port")"
+[ "$out" = 'SOCKS forwarding PASS' ] || fail "Motor SOCKS probe returned '$out'"
+printf 'socks-still-alive\n' >&"$socks_input"
+IFS= read -r -t 5 out <&"$socks_output" || fail "SOCKS EOF stopped the session"
+[ "$out" = socks-still-alive ] || fail "unexpected later SOCKS output '$out'"
+exec {socks_input}>&-
+wait "$shell_pid" || fail "Motor SOCKS session failed"
+shell_pid=""
+exec {socks_output}>&-
 echo "test-ssh-config: PASS"
