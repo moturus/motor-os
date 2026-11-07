@@ -154,7 +154,7 @@ fn run() -> Result {
         )
         .subcommand(
             Command::new("push")
-                .about("Push one explicit branch or tag to an HTTPS or SSH remote")
+                .about("Push one branch or tag to an HTTPS or SSH remote")
                 .arg(
                     Arg::new("dry-run")
                         .long("dry-run")
@@ -170,7 +170,8 @@ fn run() -> Result {
                 .arg(
                     Arg::new("refspec")
                         .required(true)
-                        .value_name("SOURCE:DESTINATION"),
+                        .value_name("SOURCE[:DESTINATION]")
+                        .help("The source ref; the destination defaults to it, and short names resolve like git"),
                 ),
         )
         .subcommand(

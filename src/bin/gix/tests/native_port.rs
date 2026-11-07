@@ -3912,6 +3912,11 @@ fn check_push_pack(output: &Path) -> Result {
         assert_eq!(spec.resolve(repo, &cancellation)?, merge);
         assert!(!spec.validate_update(repo, merge, Some(c0), &cancellation)?);
     }
+    // Like `git push origin main`, infer `refs/heads/main` for both sides.
+    let short = Spec::parse("main", None)?;
+    assert_eq!(short.destination.to_string(), "refs/heads/main");
+    assert_eq!(short.resolve(repo, &cancellation)?, merge);
+    assert!(!short.validate_update(repo, merge, Some(c0), &cancellation)?);
     let branch = Spec::parse("HEAD:refs/heads/main", None)?;
     assert!(branch.validate_update(repo, merge, Some(merge), &cancellation)?);
     assert!(
