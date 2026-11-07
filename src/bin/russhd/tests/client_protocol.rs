@@ -20,6 +20,8 @@ mod forwarding_jump;
 mod forwarding_progress;
 #[path = "client_protocol/local_forwarding.rs"]
 mod local_forwarding;
+#[path = "client_protocol/remote_forwarding.rs"]
+mod remote_forwarding;
 #[path = "client_protocol/tunnel_lifetime.rs"]
 mod tunnel_lifetime;
 

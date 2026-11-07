@@ -215,7 +215,8 @@ struct ConnectionHandler {
     close_guard: Option<ChannelCloseGuard>,
     receive_credit: Option<ReceiveCredit>,
     login: Arc<login::Grace>,
-    forwards: Option<forward::Tasks>,
+    forwards: Option<Arc<forward::Tasks>>,
+    remote_listeners: Option<forward::remote::Listeners>,
 }
 
 impl ConnectionHandler {
@@ -237,6 +238,7 @@ impl ConnectionHandler {
             receive_credit: None,
             login,
             forwards: None,
+            remote_listeners: None,
         }
     }
 
@@ -534,6 +536,58 @@ impl server::Handler for ConnectionHandler {
         Ok(())
     }
 
+    async fn tcpip_forward(
+        &mut self,
+        address: &str,
+        port: &mut u32,
+        session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        if !self.config.allow_tcp_forwarding() || forward::memory_pressure() {
+            return Ok(false);
+        }
+        let tasks = self
+            .forwards
+            .get_or_insert_with(|| Arc::new(forward::Tasks::default()));
+        let listeners = self.remote_listeners.get_or_insert_with(Default::default);
+        match listeners
+            .register(
+                address,
+                *port,
+                session.handle(),
+                tasks.clone(),
+                local_session::SSH_RECEIVE_WINDOW as usize,
+            )
+            .await
+        {
+            Ok(allocated) => {
+                *port = u32::from(allocated);
+                Ok(true)
+            }
+            Err(error) => {
+                log::info!("remote forward {address}:{port}: {error}");
+                Ok(false)
+            }
+        }
+    }
+
+    async fn cancel_tcpip_forward(
+        &mut self,
+        address: &str,
+        port: u32,
+        _: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        let Some(listeners) = self.remote_listeners.as_mut() else {
+            return Ok(false);
+        };
+        match listeners.cancel(address, port).await {
+            Ok(cancelled) => Ok(cancelled),
+            Err(error) => {
+                log::warn!("cancel remote forward {address}:{port}: {error}");
+                Ok(false)
+            }
+        }
+    }
+
     async fn channel_open_direct_tcpip(
         &mut self,
         channel: Channel<Msg>,
@@ -554,7 +608,9 @@ impl server::Handler for ConnectionHandler {
                 return Ok(());
             }
         };
-        let tasks = self.forwards.get_or_insert_with(forward::Tasks::default);
+        let tasks = self
+            .forwards
+            .get_or_insert_with(|| Arc::new(forward::Tasks::default()));
         let Some(reservation) = tasks.reserve(forward::memory_pressure()) else {
             reply.reject(ChannelOpenFailure::ResourceShortage).await;
             return Ok(());
@@ -797,6 +853,9 @@ impl server::Handler for ConnectionHandler {
 
 impl Drop for ConnectionHandler {
     fn drop(&mut self) {
+        if let Some(tasks) = &self.forwards {
+            tasks.cancel();
+        }
         log::info!(
             "Dropping Connection #{} for user '{}' from {:?}",
             self.id,

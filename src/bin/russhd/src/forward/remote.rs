@@ -1,9 +1,131 @@
 //! Connection-owned listening sockets for remote TCP forwards.
 
+use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 
 use tokio::net::TcpListener;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+
+#[derive(Default)]
+pub struct Listeners {
+    groups: HashMap<(String, u16), Group>,
+}
+
+struct Group {
+    stop: watch::Sender<()>,
+    running: Vec<JoinHandle<()>>,
+}
+
+impl Listeners {
+    pub async fn register(
+        &mut self,
+        address: &str,
+        port: u32,
+        handle: russh::server::Handle,
+        tasks: Arc<super::Tasks>,
+        window: usize,
+    ) -> io::Result<u16> {
+        let port = validate_request(address, port)?;
+        if self.groups.contains_key(&(address.to_owned(), port)) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "remote forward already registered",
+            ));
+        }
+        let bound = BoundListeners::loopback(address, u32::from(port)).await?;
+        let port = bound.port;
+        let key = (address.to_owned(), port);
+        if self.groups.contains_key(&key) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "allocated remote forward already registered",
+            ));
+        }
+        let (stop, stopped) = watch::channel(());
+        let running = bound
+            .sockets
+            .into_iter()
+            .map(|listener| {
+                tokio::spawn(accept(
+                    listener,
+                    stopped.clone(),
+                    address.to_owned(),
+                    port,
+                    handle.clone(),
+                    tasks.clone(),
+                    window,
+                ))
+            })
+            .collect();
+        self.groups.insert(key, Group { stop, running });
+        Ok(port)
+    }
+
+    /// No acknowledgement until every accept task has released its socket.
+    /// Relay jobs have their own connection scope and keep running.
+    pub async fn cancel(&mut self, address: &str, port: u32) -> io::Result<bool> {
+        let port = validate_request(address, port)?;
+        let Some(group) = self.groups.remove(&(address.to_owned(), port)) else {
+            return Ok(false);
+        };
+        drop(group.stop);
+        let mut error = None;
+        for task in group.running {
+            if let Err(join_error) = task.await {
+                log::error!("remote accept task failed: {join_error}");
+                error = Some(io::Error::other(join_error));
+            }
+        }
+        error.map_or(Ok(true), Err)
+    }
+}
+
+async fn accept(
+    listener: TcpListener,
+    mut stopped: watch::Receiver<()>,
+    address: String,
+    port: u16,
+    handle: russh::server::Handle,
+    tasks: Arc<super::Tasks>,
+    window: usize,
+) {
+    loop {
+        let accepted = tokio::select! {
+            biased;
+            _ = stopped.changed() => return,
+            result = listener.accept() => result,
+        };
+        let (socket, originator) = match accepted {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                log::warn!("remote forward accept failed: {error}");
+                return;
+            }
+        };
+        let Some(job) = tasks.reserve(super::memory_pressure()) else {
+            continue;
+        };
+        let handle = handle.clone();
+        let address = address.clone();
+        job.spawn(async move {
+            socket.set_nodelay(true)?;
+            let (channel, credit) = handle
+                .channel_open_forwarded_tcpip_with_credit(
+                    address,
+                    u32::from(port),
+                    originator.ip().to_string(),
+                    u32::from(originator.port()),
+                )
+                .await
+                .map_err(io::Error::other)?;
+            drop(handle);
+            super::relay(channel, socket, credit, window, super::memory_pressure).await
+        });
+    }
+}
 
 pub struct BoundListeners {
     pub sockets: Vec<TcpListener>,
