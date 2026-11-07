@@ -22,6 +22,8 @@ mod forwarding_progress;
 mod local_forwarding;
 #[path = "client_protocol/remote_forwarding.rs"]
 mod remote_forwarding;
+#[path = "client_protocol/remote_relay.rs"]
+mod remote_relay;
 #[path = "client_protocol/tunnel_lifetime.rs"]
 mod tunnel_lifetime;
 
