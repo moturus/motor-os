@@ -488,7 +488,7 @@ trees:
         );
         // Each role's temporary directory is closed to lower roles.
         for (path, mode) in [
-            ("/system/tmp", "rwx------"),
+            ("/system/tmp", "rwxr-x---"),
             ("/user/tmp", "rwxrwx---"),
             ("/none/tmp", "rwxrwxrwx"),
         ] {
@@ -582,6 +582,10 @@ trees:
             ImageEntry {
                 path: PathBuf::from("/user/cfg/ssh/authorized_keys.motor"),
                 kind: ImageEntryKind::File(FileClass::Regular),
+            },
+            ImageEntry {
+                path: PathBuf::from("/system/tmp"),
+                kind: ImageEntryKind::Directory,
             },
         ];
         for class in [FileClass::Script, FileClass::Elf] {

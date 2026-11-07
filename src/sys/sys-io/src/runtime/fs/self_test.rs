@@ -9,7 +9,92 @@ pub(super) const TESTS: &[crate::self_test::SelfTest] = &[
     ("fs::replace_without_traverse", replace_without_traverse),
     ("fs::quarantined_unlock", quarantined_unlock),
     ("fs::flush_after_error", flush_after_error),
+    ("fs::dhcp_snapshot", dhcp_snapshot),
 ];
+
+fn dhcp_snapshot() -> std::result::Result<(), String> {
+    moto_sdk::async_runtime::LocalRuntime::new()
+        .block_on(async {
+            let runtime = runtime()?;
+            let mode = RolePermissions::new(
+                AccessPermissions::Rwx,
+                AccessPermissions::Rx,
+                AccessPermissions::None,
+            );
+            let root = runtime.root()?;
+            let mut fs = root.write().await?;
+            let system = fs
+                .create_entry(Role::System, 0, EntryKind::Directory, "system", mode)
+                .await?;
+            let shadowed = fs
+                .create_entry(Role::System, system, EntryKind::Directory, "tmp", mode)
+                .await?;
+            drop(fs);
+            let child = FS::MemFs(memfs::MemFs::new(memfs::MemFsConfig {
+                max_size: 64 * 1024,
+                free_cache_cap: 0,
+                root_mode: mode,
+            })?);
+            runtime.mounts.borrow_mut().insert(
+                child,
+                mounts::MountPoint {
+                    mount: 0,
+                    shadowed,
+                    path: "/system/tmp".into(),
+                },
+            )?;
+            runtime.mounts.borrow_mut().find_mut(0).unwrap().read_only = true;
+            for contents in ["x".repeat(9000), "[devices]\n".to_owned()] {
+                runtime.root_fs().publish_dhcp(&contents).await?;
+                let path = "/system/tmp/sys-io/dhcp.toml";
+                ensure(
+                    mounts::stat_path(&runtime.mounts, Role::None, path)
+                        .await
+                        .is_err(),
+                    "None read DHCP",
+                )?;
+                let (id, _) = mounts::stat_path(&runtime.mounts, Role::Interactive, path).await?;
+                let entry = runtime.resolve(id)?;
+                ensure(entry.mount != 0, "DHCP wrote the root filesystem")?;
+                let fs = entry.read().await?;
+                let metadata = fs.metadata(Role::Interactive, entry.local).await?;
+                ensure(metadata.size == contents.len() as u64, "stale DHCP tail")?;
+                ensure(
+                    metadata.permissions()?
+                        == RolePermissions::new(
+                            AccessPermissions::Rw,
+                            AccessPermissions::R,
+                            AccessPermissions::None,
+                        ),
+                    "DHCP permissions",
+                )?;
+                let mut bytes = vec![0; contents.len()];
+                for offset in (0..bytes.len()).step_by(moto_sdk::async_fs::BLOCK_SIZE) {
+                    let end = (offset + moto_sdk::async_fs::BLOCK_SIZE).min(bytes.len());
+                    fs.read(
+                        Role::Interactive,
+                        entry.local,
+                        offset as u64,
+                        &mut bytes[offset..end],
+                    )
+                    .await?;
+                }
+                ensure(bytes == contents.as_bytes(), "incomplete DHCP snapshot")?;
+                drop(fs);
+                ensure(
+                    entry
+                        .write()
+                        .await?
+                        .write(Role::Interactive, entry.local, 0, b"bad")
+                        .await
+                        .is_err(),
+                    "Interactive wrote DHCP",
+                )?;
+            }
+            Ok(())
+        })
+        .map_err(|error: std::io::Error| error.to_string())
+}
 
 fn flush_after_error() -> std::result::Result<(), String> {
     use std::future::{Future, poll_fn};

@@ -72,6 +72,9 @@ trees:
     elf: "r-xr-x---"
 
 entries:
+  # Interactive services read explicitly shared runtime state below this root.
+  - path: "/system/tmp"
+    mode: "rwxr-x---"
   - path: "/system/cfg/sshd.toml"
     mode: "rw-r-----"
   - path: "/system/cfg/ssl/ssl-key.pem"

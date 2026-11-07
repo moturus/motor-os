@@ -1092,6 +1092,7 @@ pub(super) async fn init(
     channel_budget: Rc<channel_budget::ChannelBudget>,
 ) -> Result<Vec<Rc<virtio_async::virtio_net::NetDevice>>> {
     let config = config::load(&fs.root_fs()).await?;
+    fs.root_fs().publish_dhcp("[devices]\n").await?;
     log::debug!("NET cfg loaded:\n{config:#?}.");
 
     // Created before the devices: their rx/tx tasks bump the device counters.

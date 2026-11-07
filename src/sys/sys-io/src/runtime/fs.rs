@@ -27,6 +27,7 @@ mod lock_manager;
 mod mbr;
 pub(crate) mod memory;
 mod mounts;
+mod runtime_config;
 #[cfg(debug_assertions)]
 pub(super) mod self_test;
 mod spawn;
@@ -387,7 +388,7 @@ pub(crate) struct FsRuntime {
     pager: Rc<spawn::pager::Pager>,
 }
 
-/// The root filesystem as the net runtime sees it: its config and resolv.conf.
+/// Filesystem access for network configuration and mounted runtime state.
 #[derive(Clone)]
 pub(crate) struct RootFs(Rc<RefCell<mounts::MountTable>>);
 
