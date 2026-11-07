@@ -12,7 +12,7 @@ fixture="$(mktemp -d "$ROOT_DIR/build/host-tests/ssh-config.XXXXXX")"
 guest="$TEST_TMP/ssh-config"
 config=/user/cfg/ssh/config
 staged=0
-loopback_log_pid="" shell_pid="" gateway_pid="" gateway_log_pid=""
+loopback_log_pid="" shell_pid="" gateway_pid="" gateway_log_pid="" sockets=""
 SSH=(ssh -F /dev/null -p 2222 -i "$WD/test.key" -o IdentitiesOnly=yes -o BatchMode=yes
   -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" motor@192.168.4.2)
 SFTP=(sftp -F /dev/null -P 2222 -i "$WD/test.key" -o IdentitiesOnly=yes -o BatchMode=yes
@@ -27,6 +27,7 @@ cleanup() {
   if [ -n "$gateway_log_pid" ]; then wait "$gateway_log_pid" || status=1; fi
   stop_ssh_client_host
   if [ -n "$loopback_log_pid" ]; then wait "$loopback_log_pid" || status=1; fi
+  if [ -n "$sockets" ]; then rm -rf "$sockets" || status=1; fi
   if [ "$staged" -eq 1 ]; then
     "${SSH[@]}" "/system/bin/rm $config" || status=1
     "${SSH[@]}" "/system/bin/rm -r $guest" || status=1
@@ -37,6 +38,7 @@ cleanup() {
 # The owning full-test harness supplies a fresh guest, never a personal config.
 if "${SSH[@]}" "[ -e $config ]"; then fail "config fixture path already exists"; fi
 trap cleanup EXIT
+sockets="$(mktemp -d "${TMPDIR:-/tmp}/ssh-config-sockets.XXXXXX")"
 SSH_CLIENT_HOST_ROOT="$fixture/loopback"
 mkdir -m 700 "$SSH_CLIENT_HOST_ROOT"
 start_ssh_client_host "$WD/test.key" 0 /bin:/usr/bin 127.0.0.1
@@ -143,7 +145,7 @@ exec {shell_output}<>"$fixture/shell.output"
   exec {shell_input}>&-
   exec {shell_output}>&-
   exec ssh -F "$fixture/host.cfg" -T -o ExitOnForwardFailure=yes \
-    -L "$fixture/forward.sock:localhost.:2222" guest \
+    -L "$sockets/forward.sock:localhost.:2222" guest \
     'read before && echo "$before" && read after && echo "$after"' \
     < "$fixture/shell.input" > "$fixture/shell.output"
 ) 2>"$fixture/shell.log" &
@@ -151,7 +153,7 @@ shell_pid="$!"
 printf 'before-forwards\n' >&"$shell_input"
 IFS= read -r -t 5 out <&"$shell_output" || fail "forwarding shell did not start"
 [ "$out" = before-forwards ] || fail "unexpected initial shell output '$out'"
-timeout 10s "$fixture/probe" "$fixture/forward.sock"
+timeout 10s "$fixture/probe" "$sockets/forward.sock"
 printf 'after-forwards\n' >&"$shell_input"
 IFS= read -r -t 5 out <&"$shell_output" || fail "forwarding EOF closed shell input"
 [ "$out" = after-forwards ] || fail "unexpected later shell output '$out'"
