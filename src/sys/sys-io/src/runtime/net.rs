@@ -20,6 +20,7 @@ mod completed;
 mod config;
 mod device;
 mod devices;
+mod dhcp;
 mod half_open;
 mod icmp;
 mod packet_device;
@@ -41,6 +42,7 @@ pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
     device::self_test::TESTS,
     device::udp_policy_tests::TESTS,
     devices::self_test::TESTS,
+    dhcp::TESTS,
     half_open::self_test::TESTS,
     icmp::self_test::TESTS,
     packet_device::self_test::TESTS,
@@ -917,15 +919,21 @@ impl NetRuntime {
     fn update_dns_servers(&self, device_idx: usize, servers: Vec<IpAddr>) {
         {
             let mut inner = self.inner.borrow_mut();
-            if inner.dns_servers[device_idx] == servers {
-                return;
-            }
             inner.dns_servers[device_idx] = servers;
         }
 
         let this = self.clone();
         moto_sdk::async_runtime::LocalRuntime::spawn(async move {
             let _writer = this.dns_write_lock.lock().await;
+            let snapshot = dhcp::snapshot(&this.inner.borrow().devices);
+            match snapshot {
+                Ok(snapshot) => {
+                    if let Err(error) = this.fs.publish_dhcp(&snapshot).await {
+                        log::error!("failed to publish DHCP state: {error}");
+                    }
+                }
+                Err(error) => log::error!("failed to encode DHCP state: {error}"),
+            }
             let servers = {
                 let inner = this.inner.borrow();
                 let mut seen = HashSet::new();
@@ -1092,7 +1100,6 @@ pub(super) async fn init(
     channel_budget: Rc<channel_budget::ChannelBudget>,
 ) -> Result<Vec<Rc<virtio_async::virtio_net::NetDevice>>> {
     let config = config::load(&fs.root_fs()).await?;
-    fs.root_fs().publish_dhcp("[devices]\n").await?;
     log::debug!("NET cfg loaded:\n{config:#?}.");
 
     // Created before the devices: their rx/tx tasks bump the device counters.
@@ -1141,6 +1148,10 @@ pub(super) async fn init(
     for device in &virtio_devices {
         log::warn!("VirtioNET device {:?} not configured.", device.mac());
     }
+
+    fs.root_fs()
+        .publish_dhcp(&dhcp::snapshot(&devices)?)
+        .await?;
 
     if devices.iter().next().is_none() && vsock_device.is_none() {
         log::warn!(
