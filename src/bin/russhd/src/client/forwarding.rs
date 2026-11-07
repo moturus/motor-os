@@ -5,23 +5,25 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::task::Poll;
 
+use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
 use super::args::ConnectionOptions;
 use super::forward_args::{ListenAddress, TargetAddress};
+use super::socks;
 use super::transport::Peer;
 use crate::forward::{Tasks, memory_pressure, relay};
 
 #[derive(Default)]
 pub struct Listeners {
-    sockets: Vec<(TcpListener, TargetAddress)>,
+    sockets: Vec<(TcpListener, Option<TargetAddress>)>,
     next: usize,
 }
 
 pub struct Accepted {
     pub socket: TcpStream,
     pub originator: SocketAddr,
-    pub target: TargetAddress,
+    pub target: Option<TargetAddress>,
 }
 
 impl Accepted {
@@ -33,30 +35,67 @@ impl Accepted {
         job.spawn(async move {
             let result = async {
                 self.socket.set_nodelay(true)?;
-                let window = peer.receive_window();
-                let (channel, credit) = peer
-                    .channel_open_direct_tcpip_with_credit(
-                        &self.target.host,
-                        u32::from(self.target.port),
-                        self.originator.ip().to_string(),
-                        u32::from(self.originator.port()),
+                if let Some(target) = &self.target {
+                    forward(peer, self.socket, target, self.originator, None).await
+                } else {
+                    let mut socket = BufReader::with_capacity(1024, self.socket);
+                    let request = socks::negotiate(&mut socket).await?;
+                    forward(
+                        peer,
+                        socket,
+                        &request.target,
+                        self.originator,
+                        Some(&request),
                     )
                     .await
-                    .map_err(io::Error::other)?;
-                // An established relay owns its channel, not the connection.
-                drop(peer);
-                relay(channel, self.socket, credit, window, memory_pressure).await
+                }
             }
             .await;
             if let Err(error) = &result {
-                eprintln!(
-                    "ssh: forward to {}:{}: {error}",
-                    self.target.host, self.target.port
-                );
+                match &self.target {
+                    Some(target) => {
+                        eprintln!("ssh: forward to {}:{}: {error}", target.host, target.port)
+                    }
+                    None => eprintln!("ssh: dynamic forward: {error}"),
+                }
             }
             result
         });
     }
+}
+
+async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
+    peer: Arc<Peer>,
+    mut socket: S,
+    target: &TargetAddress,
+    originator: SocketAddr,
+    response: Option<&socks::Request>,
+) -> io::Result<()> {
+    let window = peer.receive_window();
+    let opened = peer
+        .channel_open_direct_tcpip_with_credit(
+            &target.host,
+            u32::from(target.port),
+            originator.ip().to_string(),
+            u32::from(originator.port()),
+        )
+        .await;
+    if let Some(request) = response
+        && let Err(error) = request.respond(&mut socket, opened.as_ref().err()).await
+    {
+        if let Ok((channel, credit)) = opened {
+            let (reader, writer) = channel.split();
+            drop((socket, credit, reader));
+            if let Err(cleanup) = writer.close().await {
+                log::debug!("closing failed SOCKS reply: {cleanup}");
+            }
+        }
+        return Err(error);
+    }
+    let (channel, credit) = opened.map_err(io::Error::other)?;
+    // An established relay owns its channel, not the connection.
+    drop(peer);
+    relay(channel, socket, credit, window, memory_pressure).await
 }
 
 impl Listeners {
@@ -158,6 +197,109 @@ mod tests {
     use super::super::forward_args::LocalForward;
     use super::*;
 
+    struct SocksServer(
+        tokio::sync::mpsc::UnboundedSender<(
+            russh::Channel<russh::server::Msg>,
+            russh::server::ChannelOpenHandle,
+            String,
+        )>,
+    );
+
+    impl russh::server::Handler for SocksServer {
+        type Error = russh::Error;
+        async fn auth_none(&mut self, _: &str) -> Result<russh::server::Auth, Self::Error> {
+            Ok(russh::server::Auth::Accept)
+        }
+        async fn channel_open_direct_tcpip(
+            &mut self,
+            channel: russh::Channel<russh::server::Msg>,
+            host: &str,
+            _: u32,
+            _: &str,
+            _: u32,
+            reply: russh::server::ChannelOpenHandle,
+            _: &mut russh::server::Session,
+        ) -> Result<(), Self::Error> {
+            self.0.send((channel, reply, host.into())).unwrap();
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn dynamic_jobs_wait_for_confirmation_and_preserve_buffered_payload() {
+        use super::super::args::{Destination, HostKeyPolicy};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let root = std::env::temp_dir().join(format!("motor-socks-relay-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            std::fs::create_dir(&root).unwrap();
+            let transport = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut options = options(Some("127.0.0.1"), false);
+            options.port = transport.local_addr().unwrap().port();
+            options.known_hosts = Some(root.join("known_hosts"));
+            options.host_key_policy = HostKeyPolicy::AcceptNew;
+            options.local_forwards[0].target = None;
+            let (opens, mut opened) = tokio::sync::mpsc::unbounded_channel();
+            let server = tokio::spawn(async move {
+                let config = Arc::new(russh::server::Config {
+                    keys: vec![russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::ssh_key::Algorithm::Ed25519).unwrap()],
+                    ..Default::default()
+                });
+                russh::server::run_stream(config, transport.accept().await.unwrap().0, SocksServer(opens)).await.unwrap().await
+            });
+            let destination = Destination::parse_with_default("127.0.0.1", "motor").unwrap();
+            let mut peer = super::super::transport::connect(&options, &destination).await.unwrap();
+            assert!(peer.authenticate_none("motor").await.unwrap().success());
+            peer.share_connection();
+            let peer = Arc::new(peer);
+            let mut listeners = Listeners::bind(&options).await.unwrap();
+            let address = listeners.sockets[0].0.local_addr().unwrap();
+            let tasks = Tasks::default();
+            for version in [4, 5] {
+                let mut application = TcpStream::connect(address).await.unwrap();
+                listeners.accept().await.unwrap().spawn(peer.clone(), &tasks);
+                let name = b"Unresolved.invalid.";
+                let mut wire = if version == 4 { vec![4, 1, 0, 80, 0, 0, 0, 1, 0] }
+                    else { vec![5, 1, 0, 5, 1, 0, 3, name.len() as u8] };
+                wire.extend(name);
+                if version == 4 { wire.push(0); } else { wire.extend([0, 80]); }
+                wire.extend(b"payload");
+                application.write_all(&wire).await.unwrap();
+                application.shutdown().await.unwrap();
+                if version == 5 {
+                    let mut method = [0; 2];
+                    application.read_exact(&mut method).await.unwrap();
+                    assert_eq!(method, [5, 0]);
+                }
+                let (channel, reply, host) = opened.recv().await.unwrap();
+                assert_eq!(host, "Unresolved.invalid.");
+                tokio::select! {
+                    biased;
+                    byte = application.read_u8() => panic!("SOCKS replied before SSH confirmation: {byte:?}"),
+                    () = std::future::ready(()) => {}
+                }
+                reply.accept().await;
+                let mut channel = channel.into_stream();
+                let mut bytes = Vec::new();
+                channel.read_to_end(&mut bytes).await.unwrap();
+                assert_eq!(bytes, b"payload");
+                channel.write_all(b"relayed").await.unwrap();
+                channel.shutdown().await.unwrap();
+                drop(channel);
+                let mut bytes = Vec::new();
+                application.read_to_end(&mut bytes).await.unwrap();
+                let response: &[u8] = if version == 4 { &[0, 90, 0, 0, 0, 0, 0, 0] }
+                    else { &[5, 0, 0, 1, 0, 0, 0, 0, 0, 0] };
+                assert_eq!(&bytes[..response.len()], response);
+                assert_eq!(&bytes[response.len()..], b"relayed");
+                tasks.wait_idle().await;
+            }
+            assert_eq!(Arc::strong_count(&peer), 1);
+            Arc::try_unwrap(peer).ok().unwrap().close().await.unwrap();
+            assert!(matches!(server.await.unwrap(), Ok(()) | Err(russh::Error::Disconnect)));
+            std::fs::remove_dir_all(root).unwrap();
+        }).await.expect("dynamic relay stalled");
+    }
+
     fn options(bind: Option<&str>, gateway_ports: bool) -> ConnectionOptions {
         let mut options = ConnectionOptions::default();
         options.gateway_ports = gateway_ports;
@@ -166,10 +308,10 @@ mod tests {
                 host: bind.map(str::to_owned),
                 port: 0,
             },
-            target: TargetAddress {
+            target: Some(TargetAddress {
                 host: "unresolved.invalid".into(),
                 port: 80,
-            },
+            }),
         }];
         options
     }
@@ -198,7 +340,7 @@ mod tests {
         let client = TcpStream::connect(address).await.unwrap();
         let accepted = listeners.accept().await.unwrap();
         assert_eq!(accepted.originator, client.local_addr().unwrap());
-        assert_eq!(accepted.target.host, "unresolved.invalid");
+        assert_eq!(accepted.target.unwrap().host, "unresolved.invalid");
     }
 
     #[tokio::test]
@@ -257,7 +399,7 @@ mod tests {
     async fn accept_rotates_among_ready_listeners() {
         let mut options = options(Some("127.0.0.1"), false);
         let mut other = options.local_forwards[0].clone();
-        other.target.host = "second.invalid".into();
+        other.target.as_mut().unwrap().host = "second.invalid".into();
         options.local_forwards.push(other);
         let mut listeners = Listeners::bind(&options).await.unwrap();
         let mut clients = Vec::new();
@@ -269,15 +411,15 @@ mod tests {
             );
         }
         assert_eq!(
-            listeners.accept().await.unwrap().target.host,
+            listeners.accept().await.unwrap().target.unwrap().host,
             "unresolved.invalid"
         );
         assert_eq!(
-            listeners.accept().await.unwrap().target.host,
+            listeners.accept().await.unwrap().target.unwrap().host,
             "second.invalid"
         );
         assert_eq!(
-            listeners.accept().await.unwrap().target.host,
+            listeners.accept().await.unwrap().target.unwrap().host,
             "unresolved.invalid"
         );
     }

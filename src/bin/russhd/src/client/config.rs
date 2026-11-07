@@ -393,7 +393,10 @@ mod tests {
         options.apply_o("ExitOnForwardFailure yes").unwrap();
         options.apply_o("ExitOnForwardFailure no").unwrap();
         assert_eq!(options.local_forwards.len(), 2);
-        assert_eq!(options.local_forwards[1].target.host, "::2");
+        assert_eq!(
+            options.local_forwards[1].target.as_ref().unwrap().host,
+            "::2"
+        );
         assert!(options.exit_on_forward_failure);
         for bad in [
             "LocalForward 8080:target:80",

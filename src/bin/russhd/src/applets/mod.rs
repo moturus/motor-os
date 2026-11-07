@@ -563,7 +563,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             [8080, 8081, 8082]
         );
-        assert_eq!(parsed.connection.local_forwards[1].target.host, "::2");
+        assert_eq!(
+            parsed.connection.local_forwards[1]
+                .target
+                .as_ref()
+                .unwrap()
+                .host,
+            "::2"
+        );
         for flags in [["-oGatewayPorts=no", "-g"], ["-g", "-oGatewayPorts=no"]] {
             let args = [flags.as_slice(), &["host"]].concat();
             assert!(parse_ssh(&strings(&args)).unwrap().connection.gateway_ports);

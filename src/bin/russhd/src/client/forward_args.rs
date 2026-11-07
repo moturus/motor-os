@@ -20,7 +20,8 @@ pub struct TargetAddress {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalForward {
     pub listen: ListenAddress,
-    pub target: TargetAddress,
+    /// No fixed target means a SOCKS listener.
+    pub target: Option<TargetAddress>,
 }
 
 impl ListenAddress {
@@ -61,11 +62,11 @@ impl LocalForward {
         match fields(value)?.as_slice() {
             [listen_port, target_host, target_port] => Ok(Self {
                 listen: ListenAddress::from_parts(None, listen_port)?,
-                target: TargetAddress::from_parts(target_host, target_port)?,
+                target: Some(TargetAddress::from_parts(target_host, target_port)?),
             }),
             [bind, listen_port, target_host, target_port] => Ok(Self {
                 listen: ListenAddress::from_parts(Some(bind), listen_port)?,
-                target: TargetAddress::from_parts(target_host, target_port)?,
+                target: Some(TargetAddress::from_parts(target_host, target_port)?),
             }),
             _ => Err(invalid()),
         }
@@ -74,7 +75,7 @@ impl LocalForward {
     pub fn parse_config(listen: &str, target: &str) -> Result<Self, ParseError> {
         Ok(Self {
             listen: ListenAddress::parse(listen)?,
-            target: TargetAddress::parse(target)?,
+            target: Some(TargetAddress::parse(target)?),
         })
     }
 }
