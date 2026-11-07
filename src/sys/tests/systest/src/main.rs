@@ -1347,6 +1347,10 @@ fn main() {
         block_mounts::devices(&args[2]);
         return;
     }
+    if args.len() == 2 && args[1] == "block-stress" {
+        block_mounts::stress();
+        return;
+    }
     if args.len() == 2 && args[1] == "mounts-none" {
         mounts::none_role();
         return;

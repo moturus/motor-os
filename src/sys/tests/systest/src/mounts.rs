@@ -318,7 +318,7 @@ pub(super) async fn delete_held_entries(
     result
 }
 
-fn memory() {
+pub(super) fn memory() {
     let result = moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().map_err(|err| err.to_string())?;
         let baseline = memfs_mount(&client).await?;

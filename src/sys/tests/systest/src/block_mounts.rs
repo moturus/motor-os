@@ -260,5 +260,85 @@ pub fn devices(phase: &str) {
         }
         client.flush().await.unwrap();
     });
+    let original = std::env::current_exe().unwrap();
+    let digest = |program: &std::path::Path| {
+        let output = std::process::Command::new(program)
+            .args(["cold-spawn-child", "digest"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stdout.starts_with(b"image-ok "));
+        output.stdout
+    };
+    let expected = digest(&original);
+    for (path, ..) in sources {
+        let program = std::path::Path::new(path).join("paging-probe");
+        if phase == "write" {
+            std::fs::copy(&original, &program).unwrap();
+            moto_rt::fs::set_perm(
+                program.to_str().unwrap(),
+                moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC,
+            )
+            .unwrap();
+        }
+        assert_eq!(digest(&program), expected);
+    }
     println!("block mounts: devices {phase} PASS");
+}
+
+pub fn stress() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    std::fs::create_dir_all(crate::DISK_TEMP_DIR).unwrap();
+    // Exercise the unchanged refusal floor with all disk owners/caches present.
+    crate::mounts::memory();
+    let barrier = std::sync::Barrier::new(5);
+    std::thread::scope(|scope| {
+        for (index, path) in ["/user", "/user/data", "/user/data/nested", "/user/bare"]
+            .into_iter()
+            .enumerate()
+        {
+            let barrier = &barrier;
+            scope.spawn(move || {
+                let name = format!("{path}/concurrent-io");
+                let mut file = std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .read(true)
+                    .write(true)
+                    .open(&name)
+                    .unwrap();
+                let mut bytes = vec![0; 65536];
+                barrier.wait();
+                for round in 0..8 {
+                    let value = (index * 19 + round) as u8;
+                    bytes.fill(value);
+                    file.seek(SeekFrom::Start(0)).unwrap();
+                    for _ in 0..64 {
+                        file.write_all(&bytes).unwrap();
+                    }
+                    file.sync_all().unwrap();
+                    file.seek(SeekFrom::Start(0)).unwrap();
+                    for _ in 0..64 {
+                        bytes.fill(!value);
+                        file.read_exact(&mut bytes).unwrap();
+                        assert!(bytes.iter().all(|byte| *byte == value));
+                    }
+                }
+                drop(file);
+                std::fs::remove_file(name).unwrap();
+            });
+        }
+        scope.spawn(|| {
+            let bytes = vec![37; 32768];
+            barrier.wait();
+            for _ in 0..8 {
+                let mut file = std::fs::File::create("/none/tmp/concurrent-memory").unwrap();
+                for _ in 0..1024 {
+                    file.write_all(&bytes).unwrap();
+                }
+                drop(file);
+                std::fs::remove_file("/none/tmp/concurrent-memory").unwrap();
+            }
+        });
+    });
+    println!("block mounts: concurrent I/O and memfs pressure PASS");
 }

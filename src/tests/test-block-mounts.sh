@@ -146,6 +146,13 @@ TOML
 "$imager" block-mount-fixture config "$TEST_VM_IMG_DIR/$MOTO_IMAGE" "$SCRATCH/devices.toml"
 start_guest devices-write --extra-disk parted.img --extra-disk bare.img --extra-disk unused.img
 vm_ssh '/user/bin/systest block-devices write'
+deadline=$((SECONDS + 10))
+until vm_ssh 'stats providers' | awk '$1 == 2 && $2 == "sys-io" { ready=1 } END { exit !ready }'; do
+  serial_test_vm_alive || fail 'guest exited before stats registration'
+  [ "$SECONDS" -lt "$deadline" ] || fail 'sys-io did not register its stats provider'
+  sleep 0.1
+done
+vm_ssh '/user/bin/systest block-stress'
 stop_guest
 echo 'read_only = true' >> "$SCRATCH/devices.toml"
 "$imager" block-mount-fixture config "$TEST_VM_IMG_DIR/$MOTO_IMAGE" "$SCRATCH/devices.toml"

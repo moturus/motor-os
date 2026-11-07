@@ -8,7 +8,63 @@ pub(super) const TESTS: &[crate::self_test::SelfTest] = &[
     ("fs::mount_records", records),
     ("fs::replace_without_traverse", replace_without_traverse),
     ("fs::quarantined_unlock", quarantined_unlock),
+    ("fs::flush_after_error", flush_after_error),
 ];
+
+fn flush_after_error() -> std::result::Result<(), String> {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+    moto_sdk::async_runtime::LocalRuntime::new()
+        .block_on(async {
+            let runtime = runtime()?;
+            let mut entries = Vec::new();
+            for index in 1..=3 {
+                let id = runtime.mounts.borrow_mut().insert(
+                    memfs(8192)?,
+                    mounts::MountPoint {
+                        mount: 0,
+                        shadowed: index,
+                        path: format!("/flush-{index}"),
+                    },
+                )?;
+                entries.push(mounts::Resolved::on_mount(&runtime.mounts, id, 0)?);
+            }
+            let first = entries[0].write().await?;
+            let read_only = entries[1].write().await?;
+            let last = entries[2].write().await?;
+            runtime.mounts.borrow_mut().find_mut(2).unwrap().read_only = true;
+            ensure(
+                runtime.root()?.check_local(1 << 112).is_err(),
+                "quarantine flush root",
+            )?;
+            let mut flush = core::pin::pin!(mounts::flush(&runtime.mounts));
+            // The first failure must not prevent later writable mounts from locking.
+            ensure(
+                poll_fn(|cx| Poll::Ready(flush.as_mut().poll(cx)))
+                    .await
+                    .is_pending(),
+                "flush stopped before first healthy mount",
+            )?;
+            drop(first);
+            ensure(
+                poll_fn(|cx| Poll::Ready(flush.as_mut().poll(cx)))
+                    .await
+                    .is_pending(),
+                "flush stopped before last healthy mount",
+            )?;
+            drop(last);
+            match poll_fn(|cx| Poll::Ready(flush.as_mut().poll(cx))).await {
+                Poll::Ready(result) => ensure(
+                    result.is_err_and(|error| error.kind() == ErrorKind::InvalidData),
+                    "flush lost original error",
+                )?,
+                Poll::Pending => return Err(std::io::Error::other("flush locked read-only mount")),
+            }
+            drop(read_only);
+            Ok(())
+        })
+        .map_err(|error: std::io::Error| error.to_string())
+}
 
 pub(super) fn memfs(cap: u64) -> Result<FS> {
     Ok(FS::MemFs(memfs::MemFs::new(memfs::MemFsConfig {
