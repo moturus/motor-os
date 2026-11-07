@@ -36,11 +36,11 @@ Developer-image validation remains release-only.
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
 | 2 | Complete: step 2a published `2a07f3a` and passed its separate 3+3 and developer-image gates. Step 2b integrates direct opens and optional configuration, resolves SDK/sys from crates.io, and passes 183 host tests, clippy, native builds, and its own 3+3 image gates | None |
 | 3 | Complete: guest jump transfers, native server forwarding/DNS/100-channel probe, shipped configuration and docs pass 3/3 release, 3/3 debug, and the complete developer-image release gate | None |
-| 4 | Published `d4a1cc4` passed its complete 3+3 and developer-image gates. The user also published repair/API revision `d16a1df`; `7e681fb1` and `10232029` pin it and integrate the callback and server-credit contracts. All 191 component tests, clippy and native release builds pass | Validate the repair together with the next milestone's image gates |
-| 5 | `-L`/`-N`, published fork repairs and guest coverage are integrated. All 218 component tests, release protocol checks, clippy and native builds pass. An image-gate hang exposed a test port-allocation race; `c1ae1c5e` and `8a9f665d` retain reservations through listener startup. The fresh batch has passed 3/3 release image runs with unchanged sources; debug and developer-release phases continue | Complete milestone gates; validate the subsequent shared close-handshake repair after fork publication |
-| 6 | Prepared separately in `build/russh-rebase/step6-worktree`: bounded SOCKS4/4a/5, `-D`, configuration and relay pass 224 component tests plus the offline mixed-forward oracle, clippy and Motor release builds. Shared probe builds natively and passes on the host. `052c0405` also retains dynamic fixture port reservations; all three dynamic cases and clippy pass | Guest validation; integrate after step 5; milestone gates |
-| 7 | In isolated `step7-worktree`, loopback binds, exact registration/cancellation, scoped relays, GatewayPorts and 100 concurrent pending opens are committed. All 240 component tests, 58 imager tests, clippy and native builds pass | Guest validation; integrate after step 6; milestone gates |
-| 8 | In isolated `step8-worktree`, `7598bac4` and `59e42fa0` implement remote forwarding arguments, configuration, exact authorization and setup ordering. Client wiring, the close-handshake repair and copied public contract tests pass all 252 component tests, clippy and both native release builds against the local fork. Allocated-port sessionless forwarding and large response draining after command exit both pass | Publish and pin the fork repair; complete client integration, coverage and milestone gates |
+| 4 | Complete: both the original `d4a1cc4` snapshot and subsequent `d16a1df` callback/server-credit repairs pass their main-image 3+3 gates and complete developer-image release gates | None |
+| 5 | Complete: `-L`/`-N`, published fork repairs and guest coverage pass all 218 component tests, clippy, native builds, 3/3 release, 3/3 debug and the complete developer-release gate. The test port-allocation race is fixed by `c1ae1c5e` and `8a9f665d`; the validated snapshot stays unchanged across all runs | None; the subsequent shared close repair is integrated with step 6 |
+| 6 | Integrated through `9c6dc207`: bounded SOCKS4/4a/5, `-D`, configuration, shared probe, retained fixture reservations and the published close fix. All 234 component tests, clippy and both Motor release binaries pass. The combined `-L`/`-D` guest check and separate `step6-main` 3+3 image batch are running | Complete guest validation and milestone gates |
+| 7 | Main-based integration `b4fa86f0` in `step7-integration-worktree` includes loopback binds, exact registration/cancellation, scoped relays, GatewayPorts and 100 concurrent pending opens. All 249 component tests, 58 imager tests, clippy and both native release binaries pass | Guest validation; integrate after step 6; separate 3+3 milestone gates |
+| 8 | Main-based integration `a18cbf7d` in `step8-integration-worktree` includes the complete `-R` runtime, authorization, ordering, allocated ports, drain, hostile-peer coverage, route/copy isolation, help and docs. It also fixes local-setup and resolver-worker shutdown. All 269 component tests, clippy and both native release binaries pass against published `e9a05c1` | Guest validation; integrate after step 7; separate 3+3 milestone gates |
 
 ### Remote forwarding: close-handshake repair in the external fork
 
@@ -50,7 +50,7 @@ command exits. Temporary byte counters show the client enqueues the full
 its EOF or close. The original failure and two diagnostic traces are retained in
 `build/russh-rebase/step8-*diagnostic.log`; all temporary counters are removed.
 
-The repair is being implemented in the external russh fork at
+The repair is implemented in the external russh fork at
 `build/russh-rebase/fork`, on `motor-v0.65.1`. Forwarding explicitly opts into
 application-controlled close through its receive-credit handle: the application
 drains its socket before sending close, and keeps its task alive until both close
@@ -64,8 +64,8 @@ drop and transport loss. Restoring the early acknowledgement in a detached
 diagnostic checkout fails the new wire regression. The complete fork suite passes
 323 active tests, with eight existing ignored doctests, in its final clean rebuild;
 selected clippy checks pass. Fork commits `3eb3ccd` (implementation and lifecycle
-tests) and `e9a05c1` (wire regressions) are ready on `motor-v0.65.1` for the user
-to push. Reusing a target directory for the counterfactual made a later check
+tests) and `e9a05c1` (wire regressions) are published on `motor-v0.65.1`; the remote
+revision is verified. Reusing a target directory for the counterfactual made a later check
 link that counterfactual artifact; its path is preserved in
 `step8-close-handshake-shared-target-diagnosis.log`, and the fork package outputs
 were cleaned before the final rebuild.
@@ -75,7 +75,40 @@ successful relay task through the handshake. Its reverse-EOF fixture now reads
 the required close before awaiting completion. The public wire tests are copied
 under `src/bin/russhd/tests`, so `full-test.sh` runs them transitively. The isolated
 manifest and lock are restored byte-for-byte after local-fork validation. The
-user will push the fork commits before the main dependency pin changes.
+published pin and contracts are integrated as `88430c6d`, with the relay repair
+in `4aad569b`. Their image validation runs with the dynamic-forwarding milestone.
+
+The additional client checks reject unrequested exact bind keys without dialing,
+handle an open serialized before its allocation reply, reject invalid allocations
+and failed requests, wait for later setup replies, and deny new opens during a
+command-exit drain. Real jumps and occupied remote ports prove configuration is
+applied only to the final SSH destination, with SCP/SFTP loading it without
+opening listeners. The OpenSSH `-G` oracle runs offline. Logs use
+`step8-remote-*` and `step8-complete-*` in `build/russh-rebase/`.
+
+`a18cbf7d` fixes two further shutdown defects found during integration review.
+Local listener setup previously awaited resolution without observing connection
+loss, retaining earlier bound listeners. A controlled single-worker test holds
+only loopback resolution and fails on that old path; setup now selects against
+the existing peer-close signal and releases its partial listener set.
+SSH runtime destruction also waited for blocking resolver work whose caller had
+already been cancelled. After session teardown has drained or cancelled its
+owned work, SSH now uses Tokio's background runtime shutdown and preserves its
+original result. A second controlled test records completion before releasing
+the worker, failing on the old runtime lifecycle. Both original failures and the
+passing complete validation remain in `step8-local-setup-*`,
+`step8-runtime-shutdown-*` and `step8-final-cancellation-*` logs. No timeout or
+retry policy changed.
+
+The preceding `step5-reserved` snapshot completes all six main-image gates with
+zero source-check status. Its complete developer-release gate also passes,
+including ordinary and service Wasm checks on both 256 MiB images. Their evidence
+is retained separately under `step5-reserved-dev-wasm-evidence/run-1` and `run-2`.
+
+## Implementation history
+
+The checkpoint notes below retain intermediate designs, failures and validation.
+The progress table above describes the current integrated state.
 
 ### Step 2b: relay foundation
 
