@@ -43,8 +43,8 @@ pub use unix::{
 mod motor;
 #[cfg(not(unix))]
 pub use motor::{
-    CAPS_ENV_KEY, detach_cap_grant, exit_status_code, kill, ordinary_child_cap_grant,
-    set_disposition, wait_child,
+    CAPS_ENV_KEY, ProcessRole, detach_cap_grant, exit_status_code, kill, ordinary_child_cap_grant,
+    own_role, set_disposition, wait_child,
 };
 
 // ---- stdin -----------------------------------------------------------------

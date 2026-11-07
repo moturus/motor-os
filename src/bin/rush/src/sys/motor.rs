@@ -71,6 +71,15 @@ pub fn kill(pid: u64, signo: i32) -> Result<(), KillError> {
     })
 }
 
+// ---- role ------------------------------------------------------------------
+
+pub use moto_sys::caps::ProcessRole;
+
+/// The shell's own role, derived from its immutable capability word.
+pub fn own_role() -> ProcessRole {
+    ProcessRole::from_caps(moto_sys::ProcessStaticPage::get().capabilities)
+}
+
 // ---- detached spawn --------------------------------------------------------
 
 /// The env key through which a spawn requests its child's capability mask.

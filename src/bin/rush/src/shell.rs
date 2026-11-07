@@ -670,10 +670,23 @@ impl Shell {
 /// one rmux's status line picks its current window out in, so a rush under an
 /// rmux reads as one thing. There is no amber among the basic sixteen, which is
 /// why these escapes are longer than a `1;34m` would be.
+///
+/// On Motor OS amber is the Interactive role's color; a System shell is red
+/// (196) and a None shell light green (120, #87ff87), from the same palette.
 pub fn default_prompt(name: &str) -> &'static str {
     match name {
         #[cfg(target_os = "motor")]
-        "PS1" => "\x1b[1;38;5;214mmotor-os\x1b[0m:\x1b[1;38;5;214m$PWD$\x1b[0m ",
+        "PS1" => match crate::sys::own_role() {
+            crate::sys::ProcessRole::System => {
+                "\x1b[1;38;5;196mmotor-os\x1b[0m:\x1b[1;38;5;196m$PWD$\x1b[0m "
+            }
+            crate::sys::ProcessRole::Interactive => {
+                "\x1b[1;38;5;214mmotor-os\x1b[0m:\x1b[1;38;5;214m$PWD$\x1b[0m "
+            }
+            crate::sys::ProcessRole::None => {
+                "\x1b[1;38;5;120mmotor-os\x1b[0m:\x1b[1;38;5;120m$PWD$\x1b[0m "
+            }
+        },
         #[cfg(not(target_os = "motor"))]
         "PS1" => "\x1b[1;38;5;214mrush\x1b[0m:\x1b[1;38;5;214m$PWD$\x1b[0m ",
         "PS2" => "> ",
