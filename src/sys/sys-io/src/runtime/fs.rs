@@ -419,6 +419,7 @@ impl FsRuntime {
     }
 
     fn admit_allocation(&self, command: u16, destination: &mounts::Resolved) -> Result<()> {
+        destination.writable()?;
         if memory::needs_memory(command, destination.kind) {
             self.free_caches.check(&self.fs_stats)?;
         }
@@ -1601,6 +1602,8 @@ async fn move_entry(
 ) -> Result<()> {
     let entry = runtime.resolve(entry)?;
     let parent = runtime.resolve(parent)?;
+    entry.writable()?;
+    parent.writable()?;
     entry.protect_root()?;
     if entry.mount != parent.mount {
         // Root protection precedes CrossesDevices, including the destination.

@@ -30,6 +30,7 @@ pub(super) struct Mount {
     pub kind: MountKind,
     pub parent: Option<MountPoint>,
     pub corrupted: bool,
+    pub read_only: bool,
     pub source: Option<MountBlockSource>,
 }
 
@@ -61,6 +62,7 @@ impl MountTable {
                 fs: Rc::new(LocalRwLock::new(root)),
                 parent: None,
                 corrupted: false,
+                read_only: false,
                 source: None,
             }],
             next_id: 1,
@@ -112,6 +114,7 @@ impl MountTable {
             fs: Rc::new(LocalRwLock::new(fs)),
             parent: Some(parent),
             corrupted: false,
+            read_only: false,
             source: None,
         });
         self.next_id += 1;
@@ -204,10 +207,19 @@ impl Resolved {
     }
 
     pub async fn write(&self) -> Result<LocalRwLockWriteGuard<'_, FS>> {
-        self.healthy()?;
+        self.writable()?;
         let guard = self.fs.write().await;
-        self.healthy()?;
+        self.writable()?;
         Ok(guard)
+    }
+
+    pub fn writable(&self) -> Result<()> {
+        self.healthy()?;
+        if self.table.borrow().healthy(self.mount)?.read_only {
+            Err(super::map_native_error(moto_rt::Error::NotAllowed))
+        } else {
+            Ok(())
+        }
     }
 
     /// Backend output validation; never apply this check to a client ID.
@@ -315,7 +327,14 @@ pub(super) async fn flush(table: &Rc<RefCell<MountTable>>) -> Result<()> {
     let mut first_error = None;
     let mut corrupted = false;
     for index in 0..count {
-        let id = table.borrow().iter().nth(index).unwrap().id;
+        let id = {
+            let mounts = table.borrow();
+            let mount = mounts.iter().nth(index).unwrap();
+            if mount.read_only && !mount.corrupted {
+                continue;
+            }
+            mount.id
+        };
         let result = async {
             let entry = Resolved::on_mount(table, id, ROOT_ID)?;
             let mut fs = entry.write().await?;
@@ -348,7 +367,7 @@ pub(super) async fn info(table: &Rc<RefCell<MountTable>>, cursor: u32) -> Result
             kind: mount.kind,
             path: mount.path().to_owned(),
             corrupted: mount.corrupted,
-            read_only: false,
+            read_only: mount.read_only,
             source: mount.source,
             used: None,
             entries: None,

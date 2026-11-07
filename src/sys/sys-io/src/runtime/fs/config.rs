@@ -391,14 +391,25 @@ pub(super) async fn load(
     caches: &memory::FreeCaches,
     devices: &mut Devices,
 ) -> Result<()> {
-    let Some(bytes) = read_root_file(table, "/system/cfg/sys-fs.toml").await? else {
-        return Ok(());
-    };
+    let bytes = read_root_file(table, "/system/cfg/sys-fs.toml")
+        .await?
+        .unwrap_or_default();
     let text = std::str::from_utf8(&bytes).map_err(|err| invalid(err.to_string()))?;
     let source = table.borrow().find(0).and_then(|mount| mount.source);
     let config = parse(text, source, super::block_cache_blocks())?;
+    if let Some(source) = source
+        && devices.read_only(source)?
+        && !config.root_read_only
+    {
+        return Err(invalid(format!(
+            "root /, {source:?}: writable mount on read-only device"
+        )));
+    }
     for (index, mount) in config.mounts.iter().enumerate() {
-        if let Backend::MotorFs { source, .. } = mount.backend {
+        if let Backend::MotorFs {
+            source, read_only, ..
+        } = mount.backend
+        {
             devices.resolve(source).await.map_err(|error| {
                 invalid(format!(
                     "mount {} at {:?}, {source:?}: {error}",
@@ -406,18 +417,24 @@ pub(super) async fn load(
                     mount.path
                 ))
             })?;
+            if devices.read_only(source)? && !read_only {
+                return Err(invalid(format!(
+                    "mount {} at {:?}, {source:?}: writable mount on read-only device",
+                    index + 1,
+                    mount.path
+                )));
+            }
         }
     }
     // Later patches enable these paths; never silently ignore a requested mount.
-    if config.root_read_only
-        || config
-            .mounts
-            .iter()
-            .any(|mount| matches!(mount.backend, Backend::MotorFs { .. }))
+    if config
+        .mounts
+        .iter()
+        .any(|mount| matches!(mount.backend, Backend::MotorFs { .. }))
     {
         return Err(std::io::Error::new(
             ErrorKind::Unsupported,
-            "block mounts and read-only mounts are not enabled yet",
+            "additional block mounts are not enabled yet",
         ));
     }
     for mount in config.mounts {
@@ -426,6 +443,11 @@ pub(super) async fn load(
             .await
             .inspect_err(|err| log::error!("Cannot mount memfs at {path}: {err}"))?;
     }
+    table.borrow_mut().find_mut(0).unwrap().read_only = config.root_read_only;
+    log::info!(
+        "mounted root 0 at /, {}",
+        if config.root_read_only { "ro" } else { "rw" }
+    );
     Ok(())
 }
 

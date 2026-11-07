@@ -145,6 +145,69 @@ async fn requests() -> Result<()> {
         "copy data",
     )?;
 
+    // Exercise the mount gate independently of its backend. Memfs remains
+    // writable in configuration; these isolated flags model Motor FS mounts.
+    for ro_mount in [0, id] {
+        runtime
+            .mounts
+            .borrow_mut()
+            .find_mut(ro_mount)
+            .unwrap()
+            .read_only = true;
+        let (ro_file, rw_file, ro_parent, rw_parent) = if ro_mount == 0 {
+            (source, entry, 0, mounted.id)
+        } else {
+            (entry, source, mounted.id, 0)
+        };
+        let ro = runtime.resolve(ro_file)?;
+        ensure(ro.read().await.is_ok(), "read-only read lock")?;
+        ensure(
+            ro.write().await.err().unwrap().raw_os_error() == Some(moto_rt::E_NOT_ALLOWED as i32),
+            "read-only write lock",
+        )?;
+        for role in [Role::System, Role::Interactive, Role::None] {
+            for replace in [false, true] {
+                for (file, parent) in [(ro_file, rw_parent), (rw_file, ro_parent)] {
+                    ensure(
+                        move_entry(&runtime, role, file, parent, "moved", replace)
+                            .await
+                            .unwrap_err()
+                            .raw_os_error()
+                            == Some(moto_rt::E_NOT_ALLOWED as i32),
+                        "read-only rename must precede CrossesDevices",
+                    )?;
+                }
+            }
+            ensure(
+                copy_file_range(&runtime, role, ro_file, 0, rw_file, 0, 1).await? == 1,
+                "copy out of read-only mount",
+            )?;
+            for size in [0, 1] {
+                ensure(
+                    copy_file_range(&runtime, role, rw_file, 0, ro_file, 0, size)
+                        .await
+                        .unwrap_err()
+                        .raw_os_error()
+                        == Some(moto_rt::E_NOT_ALLOWED as i32),
+                    "copy into read-only mount",
+                )?;
+            }
+        }
+        mounts::flush(&runtime.mounts).await?;
+        if ro_mount == 0 {
+            ensure(
+                runtime.resolve(shadowed)?.write().await.is_ok(),
+                "writable mount under read-only root",
+            )?;
+        }
+        runtime
+            .mounts
+            .borrow_mut()
+            .find_mut(ro_mount)
+            .unwrap()
+            .read_only = false;
+    }
+
     let listener = io_channel::listen("sys-io-mount-test");
     let (client, mut responses) =
         io_channel::connect("sys-io-mount-test").map_err(map_native_error)?;

@@ -33,6 +33,7 @@ struct Owner {
     inbox: channel::Sender<block_io::Message>,
     capacity: u64,
     flush_supported: bool,
+    read_only: bool,
     mbr: Option<Mbr>,
     root_header: Option<VirtioIoBuf>,
 }
@@ -105,6 +106,7 @@ impl Devices {
                 inbox: sender,
                 capacity: block.capacity(),
                 flush_supported: block.flush_supported(),
+                read_only: block.read_only(),
                 mbr: None,
                 root_header: None,
             });
@@ -143,6 +145,10 @@ impl Devices {
         Source::new(identity, offset, sectors, owner.capacity)
     }
 
+    pub fn read_only(&mut self, source: MountBlockSource) -> Result<bool> {
+        Ok(self.owner(source.device)?.read_only)
+    }
+
     pub async fn open(&mut self, source: Source, cache_blocks: usize) -> Result<FS> {
         let owner = self.owner(source.identity.device)?;
         let mut partition = VirtioPartition::from_virtio_bd(
@@ -155,7 +161,17 @@ impl Devices {
         if let Some(header) = owner.root_header.take() {
             partition.seed_first_block(header);
         }
-        let fs = motor_fs::MotorFs::open_with_cache_size(Box::new(partition), cache_blocks).await?;
+        let recovery = if owner.read_only {
+            motor_fs::RecoveryPolicy::RequireClean
+        } else {
+            motor_fs::RecoveryPolicy::Recover
+        };
+        let fs = motor_fs::MotorFs::open_with_recovery_policy(
+            Box::new(partition),
+            cache_blocks,
+            recovery,
+        )
+        .await?;
         Ok(FS::MotorFs(fs))
     }
 }
