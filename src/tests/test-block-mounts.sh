@@ -155,4 +155,120 @@ vm_ssh '/user/bin/systest block-devices read-only'
 vm_ssh findmnt
 stop_guest
 [ "$(sha256sum "$TEST_VM_IMG_DIR/bare.img")" = "$bare_before" ] || fail 'read-only bare device changed'
+
+reject_guest() {
+  local name="$1" diagnostic="$2"
+  shift 2
+  CONSOLE_LOG="/tmp/test-block-mounts-$BUILD-$VMM-$name.log"
+  SERIAL_VM_HAS_SSH=0
+  start_serial_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$CONSOLE_LOG" "$SCRATCH/console-in" "$@"
+  local deadline=$((SECONDS + 30))
+  until grep -Fq "$diagnostic" "$CONSOLE_LOG"; do
+    if ! serial_test_vm_alive; then
+      grep -Fq "$diagnostic" "$CONSOLE_LOG" || fail "guest exited without expected diagnostic: $diagnostic"
+      break
+    fi
+    [ "$SECONDS" -lt "$deadline" ] || fail "missing rejection: $diagnostic"
+    sleep 0.1
+  done
+  ! grep -Fq 'most services up' "$CONSOLE_LOG" || fail 'failed configuration published services'
+  if ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=2 -o ConnectionAttempts=1 \
+      motor@192.168.4.2 /system/bin/rush -c true >/dev/null 2>&1; then
+    fail 'rejected configuration accepted a filesystem client'
+  fi
+  # Signal only the owned VMM; CHV's PTY wrapper reaps its child normally.
+  local signal_pid="$VMM_PID" status=0
+  [ "$VMM" != chv ] || signal_pid="$VM_CHILD_PID"
+  if kill -0 "$signal_pid" 2>/dev/null; then
+    kill "$signal_pid" 2>/dev/null || ! kill -0 "$signal_pid" 2>/dev/null ||
+      fail 'could not terminate rejected guest'
+  fi
+  serial_test_wait_exit "$VMM_PID" 10 || fail 'rejected guest did not terminate'
+  wait "$VMM_PID" || status=$?
+  if [ -n "$VM_CHILD_PID" ] && kill -0 "$VM_CHILD_PID" 2>/dev/null; then
+    fail 'VMM child survived rejected boot'
+  fi
+  VMM_PID=''
+  VM_CHILD_PID=''
+  case "$VMM:$status" in
+    qemu:0|qemu:33|qemu:143|chv:0|chv:143|fc:0|fc:143) ;;
+    *) fail "rejected boot exit status $status" ;;
+  esac
+  SERIAL_VM_HAS_SSH=1
+}
+
+# Both data-only MBR disks and whole-device files must obey the backing flag.
+for format in parted bare; do
+  cp --sparse=always "$SCRATCH/partitions/root.img" "$TEST_VM_IMG_DIR/recovery-root.img"
+  cp --sparse=always "$SCRATCH/partitions/$format.img" "$TEST_VM_IMG_DIR/recovery-data.img"
+  cp "$ROOT_DIR/img_files/test-ro-root/system/cfg/sys-fs.toml" "$SCRATCH/recovery.toml"
+  cat >> "$SCRATCH/recovery.toml" <<'TOML'
+
+[[mount]]
+path = "/user/data"
+type = "motor-fs"
+device = 1
+TOML
+  [ "$format" != parted ] || echo 'partition = 1' >> "$SCRATCH/recovery.toml"
+  cp "$SCRATCH/recovery.toml" "$SCRATCH/recovery-writable.toml"
+  echo 'read_only = true' >> "$SCRATCH/recovery.toml"
+  export MOTO_IMAGE=recovery-root.img
+  "$imager" block-mount-fixture config "$TEST_VM_IMG_DIR/$MOTO_IMAGE" "$SCRATCH/recovery.toml"
+  data_before="$(sha256sum "$TEST_VM_IMG_DIR/recovery-data.img")"
+  start_guest "$format-clean-ro" --extra-disk-ro recovery-data.img
+  vm_ssh 'cat /user/data/label'
+  stop_guest
+  [ "$(sha256sum "$TEST_VM_IMG_DIR/recovery-data.img")" = "$data_before" ] || fail 'clean read-only data changed'
+  "$imager" block-mount-fixture config "$TEST_VM_IMG_DIR/$MOTO_IMAGE" "$SCRATCH/recovery-writable.toml"
+  reject_guest "$format-writable-on-ro" 'writable mount on read-only device' --extra-disk-ro recovery-data.img
+  [ "$(sha256sum "$TEST_VM_IMG_DIR/recovery-data.img")" = "$data_before" ] || fail 'rejected writable data changed'
+  "$imager" block-mount-fixture config "$TEST_VM_IMG_DIR/$MOTO_IMAGE" "$SCRATCH/recovery.toml"
+  "$imager" block-mount-fixture dirty "$TEST_VM_IMG_DIR/recovery-data.img"
+  dirty_before="$(sha256sum "$TEST_VM_IMG_DIR/recovery-data.img")"
+  reject_guest "$format-dirty-ro" 'Motor FS journal recovery required on read-only backing' --extra-disk-ro recovery-data.img
+  [ "$(sha256sum "$TEST_VM_IMG_DIR/recovery-data.img")" = "$dirty_before" ] || fail 'dirty read-only data changed'
+  start_guest "$format-recover-ro-mount" --extra-disk recovery-data.img
+  vm_ssh '[ -d /user/data/recovery-probe ] && cat /user/data/label'
+  stop_guest
+  "$imager" block-mount-fixture check-recovery "$TEST_VM_IMG_DIR/recovery-data.img"
+done
+
+root_formats=(mbr)
+[ "$VMM" = qemu ] || root_formats+=(bare)
+for format in "${root_formats[@]}"; do
+  root="$TEST_VM_IMG_DIR/recovery-root-$format.img"
+  if [ "$format" = mbr ]; then
+    cp --sparse=always "$image" "$root"
+  else
+    "$imager" block-mount-fixture extract-root "$image" "$root"
+  fi
+  export MOTO_IMAGE="${root##*/}"
+  root_before="$(sha256sum "$root")"
+  start_guest "root-$format-clean-ro" --root-read-only
+  vm_ssh '/user/bin/systest block-ro-root'
+  stop_guest
+  [ "$(sha256sum "$root")" = "$root_before" ] || fail 'clean read-only root changed'
+  sed 's/read_only = true/read_only = false/' \
+    "$ROOT_DIR/img_files/test-ro-root/system/cfg/sys-fs.toml" > "$SCRATCH/root-writable.toml"
+  "$imager" block-mount-fixture config "$root" "$SCRATCH/root-writable.toml"
+  root_before="$(sha256sum "$root")"
+  reject_guest "root-$format-writable-on-ro" 'writable mount on read-only device' --root-read-only
+  [ "$(sha256sum "$root")" = "$root_before" ] || fail 'rejected writable root changed'
+  "$imager" block-mount-fixture config "$root" "$ROOT_DIR/img_files/test-ro-root/system/cfg/sys-fs.toml"
+  "$imager" block-mount-fixture dirty "$root"
+  root_before="$(sha256sum "$root")"
+  reject_guest "root-$format-dirty-ro" 'Motor FS journal recovery required on read-only backing' --root-read-only
+  [ "$(sha256sum "$root")" = "$root_before" ] || fail 'dirty read-only root changed'
+  start_guest "root-$format-recover-ro-mount"
+  vm_ssh '[ -d /recovery-probe ] && /user/bin/systest block-ro-root'
+  stop_guest
+  "$imager" block-mount-fixture check-recovery "$root"
+done
+"$imager" resize -i "$image" -o "$TEST_VM_IMG_DIR/resized-root.img" --size 256M
+export MOTO_IMAGE=resized-root.img
+resized_before="$(sha256sum "$TEST_VM_IMG_DIR/$MOTO_IMAGE")"
+start_guest resized-root
+vm_ssh '/user/bin/systest block-ro-root'
+stop_guest
+[ "$(sha256sum "$TEST_VM_IMG_DIR/$MOTO_IMAGE")" = "$resized_before" ] || fail 'resized read-only root changed'
 echo "-------- TEST-BLOCK-MOUNTS PASS ---------"

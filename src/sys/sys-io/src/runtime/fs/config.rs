@@ -80,6 +80,13 @@ fn invalid(message: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> std:
     std::io::Error::new(ErrorKind::InvalidInput, message)
 }
 
+fn source_name(source: MountBlockSource) -> String {
+    match source.partition {
+        Some(slot) => format!("virtio{}p{slot}", source.device),
+        None => format!("virtio{}", source.device),
+    }
+}
+
 fn size(size: Size) -> Result<u64> {
     match size {
         Size::Bytes(bytes) => Ok(bytes),
@@ -447,16 +454,18 @@ pub(super) async fn load(
         {
             let extent = devices.resolve(source).await.map_err(|error| {
                 invalid(format!(
-                    "mount {} at {:?}, {source:?}: {error}",
+                    "mount {} at {:?}, {}: {error}",
                     index + 1,
-                    mount.path
+                    mount.path,
+                    source_name(source)
                 ))
             })?;
             if devices.read_only(source)? && !read_only {
                 return Err(invalid(format!(
-                    "mount {} at {:?}, {source:?}: writable mount on read-only device",
+                    "mount {} at {:?}, {}: writable mount on read-only device",
                     index + 1,
-                    mount.path
+                    mount.path,
+                    source_name(source)
                 )));
             }
             resolved.push(Some(extent));
@@ -469,7 +478,7 @@ pub(super) async fn load(
             "entry {}, path {:?}, source {}",
             index + 1,
             mount.path,
-            source.map_or_else(|| "memfs".into(), |source| format!("{:?}", source.identity))
+            source.map_or_else(|| "memfs".into(), |source| source_name(source.identity))
         );
         let result = match mount.backend {
             Backend::MemFs { .. } => mount_one(table, caches, mount, Role::System).await,
