@@ -182,3 +182,83 @@ pub fn partition(phase: &str) {
     });
     println!("block mounts: partition {phase} PASS");
 }
+
+pub fn devices(phase: &str) {
+    assert!(matches!(phase, "write" | "read-only"));
+    let sources = [
+        ("/user/data", 0, Some(4), "virtio0p4\n"),
+        ("/user/data/nested", 1, Some(1), "virtio1p1\n"),
+        ("/user/bare", 2, None, "virtio2\n"),
+    ];
+    let contents = |index: usize| {
+        (0..32781)
+            .map(|offset| ((offset + index * 17) % 251) as u8)
+            .collect::<Vec<_>>()
+    };
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+        let client = FsClient::connect().unwrap();
+        let mounts = client.mounts().await.unwrap();
+        assert_eq!(mounts.len(), 8);
+        for (index, (path, device, partition, label)) in sources.iter().enumerate() {
+            let mount = mounts.iter().find(|mount| mount.path == *path).unwrap();
+            assert_eq!(mount.id, 5 + index as u32);
+            assert_eq!(mount.kind, MountKind::MotorFs);
+            assert_eq!(
+                mount.source,
+                Some(moto_sdk::io::fs::MountBlockSource {
+                    device: *device,
+                    partition: *partition,
+                })
+            );
+            assert_eq!(mount.read_only, phase == "read-only" && *device == 2);
+            assert_eq!(
+                std::fs::read(format!("{path}/label")).unwrap(),
+                label.as_bytes()
+            );
+            let file = format!("{path}/device-persist");
+            if phase == "write" {
+                std::fs::write(&file, contents(index)).unwrap();
+            } else {
+                assert_eq!(std::fs::read(&file).unwrap(), contents(index));
+            }
+            if mount.read_only {
+                assert_eq!(
+                    std::fs::write(&file, b"bad").unwrap_err().kind(),
+                    std::io::ErrorKind::PermissionDenied
+                );
+            }
+        }
+        // Every pair crosses either an owner or a filesystem on the same owner.
+        for (index, (from, ..)) in sources.iter().enumerate() {
+            let file = format!("{from}/device-persist");
+            for (other, (to, ..)) in sources.iter().enumerate() {
+                if index == other {
+                    continue;
+                }
+                let copied = format!("{to}/from-{index}");
+                if phase == "write" {
+                    std::fs::copy(&file, &copied).unwrap();
+                }
+                assert_eq!(std::fs::read(&copied).unwrap(), contents(index));
+                let (source, _) = client.stat(&file).await.unwrap();
+                let (target, _) = client.stat(to).await.unwrap();
+                let error = if phase == "read-only" && (index == 2 || other == 2) {
+                    moto_rt::Error::NotAllowed
+                } else {
+                    moto_rt::Error::CrossesDevices
+                };
+                assert_eq!(client.move_entry(source, target, "moved").await, Err(error));
+                assert_eq!(
+                    client.move_noreplace(source, target, "moved").await,
+                    Err(error)
+                );
+            }
+            let copied = format!("/none/tmp/from-{index}");
+            std::fs::copy(&file, &copied).unwrap();
+            assert_eq!(std::fs::read(&copied).unwrap(), contents(index));
+            std::fs::remove_file(copied).unwrap();
+        }
+        client.flush().await.unwrap();
+    });
+    println!("block mounts: devices {phase} PASS");
+}

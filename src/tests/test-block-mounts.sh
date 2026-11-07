@@ -59,7 +59,8 @@ mkfifo "$SCRATCH/console-in"
 exec 3<> "$SCRATCH/console-in"
 start_guest() {
   CONSOLE_LOG="/tmp/test-block-mounts-$BUILD-$VMM-$1.log"
-  start_serial_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$CONSOLE_LOG" "$SCRATCH/console-in"
+  shift
+  start_serial_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$CONSOLE_LOG" "$SCRATCH/console-in" "$@"
   until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
       motor@192.168.4.2 /system/bin/rush -c true >/dev/null 2>&1; do
     serial_test_vm_alive || fail "guest exited before SSH was ready"
@@ -123,4 +124,35 @@ echo 'read_only = true' >> "$SCRATCH/partitions.toml"
 start_guest partition-read
 vm_ssh '/user/bin/systest block-partition read-only'
 stop_guest
+
+for disk in parted bare unused; do
+  cp --sparse=always "$SCRATCH/partitions/$disk.img" "$TEST_VM_IMG_DIR/$disk.img"
+done
+sed 's/read_only = true/read_only = false/' "$SCRATCH/partitions.toml" > "$SCRATCH/devices.toml"
+cat >> "$SCRATCH/devices.toml" <<'TOML'
+
+[[mount]]
+path = "/user/data/nested"
+type = "motor-fs"
+device = 1
+partition = 1
+cache_mb = 2
+
+[[mount]]
+path = "/user/bare"
+type = "motor-fs"
+device = 2
+TOML
+"$imager" block-mount-fixture config "$TEST_VM_IMG_DIR/$MOTO_IMAGE" "$SCRATCH/devices.toml"
+start_guest devices-write --extra-disk parted.img --extra-disk bare.img --extra-disk unused.img
+vm_ssh '/user/bin/systest block-devices write'
+stop_guest
+echo 'read_only = true' >> "$SCRATCH/devices.toml"
+"$imager" block-mount-fixture config "$TEST_VM_IMG_DIR/$MOTO_IMAGE" "$SCRATCH/devices.toml"
+bare_before="$(sha256sum "$TEST_VM_IMG_DIR/bare.img")"
+start_guest devices-read --extra-disk parted.img --extra-disk-ro bare.img --extra-disk unused.img
+vm_ssh '/user/bin/systest block-devices read-only'
+vm_ssh findmnt
+stop_guest
+[ "$(sha256sum "$TEST_VM_IMG_DIR/bare.img")" = "$bare_before" ] || fail 'read-only bare device changed'
 echo "-------- TEST-BLOCK-MOUNTS PASS ---------"

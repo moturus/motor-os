@@ -7,7 +7,7 @@ use std::io::{self, ErrorKind, Read, Seek, SeekFrom};
 use std::path::Path;
 
 type Fs = motor_fs::MotorFs<AsyncFileBlockDevice>;
-const DATA_BLOCKS: u64 = 2048;
+const DATA_BLOCKS: u64 = 16384;
 
 fn invalid(message: &str) -> io::Error {
     io::Error::new(ErrorKind::InvalidInput, message)
@@ -22,23 +22,27 @@ fn mbr(file: &mut File) -> io::Result<mbrman::MBR> {
     mbrman::MBR::read_from(file, 512).map_err(|error| io::Error::new(ErrorKind::InvalidData, error))
 }
 
-async fn open_root(path: &Path) -> io::Result<Fs> {
+fn root_region(path: &Path) -> io::Result<(u64, u64)> {
     let mut file = File::open(path)?;
     let mut header = [0; 8];
     file.read_exact(&mut header)?;
-    let (offset, length) = if motor_fs::has_superblock_magic(&header) {
-        (0, file.metadata()?.len())
+    if motor_fs::has_superblock_magic(&header) {
+        Ok((0, file.metadata()?.len()))
     } else {
         let mbr = mbr(&mut file)?;
         let (_, entry) = mbr
             .iter()
             .find(|(_, entry)| entry.sys == motor_fs::PARTITION_ID)
             .ok_or_else(|| invalid("no root filesystem"))?;
-        (
+        Ok((
             u64::from(entry.starting_lba) * 512,
             u64::from(entry.sectors) * 512,
-        )
-    };
+        ))
+    }
+}
+
+async fn open_root(path: &Path) -> io::Result<Fs> {
+    let (offset, length) = root_region(path)?;
     let device = AsyncFileBlockDevice::open_region(utf8(path)?, offset, length).await?;
     Fs::open(Box::new(device)).await
 }
@@ -104,6 +108,85 @@ async fn write_config(root: &Path, config: &[u8]) -> io::Result<()> {
     fs.flush().await
 }
 
+fn partitioned(data: &Path, output: &Path) -> io::Result<()> {
+    use std::io::Write;
+    let mut disk = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(output)?;
+    let length = fs::metadata(data)?.len();
+    disk.set_len(512 + length)?;
+    let mut table =
+        mbrman::MBR::new_from(&mut disk, 512, [5, 6, 7, 8]).map_err(io::Error::other)?;
+    table[1] = mbrman::MBRPartitionEntry {
+        boot: mbrman::BOOT_INACTIVE,
+        first_chs: mbrman::CHS::empty(),
+        sys: motor_fs::PARTITION_ID,
+        last_chs: mbrman::CHS::empty(),
+        starting_lba: 1,
+        sectors: u32::try_from(length / 512).map_err(|_| invalid("data too large"))?,
+    };
+    table.write_into(&mut disk).map_err(io::Error::other)?;
+    disk.seek(SeekFrom::Start(512))?;
+    io::copy(&mut File::open(data)?, &mut disk)?;
+    disk.flush()
+}
+
+fn extract_root(image: &Path, output: &Path) -> io::Result<()> {
+    let (offset, length) = root_region(image)?;
+    let mut input = File::open(image)?;
+    input.seek(SeekFrom::Start(offset))?;
+    let mut output = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(output)?;
+    if io::copy(&mut input.take(length), &mut output)? != length {
+        return Err(ErrorKind::UnexpectedEof.into());
+    }
+    output.sync_all()
+}
+
+async fn dirty(image: &Path) -> io::Result<()> {
+    use std::io::Write;
+    let (offset, _) = root_region(image)?;
+    let mut disk = OpenOptions::new().read(true).write(true).open(image)?;
+    disk.seek(SeekFrom::Start(offset))?;
+    let mut previous = [0; 8192];
+    disk.read_exact(&mut previous)?;
+    let mut fs = open_root(image).await?;
+    fs.create_entry(
+        Role::System,
+        0,
+        EntryKind::Directory,
+        "recovery-probe",
+        RolePermissions::all(AccessPermissions::Rwx),
+    )
+    .await?;
+    fs.flush().await?;
+    drop(fs);
+    // A committed journal with an old main superblock/root models an interrupted
+    // checkpoint. Never touch the journal itself or fabricate its contents.
+    disk.seek(SeekFrom::Start(offset))?;
+    disk.write_all(&previous)?;
+    disk.sync_all()
+}
+
+async fn check_recovery(image: &Path) -> io::Result<()> {
+    let (offset, length) = root_region(image)?;
+    let device = AsyncFileBlockDevice::open_region(utf8(image)?, offset, length).await?;
+    let fs = Fs::open_with_recovery_policy(
+        Box::new(device),
+        256,
+        motor_fs::RecoveryPolicy::RequireClean,
+    )
+    .await?;
+    if fs.stat(Role::System, 0, "recovery-probe").await?.is_none() {
+        return Err(invalid("recovery probe is missing"));
+    }
+    Ok(())
+}
+
 pub fn run(args: &[String]) -> io::Result<()> {
     let runtime = tokio::runtime::LocalRuntime::new()?;
     match args {
@@ -115,20 +198,33 @@ pub fn run(args: &[String]) -> io::Result<()> {
             fs::copy(source, &root)?;
             runtime.block_on(async {
                 data_fs(&data, b"virtio0p4\n").await?;
+                data_fs(&directory.join("parted.fs"), b"virtio1p1\n").await?;
+                data_fs(&directory.join("bare.img"), b"virtio2\n").await?;
                 let mut fs = open_root(&root).await?;
                 let user = crate::chmod::resolve_path(&fs, Path::new("/user")).await?;
                 let mode = RolePermissions::all(AccessPermissions::Rwx);
                 fs.create_entry(Role::System, user, EntryKind::Directory, "data", mode)
                     .await?;
+                fs.create_entry(Role::System, user, EntryKind::Directory, "bare", mode)
+                    .await?;
                 fs.flush().await
             })?;
+            partitioned(&directory.join("parted.fs"), &directory.join("parted.img"))?;
+            fs::write(directory.join("unused.img"), [0; 4096])?;
             append_partition(&root, &data)
         }
         [operation, image, config] if operation == "config" => {
             runtime.block_on(write_config(Path::new(image), &fs::read(config)?))
         }
+        [operation, image, output] if operation == "extract-root" => {
+            extract_root(Path::new(image), Path::new(output))
+        }
+        [operation, image] if operation == "dirty" => runtime.block_on(dirty(Path::new(image))),
+        [operation, image] if operation == "check-recovery" => {
+            runtime.block_on(check_recovery(Path::new(image)))
+        }
         _ => Err(invalid(
-            "usage: block-mount-fixture create ROOT_RAW NEW_DIR | config IMAGE TOML",
+            "usage: block-mount-fixture create ROOT_RAW NEW_DIR | config IMAGE TOML | extract-root IMAGE OUTPUT | dirty IMAGE | check-recovery IMAGE",
         )),
     }
 }
@@ -234,6 +330,29 @@ mod tests {
             })
             .unwrap();
         assert!(append_partition(&result, &partition).is_err());
+        let bare_root = output.join("bare-root.img");
+        extract_root(&result, &bare_root).unwrap();
+        assert_eq!(fs::metadata(&bare_root).unwrap().len(), DATA_BLOCKS * 4096);
+        for image in [
+            &result,
+            &bare_root,
+            &output.join("parted.img"),
+            &output.join("bare.img"),
+        ] {
+            runtime
+                .block_on(async {
+                    dirty(image).await?;
+                    assert_eq!(
+                        check_recovery(image).await.unwrap_err().kind(),
+                        ErrorKind::InvalidData
+                    );
+                    let fs = open_root(image).await?;
+                    assert!(fs.replayed_txn_log_on_open());
+                    drop(fs);
+                    check_recovery(image).await
+                })
+                .unwrap();
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 }

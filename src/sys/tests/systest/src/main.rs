@@ -1343,6 +1343,10 @@ fn main() {
         block_mounts::partition(&args[2]);
         return;
     }
+    if args.len() == 3 && args[1] == "block-devices" {
+        block_mounts::devices(&args[2]);
+        return;
+    }
     if args.len() == 2 && args[1] == "mounts-none" {
         mounts::none_role();
         return;
