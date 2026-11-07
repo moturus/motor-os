@@ -55,7 +55,10 @@ async fn run_forwarding(
         // Registration precedes requests that may wait indefinitely for a peer.
         start_ctrl_c(None, peer.interrupt())?;
     }
-    let mut listeners = Some(Listeners::bind(options).await?);
+    let mut listeners = Some(tokio::select! {
+        result = Listeners::bind(options) => result?,
+        () = peer.wait_closed() => return Err(russh::Error::Disconnect),
+    });
     let tasks = Arc::new(Tasks::default());
     let remote = (!options.remote_forwards.is_empty())
         .then(|| Arc::new(remote::Forwards::new(tasks.clone(), peer.receive_window())));
@@ -717,6 +720,134 @@ fn start_ctrl_c(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    struct Accept;
+
+    impl russh::server::Handler for Accept {
+        type Error = russh::Error;
+
+        async fn auth_none(&mut self, _: &str) -> Result<russh::server::Auth, Self::Error> {
+            Ok(russh::server::Auth::Accept)
+        }
+    }
+
+    #[test]
+    fn connection_loss_cancels_local_listener_resolution_during_setup() {
+        use std::future::{Future, poll_fn};
+        use std::os::unix::fs::DirBuilderExt;
+        use std::task::Poll;
+
+        let root = std::env::temp_dir().join(format!("motor-bind-cancel-{}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap()
+            .block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let mut options = ConnectionOptions::default();
+                    options
+                        .apply_o(&format!("Port={}", listener.local_addr().unwrap().port()))
+                        .unwrap();
+                    options
+                        .apply_o(&format!(
+                            "UserKnownHostsFile={}",
+                            root.join("known_hosts").display()
+                        ))
+                        .unwrap();
+                    options.apply_o("StrictHostKeyChecking=accept-new").unwrap();
+                    options.apply_o("BatchMode=yes").unwrap();
+                    let accepting = tokio::spawn(async move {
+                        let (socket, _) = listener.accept().await.unwrap();
+                        let config = Arc::new(russh::server::Config {
+                            keys: vec![
+                                russh::keys::PrivateKey::random(
+                                    &mut rand::rng(),
+                                    russh::keys::ssh_key::Algorithm::Ed25519,
+                                )
+                                .unwrap(),
+                            ],
+                            inactivity_timeout: None,
+                            ..Default::default()
+                        });
+                        russh::server::run_stream(config, socket, Accept).await
+                    });
+                    let destination = Destination::parse("motor@127.0.0.1").unwrap();
+                    let mut peer = transport::connect(&options, &destination).await.unwrap();
+                    assert!(peer.authenticate_none("motor").await.unwrap().success());
+                    let server = accepting.await.unwrap().unwrap();
+                    let peer = Arc::new(peer);
+                    peer.share_connection();
+                    let reservation = tokio::net::TcpSocket::new_v4().unwrap();
+                    reservation.set_reuseaddr(true).unwrap();
+                    reservation.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+                    let address = reservation.local_addr().unwrap();
+                    let earlier = tokio::net::TcpSocket::new_v4().unwrap();
+                    earlier.set_reuseaddr(true).unwrap();
+                    earlier.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+                    let earlier_address = earlier.local_addr().unwrap();
+                    options
+                        .add_local_forward(&format!(
+                            "127.0.0.1:{}:localhost:80",
+                            earlier_address.port()
+                        ))
+                        .unwrap();
+                    options
+                        .add_local_forward(&format!("LOCALHOST:{}:localhost:80", address.port()))
+                        .unwrap();
+                    options.exit_on_forward_failure = true;
+                    let args = SshArgs {
+                        connection: options.clone(),
+                        destination,
+                        command: vec![],
+                        pty: PtyMode::Disable,
+                        no_session: true,
+                    };
+
+                    // Occupy the only blocking worker so LOCALHOST resolution
+                    // stays queued. It resolves locally when cleanup releases it.
+                    let (release, released) = std::sync::mpsc::channel();
+                    let (entered, started) = tokio::sync::oneshot::channel();
+                    let blocked = tokio::task::spawn_blocking(move || {
+                        entered.send(()).unwrap();
+                        released.recv()
+                    });
+                    started.await.unwrap();
+                    let mut forwarding = Box::pin(run_forwarding(&peer, &options, args));
+                    assert!(
+                        poll_fn(|cx| Poll::Ready(forwarding.as_mut().poll(cx)))
+                            .await
+                            .is_pending()
+                    );
+                    assert!(std::net::TcpStream::connect(earlier_address).is_ok());
+                    assert!(std::net::TcpStream::connect(address).is_err());
+                    server.abort();
+                    assert!(matches!(server.await, Err(russh::Error::Disconnect)));
+                    peer.wait_closed().await;
+                    let result = poll_fn(|cx| Poll::Ready(forwarding.as_mut().poll(cx))).await;
+                    let earlier_released = std::net::TcpStream::connect(earlier_address).is_err();
+                    drop(forwarding);
+                    release.send(()).unwrap();
+                    blocked.await.unwrap().unwrap();
+                    assert!(
+                        matches!(result, Poll::Ready(Err(russh::Error::Disconnect))),
+                        "listener setup ignored connection loss while resolution was pending"
+                    );
+                    assert!(
+                        earlier_released,
+                        "cancelled setup retained an earlier listener"
+                    );
+                })
+                .await
+                .expect("listener setup cancellation stalled");
+            });
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn unix_identity_permissions_are_private() {

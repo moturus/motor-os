@@ -147,17 +147,23 @@ pub fn run(applet: Applet, args: &[String]) -> Result<i32, AppletError> {
     }
     let parsed = parse(applet, args)?;
     match parsed {
-        ParsedArgs::Ssh(args) => {
-            let runtime = runtime()?;
-            runtime
-                .block_on(crate::client::session::run_ssh(args))
-                .map_err(Into::into)
-        }
+        ParsedArgs::Ssh(args) => run_ssh_runtime(crate::client::session::run_ssh(args)),
         ParsedArgs::Scp(args) => runtime()?.block_on(scp::run(args)),
         ParsedArgs::Sftp(args) => runtime()?.block_on(sftp::run(args)),
         ParsedArgs::SshKeygen(args) => keygen::run(args),
         ParsedArgs::SshCopyId(args) => runtime()?.block_on(copy_id::run(args)),
     }
+}
+
+fn run_ssh_runtime(
+    session: impl std::future::Future<Output = Result<i32, russh::Error>>,
+) -> Result<i32, AppletError> {
+    let runtime = runtime()?;
+    let result = runtime.block_on(session);
+    // Session teardown has drained or cancelled its work. A cancelled lookup
+    // may still be running in the blocking pool and must not hold up SSH exit.
+    runtime.shutdown_background();
+    result.map_err(Into::into)
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime, AppletError> {
@@ -510,6 +516,44 @@ fn unsupported(value: &str) -> ParseError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssh_shutdown_does_not_wait_for_cancelled_blocking_work() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (release, released) = mpsc::channel();
+        let (entered, started) = mpsc::channel();
+        let (exited, done) = mpsc::channel();
+        let (finished, returned) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let result = run_ssh_runtime(async move {
+                let (entered_async, started_async) = tokio::sync::oneshot::channel();
+                let worker = tokio::task::spawn_blocking(move || {
+                    entered.send(()).unwrap();
+                    entered_async.send(()).unwrap();
+                    released.recv().unwrap();
+                    exited.send(()).unwrap();
+                });
+                started_async.await.unwrap();
+                // This models a resolver future dropped during cancellation:
+                // its blocking operation can finish independently of its caller.
+                drop(worker);
+                Err(russh::Error::Disconnect)
+            });
+            finished.send(result).unwrap();
+        });
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let result = returned.recv_timeout(Duration::from_secs(5));
+        // Always release the worker before asserting, including on old code.
+        release.send(()).unwrap();
+        done.recv_timeout(Duration::from_secs(5)).unwrap();
+        thread.join().unwrap();
+        assert!(
+            matches!(result, Ok(Err(AppletError::Ssh(russh::Error::Disconnect)))),
+            "SSH shutdown waited for cancelled blocking work"
+        );
+    }
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
