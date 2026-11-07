@@ -344,6 +344,46 @@ mod tests {
     use crate::client::args::ConnectionOptions;
 
     #[test]
+    fn dynamic_and_fixed_forwards_accumulate_in_order_with_shared_arity_checks() {
+        let config = super::Config::parse(
+            "Host target\nDynamicForward 1080\nLocalForward 8080 localhost:80\nHost *\nDynamicForward [::1]:1081\n",
+            std::path::Path::new("config"),
+        ).unwrap();
+        let mut options = ConnectionOptions::default();
+        options.add_local_forward("8082:cli:22").unwrap();
+        options.apply_o("DynamicForward=1082").unwrap();
+        options.apply_o("DynamicForward=1082").unwrap();
+        let route = config
+            .resolve(
+                &options,
+                &crate::client::args::Destination::parse_with_default("target", "motor").unwrap(),
+            )
+            .unwrap();
+        let forwards = &route[0].options.local_forwards;
+        assert_eq!(
+            forwards
+                .iter()
+                .map(|f| (f.listen.port, f.target.is_none()))
+                .collect::<Vec<_>>(),
+            [
+                (8082, false),
+                (1082, true),
+                (1080, true),
+                (8080, false),
+                (1081, true)
+            ]
+        );
+        assert_eq!(forwards[4].listen.host.as_deref(), Some("::1"));
+        for invalid in [
+            "DynamicForward=0",
+            "DynamicForward=1080 target:80",
+            "DynamicForward=[::1]:65536",
+        ] {
+            assert!(options.apply_o(invalid).is_err(), "accepted {invalid}");
+        }
+    }
+
+    #[test]
     fn forwards_accumulate_and_scalar_options_keep_the_first_value() {
         let config = super::Config::parse(
             "Host target\n ProxyJump jump\n LocalForward [::1]:8080 [::2]:80\n GatewayPorts yes\n ExitOnForwardFailure yes\nHost *\n LocalForward 8081 localhost.:443\n GatewayPorts no\n ExitOnForwardFailure no\nHost jump\n LocalForward 9090 remote:90\n",

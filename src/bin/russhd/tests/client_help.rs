@@ -17,6 +17,8 @@ fn ssh_help_succeeds_without_a_connection() {
             "/user/cfg/ssh/config",
             "-J [user@]host",
             "-L [bind:]port:host:hostport",
+            "-D [bind:]port",
+            "DynamicForward=",
             "-N",
             "-g",
             "LocalForward=",

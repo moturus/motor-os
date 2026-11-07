@@ -506,6 +506,13 @@ forwards drain before SSH returns its status. Ctrl+C or transport loss cancels
 the forwards. A blocked command-output pipe can also pause forwarding; use
 <code>-N</code> for a tunnel without command-output backpressure.</p>
 
+<p><code>ssh -N -D 1080 user@host</code> creates a SOCKS4, SOCKS4a and SOCKS5 CONNECT
+proxy. No SOCKS authentication is required. The local SOCKS client selects
+the target; names resolve at the SSH server. The same bind controls, setup
+failure policy and connection lifetime apply. An incomplete handshake uses
+one forwarding slot without blocking other connections; no handshake timer
+is imposed.</p>
+
 <h3 id="shared-connection-options-and-authentication">Shared connection options and authentication</h3>
 
 <p><code>ssh</code>, <code>scp</code>, <code>sftp</code>, and <code>ssh-copy-id</code> share authentication, host-key checks,
@@ -778,6 +785,7 @@ the command, even when <code>HostName</code> specifies a different network addre
   <tr><td><code>ServerAliveInterval</code></td><td>Keepalive interval in integer seconds; 0 (default) disables it.</td></tr>
   <tr><td><code>ServerAliveCountMax</code></td><td>Maximum unanswered keepalives; 3.</td></tr>
   <tr><td><code>LocalForward</code></td><td><code>[bind:]port host:port</code>; repeatable, SSH final destination only.</td></tr>
+  <tr><td><code>DynamicForward</code></td><td><code>[bind:]port</code>; repeatable SOCKS listener, SSH final destination only.</td></tr>
   <tr><td><code>GatewayPorts</code></td><td>Default local binds to all interfaces; <code>no</code>.</td></tr>
   <tr><td><code>ExitOnForwardFailure</code></td><td>Exit on forward setup failure; <code>no</code>.</td></tr>
 </table>
@@ -804,7 +812,7 @@ The supported settings are also accepted with <code>-o Key=Value</code>.</p>
 <p>Paths are literal. Use <code>/user/cfg/ssh/key</code>, not <code>~/.ssh/key</code>. <code>Include</code>,
 <code>Match</code>, <code>ProxyCommand</code>, value expansion, SSH URI jump syntax, agents,
 certificates, multiplexing, and system-wide config are not supported.
-Remote (<code>-R</code>) and dynamic (<code>-D</code>) forwarding, agent forwarding, and X11
+Remote (<code>-R</code>) forwarding, agent forwarding, and X11
 forwarding are unsupported.
 Unsupported directives and malformed settings report a filename and line;
 they are not silently ignored. A missing default config is allowed, while

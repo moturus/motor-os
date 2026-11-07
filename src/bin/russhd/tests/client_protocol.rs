@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 use russh::server::{Auth, Session};
 use russh::{Channel, ChannelId};
 
+#[path = "client_protocol/dynamic_forwarding.rs"]
+mod dynamic_forwarding;
 #[path = "client_protocol/forwarding.rs"]
 mod forwarding;
 #[path = "client_protocol/forwarding_jump.rs"]

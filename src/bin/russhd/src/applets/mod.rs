@@ -194,6 +194,13 @@ fn parse_ssh(args: &[String]) -> Result<SshArgs, ParseError> {
             index += 1;
             continue;
         }
+        if options
+            && option_value(args, &mut index, 'D', |value| {
+                connection.add_dynamic_forward(value)
+            })?
+        {
+            continue;
+        }
         if options && args[index] == "-g" {
             connection.force_gateway_ports();
             index += 1;
@@ -545,8 +552,12 @@ mod tests {
             "-L",
             "8080:target:80",
             "-L[::1]:8081:[::2]:81",
+            "-D",
+            "8083",
             "-o",
             "LocalForward=8082 localhost.:82",
+            "-oDynamicForward=[::1]:8084",
+            "-D[::1]:8085",
             "-oExitOnForwardFailure=yes",
             "host",
         ]))
@@ -561,7 +572,7 @@ mod tests {
                 .iter()
                 .map(|forward| forward.listen.port)
                 .collect::<Vec<_>>(),
-            [8080, 8081, 8082]
+            [8080, 8081, 8083, 8082, 8084, 8085]
         );
         assert_eq!(
             parsed.connection.local_forwards[1]
@@ -571,6 +582,9 @@ mod tests {
                 .host,
             "::2"
         );
+        for index in [2, 4, 5] {
+            assert!(parsed.connection.local_forwards[index].target.is_none());
+        }
         for flags in [["-oGatewayPorts=no", "-g"], ["-g", "-oGatewayPorts=no"]] {
             let args = [flags.as_slice(), &["host"]].concat();
             assert!(parse_ssh(&strings(&args)).unwrap().connection.gateway_ports);
@@ -583,26 +597,35 @@ mod tests {
 
     #[test]
     fn forwarding_flags_are_ssh_only_but_copy_applets_accept_config_options() {
-        for flag in ["-N", "-g", "-L8080:target:80"] {
+        for flag in ["-N", "-g", "-L8080:target:80", "-D1080"] {
             assert!(parse_scp(&strings(&[flag, "local", "u@host:remote"])).is_err());
             assert!(parse_sftp(&strings(&[flag, "host"])).is_err());
         }
         let scp = parse_scp(&strings(&[
             "-oLocalForward=8080 target:80",
+            "-oDynamicForward=1080",
             "local",
             "u@host:remote",
         ]))
         .unwrap();
-        let sftp = parse_sftp(&strings(&["-oLocalForward=8080 target:80", "host"])).unwrap();
+        let sftp = parse_sftp(&strings(&[
+            "-oLocalForward=8080 target:80",
+            "-oDynamicForward=1080",
+            "host",
+        ]))
+        .unwrap();
         assert_eq!(
             scp.connection.local_forwards,
             sftp.connection.local_forwards
         );
-        assert_eq!(scp.connection.local_forwards.len(), 1);
+        assert_eq!(scp.connection.local_forwards.len(), 2);
         for bad in [
             ["-L", "host"],
             ["-L0:target:80", "host"],
             ["-L8080:::1:80", "host"],
+            ["-D", "host"],
+            ["-D0", "host"],
+            ["-D8080:extra", "host"],
         ] {
             assert!(parse_ssh(&strings(&bad)).is_err());
         }

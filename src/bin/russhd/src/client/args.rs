@@ -201,6 +201,11 @@ impl ConnectionOptions {
         Ok(())
     }
 
+    pub fn add_dynamic_forward(&mut self, value: &str) -> Result<(), ParseError> {
+        self.push_forward(LocalForward::parse_dynamic(value)?);
+        Ok(())
+    }
+
     fn push_forward(&mut self, forward: LocalForward) {
         if !self.local_forwards.contains(&forward) {
             self.local_forwards.push(forward);
@@ -224,6 +229,9 @@ impl ConnectionOptions {
     pub(crate) fn apply(&mut self, key: &str, value: &str) -> Result<(), ParseError> {
         if value.is_empty() || value.chars().any(char::is_control) {
             return Err(ParseError::new(format!("invalid {key} value")));
+        }
+        if key.eq_ignore_ascii_case("DynamicForward") {
+            return self.add_dynamic_forward(value);
         }
         if key.eq_ignore_ascii_case("HostName") {
             super::config::literal_path(value)?;

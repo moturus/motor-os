@@ -45,6 +45,13 @@ forwards drain before SSH returns its status. Ctrl+C or transport loss cancels
 the forwards. A blocked command-output pipe can also pause forwarding; use
 `-N` for a tunnel without command-output backpressure.
 
+`ssh -N -D 1080 user@host` creates a SOCKS4, SOCKS4a and SOCKS5 CONNECT
+proxy. No SOCKS authentication is required. The local SOCKS client selects
+the target; names resolve at the SSH server. The same bind controls, setup
+failure policy and connection lifetime apply. An incomplete handshake uses
+one forwarding slot without blocking other connections; no handshake timer
+is imposed.
+
 ## Shared connection options and authentication
 
 `ssh`, `scp`, `sftp`, and `ssh-copy-id` share authentication, host-key checks,
@@ -318,6 +325,7 @@ Supported settings (also accepted through `-o Key=Value`):
 | `ServerAliveInterval` | Keepalive interval in integer seconds; 0 (default) disables it. |
 | `ServerAliveCountMax` | Maximum unanswered keepalives; 3. |
 | `LocalForward` | `[bind:]port host:port`; repeatable, SSH final destination only. |
+| `DynamicForward` | `[bind:]port`; repeatable SOCKS listener, SSH final destination only. |
 | `GatewayPorts` | Default local binds to all interfaces; `no`. |
 | `ExitOnForwardFailure` | Exit on forward setup failure; `no`. |
 
@@ -342,7 +350,7 @@ The supported settings are also accepted with `-o Key=Value`.
 Paths are literal. Use `/user/cfg/ssh/key`, not `~/.ssh/key`. `Include`,
 `Match`, `ProxyCommand`, value expansion, SSH URI jump syntax, agents,
 certificates, multiplexing, and system-wide config are not supported.
-Remote (`-R`) and dynamic (`-D`) forwarding, agent forwarding, and X11
+Remote (`-R`) forwarding, agent forwarding, and X11
 forwarding are unsupported.
 Unsupported directives and malformed settings report a filename and line;
 they are not silently ignored. A missing default config is allowed, while

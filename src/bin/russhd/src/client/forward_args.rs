@@ -58,6 +58,13 @@ impl TargetAddress {
 }
 
 impl LocalForward {
+    pub fn parse_dynamic(value: &str) -> Result<Self, ParseError> {
+        Ok(Self {
+            listen: ListenAddress::parse(value)?,
+            target: None,
+        })
+    }
+
     pub fn parse(value: &str) -> Result<Self, ParseError> {
         match fields(value)?.as_slice() {
             [listen_port, target_host, target_port] => Ok(Self {
