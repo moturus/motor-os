@@ -15,8 +15,10 @@ three debug and three release runs, plus the release developer-image suite.
 Open policy decision: when root is read-only and contains `/system/cfg/libc`,
 preserve its static resolver file or require it to match the active DNS
 settings. Until resolved, these images fail startup when sys-io tries to
-publish `resolv.conf`; the read-only test image omits libc. The native resolver
-can continue using discovered DNS servers independently of that file.
+publish `resolv.conf`; the read-only test image omits libc. Both libc and the
+native DNS service read this file. Skipping publication would leave their
+nameserver configuration static: DHCP could still update addresses and routes,
+but its DNS-server changes would not reach either resolver through the file.
 
 ## Iteration 2: findmnt, Motor FS mounts, read-only mounts
 
