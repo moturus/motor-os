@@ -2,7 +2,7 @@
 
 Status: iteration 2's implementation and test coverage are committed, and
 feature-level validation passed. The accepted DNS follow-up below is implemented
-and undergoing final regression tests. D1–D5 were accepted after review against
+and its final regression tests passed. D1–D5 were accepted after review against
 `4fcde583`
 on 2026-11-06. [fs-permissions.md](../fs-permissions.md)
 documents configuration and permissions. Iteration 1's plan is preserved in
@@ -209,6 +209,18 @@ runs passed at 1 GiB/four CPUs. `full-test-dev.sh --release` also passed,
 including native source builds, toolchain installation, the Lorry product
 suite and wasm checks. All final gate runs passed on their first attempt,
 with unchanged limits and tested source.
+
+The subsequent DNS/DHCP milestone at `08125af8` passed three debug and three
+release full-suite runs, plus the release developer-image suite, with identical
+source hashes across all seven runs. Coverage includes real DHCP acquisition,
+snapshot permissions and renewal/loss, loopback UDP/TCP DNS, resolver restart,
+and read-only roots whose backing images remain unchanged. Logs are retained
+under `build/diagnostics/dns-config/final-gates-prepared/`.
+
+DHCP discovery exposed a preexisting debug overflow when the egress cursor
+advanced past the reserved socket ID `u64::MAX`. Separate commit `2b9be4ab`
+wraps that cursor and adds a regression that failed before the fix and passes
+in debug and release afterward.
 
 Measurements compare `e094a9e6` (single-root baseline) with `280024d4`, on
 the same nested-KVM host using release Cloud Hypervisor, raw images and the
