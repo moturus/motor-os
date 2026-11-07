@@ -1,12 +1,17 @@
 use super::local_forwarding::Client;
 use super::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 
-fn start(fixture: &Fixture) -> (Client, std::process::ChildStdout, std::net::SocketAddr) {
-    let available = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = available.local_addr().unwrap();
-    drop(available);
+fn start(
+    fixture: &Fixture,
+) -> (
+    Client,
+    std::process::ChildStdout,
+    std::net::SocketAddr,
+    TcpSocket,
+) {
+    let (address, guard) = reserve_tcp_port();
     let mut args = fixture.ssh_args();
     args.extend([
         "-D".into(),
@@ -16,7 +21,7 @@ fn start(fixture: &Fixture) -> (Client, std::process::ChildStdout, std::net::Soc
     ]);
     let mut client = Client::start(&args);
     let stdout = client.ready();
-    (client, stdout, address)
+    (client, stdout, address, guard)
 }
 
 fn request(kind: u8, port: u16) -> Vec<u8> {
@@ -57,7 +62,7 @@ fn request(kind: u8, port: u16) -> Vec<u8> {
 #[test]
 fn dynamic_forwarding_supports_all_address_forms_and_preserves_pipelined_payload() {
     let fixture = Fixture::configured("allow_tcp_forwarding = true");
-    let (mut client, _stdout, local) = start(&fixture);
+    let (mut client, _stdout, local, _port_guard) = start(&fixture);
     block_on(async {
         for kind in 0..5 {
             let target = TcpListener::bind(if kind == 4 { "[::1]:0" } else { "127.0.0.1:0" })
@@ -93,7 +98,7 @@ fn dynamic_forwarding_supports_all_address_forms_and_preserves_pipelined_payload
 #[test]
 fn shared_host_and_guest_probe_checks_the_real_dynamic_listener() {
     let fixture = Fixture::configured("allow_tcp_forwarding = true");
-    let (mut client, _stdout, local) = start(&fixture);
+    let (mut client, _stdout, local, _port_guard) = start(&fixture);
     let binary = fixture.root.join("socks-probe");
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/ssh-socks-probe.rs");
     let build = Command::new("rustc")
@@ -118,7 +123,7 @@ fn shared_host_and_guest_probe_checks_the_real_dynamic_listener() {
 #[test]
 fn stalled_or_invalid_handshakes_leave_the_connection_responsive_and_cancel_on_loss() {
     let mut fixture = Fixture::configured("allow_tcp_forwarding = true");
-    let (mut client, mut stdout, local) = start(&fixture);
+    let (mut client, mut stdout, local, _port_guard) = start(&fixture);
     block_on(async {
         let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = target.local_addr().unwrap().port().to_be_bytes();
