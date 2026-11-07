@@ -1697,11 +1697,17 @@ step 2a, retain and validate both client and server close paths:
   which today never returns after a local close. Clean up pending delivery and credit
   handoff records too. Compute pending-delivery readiness after the pre-select
   application-message drain so the close cannot leave a stale socket-read guard.
-- **No closing records:** nothing about a channel outlives its local close. russh already
+- **Automatic close:** nothing about an ordinary channel outlives its local close. russh already
   removes it from `enc.channels` there and ignores a later reply, so a peer that never
   replies costs nothing, and a permit is released when its relay ends. Channel IDs come from
   a wrapping 32-bit counter: reuse takes about 4 billion opens on one connection, and a clash
   then needs a peer that withheld its reply for all of them.
+- **Forwarding close handshake:** the later OpenSSH-compatible repair at
+  `e9a05c1` adds an explicit receive-credit opt-in. A successful relay drains
+  before acknowledging close, then keeps its permit and minimal close state
+  until the peer replies. Payload queues and sockets are released before that
+  wait. Connection cancellation or an unsuccessful relay releases the retained
+  state immediately, including when the peer withholds its reply.
 - **Pending opens:** the handlers' early return stays, so a peer's `CHANNEL_CLOSE` cannot
   remove a locally initiated channel waiting for confirmation. Rejection, abandoned opens,
   and disconnect still release their state.
@@ -2134,7 +2140,9 @@ Host tests in `client_protocol.rs`, against the real `russhd` binary:
   resolve/connect/open. Late results start no dial. Channel close releases them while
   waiting for window credit, and after queued bytes reach the target: data, EOF, and close
   sent together all reach a slow target. Repeated open/close cycles retain no task or
-  handoff records. With close replies withheld, sockets, relays, and permits still release.
+  handoff records. With close replies withheld, payload queues and sockets release;
+  a successful relay retains its permit and minimal handshake state until the
+  reply or connection cancellation. Errors and cancellation release that state.
   Use event coordination, not timing guesses, to establish stalls.
 - **Authentication/idle:** silent identification and stalled authentication expire, while
   authenticated idle tunnels survive; exercise the production deadline helper with a
@@ -2186,7 +2194,7 @@ For step 2, exercise both client and server close paths:
   the server, and the second channel has no window either, so send EOF on it: that needs no
   window, and it never arrives if the server is stalled. Include a window-starved shell
   alongside a forward in the main-repository tests, since shells keep using this send path.
-- Repeated local closes with delayed or withheld peer replies release `ChannelRef`s,
+- Repeated ordinary local closes with delayed or withheld peer replies release `ChannelRef`s,
   payload queues, pending delivery, and handoff state before acknowledgement, and
   `Channel::wait()` ends on the closing side. An in-crate test can check that the entry is
   gone right after `close`, before any reply. Another admitted channel stays usable.
