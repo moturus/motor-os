@@ -308,18 +308,6 @@ pub(super) fn find_route<'a>(
     best.map(|(_, device_idx, source)| (device_idx, source))
 }
 
-/// Where the next read must stop: the end of the block `read` sits in, or the
-/// end of the file, whichever comes first.
-///
-/// Separate from [`load`] because it is the part that can be quietly wrong.
-/// `FileSystem::read` *fails* a request that crosses a block rather than
-/// returning a short count, so an over-long chunk is an error and an over-short
-/// one silently costs a round trip per call. Neither shows up in a config that
-/// happens to fit in one block, which every config did until this was written.
-fn chunk_end(read: usize, len: usize) -> usize {
-    ((read / moto_sdk::async_fs::BLOCK_SIZE + 1) * moto_sdk::async_fs::BLOCK_SIZE).min(len)
-}
-
 /// Load net config. Note that we cannot use std::fs::*, as it will block forever.
 pub(super) async fn load(runtime: &super::super::fs::RootFs) -> std::io::Result<NetConfig> {
     const CFG_PATH: &str = "/system/cfg/sys-net.toml";
@@ -351,110 +339,6 @@ pub(super) async fn load(runtime: &super::super::fs::RootFs) -> std::io::Result<
             );
             std::io::Error::from(ErrorKind::InvalidInput)
         })
-}
-
-fn resolv_conf_contents(servers: &[IpAddr]) -> String {
-    if servers.is_empty() {
-        return "# no active DNS servers\n".to_owned();
-    }
-    servers
-        .iter()
-        .map(|server| format!("nameserver {server}\n"))
-        .collect()
-}
-
-pub(super) async fn write_resolv_conf(
-    runtime: &super::super::fs::RootFs,
-    servers: &[IpAddr],
-) -> std::io::Result<()> {
-    const TEMP_NAME: &str = ".resolv.conf.dhcp";
-    let contents = resolv_conf_contents(servers);
-    let root = runtime.root()?;
-    let fs = root.read().await?;
-
-    let Some((system, _)) = fs
-        .stat(
-            moto_sdk::async_fs::Role::System,
-            moto_sdk::async_fs::ROOT_ID,
-            "system",
-        )
-        .await?
-    else {
-        return Ok(());
-    };
-    let system = root.check_local(system)?;
-    let Some((cfg, _)) = fs
-        .stat(moto_sdk::async_fs::Role::System, system, "cfg")
-        .await?
-    else {
-        return Ok(());
-    };
-    let cfg = root.check_local(cfg)?;
-    let Some((libc, _)) = fs
-        .stat(moto_sdk::async_fs::Role::System, cfg, "libc")
-        .await?
-    else {
-        // The base image has no libc overlay and no resolver file to update.
-        return Ok(());
-    };
-    let libc = root.check_local(libc)?;
-    drop(fs);
-    let mut fs = root.write().await?;
-
-    if let Some((stale, _)) = fs
-        .stat(moto_sdk::async_fs::Role::System, libc, TEMP_NAME)
-        .await?
-    {
-        let stale = root.check_local(stale)?;
-        fs.delete_entry(moto_sdk::async_fs::Role::System, stale)
-            .await?;
-    }
-    let temp = fs
-        .create_entry(
-            moto_sdk::async_fs::Role::System,
-            libc,
-            moto_sdk::async_fs::EntryKind::File,
-            TEMP_NAME,
-            moto_sdk::async_fs::RolePermissions::new(
-                moto_sdk::async_fs::AccessPermissions::Rw,
-                moto_sdk::async_fs::AccessPermissions::R,
-                moto_sdk::async_fs::AccessPermissions::R,
-            ),
-        )
-        .await?;
-    let temp = root.check_local(temp)?;
-
-    let mut written = 0usize;
-    while written < contents.len() {
-        let end = chunk_end(written, contents.len());
-        match fs
-            .write(
-                moto_sdk::async_fs::Role::System,
-                temp,
-                written as u64,
-                &contents.as_bytes()[written..end],
-            )
-            .await
-        {
-            Ok(0) => {
-                let _ = fs
-                    .delete_entry(moto_sdk::async_fs::Role::System, temp)
-                    .await;
-                return Err(ErrorKind::WriteZero.into());
-            }
-            Ok(count) => written += count,
-            Err(err) => {
-                let _ = fs
-                    .delete_entry(moto_sdk::async_fs::Role::System, temp)
-                    .await;
-                return Err(err);
-            }
-        }
-    }
-    fs.move_entry(moto_sdk::async_fs::Role::System, temp, libc, "resolv.conf")
-        .await?;
-    log::debug!("published {} DNS server(s)", servers.len());
-    Ok(())
 }
 
 pub(super) fn socket_addr_from_endpoint(endpoint: IpEndpoint) -> SocketAddr {
@@ -496,10 +380,6 @@ pub(crate) mod self_test {
 
     pub(crate) const TESTS: &[SelfTest] = &[
         (
-            "net::config::the_config_read_walks_whole_blocks",
-            the_config_read_walks_whole_blocks,
-        ),
-        (
             "net::config::parses_echo_reply_policy",
             parses_echo_reply_policy,
         ),
@@ -514,10 +394,6 @@ pub(crate) mod self_test {
         (
             "net::config::dhcp_owns_ipv4_configuration",
             dhcp_owns_ipv4_configuration,
-        ),
-        (
-            "net::config::dhcp_resolver_contents",
-            dhcp_resolver_contents,
         ),
         (
             "net::config::route_selection_handles_connected_and_default_routes",
@@ -579,50 +455,6 @@ pub(crate) mod self_test {
             });
         }
         device
-    }
-
-    /// `/system/cfg/sys-net.toml` used to be read with a single `read` into a
-    /// 4096-byte array -- one `moto_sdk::async_fs::BLOCK_SIZE` -- and whatever came back
-    /// was taken as the whole file. A larger config was cut at 4096 and the
-    /// prefix parsed, which is the dangerous half: a prefix of a TOML file is
-    /// usually still valid TOML. Reproduced with a 7715-byte config declaring a
-    /// second device past the cut -- the device did not exist, and **nothing was
-    /// logged at any level**; the machine booted looking healthy.
-    ///
-    /// The walk is what this pins. `BLOCK_SIZE` is not spelled as a literal, so
-    /// the arithmetic is checked and not the constant.
-    fn the_config_read_walks_whole_blocks() -> Result<(), String> {
-        const B: usize = moto_sdk::async_fs::BLOCK_SIZE;
-
-        // A file inside one block is one read, ending at the file and not at
-        // the block: asking past the end is not this function's job to allow.
-        st_assert_eq!(chunk_end(0, 100), 100);
-        st_assert_eq!(chunk_end(0, B), B);
-
-        // Past one block, every read but the last ends *on* a boundary. A chunk
-        // that overshot one would be refused outright -- `MotorFs::read` fails a
-        // cross-block read rather than shortening it.
-        st_assert_eq!(chunk_end(0, B + 1), B);
-        st_assert_eq!(chunk_end(B, B + 1), B + 1);
-        st_assert_eq!(chunk_end(0, 3 * B), B);
-        st_assert_eq!(chunk_end(B, 3 * B), 2 * B);
-        st_assert_eq!(chunk_end(2 * B, 3 * B), 3 * B);
-
-        // And it always advances, which is what keeps `load`'s loop finite.
-        for len in [1usize, B - 1, B, B + 1, 5 * B - 7] {
-            let mut read = 0;
-            let mut steps = 0;
-            while read < len {
-                let next = chunk_end(read, len);
-                st_assert!(next > read);
-                read = next;
-                steps += 1;
-                st_assert!(steps <= len / B + 2);
-            }
-            st_assert_eq!(read, len);
-        }
-
-        Ok(())
     }
 
     fn parses_echo_reply_policy() -> Result<(), String> {
@@ -687,18 +519,6 @@ pub(crate) mod self_test {
             .map_err(|err| err.to_string())?;
             st_assert!(parsed.validate().is_err());
         }
-        Ok(())
-    }
-
-    fn dhcp_resolver_contents() -> Result<(), String> {
-        st_assert_eq!(resolv_conf_contents(&[]), "# no active DNS servers\n");
-        st_assert_eq!(
-            resolv_conf_contents(&[
-                "192.0.2.53".parse().unwrap(),
-                "2001:db8::53".parse().unwrap()
-            ]),
-            "nameserver 192.0.2.53\nnameserver 2001:db8::53\n"
-        );
         Ok(())
     }
 

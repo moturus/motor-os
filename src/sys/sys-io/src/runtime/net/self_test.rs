@@ -32,7 +32,6 @@ pub(super) fn runtime() -> std::result::Result<NetRuntime, String> {
             tcp_listeners: HashMap::new(),
             devices: Default::default(),
             ip_addresses: HashMap::new(),
-            dns_servers: Vec::new(),
             vsock: vsock::VsockRuntime::new(None),
             clients: HashMap::new(),
         })),
@@ -54,7 +53,7 @@ pub(super) fn runtime() -> std::result::Result<NetRuntime, String> {
         free_caches: fs.free_caches.clone(),
         orphan_lingers: Rc::new(Cell::new(0)),
         fs: fs.root_fs(),
-        dns_write_lock: Rc::new(moto_sdk::async_runtime::LocalMutex::new(())),
+        dhcp_write_lock: Rc::new(moto_sdk::async_runtime::LocalMutex::new(())),
         channel_budget: Default::default(),
     })
 }
