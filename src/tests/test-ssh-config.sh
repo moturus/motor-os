@@ -157,4 +157,33 @@ exec {shell_input}>&-
 wait "$shell_pid" || fail "forwarding shell failed"
 shell_pid=""
 exec {shell_output}>&-
+
+echo '-- Motor local TCP forwarding --'
+mkfifo "$fixture/local.input" "$fixture/local.output"
+exec {local_input}<>"$fixture/local.input"
+exec {local_output}<>"$fixture/local.output"
+(
+  exec {local_input}>&-
+  exec {local_output}>&-
+  exec "${SSH[@]}" "/user/bin/ssh -L 127.0.0.1:34307:127.0.0.1:$loopback_port \
+    -o ExitOnForwardFailure=yes moto-hi \
+    'read before && echo \"\$before\" && read after && echo \"\$after\"'" \
+    < "$fixture/local.input" > "$fixture/local.output"
+) 2>"$fixture/local.log" &
+shell_pid="$!"
+printf 'local-ready\n' >&"$local_input"
+IFS= read -r -t 5 out <&"$local_output" || fail "Motor local-forward session did not start"
+[ "$out" = local-ready ] || fail "unexpected local-forward session output '$out'"
+# The Motor listener connects through the host peer to its loopback-only server.
+out="$("${SSH[@]}" "/user/bin/ssh -p 34307 -i $guest/key \
+  -o UserKnownHostsFile=$guest/known_hosts -o StrictHostKeyChecking=accept-new \
+  -o BatchMode=yes motor@127.0.0.1 /bin/echo motor-local-forward-ok")"
+[ "$out" = motor-local-forward-ok ] || fail "Motor local forward returned '$out'"
+printf 'local-still-alive\n' >&"$local_input"
+IFS= read -r -t 5 out <&"$local_output" || fail "local-forward EOF stopped the session"
+[ "$out" = local-still-alive ] || fail "unexpected later local-forward output '$out'"
+exec {local_input}>&-
+wait "$shell_pid" || fail "Motor local-forward session failed"
+shell_pid=""
+exec {local_output}>&-
 echo "test-ssh-config: PASS"
