@@ -463,7 +463,7 @@ pub(super) async fn init(
         .root()
         .await
         .map_err(|error| std::io::Error::new(error.kind(), format!("root /, virtio0: {error}")))?;
-    log::info!("Root filesystem: {:?}", source.identity);
+    log::debug!("Root filesystem: {:?}", source.identity);
     let fs = devices
         .open(source, block_cache_blocks())
         .await

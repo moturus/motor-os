@@ -420,7 +420,12 @@ async fn mount_motor(
     mount.source = Some(source.identity);
     mount.read_only = read_only;
     let state = if read_only { "ro" } else { "rw" };
-    log::info!(
+    log::log!(
+        if read_only {
+            log::Level::Info
+        } else {
+            log::Level::Debug
+        },
         "mounted motor-fs {id} at {path}, {:?}, {state}, cache {cache_blocks} blocks",
         source.identity
     );
@@ -501,7 +506,12 @@ pub(super) async fn load(
         result.map_err(|error| invalid(format!("{context}: {error}")))?;
     }
     table.borrow_mut().find_mut(0).unwrap().read_only = config.root_read_only;
-    log::info!(
+    log::log!(
+        if config.root_read_only {
+            log::Level::Info
+        } else {
+            log::Level::Debug
+        },
         "mounted root 0 at /, {}",
         if config.root_read_only { "ro" } else { "rw" }
     );
