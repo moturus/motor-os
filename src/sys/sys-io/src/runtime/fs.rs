@@ -476,7 +476,7 @@ pub(super) async fn init(
     let mounts = Rc::new(RefCell::new(mounts::MountTable::new(fs)));
     mounts.borrow_mut().find_mut(0).unwrap().source = Some(source.identity);
     let free_caches = Rc::new(memory::FreeCaches::default());
-    config::load(&mounts, &free_caches)
+    config::load(&mounts, &free_caches, &mut devices)
         .await
         .unwrap_or_else(|err| {
             panic!("Cannot apply /system/cfg/sys-fs.toml: {err}");

@@ -1,8 +1,9 @@
 //! Bounded boot configuration, fully validated before applying any mount.
-use super::{FS, memory, mounts};
+use super::{FS, devices::Devices, memory, mounts};
 use moto_sdk::async_fs::{
     AccessPermissions, EntryKind, FileSystem, ROOT_ID, Role, RolePermissions,
 };
+use moto_sdk::sys_io::api_fs::MountBlockSource;
 use serde::Deserialize;
 use std::cell::RefCell;
 use std::io::{ErrorKind, Result};
@@ -14,6 +15,15 @@ struct Config {
     // Tables first, so that errors in an entry can name it.
     #[serde(default)]
     mount: Vec<toml::Table>,
+    #[serde(default)]
+    root: RootConfig,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RootConfig {
+    #[serde(default)]
+    read_only: bool,
 }
 
 #[derive(Deserialize)]
@@ -24,6 +34,15 @@ enum MountConfig {
         path: String,
         max_size: Option<Size>,
         mode: Option<String>,
+    },
+    #[serde(rename = "motor-fs")]
+    MotorFs {
+        path: String,
+        device: u32,
+        partition: Option<u8>,
+        cache_mb: Option<u64>,
+        #[serde(default)]
+        read_only: bool,
     },
 }
 
@@ -36,8 +55,25 @@ enum Size {
 
 struct ValidatedMount {
     path: String,
-    max_size: Option<u64>,
-    mode: Option<RolePermissions>,
+    backend: Backend,
+}
+
+#[derive(Clone, Copy)]
+enum Backend {
+    MemFs {
+        max_size: Option<u64>,
+        mode: Option<RolePermissions>,
+    },
+    MotorFs {
+        source: MountBlockSource,
+        cache_blocks: usize,
+        read_only: bool,
+    },
+}
+
+struct ValidatedConfig {
+    root_read_only: bool,
+    mounts: Vec<ValidatedMount>,
 }
 
 fn invalid(message: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> std::io::Error {
@@ -98,54 +134,163 @@ fn ancestor(parent: &str, child: &str) -> bool {
         .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
-fn parse(text: &str) -> Result<Vec<ValidatedMount>> {
+fn parse(
+    text: &str,
+    root_source: Option<MountBlockSource>,
+    budget: usize,
+) -> Result<ValidatedConfig> {
     let config: Config = toml::from_str(text).map_err(|err| invalid(err.to_string()))?;
     if config.mount.len() > 255 {
         return Err(invalid("more than 255 mounts"));
     }
     let mut mounts: Vec<ValidatedMount> = Vec::with_capacity(config.mount.len());
+    let disk_count = config
+        .mount
+        .iter()
+        .filter(|table| table.get("type").and_then(toml::Value::as_str) == Some("motor-fs"))
+        .count();
+    let default_cache = budget.checked_div(disk_count).unwrap_or(0);
+    let mut sources: Vec<_> = root_source.into_iter().collect();
     for (index, table) in config.mount.into_iter().enumerate() {
         let name = match table.get("path") {
             Some(toml::Value::String(path)) => path.clone(),
             _ => format!("#{}", index + 1),
         };
-        let named = |err: &dyn std::fmt::Display| invalid(format!("mount {name}: {err}"));
-        let MountConfig::MemFs {
-            path,
-            max_size,
-            mode: root_mode,
-        } = toml::Value::Table(table)
+        let source_name = if table.get("type").and_then(toml::Value::as_str) == Some("motor-fs") {
+            format!(
+                "device {}, partition {}",
+                table
+                    .get("device")
+                    .map_or_else(|| "missing".into(), ToString::to_string),
+                table
+                    .get("partition")
+                    .map_or_else(|| "whole device".into(), ToString::to_string)
+            )
+        } else {
+            table
+                .get("type")
+                .and_then(toml::Value::as_str)
+                .unwrap_or("unknown filesystem")
+                .into()
+        };
+        let named = |err: &dyn std::fmt::Display| {
+            invalid(format!(
+                "mount {name}: entry {}, {source_name}: {err}",
+                index + 1
+            ))
+        };
+        let mount: MountConfig = toml::Value::Table(table)
             .try_into()
             .map_err(|err| named(&err))?;
+        let (path, backend) = match mount {
+            MountConfig::MemFs {
+                path,
+                max_size,
+                mode: root_mode,
+            } => (
+                path,
+                Backend::MemFs {
+                    max_size: max_size.map(size).transpose().map_err(|err| named(&err))?,
+                    mode: root_mode
+                        .as_deref()
+                        .map(mode)
+                        .transpose()
+                        .map_err(|err| named(&err))?,
+                },
+            ),
+            MountConfig::MotorFs {
+                path,
+                device,
+                partition,
+                cache_mb,
+                read_only,
+            } => {
+                let cache_blocks = match cache_mb {
+                    Some(mb) => usize::try_from(mb)
+                        .ok()
+                        .and_then(|mb| mb.checked_mul(256))
+                        .ok_or_else(|| named(&"cache_mb overflow"))?,
+                    None => default_cache,
+                };
+                (
+                    path,
+                    Backend::MotorFs {
+                        source: MountBlockSource { device, partition },
+                        cache_blocks,
+                        read_only,
+                    },
+                )
+            }
+        };
+        if let Backend::MotorFs {
+            source,
+            cache_blocks,
+            ..
+        } = &backend
+        {
+            let error = if source
+                .partition
+                .is_some_and(|slot| !(1..=4).contains(&slot))
+            {
+                Some("partition must be an MBR slot from 1 through 4")
+            } else if *cache_blocks < 256 {
+                Some("cache must contain at least 1 MiB")
+            } else if sources.iter().any(|earlier| {
+                earlier.device == source.device
+                    && (earlier.partition == source.partition
+                        || earlier.partition.is_none()
+                        || source.partition.is_none())
+            }) {
+                Some("repeated source or whole-device/partition conflict")
+            } else {
+                None
+            };
+            if let Some(error) = error {
+                return Err(named(&format!("{source:?}: {error}")));
+            }
+            sources.push(*source);
+        }
         if !path.starts_with('/')
             || path.len() > moto_rt::fs::MAX_PATH_LEN
             || path[1..]
                 .split('/')
                 .any(|component| component.is_empty() || component == "." || component == "..")
         {
-            return Err(invalid(format!("mount path is not canonical: {path:?}")));
+            return Err(named(&"mount path is not canonical"));
         }
         if path == "/system/cfg" || ancestor("/system/cfg", &path) || ancestor(&path, "/system/cfg")
         {
-            return Err(invalid(format!("mount hides system configuration: {path}")));
+            return Err(named(&"mount hides system configuration"));
         }
         if mounts
             .iter()
             .any(|earlier| earlier.path == path || ancestor(&path, &earlier.path))
         {
-            return Err(invalid(format!("mount hides an earlier mount: {path}")));
+            return Err(named(&"mount hides an earlier mount"));
         }
-        mounts.push(ValidatedMount {
-            max_size: max_size.map(size).transpose().map_err(|err| named(&err))?,
-            mode: root_mode
-                .as_deref()
-                .map(mode)
-                .transpose()
-                .map_err(|err| named(&err))?,
-            path,
-        });
+        mounts.push(ValidatedMount { path, backend });
     }
-    Ok(mounts)
+    if config.root.read_only
+        && !mounts.iter().any(|mount| {
+            mount.path == "/system/logs"
+                && matches!(
+                    mount.backend,
+                    Backend::MemFs { .. }
+                        | Backend::MotorFs {
+                            read_only: false,
+                            ..
+                        }
+                )
+        })
+    {
+        return Err(invalid(
+            "read-only root requires a writable mount at exactly /system/logs",
+        ));
+    }
+    Ok(ValidatedConfig {
+        root_read_only: config.root.read_only,
+        mounts,
+    })
 }
 
 /// Internal config reads stay on mount zero and use the same quarantine gate.
@@ -191,6 +336,13 @@ async fn mount_one(
     config: ValidatedMount,
     role: Role,
 ) -> Result<()> {
+    let Backend::MemFs {
+        max_size,
+        mode: root_mode,
+    } = config.backend
+    else {
+        return Err(ErrorKind::Unsupported.into());
+    };
     let (id, kind) = mounts::stat_path(table, role, &config.path).await?;
     if kind != EntryKind::Directory {
         return Err(ErrorKind::NotADirectory.into());
@@ -206,7 +358,7 @@ async fn mount_one(
             Ok(_) => "no",
             Err(_) => "unknown",
         };
-        let mode = match config.mode {
+        let mode = match root_mode {
             Some(mode) => mode,
             None => metadata?.permissions()?,
         };
@@ -214,9 +366,7 @@ async fn mount_one(
     };
     let ram = super::super::guest_ram_mib() << 20;
     let memfs = memfs::MemFs::new(memfs::MemFsConfig {
-        max_size: config
-            .max_size
-            .unwrap_or_else(|| memory::default_capacity(ram)),
+        max_size: max_size.unwrap_or_else(|| memory::default_capacity(ram)),
         free_cache_cap: memory::cache_capacity(ram),
         root_mode: mode,
     })?;
@@ -239,12 +389,38 @@ async fn mount_one(
 pub(super) async fn load(
     table: &Rc<RefCell<mounts::MountTable>>,
     caches: &memory::FreeCaches,
+    devices: &mut Devices,
 ) -> Result<()> {
     let Some(bytes) = read_root_file(table, "/system/cfg/sys-fs.toml").await? else {
         return Ok(());
     };
     let text = std::str::from_utf8(&bytes).map_err(|err| invalid(err.to_string()))?;
-    for mount in parse(text)? {
+    let source = table.borrow().find(0).and_then(|mount| mount.source);
+    let config = parse(text, source, super::block_cache_blocks())?;
+    for (index, mount) in config.mounts.iter().enumerate() {
+        if let Backend::MotorFs { source, .. } = mount.backend {
+            devices.resolve(source).await.map_err(|error| {
+                invalid(format!(
+                    "mount {} at {:?}, {source:?}: {error}",
+                    index + 1,
+                    mount.path
+                ))
+            })?;
+        }
+    }
+    // Later patches enable these paths; never silently ignore a requested mount.
+    if config.root_read_only
+        || config
+            .mounts
+            .iter()
+            .any(|mount| matches!(mount.backend, Backend::MotorFs { .. }))
+    {
+        return Err(std::io::Error::new(
+            ErrorKind::Unsupported,
+            "block mounts and read-only mounts are not enabled yet",
+        ));
+    }
+    for mount in config.mounts {
         let path = mount.path.clone();
         mount_one(table, caches, mount, Role::System)
             .await
@@ -258,8 +434,126 @@ pub(super) mod self_test {
     use super::*;
     use crate::self_test::{st_assert, st_assert_eq};
 
-    pub(in crate::runtime::fs) const TESTS: &[crate::self_test::SelfTest] =
-        &[("fs::mount_config", run)];
+    pub(in crate::runtime::fs) const TESTS: &[crate::self_test::SelfTest] = &[
+        ("fs::mount_config", run),
+        ("fs::disk_mount_config", disk_config),
+    ];
+
+    fn parse(text: &str) -> Result<Vec<ValidatedMount>> {
+        super::parse(
+            text,
+            Some(MountBlockSource {
+                device: 0,
+                partition: Some(3),
+            }),
+            4096,
+        )
+        .map(|config| config.mounts)
+    }
+
+    fn disk_config() -> std::result::Result<(), String> {
+        let entry = |path: &str, device: u32, fields: &str| {
+            format!("[[mount]]\ntype='motor-fs'\npath='{path}'\ndevice={device}\n{fields}\n")
+        };
+        for fields in [
+            "partition=0",
+            "partition=5",
+            "partition=-1",
+            "partition=1.0",
+            "cache_mb=0",
+            "cache_mb=-1",
+            "cache_mb='1'",
+            "cache_mb=1.0",
+            "cache_mb=9223372036854775807",
+            "read_only=1",
+            "max_size='1M'",
+            "mode='rwxrwxrwx'",
+            "unknown=1",
+        ] {
+            st_assert!(
+                parse(&entry("/named", 1, fields))
+                    .is_err_and(|error| error.to_string().contains("/named"))
+            );
+        }
+        for config in [
+            "[[mount]]\ntype='motor-fs'\npath='/a'",
+            "[[mount]]\ntype='motor-fs'\npath='/a'\ndevice=-1",
+            "[[mount]]\ntype='memfs'\npath='/a'\ndevice=1",
+            "[[mount]]\ntype='memfs'\npath='/a'\ncache_mb=1",
+            "[[mount]]\ntype='memfs'\npath='/a'\nread_only=false",
+            "[root]\nunknown=true",
+            "[root]\nread_only='true'",
+            "[root]\ncache_mb=1",
+        ] {
+            st_assert!(parse(config).is_err());
+        }
+        for pair in [
+            entry("/a", 0, "partition=3"),
+            entry("/a", 0, ""),
+            entry("/a", 1, "partition=1") + &entry("/b", 1, "partition=1"),
+            entry("/a", 1, "") + &entry("/b", 1, "partition=1"),
+            entry("/a", 1, "partition=1") + &entry("/b", 1, ""),
+        ] {
+            st_assert!(parse(&pair).is_err());
+        }
+        st_assert!(parse(&(entry("/a", 0, "partition=4") + &entry("/a/b", 1, ""))).is_ok());
+        let bare_root = Some(MountBlockSource {
+            device: 0,
+            partition: None,
+        });
+        st_assert!(super::parse(&entry("/a", 0, "partition=1"), bare_root, 4096).is_err());
+
+        let two = entry("/a", 1, "") + &entry("/b", 2, "partition=4");
+        for budget in [1024, 4096] {
+            let mounts = super::parse(&two, None, budget).unwrap().mounts;
+            for mount in mounts {
+                st_assert!(
+                    matches!(mount.backend, Backend::MotorFs { cache_blocks, .. } if cache_blocks == budget / 2)
+                );
+            }
+        }
+        let overridden = entry("/a", 1, "cache_mb=32") + &entry("/b", 2, "");
+        let mounts = parse(&overridden).unwrap();
+        st_assert!(matches!(
+            mounts[0].backend,
+            Backend::MotorFs {
+                cache_blocks: 8192,
+                ..
+            }
+        ));
+        st_assert!(matches!(
+            mounts[1].backend,
+            Backend::MotorFs {
+                cache_blocks: 2048,
+                ..
+            }
+        ));
+        let four: String = (1..=4)
+            .map(|device| entry(&format!("/m{device}"), device, ""))
+            .collect();
+        st_assert!(super::parse(&four, None, 1024).is_ok());
+        st_assert!(super::parse(&(four + &entry("/fifth", 5, "")), None, 1024).is_err());
+
+        let root = "[root]\nread_only=true\n";
+        st_assert!(parse(root).is_err());
+        for bad in [
+            entry("/system/logs/child", 1, ""),
+            entry("/system/logs", 1, "read_only=true"),
+        ] {
+            st_assert!(parse(&(root.to_owned() + &bad)).is_err());
+        }
+        for logs in [
+            "[[mount]]\ntype='memfs'\npath='/system/logs'\n".to_owned(),
+            entry("/system/logs", 1, ""),
+        ] {
+            st_assert!(
+                super::parse(&(root.to_owned() + &logs), None, 4096)
+                    .unwrap()
+                    .root_read_only
+            );
+        }
+        Ok(())
+    }
 
     fn run() -> std::result::Result<(), String> {
         for path in [
@@ -319,7 +613,9 @@ pub(super) mod self_test {
         let valid =
             parse("[[mount]]\ntype='memfs'\npath='/system/cfg2'\nmax_size='64M'\nmode='rwxr-x---'")
                 .map_err(|err| err.to_string())?;
-        st_assert_eq!(valid[0].max_size, Some(64 << 20));
+        st_assert!(
+            matches!(valid[0].backend, Backend::MemFs { max_size: Some(cap), .. } if cap == 64 << 20)
+        );
         for (value, expected) in [("1024", 1024), ("2K", 2048), ("3G", 3 << 30)] {
             st_assert_eq!(size(Size::Text(value.into())).unwrap(), expected);
         }
@@ -334,7 +630,8 @@ pub(super) mod self_test {
 
         moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
             let runtime = super::super::self_test::runtime().map_err(|err| err.to_string())?;
-            load(&runtime.mounts, &runtime.free_caches)
+            let mut devices = Devices::new(Vec::new(), runtime.fs_stats.clone());
+            load(&runtime.mounts, &runtime.free_caches, &mut devices)
                 .await
                 .map_err(|err| err.to_string())?;
             st_assert_eq!(runtime.mounts.borrow().iter().count(), 1);
@@ -369,8 +666,10 @@ pub(super) mod self_test {
                 &runtime.free_caches,
                 ValidatedMount {
                     path: "/a".into(),
-                    max_size: Some(4096),
-                    mode: None,
+                    backend: Backend::MemFs {
+                        max_size: Some(4096),
+                        mode: None,
+                    },
                 },
                 Role::System,
             )
@@ -395,8 +694,10 @@ pub(super) mod self_test {
                     &runtime.free_caches,
                     ValidatedMount {
                         path: "/a/b".into(),
-                        max_size: None,
-                        mode: None
+                        backend: Backend::MemFs {
+                            max_size: None,
+                            mode: None
+                        },
                     },
                     Role::System
                 )
@@ -427,8 +728,10 @@ pub(super) mod self_test {
                 &runtime.free_caches,
                 ValidatedMount {
                     path: "/closed".into(),
-                    max_size: Some(4096),
-                    mode: Some(configured),
+                    backend: Backend::MemFs {
+                        max_size: Some(4096),
+                        mode: Some(configured),
+                    },
                 },
                 Role::System,
             )
