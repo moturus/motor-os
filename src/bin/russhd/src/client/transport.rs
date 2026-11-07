@@ -12,6 +12,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use super::args::{ConnectionOptions, Destination, HostKeyPolicy};
 use super::known_hosts;
 use super::prompt;
+use super::remote;
 
 #[derive(Clone)]
 struct TransportControl {
@@ -48,6 +49,7 @@ struct ChannelState {
     opening_session: bool,
     session: Option<russh::ChannelId>,
     closed: bool,
+    remote: Option<Arc<remote::Forwards>>,
 }
 
 impl Drop for AbortOnDrop {
@@ -211,6 +213,11 @@ impl Peer {
         self.channels.send_modify(|state| state.single = false);
     }
 
+    pub(super) fn enable_remote_forwards(&self, forwards: Arc<remote::Forwards>) {
+        self.channels
+            .send_modify(|state| state.remote = Some(forwards));
+    }
+
     pub(super) async fn open_session(&self) -> Result<russh::Channel<client::Msg>, russh::Error> {
         // Listener accept tasks start after this open. Its confirmation is the
         // only locally initiated open during session setup.
@@ -279,8 +286,41 @@ impl Peer {
     }
 }
 
+impl Drop for Handler {
+    fn drop(&mut self) {
+        let remote = self.channels.borrow().remote.clone();
+        if let Some(remote) = remote {
+            remote.cancel();
+        }
+    }
+}
+
 impl client::Handler for Handler {
     type Error = russh::Error;
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        address: &str,
+        port: u32,
+        _: &str,
+        _: u32,
+        reply: client::ChannelOpenHandle,
+        session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let remote = self.channels.borrow().remote.clone();
+        let Some(remote) = remote else {
+            reply
+                .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
+        };
+        let credit = session
+            .receive_credit(channel.id())
+            .ok_or(russh::Error::Inconsistent)?;
+        remote.incoming(channel, reply, credit, address, port).await;
+        Ok(())
+    }
 
     async fn channel_close(
         &mut self,
@@ -292,6 +332,9 @@ impl client::Handler for Handler {
             disconnect = state.single;
             if state.single || state.session == Some(channel) {
                 state.closed = true;
+                if let Some(remote) = &state.remote {
+                    remote.stop_accepting();
+                }
                 true
             } else {
                 false
@@ -479,6 +522,7 @@ async fn connect_stream<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         opening_session: false,
         session: None,
         closed: false,
+        remote: None,
     });
     let (running, ended) = tokio::sync::watch::channel(());
     let handler = Handler {

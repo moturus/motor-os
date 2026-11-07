@@ -8,6 +8,7 @@ use super::args::{ConnectionOptions, Destination, PtyMode, SshArgs};
 use super::forwarding::Listeners;
 use super::local::safe_identity;
 use super::prompt;
+use super::remote;
 use super::terminal::{InputEvent, InputFilter};
 use super::transport;
 use crate::forward::Tasks;
@@ -48,14 +49,28 @@ async fn run_forwarding(
     options: &ConnectionOptions,
     args: SshArgs,
 ) -> Result<SessionEnd, russh::Error> {
-    let mut listeners = Some(Listeners::bind(options).await?);
-    let tasks = Tasks::default();
-    let (ready, mut opened) = tokio::sync::oneshot::channel();
     let no_session = args.no_session;
+    #[cfg(target_os = "motor")]
+    if no_session {
+        // Registration precedes requests that may wait indefinitely for a peer.
+        start_ctrl_c(None, peer.interrupt())?;
+    }
+    let mut listeners = Some(Listeners::bind(options).await?);
+    let tasks = Arc::new(Tasks::default());
+    let remote = (!options.remote_forwards.is_empty())
+        .then(|| Arc::new(remote::Forwards::new(tasks.clone(), peer.receive_window())));
+    if let Some(remote) = &remote {
+        peer.enable_remote_forwards(remote.clone());
+        if let Err(error) = setup_remote_forwards(peer, options, remote).await {
+            drop(listeners);
+            remote.cancel();
+            tasks.wait_idle().await;
+            return Err(error);
+        }
+    }
+    let (ready, mut opened) = tokio::sync::oneshot::channel();
     let work = async {
         if no_session {
-            #[cfg(target_os = "motor")]
-            start_ctrl_c(None, peer.interrupt())?;
             let _ = ready.send(());
             return std::future::pending().await;
         }
@@ -103,6 +118,9 @@ async fn run_forwarding(
             }
         }
     };
+    if let Some(remote) = &remote {
+        remote.stop_accepting();
+    }
     drop(listeners);
     if matches!(result, Ok(SessionEnd::Status(_))) && !peer.is_closed() {
         tokio::select! {
@@ -118,6 +136,37 @@ async fn run_forwarding(
         tasks.wait_idle().await;
     }
     result
+}
+
+async fn setup_remote_forwards(
+    peer: &transport::Peer,
+    options: &ConnectionOptions,
+    remote: &remote::Forwards,
+) -> Result<(), russh::Error> {
+    for request in &options.remote_forwards {
+        let result = match peer
+            .tcpip_forward(request.bind_address(), u32::from(request.listen.port))
+            .await
+        {
+            Ok(reply) => remote.record(request, reply),
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(port) if request.listen.port == 0 => eprintln!(
+                "Allocated port {port} for remote forward to {}:{}",
+                request.target.host, request.target.port,
+            ),
+            Ok(_) => {}
+            Err(error) if options.exit_on_forward_failure => return Err(error),
+            Err(error) => eprintln!(
+                "Warning: remote forward {}:{}: {error}",
+                request.bind_address(),
+                request.listen.port
+            ),
+        }
+    }
+    remote.finish_setup();
+    Ok(())
 }
 
 type Handle = transport::Peer;

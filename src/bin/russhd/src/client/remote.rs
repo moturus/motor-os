@@ -158,6 +158,7 @@ impl Forwards {
                     return Ok(());
                 }
             };
+            credit.defer_close();
             reply.accept().await;
             forward::relay(channel, socket, credit, window, forward::memory_pressure).await
         });
