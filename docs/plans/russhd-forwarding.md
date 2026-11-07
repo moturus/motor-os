@@ -39,8 +39,8 @@ Developer-image validation remains release-only.
 | 4 | Complete: both the original `d4a1cc4` snapshot and subsequent `d16a1df` callback/server-credit repairs pass their main-image 3+3 gates and complete developer-image release gates | None |
 | 5 | Complete: `-L`/`-N`, published fork repairs and guest coverage pass all 218 component tests, clippy, native builds, 3/3 release, 3/3 debug and the complete developer-release gate. The test port-allocation race is fixed by `c1ae1c5e` and `8a9f665d`; the validated snapshot stays unchanged across all runs | None; the subsequent shared close repair is integrated with step 6 |
 | 6 | Complete: bounded SOCKS4/4a/5, `-D`, configuration, shared probe, retained fixture reservations and the published close fix through `9c6dc207`. All 234 component tests, clippy, both Motor release binaries and the separate `step6-main` 3/3 release and 3/3 debug image runs pass. Native guest coverage is committed as `013f22f6` | None |
-| 7 | Integrated through `8bcb223b`, with guest coverage in `43ec0af2` and socket-path repair `1f0c3960`. The first snapshot passes 249 component tests, 58 imager tests, both native builds, 3/3 release and one debug image run, then exposes the transport-flush deadlock below. The tested external repair is committed through `b45bd26`; local integration passes 255 component tests, clippy, native debug/release builds and the complete targeted guest SSH check | User publishes the four fork commits; update the real pin and restart fresh milestone image gates |
-| 8 | Prepared integration `a18cbf7d` includes the complete `-R` runtime, authorization, ordering, allocations, drain, hostile-peer and route/copy coverage, help, docs and the two setup/shutdown fixes. All 269 baseline tests pass against published `e9a05c1`; compatibility with the transport repair passes 275 tests, strict clippy and both native release binaries | Guest validation; integrate after step 7 and fork publication; separate 3+3 milestone gates |
+| 7 | Integrated through `8bcb223b`, with guest coverage in `43ec0af2` and socket-path repair `1f0c3960`. The first snapshot passes 249 component tests, 58 imager tests, both native builds, 3/3 release and one debug image run, then exposes the transport-flush deadlock below. The user published the repair through `b45bd26`; the real pin and public regressions are integrated in `c42f162d` and `2b5f0123`. All 255 component tests, strict all-target clippy and both native release binaries pass without overrides | Fresh `step7-transport-published` 3+3 image gates are running; the earlier failed snapshot's passes are not reused |
+| 8 | Prepared integration `a18cbf7d` includes the complete `-R` runtime, authorization, ordering, allocations, drain, hostile-peer and route/copy coverage, help, docs and the two setup/shutdown fixes. All 269 baseline tests pass against published `e9a05c1`; compatibility with the transport repair passes 275 tests, strict clippy and both native release binaries. The nine feature patches apply cleanly to the real published repair in `step8-published-transport-worktree`, through `118e4348` | Validate the exact published combination; integrate after step 7; guest validation, separate 3+3 image gates and the final complete developer-release gate |
 
 ### Remote forwarding: close-handshake repair in the external fork
 
@@ -176,8 +176,13 @@ separate from final validation in `step7-transport-*` logs.
 
 The original failure, stacks, offline core and decoded state are retained under
 `step7-debug2-*`; no retry or longer timeout was used to accept the original gate.
-No core OS source changed. User publication through `b45bd26` is the remaining
-prerequisite before updating the real pin and starting fresh affected image gates.
+No core OS source changed. The user has published through `b45bd26`, and the
+remote branch revision is verified. `c42f162d` updates only the four locked Git
+sources and adds the full-duplex regression; `2b5f0123` adds the blocked-reply and
+teardown regressions. Registry dependency versions remain unchanged. All 255
+component tests, strict all-target clippy and both native release binaries pass
+against the actual published pin. Fresh `step7-transport-published` image gates
+are running on a frozen source snapshot, followed by the final client milestone.
 
 ## Implementation history
 
