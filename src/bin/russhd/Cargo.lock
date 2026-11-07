@@ -1370,7 +1370,7 @@ dependencies = [
 [[package]]
 name = "pageant"
 version = "0.2.5"
-source = "git+https://github.com/moturus/russh.git?branch=motor-v0.65.1#e9a05c1ebab9caef5ef3760f0bfb84fb0d5e1c55"
+source = "git+https://github.com/moturus/russh.git?branch=motor-v0.65.1#b45bd26f25aef9b28bcc6847484d96bee4507c84"
 dependencies = [
  "base16ct",
  "byteorder",
@@ -1686,7 +1686,7 @@ dependencies = [
 [[package]]
 name = "russh"
 version = "0.65.1"
-source = "git+https://github.com/moturus/russh.git?branch=motor-v0.65.1#e9a05c1ebab9caef5ef3760f0bfb84fb0d5e1c55"
+source = "git+https://github.com/moturus/russh.git?branch=motor-v0.65.1#b45bd26f25aef9b28bcc6847484d96bee4507c84"
 dependencies = [
  "aes",
  "bitflags",
@@ -1756,7 +1756,7 @@ dependencies = [
 [[package]]
 name = "russh-cryptovec"
 version = "0.62.0"
-source = "git+https://github.com/moturus/russh.git?branch=motor-v0.65.1#e9a05c1ebab9caef5ef3760f0bfb84fb0d5e1c55"
+source = "git+https://github.com/moturus/russh.git?branch=motor-v0.65.1#b45bd26f25aef9b28bcc6847484d96bee4507c84"
 dependencies = [
  "log",
  "nix",
@@ -1784,7 +1784,7 @@ dependencies = [
 [[package]]
 name = "russh-util"
 version = "0.52.0"
-source = "git+https://github.com/moturus/russh.git?branch=motor-v0.65.1#e9a05c1ebab9caef5ef3760f0bfb84fb0d5e1c55"
+source = "git+https://github.com/moturus/russh.git?branch=motor-v0.65.1#b45bd26f25aef9b28bcc6847484d96bee4507c84"
 dependencies = [
  "chrono",
  "tokio",
