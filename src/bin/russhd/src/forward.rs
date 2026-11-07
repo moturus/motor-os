@@ -7,6 +7,7 @@ use russh::{Channel, ChannelId, ChannelMsg, ReceiveCredit};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 mod open;
+pub mod remote;
 mod tasks;
 pub use open::{direct_tcpip, memory_pressure, validate_target};
 pub use tasks::{Reservation, Tasks};
