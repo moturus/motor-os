@@ -91,6 +91,31 @@ fn dynamic_forwarding_supports_all_address_forms_and_preserves_pipelined_payload
 }
 
 #[test]
+fn shared_host_and_guest_probe_checks_the_real_dynamic_listener() {
+    let fixture = Fixture::configured("allow_tcp_forwarding = true");
+    let (mut client, _stdout, local) = start(&fixture);
+    let binary = fixture.root.join("socks-probe");
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/ssh-socks-probe.rs");
+    let build = Command::new("rustc")
+        .args(["--edition=2024", "-D", "warnings"])
+        .arg(source)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(build.status.success(), "{build:?}");
+    let output = Command::new(binary)
+        .arg(local.to_string())
+        .arg(fixture.port.to_string())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"SOCKS forwarding PASS\n");
+    drop(client.0.stdin.take());
+    assert!(client.wait().success());
+}
+
+#[test]
 fn stalled_or_invalid_handshakes_leave_the_connection_responsive_and_cancel_on_loss() {
     let mut fixture = Fixture::configured("allow_tcp_forwarding = true");
     let (mut client, mut stdout, local) = start(&fixture);
