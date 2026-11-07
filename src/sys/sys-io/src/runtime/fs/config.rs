@@ -386,6 +386,40 @@ async fn mount_one(
     Ok(())
 }
 
+async fn mount_motor(
+    table: &Rc<RefCell<mounts::MountTable>>,
+    devices: &mut Devices,
+    path: String,
+    source: super::devices::Source,
+    cache_blocks: usize,
+    read_only: bool,
+) -> Result<()> {
+    let (id, kind) = mounts::stat_path(table, Role::System, &path).await?;
+    if kind != EntryKind::Directory {
+        return Err(ErrorKind::NotADirectory.into());
+    }
+    let point = mounts::Resolved::resolve(table, id)?;
+    let fs = devices.open(source, cache_blocks).await?;
+    let mut mounts = table.borrow_mut();
+    let id = mounts.insert(
+        fs,
+        mounts::MountPoint {
+            mount: point.mount,
+            shadowed: point.local,
+            path: path.clone(),
+        },
+    )?;
+    let mount = mounts.find_mut(id).unwrap();
+    mount.source = Some(source.identity);
+    mount.read_only = read_only;
+    let state = if read_only { "ro" } else { "rw" };
+    log::info!(
+        "mounted motor-fs {id} at {path}, {:?}, {state}, cache {cache_blocks} blocks",
+        source.identity
+    );
+    Ok(())
+}
+
 pub(super) async fn load(
     table: &Rc<RefCell<mounts::MountTable>>,
     caches: &memory::FreeCaches,
@@ -405,12 +439,13 @@ pub(super) async fn load(
             "root /, {source:?}: writable mount on read-only device"
         )));
     }
+    let mut resolved = Vec::with_capacity(config.mounts.len());
     for (index, mount) in config.mounts.iter().enumerate() {
         if let Backend::MotorFs {
             source, read_only, ..
         } = mount.backend
         {
-            devices.resolve(source).await.map_err(|error| {
+            let extent = devices.resolve(source).await.map_err(|error| {
                 invalid(format!(
                     "mount {} at {:?}, {source:?}: {error}",
                     index + 1,
@@ -424,24 +459,37 @@ pub(super) async fn load(
                     mount.path
                 )));
             }
+            resolved.push(Some(extent));
+        } else {
+            resolved.push(None);
         }
     }
-    // Later patches enable these paths; never silently ignore a requested mount.
-    if config
-        .mounts
-        .iter()
-        .any(|mount| matches!(mount.backend, Backend::MotorFs { .. }))
-    {
-        return Err(std::io::Error::new(
-            ErrorKind::Unsupported,
-            "additional block mounts are not enabled yet",
-        ));
-    }
-    for mount in config.mounts {
-        let path = mount.path.clone();
-        mount_one(table, caches, mount, Role::System)
-            .await
-            .inspect_err(|err| log::error!("Cannot mount memfs at {path}: {err}"))?;
+    for (index, (mount, source)) in config.mounts.into_iter().zip(resolved).enumerate() {
+        let context = format!(
+            "entry {}, path {:?}, source {}",
+            index + 1,
+            mount.path,
+            source.map_or_else(|| "memfs".into(), |source| format!("{:?}", source.identity))
+        );
+        let result = match mount.backend {
+            Backend::MemFs { .. } => mount_one(table, caches, mount, Role::System).await,
+            Backend::MotorFs {
+                cache_blocks,
+                read_only,
+                ..
+            } => {
+                mount_motor(
+                    table,
+                    devices,
+                    mount.path,
+                    source.unwrap(),
+                    cache_blocks,
+                    read_only,
+                )
+                .await
+            }
+        };
+        result.map_err(|error| invalid(format!("{context}: {error}")))?;
     }
     table.borrow_mut().find_mut(0).unwrap().read_only = config.root_read_only;
     log::info!(

@@ -57,14 +57,29 @@ image="$TEST_VM_IMG_DIR/$MOTO_IMAGE"
 baseline="$(sha256sum "$image")"
 mkfifo "$SCRATCH/console-in"
 exec 3<> "$SCRATCH/console-in"
-for boot in 1 2; do
-  CONSOLE_LOG="/tmp/test-block-mounts-$BUILD-$VMM-$boot.log"
+start_guest() {
+  CONSOLE_LOG="/tmp/test-block-mounts-$BUILD-$VMM-$1.log"
   start_serial_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$CONSOLE_LOG" "$SCRATCH/console-in"
   until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
       motor@192.168.4.2 /system/bin/rush -c true >/dev/null 2>&1; do
     serial_test_vm_alive || fail "guest exited before SSH was ready"
     sleep 1
   done
+}
+stop_guest() {
+  vm_ssh shutdown
+  serial_test_wait_exit "$VMM_PID" 20 || fail "shutdown did not finish"
+  status=0
+  wait "$VMM_PID" || status=$?
+  if [ -n "$VM_CHILD_PID" ] && kill -0 "$VM_CHILD_PID" 2>/dev/null; then
+    fail "VMM child survived shutdown"
+  fi
+  VMM_PID=""
+  VM_CHILD_PID=""
+  case "$VMM:$status" in qemu:33|chv:0|fc:0) ;; *) fail "shutdown status $status" ;; esac
+}
+for boot in 1 2; do
+  start_guest "ro-root-$boot"
   if [ "$boot" = 1 ]; then
     vm_ssh '/system/services/strobe --self-test'
   fi
@@ -79,16 +94,33 @@ for boot in 1 2; do
   [ "$(vm_ssh 'cat /user/tmp/ro-system.status')" = 0 ] || fail "System checks failed"
   vm_ssh 'findmnt'
   # Require a guest-requested exit; forced cleanup is not a successful reboot.
-  vm_ssh shutdown
-  serial_test_wait_exit "$VMM_PID" 20 || fail "shutdown did not finish"
-  status=0
-  wait "$VMM_PID" || status=$?
-  if [ -n "$VM_CHILD_PID" ] && kill -0 "$VM_CHILD_PID" 2>/dev/null; then
-    fail "VMM child survived shutdown"
-  fi
-  VMM_PID=""
-  VM_CHILD_PID=""
-  case "$VMM:$status" in qemu:33|chv:0|fc:0) ;; *) fail "shutdown status $status" ;; esac
+  stop_guest
   [ "$(sha256sum "$image")" = "$baseline" ] || fail "read-only root changed its backing image"
 done
+imager="$ROOT_DIR/build/obj/$BUILD/imager/$BUILD/imager"
+"$imager" block-mount-fixture create "$image" "$SCRATCH/partitions"
+cp --sparse=always "$SCRATCH/partitions/root.img" "$TEST_VM_IMG_DIR/partitions.img"
+export MOTO_IMAGE=partitions.img
+start_guest unconfigured
+vm_ssh '/user/bin/systest block-partition unconfigured'
+stop_guest
+sed 's/read_only = true/read_only = false/' \
+  "$ROOT_DIR/img_files/test-ro-root/system/cfg/sys-fs.toml" > "$SCRATCH/partitions.toml"
+cat >> "$SCRATCH/partitions.toml" <<'TOML'
+
+[[mount]]
+path = "/user/data"
+type = "motor-fs"
+device = 0
+partition = 4
+TOML
+"$imager" block-mount-fixture config "$TEST_VM_IMG_DIR/$MOTO_IMAGE" "$SCRATCH/partitions.toml"
+start_guest partition-write
+vm_ssh '/user/bin/systest block-partition write'
+stop_guest
+echo 'read_only = true' >> "$SCRATCH/partitions.toml"
+"$imager" block-mount-fixture config "$TEST_VM_IMG_DIR/$MOTO_IMAGE" "$SCRATCH/partitions.toml"
+start_guest partition-read
+vm_ssh '/user/bin/systest block-partition read-only'
+stop_guest
 echo "-------- TEST-BLOCK-MOUNTS PASS ---------"
