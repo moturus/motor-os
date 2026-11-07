@@ -146,8 +146,12 @@ fn one_remote_listener_admits_100_pending_opens_without_stalling_a_command() {
         }
         assert_eq!(output, b"remote-command-ok\n");
         assert_eq!(status, Some(0));
+        let mut exchanges = tokio::task::JoinSet::new();
         for (socket, opened) in pending {
-            round_trip(socket, opened).await;
+            exchanges.spawn(round_trip(socket, opened));
+        }
+        while let Some(result) = exchanges.join_next().await {
+            result.unwrap();
         }
         session
             .cancel_tcpip_forward("localhost", port)
