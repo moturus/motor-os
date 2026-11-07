@@ -372,8 +372,7 @@ The supported settings are also accepted with `-o Key=Value`.
 Paths are literal. Use `/user/cfg/ssh/key`, not `~/.ssh/key`. `Include`,
 `Match`, `ProxyCommand`, value expansion, SSH URI jump syntax, agents,
 certificates, multiplexing, and system-wide config are not supported.
-Remote (`-R`) forwarding, agent forwarding, and X11
-forwarding are unsupported.
+Agent forwarding and X11 forwarding are unsupported.
 Unsupported directives and malformed settings report a filename and line;
 they are not silently ignored. A missing default config is allowed, while
 a missing file explicitly selected with `-F` is an error.

@@ -27,7 +27,7 @@ The other libraries in `src/sys/lib` are internal and not published:
   `src/bin`, `src/tests`, the forks and the toolchain. They use no path, Git
   source or `[patch]` for these crates. A path copy next to a crates.io copy
   links moto-rt twice, and the two copies' types do not match.
-- A program that needs SDK services depends on `moto-sdk = "0.1"`. It uses
+- A program that needs SDK services depends on `moto-sdk = "0.2"`. It uses
   `moto_sdk::rt` and `moto_sdk::sys` rather than its own moto-rt and moto-sys
   dependencies. A program that needs only moto-rt or moto-sys depends on them
   directly, as curl, gix and Lorry do. Do not add the SDK where it is not
@@ -84,9 +84,9 @@ The SDK combines eleven former crates. Paths below are relative to `moto_sdk`.
 - Crates the SDK replaced, such as moto-ipc 0.2.4, stay on crates.io. New code
   does not use them.
 
-### Prepared releases: moto-sys 0.4.0 and moto-sdk 0.2.0
+### Published releases: moto-sys 0.4.0 and moto-sdk 0.2.0
 
-These versions are prepared for publication. The version changes follow
+Both versions are published. The version changes follow
 [Cargo's semver rules](https://doc.rust-lang.org/cargo/reference/semver.html):
 removing public APIs requires a new compatibility range, including through
 the SDK's `sys` re-export.
@@ -100,7 +100,8 @@ the SDK's `sys` re-export.
   for the matching sys-io service. The published runtime remains
   `moto-rt 0.17.9`.
 
-`moto-sys 0.4.0` is published from commit `70da7181`. The SDK package-test
+`moto-sys 0.4.0` is published from commit `70da7181`, and `moto-sdk 0.2.0`
+from `f8f22e77`. The SDK package-test
 lock is refreshed with its final registry checksum, retaining all unrelated
 dependency versions and the declared direct dependency floors. The standalone
 SDK Motor OS publish dry run passes against the published system crate.
@@ -110,15 +111,9 @@ repaired OOM cancellation test and refreshed SDK package lock. The test now
 covers recovery before cancellation and requires child resources to be
 reclaimed before releasing pressure allocations or retained handles. The
 original failure, diagnosis and complete validation results are recorded in
-the [forwarding plan](plans/russhd-forwarding.md#published-system-crate-sdk-gate-validation).
+the git history of `docs/plans/russhd-forwarding.md`, removed after commit `85f39f3d`.
 
-After pushing this change, publish the SDK from `src/sys`:
-
-```sh
-cargo publish --locked --target x86_64-unknown-motor -p moto-sdk
-```
-
-Then raise applications that need the new API to `moto-sdk = "0.2"` and
-update their registry lockfiles. Existing `0.1` consumers keep their current
-requirement until they migrate. No runtime or kernel implementation changes
-are part of the release preparation.
+Russhd now uses both published versions. Applications that need the new API
+use `moto-sdk = "0.2"` and update their registry lockfiles. Existing `0.1`
+consumers keep their current requirement until they migrate. These releases
+did not change runtime or kernel implementations.
