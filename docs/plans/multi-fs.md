@@ -1,11 +1,22 @@
 # Multiple filesystems in sys-io
 
-Status: iteration 1 (memfs over the three tmp directories, configured in
-`/system/cfg/sys-fs.toml`) is committed; [fs-permissions.md](../fs-permissions.md)
-describes it and `git show b686d5e6:docs/plans/multi-fs.md` records it
-(requirements and design: `c1890b6a`). Iteration 2 was reviewed against
-`4fcde583` on 2026-11-06; D1–D5 are accepted. Implementation is in progress,
-starting with step 0; test each patch and commit it with a one-line message.
+Status: iteration 2's implementation and test coverage are committed, and
+feature-level validation passed. The libc resolver policy for read-only
+roots remains open below. D1–D5 were accepted after review against `4fcde583`
+on 2026-11-06. [fs-permissions.md](../fs-permissions.md)
+documents configuration and permissions. Iteration 1's plan is preserved in
+`b686d5e6` (requirements and design: `c1890b6a`).
+
+Individual patches use focused tests and one-line commits. Per the 2026-11-07
+workflow change, repeated full-suite runs are reserved for major milestones
+or the completed feature, rather than each patch. The final gate remains
+three debug and three release runs, plus the release developer-image suite.
+
+Open policy decision: when root is read-only and contains `/system/cfg/libc`,
+preserve its static resolver file or require it to match the active DNS
+settings. Until resolved, these images fail startup when sys-io tries to
+publish `resolv.conf`; the read-only test image omits libc. The native resolver
+can continue using discovered DNS servers independently of that file.
 
 ## Iteration 2: findmnt, Motor FS mounts, read-only mounts
 
@@ -33,17 +44,17 @@ partition = 1         # optional MBR slot 1-4; absent: Motor FS fills the device
 
 - `device` follows the PCI scan order and is never renumbered: a function that
   fails to parse keeps its slot, so `discover_virtio_devices` in virtio-async
-  must report failed functions with the kind the PCI device ID gives (today it
-  drops them). Log the index-to-PCI mapping. `partition` counts unused and
+  reports failed functions with the kind the PCI device ID gives. Log the
+  index-to-PCI mapping. `partition` counts unused and
   non-Motor slots; zero is invalid. No format guessing: a bad MBR or slot never
   falls back to the whole device, an omitted `partition` never searches an MBR. (D1)
 - Root: device 0's first block, after a capacity check. A Motor FS header
   selects the whole device; otherwise require a valid MBR and take its lowest
-  Motor FS slot (replacing today's panic on a second one). Missing or invalid
+  Motor FS slot. Missing or invalid
   root fails boot. The shipped root stays slot 3, slot 4 free; a bare root
   boots only on Cloud Hypervisor and Firecracker (kernel and initrd separate).
-- Header check, in motor-fs, on the block 0 every open already reads (today
-  `TxnLogger::open` validates nothing): magic, version 1, superblock block
+- Header check, in motor-fs, on the block 0 every open already reads:
+  magic, version 1, superblock block
   count equal to the extent's; the journal is located from the extent size,
   so a resized backing file would replay the wrong blocks.
 - Validate the whole file, then every source, before opening anything. Keep the
@@ -95,8 +106,8 @@ config) fail with `PermissionDenied`. The shipped file keeps root writable.
   mount even after an error.
 - Each virtqueue takes one of the 16 IRQ vectors sys-io reserves (64–79), shared
   with net and vsock, so about ten extra disks is the practical ceiling.
-- Cache (D2): B is today's `block_cache_blocks()` budget (16 MiB at 256 MiB RAM
-  and above), kept for root; each of M additional mounts defaults to B/M in
+- Cache (D2): B is the existing `block_cache_blocks()` budget (16 MiB at 256 MiB
+  RAM and above), kept for root; each of M additional mounts defaults to B/M in
   whole blocks; `cache_mb` replaces only that mount's share and may exceed the
   budget; a cache below 1 MiB rejects the file. Each Motor FS also pins 64
   journal blocks plus its superblock; measure sys-io memory at small guest
@@ -123,18 +134,15 @@ config) fail with `PermissionDenied`. The shipped file keeps root writable.
    applying; default shares, then overrides. Self-tests for every rule above
    at small and normal RAM; new entries are never silently ignored.
 3. Read-only: negotiate `VIRTIO_BLK_F_RO` when offered and expose the resulting
-   device flag (today the bit is never acknowledged, so the flag is always
-   false); check it against configuration. Add the opening policy above to
+   device flag; check it against configuration. Add the opening policy above to
    motor-fs and propagate recovery completion/errors to startup. Flag on
    `Mount`, checked in `Resolved::write`; also check both resolved mounts in
-   `move_entry` before the `CrossesDevices` branch, which currently returns
-   before taking the write lock. Cover both rename variants with a read-only
-   source and with a read-only destination. Flush skips; root flip; `ro` in
+   `move_entry` before the `CrossesDevices` branch. Cover both rename variants
+   with a read-only source and with a read-only destination. Flush skips; root flip; `ro` in
    the boot line and findmnt. Self-tests: feature present/absent, recovery
    forbidden with no writes queued, and recovery completion/errors. strobe reclaims
-   logs by `fs.available_bytes` (data partition only): switch it to the
-   `/system/logs` mount's cap and usage from the listing (small `src/sys/strobe`
-   change). Image flavor `motor-os-ro-root.yaml` (`BUILD_TEST_IMAGE`, replaces
+   logs using the `/system/logs` mount's cap and usage from the listing.
+   Image flavor `motor-os-ro-root.yaml` (`BUILD_TEST_IMAGE`, replaces
    `sys-fs.toml`); new `test-block-mounts.sh` boots it on the gate's VMM:
    services log, root `ro`, root writes fail with `PermissionDenied` for System
    and Interactive, reads and exec work, logs rotate against the memfs cap,
@@ -166,3 +174,82 @@ config) fail with `PermissionDenied`. The shipped file keeps root writable.
    memory, boot time and I/O against the single-root baseline; fixture once on
    the other two VMMs. Gate: three debug and three release `full-test.sh` runs,
    then `full-test-dev.sh --release`; no retries or longer limits.
+
+### Implementation validation (2026-11-07)
+
+The 12-profile mount matrix passed: QEMU debug and release at 128/256 MiB
+with one/four CPUs and 1 GiB with one CPU, plus release Cloud Hypervisor and
+Firecracker at 256 MiB/four CPUs. These cover concurrent I/O, executable paging,
+memfs refusal/recovery, reboot/readback, read-only backing, journal recovery
+and invalid configurations/images. CHV/FC also cover bare roots. A plain
+128 MiB boot passed before enabling that profile; the five-default-cache
+rejection passed there. Three debug and three release full-suite milestone
+runs passed at 1 GiB/four CPUs. `full-test-dev.sh --release` also passed,
+including native source builds, toolchain installation, the Lorry product
+suite and wasm checks. All final gate runs passed on their first attempt,
+with unchanged limits and tested source.
+
+Measurements compare `e094a9e6` (single-root baseline) with `280024d4`, on
+the same nested-KVM host using release Cloud Hypervisor, raw images and the
+same preserved `systest fs-bench` binary. “Four FS” means root plus slot 4,
+a sector-1 MBR data disk and a bare data disk, using default cache shares.
+Each run starts from fresh image copies and measures the second boot.
+Four-CPU rows are medians of three predefined samples; one-CPU rows have one
+sample. Runs were sequential, without concurrent builds or VMs.
+
+Warm boot milestones, kernel / services up in milliseconds (each median
+computed independently):
+
+| RAM / CPUs | Baseline | Current, one FS | Current, four FS |
+| --- | ---: | ---: | ---: |
+| 128 MiB / 1 | 17 / 41 | 22 / 49 | 14 / 53 |
+| 256 MiB / 1 | 10 / 30 | 7 / 30 | 14 / 65 |
+| 256 MiB / 4 | 20 / 39 | 20 / 47 | 20 / 56 |
+| 1 GiB / 1 | 14 / 41 | 14 / 36 | 6 / 44 |
+| 1 GiB / 4 | 14 / 34 | 19 / 45 | 20 / 57 |
+
+Routine writable-mount messages now use DEBUG, removing two serial INFO
+messages from the single-root boot path; PCI mappings and read-only mounts
+remain at INFO. The single-root userspace interval was 3–6 ms above baseline
+in four profiles and 5 ms below it in the other. These short timings vary with
+host scheduling; the additional filesystems also require opening their
+configured sources.
+
+Peak sampled sys-io RSS after the filesystem benchmarks, in MiB:
+
+| RAM / CPUs | Baseline | Current, one FS | Current, four FS |
+| --- | ---: | ---: | ---: |
+| 128 MiB / 1 | 21.5 | 21.5 | 28.7 |
+| 256 MiB / 1 | 34.9 | 34.9 | 53.6 |
+| 256 MiB / 4 | 34.8 | 34.8 | 53.9 |
+| 1 GiB / 1 | 34.9 | 34.9 | 53.6 |
+| 1 GiB / 4 | 34.9 | 34.9 | 53.9 |
+
+Single-root memory is nearly unchanged. Additional mounts added about
+1–1.4 MiB before I/O and about 7.2 MiB at 128 MiB RAM or 18.7–19.1 MiB at
+larger sizes after their caches were filled. RSS includes journal blocks,
+retained I/O buffers and allocator overhead beyond the configured LRU sizes.
+The 128 MiB concurrency and refusal/recovery tests passed with unchanged
+OOM floors.
+
+Root throughput, hot sequential 1 MiB / write 1 MiB / cold sequential 1 MiB,
+in MiB/s, rounded:
+
+| RAM / CPUs | Baseline | Current, one FS | Current, four FS |
+| --- | ---: | ---: | ---: |
+| 128 MiB / 1 | 1600 / 288 / 610 | 1328 / 208 / 554 | 1222 / 208 / 441 |
+| 256 MiB / 1 | 1607 / 184 / 597 | 1580 / 190 / 550 | 1409 / 269 / 569 |
+| 256 MiB / 4 | 1256 / 201 / 611 | 1435 / 212 / 591 | 1696 / 213 / 645 |
+| 1 GiB / 1 | 1284 / 149 / 593 | 1225 / 157 / 562 | 1607 / 168 / 561 |
+| 1 GiB / 4 | 1387 / 195 / 637 | 1456 / 194 / 505 | 1636 / 214 / 644 |
+
+I/O rates varied substantially between samples and between the two measurement
+sets taken before and after the logging change; these are acceptance samples,
+not statistically precise performance estimates. The single 128 MiB sample
+was slower, while the repeated four-CPU hot-read/write comparisons were
+similar or faster. Cold-read rates were lower in the final single-root rows;
+the preceding measurement set showed mixed cold-read results. All three
+additional source forms completed the benchmark;
+their cold sequential rates ranged from 443 to 835 MiB/s across these profiles.
+Raw logs, image hashes and per-source results are retained under
+`build/diagnostics/multi-fs-validation/`.

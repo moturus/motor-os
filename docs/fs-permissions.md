@@ -28,8 +28,35 @@ one by rename, returns `PermissionDenied`. `remove_dir_all("/none/tmp")` can
 empty the mount before failing to remove its root. Prefer a private subtree
 for temporary work. The native `FsClient::mounts()` API lists all mounts,
 configured paths, capacities and sampled usage for every role. sys-io's
-`fs.capacity_bytes` and `fs.available_bytes` metrics describe only the data
-partition; memfs usage appears in the listing and the `fs.memfs.*` totals.
+`fs.capacity_bytes` and `fs.available_bytes` metrics describe only the root
+filesystem; memfs usage appears in the listing and the `fs.memfs.*` totals.
+
+Additional Motor FS filesystems can be mounted at boot by adding entries to
+`/system/cfg/sys-fs.toml`:
+
+```toml
+[[mount]]
+path = "/user/data" # an existing directory
+type = "motor-fs"
+device = 1
+partition = 2      # MBR slot 1–4; omit for a whole-device Motor FS image
+# read_only = true
+# cache_mb = 8     # optional LRU cache size in MiB
+```
+
+Device numbers follow the PCI scan order shown in sys-io's boot log; failed
+devices keep their numbers. Partitions retain their MBR slot numbers. Omitting
+`partition` requires a bare Motor FS image and does not search for an MBR.
+Mounts are applied in file order, so a later target can be inside an earlier
+mount. Motor FS preserves the mounted filesystem's stored permissions.
+
+Root keeps its usual cache budget; additional Motor FS mounts share another
+budget of the same size equally, in whole 4 KiB blocks. A positive integer
+`cache_mb` overrides only that mount's share and may exceed this default budget.
+Every cache must be at least 1 MiB. Invalid configuration or a missing,
+malformed or repeated source aborts startup before filesystem services become
+available. `findmnt` shows `virtio1p2` for a partition or `virtio1` for a
+whole device.
 
 ## Permission model
 
@@ -46,6 +73,10 @@ editor configuration fail unless their destinations have writable mounts.
 Opening a mount can recover a journal on writable backing before enforcing
 the mount flag. VMM read-only backing requires a clean journal and an explicitly
 read-only configuration; it never receives recovery writes.
+
+Read-only roots containing `/system/cfg/libc` currently fail during resolver
+file publication. The [plan](plans/multi-fs.md) records the pending policy
+decision for these images.
 
 A Motor OS filesystem mode contains three permission triplets in **System, Interactive,
 None** order. For example, `rw-r-----` grants System read/write, Interactive
