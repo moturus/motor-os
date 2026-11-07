@@ -6,7 +6,7 @@ const MAX_HOST: usize = 255;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ListenAddress {
-    /// None uses GatewayPorts; an explicit empty address or `*` is a wildcard.
+    /// None uses this forward's default; an explicit empty address or `*` is a wildcard.
     pub host: Option<String>,
     pub port: u16,
 }
@@ -24,19 +24,37 @@ pub struct LocalForward {
     pub target: Option<TargetAddress>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteForward {
+    pub listen: ListenAddress,
+    pub target: TargetAddress,
+}
+
 impl ListenAddress {
     pub fn parse(value: &str) -> Result<Self, ParseError> {
+        Self::parse_with_zero(value, false)
+    }
+
+    fn parse_with_zero(value: &str, allow_zero: bool) -> Result<Self, ParseError> {
         match fields(value)?.as_slice() {
-            [listen_port] => Self::from_parts(None, listen_port),
-            [host, listen_port] => Self::from_parts(Some(host), listen_port),
+            [listen_port] => Self::from_parts(None, listen_port, allow_zero),
+            [host, listen_port] => Self::from_parts(Some(host), listen_port, allow_zero),
             _ => Err(invalid()),
         }
     }
 
-    fn from_parts(bind: Option<&str>, listen_port: &str) -> Result<Self, ParseError> {
+    fn from_parts(
+        bind: Option<&str>,
+        listen_port: &str,
+        allow_zero: bool,
+    ) -> Result<Self, ParseError> {
         Ok(Self {
             host: bind.map(|value| host(value, true)).transpose()?,
-            port: port(listen_port)?,
+            port: if allow_zero {
+                listen_port.parse().map_err(|_| invalid())?
+            } else {
+                port(listen_port)?
+            },
         })
     }
 }
@@ -68,11 +86,11 @@ impl LocalForward {
     pub fn parse(value: &str) -> Result<Self, ParseError> {
         match fields(value)?.as_slice() {
             [listen_port, target_host, target_port] => Ok(Self {
-                listen: ListenAddress::from_parts(None, listen_port)?,
+                listen: ListenAddress::from_parts(None, listen_port, false)?,
                 target: Some(TargetAddress::from_parts(target_host, target_port)?),
             }),
             [bind, listen_port, target_host, target_port] => Ok(Self {
-                listen: ListenAddress::from_parts(Some(bind), listen_port)?,
+                listen: ListenAddress::from_parts(Some(bind), listen_port, false)?,
                 target: Some(TargetAddress::from_parts(target_host, target_port)?),
             }),
             _ => Err(invalid()),
@@ -84,6 +102,33 @@ impl LocalForward {
             listen: ListenAddress::parse(listen)?,
             target: Some(TargetAddress::parse(target)?),
         })
+    }
+}
+
+impl RemoteForward {
+    pub fn parse(value: &str) -> Result<Self, ParseError> {
+        match fields(value)?.as_slice() {
+            [listen_port, target_host, target_port] => Ok(Self {
+                listen: ListenAddress::from_parts(None, listen_port, true)?,
+                target: TargetAddress::from_parts(target_host, target_port)?,
+            }),
+            [bind, listen_port, target_host, target_port] => Ok(Self {
+                listen: ListenAddress::from_parts(Some(bind), listen_port, true)?,
+                target: TargetAddress::from_parts(target_host, target_port)?,
+            }),
+            _ => Err(invalid()),
+        }
+    }
+
+    pub fn parse_config(listen: &str, target: &str) -> Result<Self, ParseError> {
+        Ok(Self {
+            listen: ListenAddress::parse_with_zero(listen, true)?,
+            target: TargetAddress::parse(target)?,
+        })
+    }
+
+    pub fn bind_address(&self) -> &str {
+        self.listen.host.as_deref().unwrap_or("localhost")
     }
 }
 
@@ -161,6 +206,42 @@ fn fields(value: &str) -> Result<Vec<&str>, ParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_forwards_allow_allocation_only_for_the_listening_port() {
+        for (argument, listen, target) in [
+            ("0:localhost:80", "0", "localhost:80"),
+            ("127.0.0.1:0:host:443", "127.0.0.1:0", "host:443"),
+            ("[::1]:65535:[::2]:22", "[::1]:65535", "[::2]:22"),
+            ("*:0:target:80", "*:0", "target:80"),
+            (":0:target:80", ":0", "target:80"),
+        ] {
+            assert_eq!(
+                RemoteForward::parse(argument).unwrap(),
+                RemoteForward::parse_config(listen, target).unwrap()
+            );
+        }
+        assert_eq!(
+            RemoteForward::parse("0:host:80").unwrap().bind_address(),
+            "localhost"
+        );
+        for argument in [
+            "",
+            "80:host",
+            "65536:host:80",
+            "0:host:0",
+            "0:host:65536",
+            "0:bad/host:80",
+            "[::1]:0:[[::2]]:80",
+        ] {
+            assert!(
+                RemoteForward::parse(argument).is_err(),
+                "accepted {argument:?}"
+            );
+        }
+        assert!(LocalForward::parse("0:host:80").is_err());
+        assert!(LocalForward::parse_dynamic("0").is_err());
+    }
 
     #[test]
     fn command_and_config_syntax_share_the_same_endpoints() {

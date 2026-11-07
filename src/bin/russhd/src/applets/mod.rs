@@ -189,6 +189,13 @@ fn parse_ssh(args: &[String]) -> Result<SshArgs, ParseError> {
         {
             continue;
         }
+        if options
+            && option_value(args, &mut index, 'R', |value| {
+                connection.add_remote_forward(value)
+            })?
+        {
+            continue;
+        }
         if options && args[index] == "-N" {
             no_session = true;
             index += 1;
@@ -542,6 +549,36 @@ mod tests {
 
         let parsed = parse_ssh(&strings(&["host", "command", "--help"])).unwrap();
         assert_eq!(parsed.command, ["command", "--help"]);
+    }
+
+    #[test]
+    fn remote_forwarding_flags_accumulate_and_copy_applets_only_accept_config() {
+        let parsed = parse_ssh(&strings(&[
+            "-R",
+            "0:target:80",
+            "-R[::1]:8080:[::2]:81",
+            "-oRemoteForward=localhost:8081 local:82",
+            "-R0:target:80",
+            "host",
+        ]))
+        .unwrap();
+        assert_eq!(parsed.connection.remote_forwards.len(), 3);
+        assert_eq!(parsed.connection.remote_forwards[0].listen.port, 0);
+        assert_eq!(parsed.connection.remote_forwards[1].target.host, "::2");
+        for value in ["0:target:0", "65536:target:80", "0:bad/host:80"] {
+            assert!(parse_ssh(&strings(&["-R", value, "host"])).is_err());
+        }
+        assert!(parse_scp(&strings(&["-R0:target:80", "local", "u@host:remote"])).is_err());
+        assert!(parse_sftp(&strings(&["-R0:target:80", "host"])).is_err());
+        assert!(
+            parse_scp(&strings(&[
+                "-oRemoteForward=0 target:80",
+                "local",
+                "u@host:remote"
+            ]))
+            .is_ok()
+        );
+        assert!(parse_sftp(&strings(&["-oRemoteForward=0 target:80", "host"])).is_ok());
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::forward_args::LocalForward;
+use super::forward_args::{LocalForward, RemoteForward};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Applet {
@@ -81,6 +81,7 @@ pub enum HostKeyPolicy {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionOptions {
     pub local_forwards: Vec<LocalForward>,
+    pub remote_forwards: Vec<RemoteForward>,
     pub gateway_ports: bool,
     gateway_ports_set: bool,
     pub exit_on_forward_failure: bool,
@@ -113,6 +114,7 @@ impl Default for ConnectionOptions {
     fn default() -> Self {
         Self {
             local_forwards: Vec::new(),
+            remote_forwards: Vec::new(),
             gateway_ports: false,
             gateway_ports_set: false,
             exit_on_forward_failure: false,
@@ -213,6 +215,13 @@ impl ConnectionOptions {
     }
 
     pub(crate) fn apply_values(&mut self, key: &str, values: &[String]) -> Result<(), ParseError> {
+        if key.eq_ignore_ascii_case("RemoteForward") {
+            let [listen, target] = values else {
+                return Err(ParseError::new(format!("{key} requires two arguments")));
+            };
+            self.push_remote_forward(RemoteForward::parse_config(listen, target)?);
+            return Ok(());
+        }
         if key.eq_ignore_ascii_case("LocalForward") {
             let [listen, target] = values else {
                 return Err(ParseError::new(format!("{key} requires two arguments")));
@@ -224,6 +233,17 @@ impl ConnectionOptions {
             return Err(ParseError::new(format!("{key} requires one argument")));
         };
         self.apply(key, value)
+    }
+
+    pub fn add_remote_forward(&mut self, value: &str) -> Result<(), ParseError> {
+        self.push_remote_forward(RemoteForward::parse(value)?);
+        Ok(())
+    }
+
+    fn push_remote_forward(&mut self, forward: RemoteForward) {
+        if !self.remote_forwards.contains(&forward) {
+            self.remote_forwards.push(forward);
+        }
     }
 
     pub(crate) fn apply(&mut self, key: &str, value: &str) -> Result<(), ParseError> {

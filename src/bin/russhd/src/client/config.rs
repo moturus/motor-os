@@ -344,6 +344,47 @@ mod tests {
     use crate::client::args::ConnectionOptions;
 
     #[test]
+    fn remote_forwarding_accumulates_exact_definitions_without_moving_cli_requests_to_jumps() {
+        let config = super::Config::parse(
+            "Host target\n ProxyJump jump\n RemoteForward localhost:0 local:80\n RemoteForward localhost:0 local:80\nHost *\n RemoteForward [::1]:9000 [::2]:90\nHost jump\n RemoteForward 9001 jump:91\n",
+            std::path::Path::new("memory"),
+        ).unwrap();
+        let mut options = ConnectionOptions::default();
+        options.add_remote_forward("9002:cli:92").unwrap();
+        let route = config
+            .resolve(
+                &options,
+                &crate::client::args::Destination::parse("user@target").unwrap(),
+            )
+            .unwrap();
+        let jump = &route[0].options.remote_forwards;
+        assert_eq!(
+            jump.iter()
+                .map(|forward| forward.listen.port)
+                .collect::<Vec<_>>(),
+            [9000, 9001]
+        );
+        let target = &route[1].options.remote_forwards;
+        assert_eq!(
+            target
+                .iter()
+                .map(|forward| forward.listen.port)
+                .collect::<Vec<_>>(),
+            [9002, 0, 9000]
+        );
+        assert_eq!(target[1].bind_address(), "localhost");
+        assert_eq!(target[2].target.host, "::2");
+        for option in [
+            "RemoteForward=0:target:80",
+            "RemoteForward=0",
+            "RemoteForward=0 target:0",
+            "RemoteForward=0 target:80 extra",
+        ] {
+            assert!(options.apply_o(option).is_err());
+        }
+    }
+
+    #[test]
     fn dynamic_and_fixed_forwards_accumulate_in_order_with_shared_arity_checks() {
         let config = super::Config::parse(
             "Host target\nDynamicForward 1080\nLocalForward 8080 localhost:80\nHost *\nDynamicForward [::1]:1081\n",
