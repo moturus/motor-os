@@ -39,7 +39,7 @@ Developer-image validation remains release-only.
 | 4 | Complete: both the original `d4a1cc4` snapshot and subsequent `d16a1df` callback/server-credit repairs pass their main-image 3+3 gates and complete developer-image release gates | None |
 | 5 | Complete: `-L`/`-N`, published fork repairs and guest coverage pass all 218 component tests, clippy, native builds, 3/3 release, 3/3 debug and the complete developer-release gate. The test port-allocation race is fixed by `c1ae1c5e` and `8a9f665d`; the validated snapshot stays unchanged across all runs | None; the subsequent shared close repair is integrated with step 6 |
 | 6 | Complete: bounded SOCKS4/4a/5, `-D`, configuration, shared probe, retained fixture reservations and the published close fix through `9c6dc207`. All 234 component tests, clippy, both Motor release binaries and the separate `step6-main` 3/3 release and 3/3 debug image runs pass. Native guest coverage is committed as `013f22f6` | None |
-| 7 | Integrated through `8bcb223b`: loopback binds, exact registration/cancellation, scoped relays, GatewayPorts and 100 concurrent pending opens. All 249 component tests, 58 imager tests, clippy and both native release binaries pass. The `step7-main` 3+3 image batch is running, including native remote listeners and the added wildcard/allocated-port guest check | Complete guest validation and milestone gates |
+| 7 | Integrated through `8bcb223b`, with guest coverage in `43ec0af2`. All 249 component tests, 58 imager tests, clippy, both native builds, 3/3 release and the first debug image run pass. The second debug run times out in an existing jump transfer and exposes the transport-flush deadlock described below | Repair and publish the external transport fix; fresh milestone image gates |
 | 8 | Main-based integration `a18cbf7d` in `step8-integration-worktree` includes the complete `-R` runtime, authorization, ordering, allocated ports, drain, hostile-peer coverage, route/copy isolation, help and docs. It also fixes local-setup and resolver-worker shutdown. All 269 component tests, clippy and both native release binaries pass against published `e9a05c1` | Guest validation; integrate after step 7; separate 3+3 milestone gates |
 
 ### Remote forwarding: close-handshake repair in the external fork
@@ -114,6 +114,33 @@ port-allocation path. Both checks pass in the first complete `step7-main`
 release image run; its remaining milestone runs are in progress. The completed
 step 6 sources and active step 7 sources and runners stayed unchanged during
 their respective gates.
+
+### Transport flush: stalled full-duplex jump transfer
+
+`step7-main-debug-2` fails at its unchanged 1800-second deadline, with source
+status zero. A 4 MiB guest jump transfer returns only 214,960 bytes. The host
+target waits for more stdin, and the jump's TCP socket has queued data in both
+directions. Other guest SSH sessions remain responsive. Native debugger stacks
+show the input thread waiting on its full queue, the output thread waiting on an
+empty queue, and the async thread parked in Mio.
+
+The preserved client memory snapshot and matching symbols show unread native
+TCP buffers and Tokio's READABLE bit already set, with no registered reader and
+a waiting writer. Both russh session loops await a full transport flush before
+reading again. A new encrypted in-memory regression in the external fork at
+`build/russh-rebase/fork`, using a 4096-byte transport and large channel windows
+and receivers, reproduces the deadlock while both applications actively drain.
+Its initial compile-signature error is preserved separately from the actual
+failing regression in `step7-transport-flush-reproduction-compiled.log`.
+
+The repair is being prepared on the existing external `motor-v0.65.1` branch:
+retain partial-write progress across cancellation, select transport writes
+alongside reads, pause application-output admission while ciphertext remains,
+and bound queued transport output. Preserve packet order, rekey state and the
+existing inactivity timeout. The original failure, stacks, offline core and
+decoded state are retained under `step7-debug2-*`; no retry or longer timeout
+was used. No core OS source changed. A tested fork commit will require user
+publication before updating the real main pin and restarting the affected gates.
 
 ## Implementation history
 
