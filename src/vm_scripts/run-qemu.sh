@@ -48,7 +48,7 @@ fi
 echo "run-qemu: -smp ${SMP}, memory ${MEMORY_MIB} MiB${MOTO_CPU_AFFINITY:+ (pinned to host cpus ${MOTO_CPU_AFFINITY})}" 1>&2
 
 if [ "${MOTO_QEMU_USER_NET:-0}" = "1" ]; then
-  NETDEV="user,net=192.168.4.0/24,host=192.168.4.1,hostfwd=tcp:127.0.0.1:10023-192.168.4.2:2222,id=nic0"
+  NETDEV="user,net=192.168.4.0/24,host=192.168.4.1,dhcpstart=192.168.4.2,hostfwd=tcp:127.0.0.1:10023-192.168.4.2:2222,id=nic0"
 else
   NETDEV="tap,ifname=moto-tap,script=no,downscript=no,id=nic0"
 fi

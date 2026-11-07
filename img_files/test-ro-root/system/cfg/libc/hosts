@@ -1,0 +1,4 @@
+127.0.0.1 localhost
+::1 localhost
+127.0.0.53 motor-dns-test
+::1 motor-dns-test

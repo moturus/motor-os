@@ -83,6 +83,7 @@ for boot in 1 2; do
   start_guest "ro-root-$boot"
   if [ "$boot" = 1 ]; then
     vm_ssh '/system/services/strobe --self-test'
+    vm_ssh '/system/services/dns-resolver --self-test-local'
   fi
   vm_ssh 'MOTOR_OS_CAPS=0x244 /user/bin/systest block-ro-root'
   vm_ssh 'MOTOR_OS_CAPS=0x204 /user/bin/systest block-ro-root'
@@ -99,6 +100,32 @@ for boot in 1 2; do
   [ "$(sha256sum "$image")" = "$baseline" ] || fail "read-only root changed its backing image"
 done
 imager="$ROOT_DIR/build/obj/$BUILD/imager/$BUILD/imager"
+# An actual DHCP ACK must reach the snapshot and resolver on a read-only root.
+# QEMU supplies DHCP locally; these checks send no Internet traffic.
+if [ "$VMM" = qemu ]; then
+  cp --sparse=always "$image" "$TEST_VM_IMG_DIR/dhcp.img"
+  cat > "$SCRATCH/sys-net-dhcp.toml" <<'TOML'
+auto_icmp_echo_reply = true
+loopback = true
+[devices.net0]
+dhcp = true
+TOML
+  "$imager" block-mount-fixture net-config "$TEST_VM_IMG_DIR/dhcp.img" "$SCRATCH/sys-net-dhcp.toml"
+  dhcp_before="$(sha256sum "$TEST_VM_IMG_DIR/dhcp.img")"
+  export MOTO_IMAGE=dhcp.img MOTO_QEMU_USER_NET=1
+  sed 's/^\[192.168.4.2\]:2222/[127.0.0.1]:10023/' "$WD/test-known-hosts" > "$SCRATCH/known-hosts"
+  SSH_OPTIONS=(-F /dev/null -p 10023 -o HostName=127.0.0.1
+    -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes
+    -o UserKnownHostsFile="$SCRATCH/known-hosts" -i "$WD/test.key")
+  SSH=(ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2)
+  start_guest dhcp
+  vm_ssh '/system/services/dns-resolver --test-dhcp'
+  vm_ssh '/system/services/dns-resolver --self-test-local'
+  stop_guest
+  [ "$(sha256sum "$TEST_VM_IMG_DIR/dhcp.img")" = "$dhcp_before" ] || fail "DHCP wrote to the root image"
+  unset MOTO_QEMU_USER_NET
+  test_vm_configure_ssh
+fi
 "$imager" block-mount-fixture create "$image" "$SCRATCH/partitions"
 cp --sparse=always "$SCRATCH/partitions/root.img" "$TEST_VM_IMG_DIR/partitions.img"
 export MOTO_IMAGE=partitions.img

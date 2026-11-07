@@ -185,3 +185,29 @@ pub(super) fn self_test() {
     snapshot.active_devices.push("a".into());
     assert!(self_forward.nameservers(&snapshot, 0).is_empty());
 }
+
+// QEMU's isolated user-network fixture acquires this lease over virtio-net.
+// Verify the published ACK and the same upstream selection used by the service.
+pub(super) fn dhcp_self_test() {
+    let config = Config::parse(&read(CONFIG_PATH, MAX_CONFIG_BYTES).unwrap()).unwrap();
+    assert!(config.devices["net0"].dhcp);
+    let snapshot: toml::Value = toml::from_str(&read(DHCP_PATH, 1024 * 1024).unwrap()).unwrap();
+    let lease = &snapshot["devices"]["net0"]["lease"];
+    assert_eq!(lease["address"].as_str(), Some("192.168.4.2/24"));
+    for field in ["router", "server_address", "server_identifier"] {
+        assert_eq!(lease[field].as_str(), Some("192.168.4.1"));
+    }
+    let times = [
+        "acquired_at_unix_ms",
+        "renew_at_unix_ms",
+        "rebind_at_unix_ms",
+        "expires_at_unix_ms",
+    ]
+    .map(|field| lease[field].as_integer().unwrap());
+    assert!(times.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(
+        nameservers().unwrap(),
+        ["192.168.4.3".parse::<IpAddr>().unwrap()]
+    );
+    println!("dns-resolver live DHCP test PASS");
+}

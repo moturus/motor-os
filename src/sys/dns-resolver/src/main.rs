@@ -566,6 +566,16 @@ fn main() {
             bridge_self_test();
             ipc_self_test(client);
         }
+        Some("--self-test-local") if args.next().is_none() => {
+            let mut client = connect_with_retry();
+            capability_self_test();
+            resolver_policy_self_test();
+            let hosts = client.lookup("motor-dns-test", AddressFamily::Any).unwrap();
+            assert!(hosts.addresses.len() >= 2);
+            assert!(!std::fs::exists("/system/cfg/libc/resolv.conf").unwrap());
+            println!("dns-resolver local self-test PASS");
+        }
+        Some("--test-dhcp") if args.next().is_none() => config::dhcp_self_test(),
         Some("--test-capabilities") if args.next().is_none() => capability_self_test(),
         Some("--test-capability-child") if args.next().is_none() => capability_test_child(),
         _ => {

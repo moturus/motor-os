@@ -97,9 +97,9 @@ fn append_partition(root: &Path, data: &Path) -> io::Result<()> {
     disk.sync_all()
 }
 
-async fn write_config(root: &Path, config: &[u8]) -> io::Result<()> {
+async fn write_config(root: &Path, path: &str, config: &[u8]) -> io::Result<()> {
     let mut fs = open_root(root).await?;
-    let file = crate::chmod::resolve_path(&fs, Path::new("/system/cfg/sys-fs.toml")).await?;
+    let file = crate::chmod::resolve_path(&fs, Path::new(path)).await?;
     fs.resize(Role::System, file, 0).await?;
     for (index, bytes) in config.chunks(4096).enumerate() {
         fs.write(Role::System, file, (index * 4096) as u64, bytes)
@@ -251,8 +251,13 @@ pub fn run(args: &[String]) -> io::Result<()> {
             fs::write(directory.join("unused.img"), [0; 4096])?;
             append_partition(&root, &data)
         }
-        [operation, image, config] if operation == "config" => {
-            runtime.block_on(write_config(Path::new(image), &fs::read(config)?))
+        [operation, image, config] if matches!(operation.as_str(), "config" | "net-config") => {
+            let path = if operation == "config" {
+                "/system/cfg/sys-fs.toml"
+            } else {
+                "/system/cfg/sys-net.toml"
+            };
+            runtime.block_on(write_config(Path::new(image), path, &fs::read(config)?))
         }
         [operation, image, output] if operation == "extract-root" => {
             extract_root(Path::new(image), Path::new(output))
@@ -263,7 +268,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
             runtime.block_on(check_recovery(Path::new(image)))
         }
         _ => Err(invalid(
-            "usage: block-mount-fixture create ROOT_RAW NEW_DIR | config IMAGE TOML | extract-root IMAGE OUTPUT | corrupt IMAGE KIND | dirty IMAGE | check-recovery IMAGE",
+            "usage: block-mount-fixture create ROOT_RAW NEW_DIR | config IMAGE TOML | net-config IMAGE TOML | extract-root IMAGE OUTPUT | corrupt IMAGE KIND | dirty IMAGE | check-recovery IMAGE",
         )),
     }
 }
@@ -344,7 +349,7 @@ mod tests {
         let text = b"[[mount]]\npath='/user/data'\ntype='motor-fs'\ndevice=0\npartition=4\n";
         runtime
             .block_on(async {
-                write_config(&result, text).await?;
+                write_config(&result, "/system/cfg/sys-fs.toml", text).await?;
                 let root = open_root(&result).await?;
                 let cfg =
                     crate::chmod::resolve_path(&root, Path::new("/system/cfg/sys-fs.toml")).await?;

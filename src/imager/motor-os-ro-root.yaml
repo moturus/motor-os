@@ -1,6 +1,7 @@
 permission_policy: "motor-os-permissions.yaml"
 input_files:
   - "/system/services/russhd"
+  - "/system/services/dns-resolver"
   - "/system/services/strobe"
   - "/system/services/sys-init"
   - "/system/services/sys-tty"
@@ -11,6 +12,7 @@ directories:
   - "/system"
   - "/system/bin"
   - "/system/cfg"
+  - "/system/cfg/libc"
   - "/system/logs"
   - "/system/services"
   - "/system/tmp"

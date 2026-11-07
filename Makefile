@@ -325,7 +325,7 @@ system-tty.img: boot core sys-base user-base wg
 vsock-test.img: boot core sys-base sysbox rush systest
 	$(call BUILD_TEST_IMAGE,vsock-test)
 
-ro-root.img: boot core sys-base sysbox rush russhd systest
+ro-root.img: boot core sys-base sysbox rush russhd dns-resolver systest
 	$(call BUILD_TEST_IMAGE,ro-root)
 
 # The minimal base image; it takes nothing from the assembly.
