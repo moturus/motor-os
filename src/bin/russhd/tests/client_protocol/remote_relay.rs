@@ -115,6 +115,48 @@ async fn round_trip(mut socket: TcpStream, mut opened: Opened) {
 }
 
 #[test]
+fn one_remote_listener_admits_100_pending_opens_without_stalling_a_command() {
+    let fixture = Fixture::configured("allow_tcp_forwarding = true");
+    block_on(async {
+        let (session, mut incoming) = connect(&fixture).await;
+        let port = session.tcpip_forward("localhost", 0).await.unwrap();
+        let mut pending = Vec::new();
+        for _ in 0..100 {
+            let socket = TcpStream::connect(("127.0.0.1", port as u16))
+                .await
+                .unwrap();
+            pending.push((socket, incoming.recv().await.unwrap()));
+        }
+        let mut command = session.channel_open_session().await.unwrap();
+        command
+            .exec(true, "/bin/echo remote-command-ok")
+            .await
+            .unwrap();
+        command.eof().await.unwrap();
+        let mut output = Vec::new();
+        let mut status = None;
+        loop {
+            match command.wait().await {
+                Some(ChannelMsg::Data { data }) => output.extend_from_slice(&data),
+                Some(ChannelMsg::ExitStatus { exit_status }) => status = Some(exit_status),
+                Some(ChannelMsg::Close) => break,
+                Some(_) => {}
+                None => panic!("command ended without close"),
+            }
+        }
+        assert_eq!(output, b"remote-command-ok\n");
+        assert_eq!(status, Some(0));
+        for (socket, opened) in pending {
+            round_trip(socket, opened).await;
+        }
+        session
+            .cancel_tcpip_forward("localhost", port)
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
 fn gateway_ports_overrides_explicit_loopback_with_wildcard_binds_and_allocated_ports() {
     let fixture = Fixture::configured("allow_tcp_forwarding = true\ngateway_ports = true");
     block_on(async {
