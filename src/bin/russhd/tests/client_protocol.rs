@@ -26,6 +26,8 @@ mod local_forwarding;
 mod remote_failures;
 #[path = "client_protocol/remote_forwarding.rs"]
 mod remote_forwarding;
+#[path = "client_protocol/remote_ordering.rs"]
+mod remote_ordering;
 #[path = "client_protocol/remote_peer.rs"]
 mod remote_peer;
 #[path = "client_protocol/remote_policy.rs"]

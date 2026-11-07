@@ -3,7 +3,7 @@ use super::remote_peer::{Event, Peer, Reply};
 use super::*;
 use std::net::{Shutdown, TcpListener};
 
-fn start(fixture: &Fixture, peer: &Peer, forwards: &[String]) -> Client {
+pub(super) fn start(fixture: &Fixture, peer: &Peer, forwards: &[String]) -> Client {
     let mut args = fixture.ssh_args();
     args[3] = peer.port.to_string();
     for forward in forwards {
@@ -13,7 +13,12 @@ fn start(fixture: &Fixture, peer: &Peer, forwards: &[String]) -> Client {
     Client::start(&args)
 }
 
-fn finish(peer: &Peer, handle: &russh::server::Handle, client: &mut Client, status: u32) {
+pub(super) fn finish(
+    peer: &Peer,
+    handle: &russh::server::Handle,
+    client: &mut Client,
+    status: u32,
+) {
     let session = peer.sessions.recv_timeout(Duration::from_secs(5)).unwrap();
     block_on(async {
         handle
