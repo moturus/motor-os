@@ -538,7 +538,8 @@ stop is preferred over a partial restart.</p>
     to <code>.prev</code>. Userspace metric providers register with it so that collectors such as
     <code>sysbox stats</code> can find them.</td></tr>
   <tr><td><code>dns-resolver</code></td><td>A bounded IPC service that resolves names over UDP with
-    TCP fallback; runs with the None role (see <a href="dns.html">DNS resolver</a>).</td></tr>
+    TCP fallback and a loopback DNS listener; runs as Interactive to read DHCP state
+    (see <a href="dns.html">DNS resolver</a>).</td></tr>
   <tr><td><code>russhd</code></td><td>The SSH server: password and public-key authentication,
     shells, command execution, and SFTP; runs with the Interactive role.</td></tr>
 </table>

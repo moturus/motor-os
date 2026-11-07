@@ -127,8 +127,9 @@ anything:
    Motor OS meson cross-file. Every functional config reader in mlibc —
    `resolv.conf`, `hosts`, `protocols`, `passwd`/`group`, `shells`,
    `localtime`, `shadow` — and the `_PATH_*` macros route through it, so libc
-   configuration lives at `/system/cfg/libc/resolv.conf`,
-   `/system/cfg/libc/hosts`, and so on. Deliberately *not* implemented as a
+   configuration lives under `/system/cfg/libc`. Images include `hosts` but
+   no longer generate `resolv.conf`: mlibc's missing-file default sends DNS
+   queries to the native resolver at `127.0.0.1:53`. Deliberately *not* implemented as a
    path rewrite inside the sysdep `open()`, which would silently capture a
    program's own `/etc` accesses.
 

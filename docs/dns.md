@@ -1,6 +1,6 @@
 # Motor OS DNS resolver service
 
-DNS resolver is a standalone bounded IPC service. Its
+DNS resolver serves bounded IPC and DNS on `127.0.0.1:53` (UDP and TCP). Its
 backend is native Rust and depends only on Motor OS networking and
 filesystem APIs.
 
@@ -18,23 +18,39 @@ Rust application
 Numeric addresses and `localhost` retain their VDSO fast paths. Other names use
 a fresh `moto_dns::Client` per lookup, so a dead resolver connection is not
 cached and a restarted service is discoverable by the next call. The service
-keeps four fixed workers and the versioned, pointer-free request/response
-contract in `moto-dns`.
+keeps four fixed IPC workers and the versioned, pointer-free request/response
+contract in `moto-dns`. The loopback listener has two UDP and two TCP workers.
+Unmodified mlibc uses this listener through its default nameserver when
+`/system/cfg/libc/resolv.conf` is absent; images no longer generate that file.
 
 ## Configuration
 
-The service reads `/system/cfg/libc/hosts` first and
-`/system/cfg/libc/resolv.conf` second. sys-io owns `resolv.conf`: before
-starting services it atomically publishes the DNS servers from active static
-device configuration, then republishes the aggregate whenever a DHCP lease
-changes. Static servers are declared with `dns_servers` in `sys-net.toml`;
-DHCP-configured devices use the servers in their leases. At most the first two
-unique nameservers are queried, keeping one-family lookup latency inside the
-IPC deadline when both are unavailable.
+The service checks numeric addresses and `/system/cfg/libc/hosts` first.
+For other names it reads `/system/cfg/sys-net.toml` and the current
+`/system/tmp/sys-io/dhcp.toml` snapshot on each lookup. Static devices supply
+`dns_servers`; devices with `dhcp = true` use an unexpired lease's servers.
+Absent interfaces and lost or expired leases supply no servers. In device-name
+order, at most the first two unique nameservers are used, preserving each
+device's server order. Unspecified addresses and `127.0.0.1` are excluded to
+avoid forwarding to the listener itself.
+
+sys-io atomically replaces the snapshot at boot and on DHCP acquisition,
+renewal (including unchanged addresses), and loss. It contains `active_devices`
+and a `[devices.NAME.lease]` table for each current DHCP lease, with address/prefix,
+router, DNS servers, server address and identifier, and acquisition, renewal,
+rebinding and expiry timestamps in Unix milliseconds. An unleased DHCP device
+has an empty `[devices.NAME]` table. See [networking.md](networking.md).
+
+The snapshot's mode is `rw-r-----`: System writes, Interactive reads, None has
+no access. `/system/tmp` and its `sys-io` directory permit Interactive traversal.
+The resolver runs with CAP_INTERACTIVE, CAP_NET and CAP_LOG, without CAP_FS_WRITE.
+Read-only roots work with writable `/system/tmp` and `/system/logs` mounts;
+DNS no longer writes under `/system/cfg/libc`. An older image's existing
+`resolv.conf` must be removed offline to select mlibc's loopback default.
 
 ## Transport and validation
 
-Each UDP attempt:
+Each native address lookup's UDP attempt:
 
 - creates a fresh socket, giving it a freshly randomized ephemeral source port;
 - connects it to the selected nameserver, so packets from other sources are
@@ -58,6 +74,14 @@ There is no cache. Correct caching requires retaining and applying each DNS
 record's TTL and negative-cache policy; an arbitrary service TTL would trade a
 small speedup for stale answers.
 
+The loopback frontend accepts one IN-class question per request, up to 4096
+bytes. It answers local A/AAAA queries from the same hosts/numeric lookup and
+forwards other queries, including PTR, preserving upstream records and TTLs.
+UDP replies are at most 512 bytes; larger answers return the question with TC
+set for TCP fallback. TCP serves one query per connection with a one-second
+request-read deadline. Malformed requests receive FORMERR; unavailable upstreams
+receive SERVFAIL; zone transfers are unsupported. It binds only IPv4 loopback.
+
 ## Result contract
 
 The existing resolver statuses remain unchanged: success, not found,
@@ -71,3 +95,9 @@ requests, result ordering, IPC restart behavior, live external resolution, and
 a deterministic loopback DNS fixture. The fixture drops the first UDP query,
 returns a truncated response to the retransmission, and completes the lookup
 over TCP.
+
+`--self-test-local` covers the hermetic subset, both loopback transports, IPC,
+and snapshot permissions. `test-block-mounts.sh`, called by `full-test.sh`, runs
+it on a read-only root containing the libc directory. Its QEMU DHCP fixture
+checks a real acquired lease and resolver selection with `--test-dhcp`, and
+verifies that the root image remains byte-for-byte unchanged.

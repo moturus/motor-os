@@ -9,8 +9,9 @@ This document describes permissions on newly built images. It does not define
 a migration for existing images and does not impose an OS-wide W^X rule on
 files created after boot.
 
-`/system/tmp`, `/user/tmp` and `/none/tmp` are empty, volatile memfs mounts
-after each boot, configured by `/system/cfg/sys-fs.toml`. Each root inherits
+`/system/tmp`, `/user/tmp` and `/none/tmp` are volatile memfs mounts, created
+empty at each boot by `/system/cfg/sys-fs.toml`. sys-io then publishes its DHCP
+snapshot under `/system/tmp`. Each root inherits
 its directory's image mode; only System may change a mounted root's mode.
 Tests that need Motor FS storage, or data that survives a reboot, use
 `/user/test-tmp` instead. Memfs charges live data and metadata against each
@@ -74,9 +75,10 @@ Opening a mount can recover a journal on writable backing before enforcing
 the mount flag. VMM read-only backing requires a clean journal and an explicitly
 read-only configuration; it never receives recovery writes.
 
-Read-only roots containing `/system/cfg/libc` currently fail during resolver
-file publication. The [plan](plans/multi-fs.md) records the pending policy
-decision for these images.
+Networking also requires writable `/system/tmp` for the atomic
+`sys-io/dhcp.toml` snapshot. The standard memfs mount supplies this. DNS reads
+`sys-net.toml` and the snapshot; it no longer creates `resolv.conf` or writes
+under `/system/cfg/libc`, so that directory may live on a read-only root.
 
 A Motor OS filesystem mode contains three permission triplets in **System, Interactive,
 None** order. For example, `rw-r-----` grants System read/write, Interactive
@@ -148,7 +150,12 @@ ELF whose type is `ET_EXEC` or `ET_DYN`.
 | `/devtools/lorry/user` | `rwxrwx---` | `rw-rw----` | `rwxrwx---` | `r-xr-x---` | Interactive Lorry repository and cache, hidden from None |
 | `/devtools/lorry/none` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | None-role Lorry repository and cache |
 
-Before any runtime permission changes, the directory modes have these effects:
+An exact-entry rule gives the `/system/tmp` directory `rwxr-x---`, permitting
+Interactive traversal without making its scratch files readable. sys-io creates
+`/system/tmp/sys-io` with `rwxr-x---` and its atomic `dhcp.toml` snapshot with
+`rw-r-----`. None cannot traverse either directory.
+
+Before any other runtime permission changes, the directory modes have these effects:
 
 - Interactive cannot create a new root-level tree or replace `/system`.
 - Interactive can create and replace entries throughout `/user` and
@@ -156,8 +163,8 @@ Before any runtime permission changes, the directory modes have these effects:
   toolchain archive's `install.sh` relies on this to replace `/devtools/llvm`
   and `/devtools/rust` ([toolchain.md](toolchain.md)).
 - Each role can create and replace entries in its own temporary directory
-  and in those of lower roles. None can use only `/none/tmp`, and Interactive
-  cannot reach `/system/tmp`.
+  and in those of lower roles. None can use only `/none/tmp`. Interactive can
+  traverse `/system/tmp` and read the DHCP snapshot, but cannot modify either.
 - Only System can create, delete, or rename entries in `/system/logs`.
   Interactive can traverse and read regular logs but cannot alter them; None
   cannot traverse the directory. An image containing a script or ELF under
@@ -168,7 +175,7 @@ Before any runtime permission changes, the directory modes have these effects:
 Several installed trees deliberately use the default rule:
 
 - `/system/services` remains public read/execute. Interactive tests execute
-  `/system/services/dns-resolver --self-test` and spawn a None-role resolver;
+  `/system/services/dns-resolver --self-test` and spawn None-role test children;
   the spawning role must be able to read the program file.
 - Most of `/system/cfg`, including the implicit `/system/cfg/ssl` directory,
   is System-writable and publicly readable. None-role services have not yet

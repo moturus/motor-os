@@ -44,9 +44,30 @@ dhcp = true
 DHCP owns the device's IPv4 address, default route, and advertised DNS servers.
 Static IPv4 CIDRs, routes, or DNS servers on the same device are rejected,
 while static IPv6 configuration may coexist. On renewal, replacement, or lease
-loss, sys-io updates the address and route and atomically republishes the
-aggregate active DNS server list in `/system/cfg/libc/resolv.conf`. Duplicate
-servers are removed without reordering devices or servers.
+loss, sys-io updates the address and route and atomically replaces
+`/system/tmp/sys-io/dhcp.toml`. This System-writable, Interactive-readable file
+(`rw-r-----`) contains active interface names and complete supported lease
+details. For example:
+
+```toml
+active_devices = ["loopback", "net0"]
+[devices.net0.lease]
+address = "192.0.2.10/24"
+router = "192.0.2.1" # omitted when no router was advertised
+dns_servers = ["192.0.2.53"]
+server_address = "192.0.2.1"
+server_identifier = "192.0.2.1"
+acquired_at_unix_ms = 1794000000000
+renew_at_unix_ms = 1794001800000
+rebind_at_unix_ms = 1794003150000
+expires_at_unix_ms = 1794003600000
+```
+
+Before acquisition and after loss, `[devices.net0]` has no `lease` table.
+Renewal republishes deadlines even when the address and DNS list are unchanged.
+The [DNS service](dns.md) reads this snapshot with `sys-net.toml`, excludes expired
+leases, and deduplicates servers in device-name order. It serves native IPC and
+loopback port 53; sys-io no longer creates `resolv.conf`.
 
 Wildcard TCP listeners begin accepting on an address when a lease installs it
 and stop accepting new connections when the address disappears. Established

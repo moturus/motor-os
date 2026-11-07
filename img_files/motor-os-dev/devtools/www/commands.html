@@ -792,7 +792,8 @@ a missing file explicitly selected with <code>-F</code> is an error.</p>
   <tr><td><code>/user/cfg/russhd/users.toml</code>, <code>/user/cfg/ssh/authorized_keys.NAME</code></td><td>russhd: login names, password verifiers, and each name's public keys; see <a href="#log-in-to-a-motor-os-server">Log in to a Motor OS server</a>.</td></tr>
   <tr><td><code>/user/cfg/ssh/config</code>, <code>id_ed25519</code>, <code>known_hosts</code></td><td>SSH clients: host configuration, default private identity, and trusted server keys; see <a href="#ssh-client">SSH clients</a>.</td></tr>
   <tr><td><code>/system/cfg/sys-tty.cfg</code>, <code>/system/cfg/rush.cfg</code></td><td>The console shell's environment and startup file.</td></tr>
-  <tr><td><code>/system/cfg/libc/hosts</code>, <code>resolv.conf</code></td><td>The DNS resolver and the C library. <code>resolv.conf</code> is written by sys-io.</td></tr>
+  <tr><td><code>/system/cfg/libc/hosts</code></td><td>Local names for the DNS resolver and C library. Without <code>resolv.conf</code>, mlibc uses the DNS service at <code>127.0.0.1:53</code>.</td></tr>
+  <tr><td><code>/system/tmp/sys-io/dhcp.toml</code></td><td>sys-io's current DHCP leases and active interface names; read by the Interactive DNS service.</td></tr>
   <tr><td><code>/user/cfg/red.toml</code>, <code>rmux.toml</code>, <code>kibim/</code>, <code>lorry.toml</code></td><td>Per-program settings, all optional.</td></tr>
 </table>
 </div>

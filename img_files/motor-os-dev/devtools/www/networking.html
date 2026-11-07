@@ -439,8 +439,10 @@ dhcp = true</code></pre>
 <p>DHCP owns the device's IPv4 address, default route, and advertised DNS servers. Static
 IPv4 CIDRs, routes, or DNS servers on the same device are rejected, while static IPv6
 configuration may coexist. On renewal, replacement, or lease loss, sys-io updates the
-address and route and atomically republishes the aggregate active DNS server list in
-<code>/system/cfg/libc/resolv.conf</code>. Wildcard TCP listeners begin accepting on an
+address and route and atomically publishes lease details in
+<code>/system/tmp/sys-io/dhcp.toml</code> (System writable, Interactive readable).
+The DNS service reads this snapshot with <code>sys-net.toml</code>, ignoring expired leases;
+it serves native IPC and loopback port 53. Wildcard TCP listeners begin accepting on an
 address when a lease installs it and stop accepting new connections when the address
 disappears; established connections are not aborted only because a lease was lost, and
 applications must still handle the ordinary I/O failure that follows when the old address
@@ -478,7 +480,7 @@ rejected; omit a key to keep its default.</p>
   <tr><td>TCP</td><td>CUBIC congestion control with a 10-segment initial window; SACK; RACK-TLP loss recovery (RFC 8985); RFC 7323 timestamps and window scaling; SYN cookies under flood; keepalive; zero-window probing; TIME-WAIT retention; per-connection linger on close; family-correct wildcard listeners.</td><td><code>SO_KEEPALIVE</code> is always on and not yet configurable.</td></tr>
   <tr><td>UDP</td><td>Unicast, connected and unconnected, IPv4 and IPv6, with bounded receive queues.</td><td>Multicast and broadcast.</td></tr>
   <tr><td>ICMP</td><td>Echo request and reply (<code>ping</code>), with automatic replies configurable; incoming errors are validated before they affect a flow.</td><td>Raw sockets.</td></tr>
-  <tr><td>Names</td><td>The <a href="dns.html">DNS resolver service</a>, a hosts file, and <code>resolv.conf</code> maintained by sys-io.</td><td></td></tr>
+  <tr><td>Names</td><td>The <a href="dns.html">DNS resolver service</a>, a hosts file, static settings in <code>sys-net.toml</code>, and live DHCP state from sys-io.</td><td></td></tr>
   <tr><td>VPN</td><td><a href="wireguard.html">WireGuard</a> tunnels with IPv4/IPv6, peer configuration, detached daemons, status and diagnostics.</td><td>Inter-interface forwarding, live reload and a persistent kill switch.</td></tr>
 </table>
 </div>

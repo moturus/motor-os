@@ -1,8 +1,9 @@
 # Multiple filesystems in sys-io
 
 Status: iteration 2's implementation and test coverage are committed, and
-feature-level validation passed. The libc resolver policy for read-only
-roots remains open below. D1–D5 were accepted after review against `4fcde583`
+feature-level validation passed. The accepted DNS follow-up below is implemented
+and undergoing final regression tests. D1–D5 were accepted after review against
+`4fcde583`
 on 2026-11-06. [fs-permissions.md](../fs-permissions.md)
 documents configuration and permissions. Iteration 1's plan is preserved in
 `b686d5e6` (requirements and design: `c1890b6a`).
@@ -14,9 +15,9 @@ three debug and three release runs, plus the release developer-image suite.
 
 DNS follow-up requested on 2026-11-07: move the native resolver's configuration
 to `/system/cfg/sys-net.toml` and remove sys-io's `resolv.conf` publisher. This
-removes the boot-time write to `/system/cfg/libc` that currently prevents a
-read-only root containing that directory from booting. The existing read-only
-test image omits that directory; extend it to cover this case and native DNS.
+removes the boot-time write to `/system/cfg/libc`. The read-only test image now
+includes that directory and the DNS service, with local DNS and actual DHCP
+acquisition checks that require the root image to remain unchanged.
 
 The accepted follow-up keeps changes in this repository:
 
@@ -50,7 +51,7 @@ changes stay in this repository (no kernel, moto-rt, stdlib, toolchain or
 
 ```toml
 [root]                # optional; root is mounted before this file is read
-read_only = true      # needs a writable [[mount]] at exactly /system/logs
+read_only = true      # needs writable /system/logs and /system/tmp mounts
 [[mount]]
 path = "/user/data"   # existing directory, resolved through earlier mounts
 type = "motor-fs"
@@ -111,8 +112,10 @@ validation. Root uses the same opening policy before reading the file; its
 mount flag is set after validation and all mounts, before FS listeners
 publish. A read-only root without the writable
 `/system/logs` mount fails validation. strobe's logs are the known boot-time
-writes under root; later user writes (`known_hosts`, key generation, editor
-config) fail with `PermissionDenied`. The shipped file keeps root writable.
+writes under root; networking publishes runtime DHCP state under writable
+`/system/tmp`. DNS makes no writes to `/system/cfg/libc`. Later user writes
+(`known_hosts`, key generation, editor config) fail with `PermissionDenied`.
+The shipped file keeps root writable.
 
 ### I/O ownership, cache budget and boot cost
 

@@ -425,16 +425,28 @@ resolver's. Numeric addresses and <code>localhost</code> need no capability. See
 
 <h2>Configuration</h2>
 <p>The service reads <code>/system/cfg/libc/hosts</code> first and
-<code>/system/cfg/libc/resolv.conf</code> second. sys-io owns <code>resolv.conf</code>:
-before starting services it publishes the DNS servers from the active static device
-configuration atomically, and it republishes the aggregate whenever a DHCP lease changes.
-Static servers are declared with <code>dns_servers</code> in <code>sys-net.toml</code>;
-DHCP-configured devices use the servers from their leases. At most the first two unique
-nameservers are queried, which keeps one-family lookup latency inside the IPC deadline
-when both are unavailable.</p>
+then reads <code>/system/cfg/sys-net.toml</code> and the atomic runtime snapshot
+<code>/system/tmp/sys-io/dhcp.toml</code>. Static devices supply <code>dns_servers</code>;
+DHCP devices supply servers from their unexpired leases. Absent interfaces and lost or
+expired leases contribute no servers. At most the first two unique nameservers are used,
+in device-name order, preserving each device's server order.</p>
+<p>sys-io replaces the snapshot at boot and on DHCP acquisition, renewal and loss. It
+includes active interface names, addresses, routers, DNS servers, server identifiers and
+lease deadlines. System may write it, Interactive may read it, and None has no access
+(<code>rw-r-----</code>). The resolver runs as Interactive with network and logging
+capabilities, without filesystem-write capability.</p>
+<p>The service also listens on <code>127.0.0.1:53</code> over UDP and TCP, with two fixed
+workers per transport. This is mlibc's default nameserver when <code>resolv.conf</code>
+is absent. Images no longer generate that file or write under <code>/system/cfg/libc</code>;
+read-only roots need writable <code>/system/tmp</code> and <code>/system/logs</code> mounts.
+Remove an older image's resolver file offline to select the loopback default.</p>
+<p>The listener answers local A/AAAA queries and forwards other queries, including PTR,
+preserving records and TTLs. Requests are limited to one IN-class question and 4096 bytes.
+UDP replies over 512 bytes set TC for TCP fallback; TCP serves one query per connection
+with a one-second request-read deadline. Zone transfers are unsupported.</p>
 
 <h2>Transport and validation</h2>
-<p>Each UDP attempt:</p>
+<p>Each native address lookup's UDP attempt:</p>
 <ul>
   <li>creates a fresh socket, and with it a freshly randomized ephemeral source port;</li>
   <li>connects it to the selected nameserver, so packets from other sources are discarded
