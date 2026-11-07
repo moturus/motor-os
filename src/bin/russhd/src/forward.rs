@@ -26,6 +26,7 @@ where
     S: From<(ChannelId, ChannelMsg)> + Send + Sync + 'static,
     R: AsyncRead + AsyncWrite + Unpin,
 {
+    credit.defer_close();
     let (mut incoming, outgoing) = channel.split();
     let mut writer = outgoing.make_writer();
     let (mut from_socket, mut to_socket) = tokio::io::split(socket);
@@ -94,18 +95,15 @@ where
         }
     }
     .await;
-    // Release TCP and payload before awaiting a close message. A peer close
-    // has already been acknowledged by russh and needs no application reply.
+    // Drain the socket before acknowledging a peer close. Keep the task alive
+    // through both close messages so connection shutdown cannot discard data.
     drop(sending);
     drop(to_socket);
     drop(incoming);
     drop(queue);
-    if !closed {
-        let closing = outgoing.close().await.map_err(io::Error::other);
-        result.and(closing)
-    } else {
-        result
-    }
+    let closing = outgoing.close().await.map_err(io::Error::other);
+    result.and(closing)?;
+    credit.wait_closed().await.map_err(io::Error::other)
 }
 
 /// Coalesces SSH packets without retaining an allocation for each packet.

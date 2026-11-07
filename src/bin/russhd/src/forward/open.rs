@@ -53,6 +53,7 @@ pub async fn direct_tcpip(
             return Ok(());
         }
     };
+    credit.defer_close();
     reply.accept().await;
     super::relay(channel, socket, credit, window, memory_pressure).await
 }

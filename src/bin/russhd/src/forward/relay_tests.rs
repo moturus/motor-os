@@ -383,7 +383,6 @@ async fn socket_eof_leaves_channel_to_socket_alive() {
             .await
             .unwrap();
         channel.eof().await.unwrap();
-        finished.await.unwrap().unwrap();
         assert_eq!(reader.await.unwrap(), vec![19; 2 * WINDOW as usize]);
         // EOF ends payload delivery; window and close events still need a reader.
         loop {
@@ -393,6 +392,7 @@ async fn socket_eof_leaves_channel_to_socket_alive() {
                 message => panic!("unexpected event after EOF: {message:?}"),
             }
         }
+        finished.await.unwrap().unwrap();
         finish(fixture.client, fixture.server).await;
     })
     .await
