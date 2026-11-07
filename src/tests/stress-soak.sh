@@ -381,7 +381,7 @@ gate_ssh 30 "stop DNS resolver" "/system/bin/rush -c 'kill $resolver_pid'"
 gate_ssh 30 "numeric ping without DNS" /system/bin/ping -c 1 127.0.0.1
 gate_wait_for_ping_error google.com NotConnected
 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
-  MOTOR_OS_CAPS=0x108 /system/services/dns-resolver \
+  MOTOR_OS_CAPS=0x148 /system/services/dns-resolver \
   >>"$GATE_LOG" 2>&1 &
 DNS_RESOLVER_SSH_PID=$!
 resolver_restarted=0

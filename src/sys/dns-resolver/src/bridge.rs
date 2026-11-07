@@ -3,8 +3,6 @@ use std::net::IpAddr;
 use moto_dns::{Address, AddressFamily, Status, MAX_ADDRESSES};
 
 const HOSTS_PATH: &str = "/system/cfg/libc/hosts";
-const RESOLV_CONF_PATH: &str = "/system/cfg/libc/resolv.conf";
-const MAX_NAMESERVERS: usize = 2;
 
 pub struct Result {
     pub status: Status,
@@ -32,8 +30,8 @@ pub fn lookup(name: &[u8], family: AddressFamily) -> Result {
         }
     }
 
-    let servers = match std::fs::read_to_string(RESOLV_CONF_PATH) {
-        Ok(contents) => nameservers(&contents),
+    let servers = match super::config::nameservers() {
+        Ok(servers) => servers,
         Err(_) => return failure(Status::TemporaryFailure),
     };
     if servers.is_empty() {
@@ -89,26 +87,6 @@ fn hosts_lookup(contents: &str, name: &[u8], family: AddressFamily) -> Vec<IpAdd
         }
     }
     addresses
-}
-
-fn nameservers(contents: &str) -> Vec<IpAddr> {
-    let mut servers = Vec::new();
-    for line in contents.lines() {
-        let mut fields = line.split('#').next().unwrap_or("").split_whitespace();
-        if fields.next() != Some("nameserver") {
-            continue;
-        }
-        let Some(server) = fields.next().and_then(|value| value.parse::<IpAddr>().ok()) else {
-            continue;
-        };
-        if !server.is_unspecified() && !servers.contains(&server) {
-            servers.push(server);
-            if servers.len() == MAX_NAMESERVERS {
-                break;
-            }
-        }
-    }
-    servers
 }
 
 fn family_matches(address: IpAddr, family: AddressFamily) -> bool {
@@ -202,12 +180,6 @@ pub fn self_test() {
             "2001:db8::1".parse::<IpAddr>().unwrap()
         ]
     );
-    assert_eq!(
-        nameservers("nameserver 192.0.2.53\ninvalid\nnameserver 2001:db8::53\n"),
-        [
-            "192.0.2.53".parse::<IpAddr>().unwrap(),
-            "2001:db8::53".parse::<IpAddr>().unwrap()
-        ]
-    );
+    super::config::self_test();
     super::dns::self_test();
 }

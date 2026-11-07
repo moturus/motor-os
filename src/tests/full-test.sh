@@ -817,7 +817,7 @@ vm_ssh "/system/bin/rush -c 'kill $resolver_pid'"
 vm_ssh /system/bin/ping -c 1 127.0.0.1
 wait_for_ping_error google.com NotConnected
 
-"${SSH[@]}" MOTOR_OS_CAPS=0x108 /system/services/dns-resolver \
+"${SSH[@]}" MOTOR_OS_CAPS=0x148 /system/services/dns-resolver \
   >> /tmp/full-test-dns-resolver.log 2>&1 &
 DNS_RESOLVER_SSH_PID="$!"
 

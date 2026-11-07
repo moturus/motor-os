@@ -12,13 +12,29 @@ workflow change, repeated full-suite runs are reserved for major milestones
 or the completed feature, rather than each patch. The final gate remains
 three debug and three release runs, plus the release developer-image suite.
 
-Open policy decision: when root is read-only and contains `/system/cfg/libc`,
-preserve its static resolver file or require it to match the active DNS
-settings. Until resolved, these images fail startup when sys-io tries to
-publish `resolv.conf`; the read-only test image omits libc. Both libc and the
-native DNS service read this file. Skipping publication would leave their
-nameserver configuration static: DHCP could still update addresses and routes,
-but its DNS-server changes would not reach either resolver through the file.
+DNS follow-up requested on 2026-11-07: move the native resolver's configuration
+to `/system/cfg/sys-net.toml` and remove sys-io's `resolv.conf` publisher. This
+removes the boot-time write to `/system/cfg/libc` that currently prevents a
+read-only root containing that directory from booting. The existing read-only
+test image omits that directory; extend it to cover this case and native DNS.
+
+The accepted follow-up keeps changes in this repository:
+
+1. Publish an atomic `/system/tmp/sys-io/dhcp.toml` snapshot through the mount
+   table. System may write it, Interactive may read it, and None has no access
+   (`rw-r-----`). Permit Interactive traversal of `/system/tmp`; its other
+   System-owned scratch files retain their existing permissions.
+2. Include active interface names and each DHCP interface's current lease:
+   address/prefix, advertised router, DNS servers, server address/identifier,
+   and renewal, rebinding, and expiry timestamps (Unix milliseconds). Publish
+   on acquisition, renewal, and loss, including an empty lease before discovery.
+   The resolver reads static settings from `sys-net.toml`, merges live DHCP
+   data in device-name order, and rejects expired leases. It runs as Interactive
+   with CAP_NET and CAP_LOG, without filesystem-write capability.
+3. Serve bounded DNS requests on loopback port 53 alongside existing IPC,
+   preserving A/AAAA and PTR queries for unmodified mlibc. Remove `resolv.conf`
+   generation. Tests cover packet validation, local DNS, DHCP replacement and
+   expiry, permissions, and a read-only root with the libc configuration tree.
 
 ## Iteration 2: findmnt, Motor FS mounts, read-only mounts
 

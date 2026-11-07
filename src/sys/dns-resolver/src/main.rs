@@ -1,4 +1,5 @@
 mod bridge;
+mod config;
 mod dns;
 mod order;
 
@@ -512,10 +513,33 @@ fn capability_test_child() {
             "127.0.0.1:80".parse().unwrap()
         );
     }
+    let interactive =
+        moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_INTERACTIVE != 0;
+    let snapshot = std::fs::read_to_string("/system/tmp/sys-io/dhcp.toml");
+    if interactive {
+        assert!(snapshot.unwrap().contains("active_devices"));
+    } else {
+        assert_eq!(
+            snapshot.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+    assert_eq!(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open("/system/tmp/sys-io/dhcp.toml")
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::PermissionDenied,
+    );
 }
 
 fn capability_self_test() {
-    for caps in [0, moto_sys::caps::CAP_NET] {
+    for caps in [
+        0,
+        moto_sys::caps::CAP_NET,
+        moto_sys::caps::CAP_NET | moto_sys::caps::CAP_INTERACTIVE,
+    ] {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--test-capability-child")
             .env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, format!("{caps:#x}"))
