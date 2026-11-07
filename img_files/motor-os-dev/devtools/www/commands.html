@@ -513,6 +513,23 @@ failure policy and connection lifetime apply. An incomplete handshake uses
 one forwarding slot without blocking other connections; no handshake timer
 is imposed.</p>
 
+<h3 id="remote-tcp-forwarding">Remote TCP forwarding</h3>
+
+<p><code>ssh -N -R 8080:localhost:80 user@host</code> asks the server to listen on port 8080
+and connects each forwarded connection to <code>localhost:80</code> on this client.
+Use <code>[bind:]port:host:port</code>, bracketing IPv6 addresses. Target names resolve
+on the client. Remote forwards also work through <code>-J</code> and alongside commands.</p>
+
+<p>Use remote listen port 0 to have the server allocate a port; SSH prints the
+allocated port to stderr. Target ports must be 1–65535. The server controls
+which interfaces its remote listeners use. Motor's default is loopback;
+the server's <code>gateway_ports = true</code> exposes them on all interfaces.</p>
+
+<p>The same setup-failure and connection-lifetime rules apply. After a command
+ends, new remote connections are refused while admitted connections drain.
+Configured forwards run only for SSH's final destination; copy applets load
+the settings without starting listeners.</p>
+
 <h3 id="shared-connection-options-and-authentication">Shared connection options and authentication</h3>
 
 <p><code>ssh</code>, <code>scp</code>, <code>sftp</code>, and <code>ssh-copy-id</code> share authentication, host-key checks,
@@ -790,6 +807,7 @@ the command, even when <code>HostName</code> specifies a different network addre
   <tr><td><code>ServerAliveCountMax</code></td><td>Maximum unanswered keepalives; 3.</td></tr>
   <tr><td><code>LocalForward</code></td><td><code>[bind:]port host:port</code>; repeatable, SSH final destination only.</td></tr>
   <tr><td><code>DynamicForward</code></td><td><code>[bind:]port</code>; repeatable SOCKS listener, SSH final destination only.</td></tr>
+  <tr><td><code>RemoteForward</code></td><td><code>[bind:]port host:port</code>; repeatable remote listener, SSH final destination only; listen port 0 allocates a port.</td></tr>
   <tr><td><code>GatewayPorts</code></td><td>Default local binds to all interfaces; <code>no</code>.</td></tr>
   <tr><td><code>ExitOnForwardFailure</code></td><td>Exit on forward setup failure; <code>no</code>.</td></tr>
 </table>

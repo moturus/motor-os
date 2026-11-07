@@ -52,6 +52,23 @@ failure policy and connection lifetime apply. An incomplete handshake uses
 one forwarding slot without blocking other connections; no handshake timer
 is imposed.
 
+## Remote TCP forwarding
+
+`ssh -N -R 8080:localhost:80 user@host` asks the server to listen on port 8080
+and connects each forwarded connection to `localhost:80` on this client.
+Use `[bind:]port:host:port`, bracketing IPv6 addresses. Target names resolve
+on the client. Remote forwards also work through `-J` and alongside commands.
+
+Use remote listen port 0 to have the server allocate a port; SSH prints the
+allocated port to stderr. Target ports must be 1–65535. The server controls
+which interfaces its remote listeners use. Motor's default is loopback;
+the server's `gateway_ports = true` exposes them on all interfaces.
+
+The same setup-failure and connection-lifetime rules apply. After a command
+ends, new remote connections are refused while admitted connections drain.
+Configured forwards run only for SSH's final destination; copy applets load
+the settings without starting listeners.
+
 ## Shared connection options and authentication
 
 `ssh`, `scp`, `sftp`, and `ssh-copy-id` share authentication, host-key checks,
@@ -330,6 +347,7 @@ Supported settings (also accepted through `-o Key=Value`):
 | `ServerAliveCountMax` | Maximum unanswered keepalives; 3. |
 | `LocalForward` | `[bind:]port host:port`; repeatable, SSH final destination only. |
 | `DynamicForward` | `[bind:]port`; repeatable SOCKS listener, SSH final destination only. |
+| `RemoteForward` | `[bind:]port host:port`; repeatable remote listener, SSH final destination only; listen port 0 allocates a port. |
 | `GatewayPorts` | Default local binds to all interfaces; `no`. |
 | `ExitOnForwardFailure` | Exit on forward setup failure; `no`. |
 

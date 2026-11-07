@@ -13,6 +13,8 @@ Options:
   -L [bind:]port:host:hostport
                       Forward a local TCP port through the remote host
   -D [bind:]port      Listen as a SOCKS4/4a/5 CONNECT proxy (no authentication)
+  -R [bind:]port:host:hostport
+                      Forward a remote TCP port to a target on this client
   -N                  Run no command or shell (tunnel only)
   -g                  Default local forwards to all interfaces
   -o Key=Value        Set a connection option (listed below)
@@ -37,6 +39,7 @@ Connection options for -o:
   ServerAliveCountMax=count             Unanswered keepalives (default: 3)
   LocalForward="[bind:]port host:port"   Add a local TCP forward
   DynamicForward=[bind:]port            Add a SOCKS listener
+  RemoteForward="[bind:]port host:port"  Add a remote TCP forward (port 0: allocate)
   GatewayPorts=yes|no                   Default to all interfaces (default: no)
   ExitOnForwardFailure=yes|no           Exit on setup failure (default: no)
 
@@ -47,8 +50,9 @@ Configuration (Motor OS):
   The default user is $USER, or motor if USER is unset or empty.
   Host blocks support aliases, multiple patterns, *, ? and ! negation.
   Supported settings are listed above. Command-line settings take priority;
-  otherwise the first matching scalar wins. IdentityFile, LocalForward and
-  DynamicForward entries accumulate. Forwards run only on the final destination.
+  otherwise the first matching scalar wins. IdentityFile, LocalForward,
+  DynamicForward and RemoteForward entries accumulate. Forwards run only on
+  the final destination. Allocated remote ports are printed to stderr.
   Include, Match, ProxyCommand, agents and value expansion are unsupported.
   Paths are literal; use /user/cfg/ssh/key rather than ~/.ssh/key.
 
@@ -59,6 +63,7 @@ Examples:
   ssh -J motor@gateway motor@private-host
   ssh -N -L 8080:localhost:80 motor@host
   ssh -N -D 1080 motor@host
+  ssh -N -R 0:localhost:80 motor@host
 
 Key installation:
   ssh-copy-id -i key.pub user@host

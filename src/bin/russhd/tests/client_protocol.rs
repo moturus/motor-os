@@ -34,6 +34,8 @@ mod remote_peer;
 mod remote_policy;
 #[path = "client_protocol/remote_relay.rs"]
 mod remote_relay;
+#[path = "client_protocol/remote_routes.rs"]
+mod remote_routes;
 #[path = "client_protocol/tunnel_lifetime.rs"]
 mod tunnel_lifetime;
 
