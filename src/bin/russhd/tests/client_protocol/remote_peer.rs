@@ -10,6 +10,8 @@ pub(super) struct Reply {
 
 pub(super) enum Event {
     Confirmed(ChannelId),
+    Data(ChannelId, Vec<u8>),
+    Eof(ChannelId),
 }
 
 struct Handler {
@@ -72,6 +74,27 @@ impl russh::server::Handler for Handler {
         _: &mut Session,
     ) -> Result<(), Self::Error> {
         self.events.send(Event::Confirmed(channel)).unwrap();
+        Ok(())
+    }
+
+    async fn data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        _: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.events
+            .send(Event::Data(channel, data.to_vec()))
+            .unwrap();
+        Ok(())
+    }
+
+    async fn channel_eof(
+        &mut self,
+        channel: ChannelId,
+        _: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.events.send(Event::Eof(channel)).unwrap();
         Ok(())
     }
 }
