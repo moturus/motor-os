@@ -33,6 +33,15 @@ fn write_private(path: &Path, text: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
+/// A reusable, non-listening reservation leaves no port-allocation gap while
+/// the child creates its listener. Keep the returned socket until the test ends.
+fn reserve_tcp_port() -> (std::net::SocketAddr, tokio::net::TcpSocket) {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.set_reuseaddr(true).unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    (socket.local_addr().unwrap(), socket)
+}
+
 struct Fixture {
     child: Child,
     log_thread: Option<std::thread::JoinHandle<()>>,

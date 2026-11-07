@@ -60,9 +60,7 @@ fn local_forward_round_trip_half_close_keeps_session_alive_and_drains_after_exit
     let fixture = Fixture::configured("allow_tcp_forwarding = true");
     let target = TcpListener::bind("127.0.0.1:0").unwrap();
     let target_port = target.local_addr().unwrap().port();
-    let available = TcpListener::bind("127.0.0.1:0").unwrap();
-    let local = available.local_addr().unwrap();
-    drop(available);
+    let (local, _port_guard) = reserve_tcp_port();
     let mut args = fixture.ssh_args();
     args.extend([
         "-L".into(),
@@ -133,9 +131,7 @@ fn local_setup_failure_warns_or_exits_before_starting_the_command() {
     let fixture = Fixture::start();
     let blocked = TcpListener::bind("127.0.0.1:0").unwrap();
     for exit in [false, true] {
-        let available = TcpListener::bind("127.0.0.1:0").unwrap();
-        let local = available.local_addr().unwrap();
-        drop(available);
+        let (local, _port_guard) = reserve_tcp_port();
         let mut args = fixture.ssh_args();
         args.extend([
             "-L".into(),
@@ -181,9 +177,7 @@ fn target_refusal_closes_only_that_socket_and_prints_one_error() {
         socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
         socket
     });
-    let available = TcpListener::bind("127.0.0.1:0").unwrap();
-    let local = available.local_addr().unwrap();
-    drop(available);
+    let (local, _port_guard) = reserve_tcp_port();
     let mut args = fixture.ssh_args();
     args.extend([
         "-L".into(),
@@ -236,10 +230,19 @@ fn configured_local_forward_runs_only_on_final_ssh_hop_and_not_on_scp_or_sftp() 
     let available = TcpListener::bind("127.0.0.1:0").unwrap();
     let local = available.local_addr().unwrap();
     let path = fixture.root.join("local-forward-config");
-    std::fs::write(&path, format!(
-        "Host jump\nHostName 127.0.0.1\nPort {}\nLocalForward 127.0.0.1:{} localhost:80\nHost final\nHostName 127.0.0.1\nPort {}\nProxyJump jump\nLocalForward 127.0.0.1:{} localhost:{}\nHost *\nUser motor\nIdentityFile {}\nUserKnownHostsFile {}\nStrictHostKeyChecking accept-new\nBatchMode yes\nExitOnForwardFailure yes\n",
-        jump.port, blocked_jump.local_addr().unwrap().port(), fixture.port, local.port(), target.local_addr().unwrap().port(), fixture.identity.display(), fixture.known_hosts.display(),
-    )).unwrap();
+    let config_text = |port| {
+        format!(
+            "Host jump\nHostName 127.0.0.1\nPort {}\nLocalForward 127.0.0.1:{} localhost:80\nHost final\nHostName 127.0.0.1\nPort {}\nProxyJump jump\nLocalForward 127.0.0.1:{} localhost:{}\nHost *\nUser motor\nIdentityFile {}\nUserKnownHostsFile {}\nStrictHostKeyChecking accept-new\nBatchMode yes\nExitOnForwardFailure yes\n",
+            jump.port,
+            blocked_jump.local_addr().unwrap().port(),
+            fixture.port,
+            port,
+            target.local_addr().unwrap().port(),
+            fixture.identity.display(),
+            fixture.known_hosts.display(),
+        )
+    };
+    std::fs::write(&path, config_text(local.port())).unwrap();
     let config = vec!["-F".to_owned(), path.display().to_string()];
     let source = fixture.root.join("local-forward-source");
     let destination = fixture.root.join("local-forward-destination");
@@ -269,7 +272,10 @@ fn configured_local_forward_runs_only_on_final_ssh_hop_and_not_on_scp_or_sftp() 
     .concat();
     let output = fixture.run(&sftp, b"");
     assert!(output.status.success(), "{output:?}");
-    drop(available);
+    // Keep the occupied port above for the copy-applet checks, and use a
+    // separately reserved port for the positive SSH forwarding case.
+    let (local, _port_guard) = reserve_tcp_port();
+    std::fs::write(&path, config_text(local.port())).unwrap();
     let args = [config, vec!["final".into(), "printf ready; cat".into()]].concat();
     let mut client = Client::start(&args);
     let _stdout = client.ready();

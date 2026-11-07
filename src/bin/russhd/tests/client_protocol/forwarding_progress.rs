@@ -3,9 +3,8 @@ use super::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 
-fn arguments(fixture: &Fixture, port: u16) -> (Vec<String>, std::net::SocketAddr) {
-    let available = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let local = available.local_addr().unwrap();
+fn arguments(fixture: &Fixture, port: u16) -> (Vec<String>, std::net::SocketAddr, TcpSocket) {
+    let (local, guard) = reserve_tcp_port();
     let mut args = fixture.ssh_args();
     args.extend([
         "-L".into(),
@@ -13,7 +12,7 @@ fn arguments(fixture: &Fixture, port: u16) -> (Vec<String>, std::net::SocketAddr
         "motor@127.0.0.1".into(),
         "printf ready; cat".into(),
     ]);
-    (args, local)
+    (args, local, guard)
 }
 
 #[test]
@@ -21,7 +20,7 @@ fn a_local_reader_that_stops_does_not_park_another_forward_or_the_command() {
     let mut fixture = Fixture::configured("allow_tcp_forwarding = true");
     block_on(async {
         let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let (args, local) = arguments(&fixture, target.local_addr().unwrap().port());
+        let (args, local, _port_guard) = arguments(&fixture, target.local_addr().unwrap().port());
         let mut client = Client::start(&args);
         let mut stdout = client.ready();
         let socket = TcpSocket::new_v4().unwrap();
@@ -78,7 +77,7 @@ fn both_tcp_peers_can_write_a_complete_ssh_window_before_reading() {
     let fixture = Fixture::configured("allow_tcp_forwarding = true");
     block_on(async {
         let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let (args, local) = arguments(&fixture, target.local_addr().unwrap().port());
+        let (args, local, _port_guard) = arguments(&fixture, target.local_addr().unwrap().port());
         let mut client = Client::start(&args);
         let _stdout = client.ready();
         let mut socket = TcpStream::connect(local).await.unwrap();

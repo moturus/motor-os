@@ -1,6 +1,6 @@
 use super::local_forwarding::Client;
 use super::*;
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{Shutdown, TcpStream};
 use std::sync::mpsc::{Receiver, Sender};
 
 struct Open {
@@ -150,9 +150,7 @@ impl Drop for Server {
 fn command_close_drains_an_open_that_has_not_yet_been_confirmed() {
     let fixture = Fixture::start();
     let server = Server::start(8192);
-    let available = TcpListener::bind("127.0.0.1:0").unwrap();
-    let local = available.local_addr().unwrap();
-    drop(available);
+    let (local, _port_guard) = reserve_tcp_port();
     let mut args = fixture.ssh_args();
     args[3] = server.port.to_string();
     args.extend([
@@ -251,9 +249,7 @@ fn tunnel_without_session_cancels_pending_and_window_blocked_work_on_loss_or_int
         for confirmed in [false, true] {
             let fixture = Fixture::start();
             let server = Server::start(0);
-            let available = TcpListener::bind("127.0.0.1:0").unwrap();
-            let local = available.local_addr().unwrap();
-            drop(available);
+            let (local, _port_guard) = reserve_tcp_port();
             let mut args = fixture.ssh_args();
             args[3] = server.port.to_string();
             args.extend([
