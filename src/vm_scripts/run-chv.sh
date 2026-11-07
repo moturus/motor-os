@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 WD="$(dirname "$0")"
 SMP="${MOTO_SMP:-4}"
@@ -54,6 +54,14 @@ if [ "${MOTO_HUGEPAGES:-1}" != "0" ]; then
   fi
 fi
 
+EXTRA_DISKS=()
+for DISK in $VM_DISKS; do
+  DISK_NAME="${DISK%:*}"
+  vm_extra_disk_format "$DISK_NAME"
+  EXTRA_DISKS+=("path=$WD/$DISK_NAME,image_type=$VM_DISK_FORMAT,readonly=${DISK#*:}")
+done
+ROOT_DISK_MODE=""
+[ "$VM_ROOT_READ_ONLY" != on ] || ROOT_DISK_MODE=,readonly=on
 exec cloud-hypervisor-static --cpus "boot=$SMP" --memory "$MEMORY" \
     --api-socket "$RUNTIME_DIR/chv" \
     --console off --serial tty \
@@ -61,6 +69,6 @@ exec cloud-hypervisor-static --cpus "boot=$SMP" --memory "$MEMORY" \
     --kernel "$WD/kloader" \
     --initramfs "$WD/initrd" \
     --net "tap=moto-tap,mac=a4:a1:c2:00:00:01,ip=192.168.4.2,mask=255.255.255.0" \
-    --disk "path=$WD/$IMAGE,image_type=$IMAGE_FORMAT" "$@"
+    --disk "path=$WD/$IMAGE,image_type=$IMAGE_FORMAT$ROOT_DISK_MODE" "${EXTRA_DISKS[@]}" "$@"
 
 #           "tap=moto-tap-2,mac=a4:a1:c2:00:00:02,ip=192.168.6.2,mask=255.255.255.0" \

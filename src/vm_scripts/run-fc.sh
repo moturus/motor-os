@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 WD="$(dirname "$0")"
 SMP="${MOTO_SMP:-2}"
@@ -36,6 +36,13 @@ case "$IMAGE" in
     exit 2
     ;;
 esac
+for DISK in $VM_DISKS; do
+  vm_extra_disk_format "${DISK%:*}"
+  if [ "$VM_DISK_FORMAT" != raw ]; then
+    echo "run-fc: Firecracker requires a raw extra disk, not '${DISK%:*}'" >&2
+    exit 2
+  fi
+done
 case "$SMP" in
   "" | *[!0-9]* | 0 | 0[0-9]*)
     echo "run-fc: MOTO_SMP must be a positive integer" >&2
@@ -106,8 +113,17 @@ cat <<EOF > "$CONFIG"
       "drive_id": "disk0",
       "path_on_host": "${ABS_WD}/${IMAGE}",
       "is_root_device": false,
-      "is_read_only": false
+      "is_read_only": $(if [ "$VM_ROOT_READ_ONLY" = on ]; then echo true; else echo false; fi)
     }
+$(DISK_INDEX=1
+  for DISK in $VM_DISKS; do
+    DISK_NAME="${DISK%:*}"
+    READ_ONLY=false
+    [ "${DISK#*:}" != on ] || READ_ONLY=true
+    printf '    ,{"drive_id":"disk%s","path_on_host":"%s/%s","is_root_device":false,"is_read_only":%s}\n' \
+      "$DISK_INDEX" "$ABS_WD" "$DISK_NAME" "$READ_ONLY"
+    DISK_INDEX=$((DISK_INDEX + 1))
+  done)
   ],
   "network-interfaces": [
     {
