@@ -450,7 +450,8 @@ built natively with <code>rustc</code> or with <a href="lorry.html">Lorry</a> (s
   <li><strong>rustls with ring</strong>: TLS on both the client (curl, Gears) and server
   (httpd, httpd-axum) side.</li>
   <li><strong>russh</strong> and russh-sftp: the SSH server and clients. The russh fork
-  supports application-controlled receive windows on both the client and server.</li>
+  supports application-controlled receive windows on both the client and server,
+  including cancellation-safe credit handoff for outgoing forwarding channels.</li>
   <li><strong>crossterm</strong>: a Motor OS backend that handles terminal size and Ctrl+C the
   Motor OS way, so a crossterm program needs no Motor OS-specific code.</li>
   <li><strong>ctrlc</strong>: a fork whose handler is the process's Ctrl+C handler.</li>
