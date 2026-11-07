@@ -110,8 +110,10 @@ prepared step 7 and step 8 scripts. A second guest daemon reports readiness on
 its terminal, then the host client requests an allocated remote port. Connections
 from the private tap and guest IPv6 loopback must both reach the host target,
 and the controlling command must remain usable. This covers Motor's wildcard
-port-allocation path; actual guest validation is pending step 7. The active
-step 6 sources and runner scripts remain unchanged.
+port-allocation path. Both checks pass in the first complete `step7-main`
+release image run; its remaining milestone runs are in progress. The completed
+step 6 sources and active step 7 sources and runners stayed unchanged during
+their respective gates.
 
 ## Implementation history
 
