@@ -22,6 +22,7 @@ use std::{collections::BTreeMap, collections::BTreeSet, fs, path::Path};
 use mbrman::BOOT_ACTIVE;
 use std::io::{self, Seek, SeekFrom};
 
+mod block_mount_fixture;
 mod chmod;
 mod permissions;
 mod publish_www;
@@ -751,6 +752,13 @@ fn main() {
         return;
     }
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|arg| arg == "block-mount-fixture") {
+        if let Err(error) = block_mount_fixture::run(&args[2..]) {
+            eprintln!("imager block-mount-fixture: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.get(1).is_some_and(|arg| arg == "chmod") {
         if args.len() != 5 {
             print_usage_and_exit();
