@@ -107,6 +107,14 @@ pub fn config_file() -> PathBuf {
     PathBuf::from("/user/cfg/rmux.toml")
 }
 
+/// Whether the panes this process starts have the None role: [`spawn_pane`]
+/// sets no mask, so they get this process's default child mask.
+pub fn panes_are_none_role() -> bool {
+    use moto_sdk::sys::caps::{ProcessRole, default_child_capabilities};
+    let own = moto_sdk::sys::ProcessStaticPage::get().capabilities;
+    ProcessRole::from_caps(default_child_capabilities(own)) == ProcessRole::None
+}
+
 /// Spawn `cmd`'s child reparented to the kernel, so it outlives this process.
 ///
 /// Motor's equivalent of Unix's reparent-to-init, and not a default: an

@@ -268,6 +268,8 @@ pub struct Server {
     /// to say it to. The server is started before any client has attached, so
     /// at the moment it reads the file there is no status row to put this on.
     greeting: Option<String>,
+    /// The chrome's colours, which say what role this server's panes have.
+    palette: status::Palette,
 }
 
 impl Server {
@@ -291,6 +293,7 @@ impl Server {
             retitle: None,
             greeting: (!complaints.is_empty())
                 .then(|| format!("rmux.toml: {}", complaints.join("; "))),
+            palette: status::Palette::for_panes(crate::sys::panes_are_none_role()),
         }
     }
 
@@ -1389,6 +1392,7 @@ impl Server {
     /// Paint every attached client, each against its own screen.
     fn render(&mut self) {
         let status_shown = self.config.status;
+        let palette = self.palette;
         let listing = self.describe();
         for client in &mut self.clients {
             let Some(session) = client.session.and_then(|id| self.sessions.get(id)) else {
@@ -1428,7 +1432,7 @@ impl Server {
                     col,
                     Cell {
                         ch: glyph,
-                        attrs: status::border(),
+                        attrs: status::border(palette),
                     },
                 );
             }
@@ -1440,7 +1444,10 @@ impl Server {
                 (Mode::Normal | Mode::Copy { typing: None, .. }, Some(text))
                     if rows > status::HEIGHT =>
                 {
-                    frame.set_row(rows - status::HEIGHT, &status::message_row(text, cols));
+                    frame.set_row(
+                        rows - status::HEIGHT,
+                        &status::message_row(text, cols, palette),
+                    );
                 }
                 // vi shows the needle where it shows everything else, and so
                 // does this: on the row the status line was using.
@@ -1454,7 +1461,7 @@ impl Server {
                     let label = if *which == Search::Forward { "/" } else { "?" };
                     frame.set_row(
                         rows - status::HEIGHT,
-                        &status::prompt_row(label, typed, cols),
+                        &status::prompt_row(label, typed, cols, palette),
                     );
                 }
                 // The indicator is the only thing on screen that says copy mode
@@ -1463,17 +1470,17 @@ impl Server {
                     let indicator = reading.as_ref().map_or("", |(_, text)| text.as_str());
                     frame.set_row(
                         rows - status::HEIGHT,
-                        &status::prompt_row("-- copy mode --", indicator, cols),
+                        &status::prompt_row("-- copy mode --", indicator, cols, palette),
                     );
                 }
                 (Mode::Prompt { what, typed }, _) if rows > status::HEIGHT => {
                     frame.set_row(
                         rows - status::HEIGHT,
-                        &status::prompt_row(what.label(), typed, cols),
+                        &status::prompt_row(what.label(), typed, cols, palette),
                     );
                 }
                 (Mode::Sessions { at }, _) => {
-                    for (row, cells) in status::session_overlay(&listing, *at, cols)
+                    for (row, cells) in status::session_overlay(&listing, *at, cols, palette)
                         .iter()
                         .enumerate()
                     {
@@ -1481,7 +1488,7 @@ impl Server {
                     }
                 }
                 _ if status_shown && rows > status::HEIGHT => {
-                    frame.set_row(rows - status::HEIGHT, &status::row(session, cols));
+                    frame.set_row(rows - status::HEIGHT, &status::row(session, cols, palette));
                 }
                 _ => {}
             }

@@ -30,26 +30,52 @@ use crate::session::Session;
 /// How many rows the status line takes when it is shown.
 pub const HEIGHT: usize = 1;
 
-/// The status line's palette: amber, where tmux's default status line is green.
-/// Both ambers carry their own near-black ink, so the bar reads the same on a
-/// dark terminal and on a light one -- which it has to, because nothing in rmux
-/// ever learns which one it is on. 256-colour, as the rest of the tree emits.
-const AMBER: Color = Color::Indexed(222);
-const AMBER_DEEP: Color = Color::Indexed(214);
+/// The chrome's two colours: the bar's, and the deeper one the current window
+/// is picked out in. Both carry the same near-black ink, so the bar reads the
+/// same on a dark terminal and on a light one -- which it has to, because
+/// nothing in rmux ever learns which one it is on. 256-colour, as the rest of
+/// the tree emits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Palette {
+    bar: Color,
+    current: Color,
+}
+
+impl Palette {
+    /// Amber, where tmux's default status line is green.
+    pub const AMBER: Palette = Palette {
+        bar: Color::Indexed(222),
+        current: Color::Indexed(214),
+    };
+    /// Light green, for a server whose panes have the None role: the bar is
+    /// the colour of a None rush's prompt, and the current window is one step
+    /// darker in every channel.
+    pub const GREEN: Palette = Palette {
+        bar: Color::Indexed(120),
+        current: Color::Indexed(77),
+    };
+
+    /// The palette for a server whose panes do, or do not, have the None role.
+    pub fn for_panes(none_role: bool) -> Palette {
+        if none_role { Self::GREEN } else { Self::AMBER }
+    }
+}
+
 const INK: Color = Color::Indexed(233);
 
 /// Draw the status line for `session`, `cols` wide.
 ///
-/// Amber under near-black ink for the whole bar, which is the cheapest way to
-/// make a row read as chrome rather than as content. The current window takes
-/// the deeper amber -- the bar is the lighter of the two, so what is picked out
-/// is the window and not the row -- and nothing else: the text is the same
-/// whichever window is current, so a switch moves the highlight and not a
-/// single character. The price is that a terminal with no colour cannot tell.
-pub fn row(session: &Session, cols: usize) -> Vec<Cell> {
-    let bar = bar();
+/// The bar's colour under near-black ink for the whole row, which is the
+/// cheapest way to make a row read as chrome rather than as content. The
+/// current window takes the deeper colour -- the bar is the lighter of the
+/// two, so what is picked out is the window and not the row -- and nothing
+/// else: the text is the same whichever window is current, so a switch moves
+/// the highlight and not a single character. The price is that a terminal with
+/// no colour cannot tell.
+pub fn row(session: &Session, cols: usize, palette: Palette) -> Vec<Cell> {
+    let bar = bar(palette);
     let current = Attrs {
-        bg: AMBER_DEEP,
+        bg: palette.current,
         ..bar
     };
 
@@ -94,8 +120,8 @@ pub fn row(session: &Session, cols: usize) -> Vec<Cell> {
 /// tmux puts `prefix ,` and `prefix $` here rather than in a window of their
 /// own, and so does rmux: the row is already chrome, and a rename is one line
 /// of text. `command-prompt` (`prefix :`) landed in the same place.
-pub fn prompt_row(label: &str, typed: &str, cols: usize) -> Vec<Cell> {
-    render(&format!("{label} {typed}"), bar(), cols)
+pub fn prompt_row(label: &str, typed: &str, cols: usize, palette: Palette) -> Vec<Cell> {
+    render(&format!("{label} {typed}"), bar(palette), cols)
 }
 
 /// The message line of §2.2: one thing rmux has to say, on the status row.
@@ -105,27 +131,27 @@ pub fn prompt_row(label: &str, typed: &str, cols: usize) -> Vec<Cell> {
 /// pane for something that is empty almost always. It is drawn as chrome
 /// because that is what it is; tmux gives it a colour of its own, where rmux
 /// has the one palette and no option to change it (§2.2).
-pub fn message_row(text: &str, cols: usize) -> Vec<Cell> {
-    render(text, bar(), cols)
+pub fn message_row(text: &str, cols: usize, palette: Palette) -> Vec<Cell> {
+    render(text, bar(palette), cols)
 }
 
-fn bar() -> Attrs {
+fn bar(palette: Palette) -> Attrs {
     Attrs {
         fg: INK,
-        bg: AMBER,
+        bg: palette.bar,
         flags: 0,
     }
 }
 
 /// How the cells dividing panes are drawn (§7.1) -- chrome, like the bar, and
-/// in the bar's amber so that all of it reads as one thing.
+/// in the bar's colour so that all of it reads as one thing.
 ///
-/// The glyph is what is amber, not a filled column: `Window::borders` hands out
-/// junction glyphs as well as `│` and `─`, and a junction only reads as one if
-/// the line is the coloured part.
-pub fn border() -> Attrs {
+/// The glyph is what is coloured, not a filled column: `Window::borders` hands
+/// out junction glyphs as well as `│` and `─`, and a junction only reads as one
+/// if the line is the coloured part.
+pub fn border(palette: Palette) -> Attrs {
     Attrs {
-        fg: AMBER,
+        fg: palette.bar,
         ..Attrs::default()
     }
 }
@@ -135,9 +161,14 @@ pub fn border() -> Attrs {
 /// One row per session, the current choice marked. With sessions being real,
 /// *some* way to see and switch them is a basic, and this is the smallest thing
 /// that is one.
-pub fn session_overlay(lines: &[String], at: usize, cols: usize) -> Vec<Vec<Cell>> {
+pub fn session_overlay(
+    lines: &[String],
+    at: usize,
+    cols: usize,
+    palette: Palette,
+) -> Vec<Vec<Cell>> {
     let plain = Attrs::default();
-    let chosen = bar();
+    let chosen = bar(palette);
 
     let mut rows = vec![render(
         "-- sessions: digit or arrows, Esc cancels --",
@@ -193,13 +224,33 @@ mod tests {
         cells.iter().map(|cell| cell.ch).collect()
     }
 
-    /// The cells in the current window's amber.
-    fn lit(cells: &[Cell]) -> String {
+    const AMBER: Palette = Palette::AMBER;
+
+    /// The status line as an Interactive server draws it.
+    fn row(session: &Session, cols: usize) -> Vec<Cell> {
+        super::row(session, cols, AMBER)
+    }
+
+    /// The cells in `palette`'s current-window colour.
+    fn lit_in(cells: &[Cell], palette: Palette) -> String {
         cells
             .iter()
-            .filter(|cell| cell.attrs.bg == AMBER_DEEP)
+            .filter(|cell| cell.attrs.bg == palette.current)
             .map(|cell| cell.ch)
             .collect()
+    }
+
+    fn lit(cells: &[Cell]) -> String {
+        lit_in(cells, AMBER)
+    }
+
+    /// A 256-colour cube entry's red, green, and blue levels, each 0 to 5.
+    fn cube(color: Color) -> [u8; 3] {
+        let Color::Indexed(n @ 16..=231) = color else {
+            panic!("{color:?} is not in the 256-colour cube");
+        };
+        let n = n - 16;
+        [n / 36, n / 6 % 6, n % 6]
     }
 
     #[test]
@@ -292,23 +343,23 @@ mod tests {
 
     #[test]
     fn a_prompt_takes_the_status_row_and_shows_what_is_typed() {
-        let cells = prompt_row("(rename-window)", "buil", 40);
+        let cells = prompt_row("(rename-window)", "buil", 40, AMBER);
         assert!(text(&cells).starts_with("(rename-window) buil"));
         assert_eq!(cells.len(), 40);
-        assert!(cells.iter().all(|cell| cell.attrs.bg == AMBER));
+        assert!(cells.iter().all(|cell| cell.attrs.bg == AMBER.bar));
     }
 
     #[test]
     fn the_session_list_numbers_every_session_and_marks_the_choice() {
         let lines = ["build: 1 window".to_owned(), "notes: 2 windows".to_owned()];
-        let rows = session_overlay(&lines, 1, 40);
+        let rows = session_overlay(&lines, 1, 40, AMBER);
         assert_eq!(rows.len(), 3);
         assert!(text(&rows[1]).starts_with("0: build"));
         assert!(text(&rows[2]).starts_with("1: notes"));
         // Only the chosen line is highlighted; the rest sit over a pane and are
         // drawn in the pane's own colours.
         assert!(rows[1].iter().all(|cell| cell.attrs == Attrs::default()));
-        assert!(rows[2].iter().all(|cell| cell.attrs.bg == AMBER));
+        assert!(rows[2].iter().all(|cell| cell.attrs.bg == AMBER.bar));
     }
 
     #[test]
@@ -322,7 +373,7 @@ mod tests {
         assert!(
             cells
                 .iter()
-                .all(|cell| cell.attrs.bg == AMBER || cell.attrs.bg == AMBER_DEEP)
+                .all(|cell| cell.attrs.bg == AMBER.bar || cell.attrs.bg == AMBER.current)
         );
     }
 
@@ -330,11 +381,49 @@ mod tests {
     fn the_split_lines_are_the_bar_colour() {
         // Chrome is chrome: a white divider under an amber bar reads as two
         // different things drawn by two different programs.
-        assert_eq!(border().fg, AMBER);
-        assert_eq!(border().fg, bar().bg);
-        // No background of its own, so a border costs one glyph rather than a
-        // column of fill over whatever pane it divides.
-        assert_eq!(border().bg, Color::Default);
+        for palette in [Palette::AMBER, Palette::GREEN] {
+            assert_eq!(border(palette).fg, palette.bar);
+            assert_eq!(border(palette).fg, bar(palette).bg);
+            // No background of its own, so a border costs one glyph rather than
+            // a column of fill over whatever pane it divides.
+            assert_eq!(border(palette).bg, Color::Default);
+        }
+    }
+
+    #[test]
+    fn a_server_with_none_role_panes_draws_all_of_its_chrome_green() {
+        assert_eq!(Palette::for_panes(false), Palette::AMBER);
+        assert_eq!(Palette::for_panes(true), Palette::GREEN);
+        // The colour of a None rush's prompt (rush's `default_prompt`), so a
+        // None shell in a None rmux reads as one thing.
+        assert_eq!(Palette::GREEN.bar, Color::Indexed(120));
+
+        let (sessions, _rx) = session_with("build", 3);
+        let session = sessions.iter().next().unwrap();
+        let cells = super::row(session, 60, Palette::GREEN);
+        assert_eq!(lit_in(&cells, Palette::GREEN), " 2:true ");
+        assert!(cells.iter().all(|cell| cell.attrs.fg == INK));
+        assert!(cells.iter().all(|cell| {
+            cell.attrs.bg == Palette::GREEN.bar || cell.attrs.bg == Palette::GREEN.current
+        }));
+        let prompt = prompt_row("(rename-window)", "", 40, Palette::GREEN);
+        assert!(
+            prompt
+                .iter()
+                .all(|cell| cell.attrs.bg == Palette::GREEN.bar)
+        );
+        let message = message_row("no room", 40, Palette::GREEN);
+        assert!(
+            message
+                .iter()
+                .all(|cell| cell.attrs.bg == Palette::GREEN.bar)
+        );
+        let overlay = session_overlay(&["build: 3 windows".to_owned()], 0, 40, Palette::GREEN);
+        assert!(
+            overlay[1]
+                .iter()
+                .all(|cell| cell.attrs.bg == Palette::GREEN.bar)
+        );
     }
 
     #[test]
@@ -351,15 +440,14 @@ mod tests {
     #[test]
     fn the_bar_is_lighter_than_the_window_it_picks_out() {
         // The point of the pair: the row recedes and the current window comes
-        // forward, rather than the other way about.
-        let (Color::Indexed(bar_bg), Color::Indexed(current_bg)) = (bar().bg, AMBER_DEEP) else {
-            panic!("the palette is a 256-colour one");
-        };
-        // 222 and 214 are the same hue three steps apart in the cube's green
-        // axis, so the larger index is the lighter colour.
-        assert!(
-            bar_bg > current_bg,
-            "{bar_bg} is not lighter than {current_bg}"
-        );
+        // forward, rather than the other way about. In the 256-colour cube,
+        // lighter means no channel lower and at least one higher.
+        for palette in [Palette::AMBER, Palette::GREEN] {
+            let (bar, current) = (cube(palette.bar), cube(palette.current));
+            assert!(
+                bar != current && bar.iter().zip(current).all(|(b, c)| *b >= c),
+                "{palette:?}: the bar is not lighter than the current window"
+            );
+        }
     }
 }
