@@ -40,7 +40,7 @@ Developer-image validation remains release-only.
 | 5 | Complete: `-L`/`-N`, published fork repairs and guest coverage pass all 218 component tests, clippy, native builds, 3/3 release, 3/3 debug and the complete developer-release gate. The test port-allocation race is fixed by `c1ae1c5e` and `8a9f665d`; the validated snapshot stays unchanged across all runs | None; the subsequent shared close repair is integrated with step 6 |
 | 6 | Complete: bounded SOCKS4/4a/5, `-D`, configuration, shared probe, retained fixture reservations and the published close fix through `9c6dc207`. All 234 component tests, clippy, both Motor release binaries and the separate `step6-main` 3/3 release and 3/3 debug image runs pass. Native guest coverage is committed as `013f22f6` | None |
 | 7 | Complete: server remote listeners, cancellation, ownership, limits, GatewayPorts and native guest coverage through `43ec0af2`, socket-path repair `1f0c3960`, and the published transport repair in `c42f162d` and `2b5f0123`. All 255 component tests, strict all-target clippy, both native release binaries and fresh `step7-transport-published` 3/3 release plus 3/3 debug image gates pass with source status zero | None; the earlier failed snapshot and its diagnostic evidence are preserved separately |
-| 8 | Prepared integration `118e4348` includes the complete `-R` runtime, authorization, ordering, allocations, drain, hostile-peer and route/copy coverage, help, docs and the two setup/shutdown fixes on top of the actual published transport repair. All 275 component tests, strict all-target clippy, formatting and both native release binaries pass. The combined guest script retains the short-socket repair and adds the client `-R` check; its prepared source snapshot is recorded | Integrate after step 7; guest validation, separate 3+3 image gates and the final complete developer-release gate |
+| 8 | Integrated in nine tested patches from `95cabed1` through `b02667bd`: complete `-R` runtime, authorization, ordering, allocations, drain, hostile-peer and route/copy coverage, help, docs and the two setup/shutdown fixes on top of the actual published transport repair. All 275 component tests, strict all-target clippy, formatting and both native release binaries pass. Main's source bytes match the prepared snapshot, including the combined guest script with the short-socket repair and client `-R` check | Fresh `step8-transport-published` 3+3 main-image gates are running, followed by the complete developer-release gate; commit guest coverage after its first full release pass |
 
 ### Remote forwarding: close-handshake repair in the external fork
 
@@ -184,7 +184,11 @@ component tests, strict all-target clippy and both native release binaries pass
 against the actual published pin. Fresh `step7-transport-published` image gates
 pass three release and three debug runs on a frozen source snapshot. Each test
 and source-check status is zero; their passes replace the earlier snapshot's
-incomplete batch. The final client milestone follows on the same published pin.
+incomplete batch. The final client patches are integrated through `b02667bd` on
+the same published pin, with source bytes matching the isolated 275-test preflight.
+Its separate `step8-transport-published` 3+3 main-image batch is running. After
+those passes, the final developer-image release gate checks both 256 MiB Wasm
+images in the ordinary and service modes and archives their evidence separately.
 
 ## Implementation history
 
