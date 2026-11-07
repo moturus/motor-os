@@ -36,11 +36,46 @@ Developer-image validation remains release-only.
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
 | 2 | Complete: step 2a published `2a07f3a` and passed its separate 3+3 and developer-image gates. Step 2b integrates direct opens and optional configuration, resolves SDK/sys from crates.io, and passes 183 host tests, clippy, native builds, and its own 3+3 image gates | None |
 | 3 | Complete: guest jump transfers, native server forwarding/DNS/100-channel probe, shipped configuration and docs pass 3/3 release, 3/3 debug, and the complete developer-image release gate | None |
-| 4 | User published `d4a1cc4`; the actual pin and four main contracts pass all 187 component tests, clippy, native release builds, 3/3 release and 3/3 debug image gates, and the complete developer-image release gate. The subsequently discovered callback-open regression is fixed and tested in fork commit `88e1181` | Publish and integrate the repair |
-| 5 | `-L`/`-N` options, config, listeners, shared lifetime, cancellation and shared-loop progress are committed in isolated `build/russh-rebase/step5-worktree`; 212 component tests plus the offline OpenSSH oracle, clippy and native release builds pass; guest check is staged | Guest validation; merge after step 4's gates and fork repair publication; milestone gates |
-| 6 | Prepared separately in `build/russh-rebase/step6-worktree`: bounded SOCKS4/4a/5, `-D`, configuration and relay pass 224 component tests plus the offline mixed-forward oracle, clippy and Motor release builds; shared probe builds natively and passes on the host | Guest validation; integrate after step 5; milestone gates |
-| 7 | Additive server outgoing-credit API `f3ae114` and encrypted contracts `d16a1df` are committed in the external fork, after helper `ccfd16c` and compatibility repair `88e1181`; all 317 fork tests, selected clippy, formatting and native builds pass | User publication, actual main pin/contracts, server remote listeners, `gateway_ports`, host/guest coverage, milestone gates |
-| 8 | Not started | Client remote-forward authorization and ordering, `-R` integration and guest coverage, milestone gates |
+| 4 | Published `d4a1cc4` passed its complete 3+3 and developer-image gates. The user also published repair/API revision `d16a1df`; `7e681fb1` and `10232029` pin it and integrate the callback and server-credit contracts. All 191 component tests, clippy and native release builds pass | Validate the repair together with the next milestone's image gates |
+| 5 | `-L`/`-N`, published fork repairs and guest coverage are integrated. All 218 component tests, release protocol checks, clippy and native builds pass. An image-gate hang exposed a test port-allocation race; `c1ae1c5e` and `8a9f665d` retain reservations through listener startup. The fresh batch has passed 3/3 release image runs with unchanged sources; debug and developer-release phases continue | Complete milestone gates; validate the subsequent shared close-handshake repair after fork publication |
+| 6 | Prepared separately in `build/russh-rebase/step6-worktree`: bounded SOCKS4/4a/5, `-D`, configuration and relay pass 224 component tests plus the offline mixed-forward oracle, clippy and Motor release builds. Shared probe builds natively and passes on the host. `052c0405` also retains dynamic fixture port reservations; all three dynamic cases and clippy pass | Guest validation; integrate after step 5; milestone gates |
+| 7 | In isolated `step7-worktree`, loopback binds, exact registration/cancellation, scoped relays, GatewayPorts and 100 concurrent pending opens are committed. All 240 component tests, 58 imager tests, clippy and native builds pass | Guest validation; integrate after step 6; milestone gates |
+| 8 | In isolated `step8-worktree`, `7598bac4` and `59e42fa0` implement remote forwarding arguments, configuration, exact authorization and setup ordering. Client wiring, the close-handshake repair and copied public contract tests pass all 252 component tests, clippy and both native release builds against the local fork. Allocated-port sessionless forwarding and large response draining after command exit both pass | Publish and pin the fork repair; complete client integration, coverage and milestone gates |
+
+### Remote forwarding: close-handshake repair in the external fork
+
+The first real client `-R` large-transfer check loses response bytes after its
+command exits. Temporary byte counters show the client enqueues the full
+2,129,920-byte response, but the connection disconnects before the server receives
+its EOF or close. The original failure and two diagnostic traces are retained in
+`build/russh-rebase/step8-*diagnostic.log`; all temporary counters are removed.
+
+The repair is being implemented in the external russh fork at
+`build/russh-rebase/fork`, on `motor-v0.65.1`. Forwarding explicitly opts into
+application-controlled close through its receive-credit handle: the application
+drains its socket before sending close, and keeps its task alive until both close
+messages have passed. Ordinary channel close continues to release receive queues
+immediately. Dropping the last credit handle releases retained handshake state,
+and transport loss ends its waiter. This follows the drain and close states in
+[OpenSSH nchan.c](https://github.com/openssh/openssh-portable/blob/master/nchan.c).
+Three lifecycle tests cover both close orders, cancellation and transport loss.
+Three encrypted-wire tests verify drain-before-ack in both directions, last-credit
+drop and transport loss. Restoring the early acknowledgement in a detached
+diagnostic checkout fails the new wire regression. The complete fork suite passes
+323 active tests, with eight existing ignored doctests, in its final clean rebuild;
+selected clippy checks pass. Fork commits `3eb3ccd` (implementation and lifecycle
+tests) and `e9a05c1` (wire regressions) are ready on `motor-v0.65.1` for the user
+to push. Reusing a target directory for the counterfactual made a later check
+link that counterfactual artifact; its path is preserved in
+`step8-close-handshake-shared-target-diagnosis.log`, and the fork package outputs
+were cleaned before the final rebuild.
+
+The prepared main integration keeps ordinary errors cancellable and holds a
+successful relay task through the handshake. Its reverse-EOF fixture now reads
+the required close before awaiting completion. The public wire tests are copied
+under `src/bin/russhd/tests`, so `full-test.sh` runs them transitively. The isolated
+manifest and lock are restored byte-for-byte after local-fork validation. The
+user will push the fork commits before the main dependency pin changes.
 
 ### Step 2b: relay foundation
 
@@ -523,6 +558,22 @@ by all 56 role/service commands on each image. Both runs and their console and
 image evidence are retained separately in `step4-dev-wasm-evidence/run-{1,2}`.
 
 ### Step 5: isolated parser preparation
+
+After the user published `d16a1df4a0fbc60e61f5410e3adf42024b41d0b0`, the remote
+revision was verified and pinned without any registry-version changes. All 191
+component tests, all-target clippy with warnings denied and both Motor release
+binaries pass (`step7-published-{component,clippy,native}.log`). The callback
+and server-open regressions are discovered transitively by `full-test.sh`.
+
+The prepared step 5 commits are now integrated in their original order, through
+`1bf69ae1`. `b77f3efb` adds the public legacy-open refusal/cancellation regression.
+All 218 component tests, clippy and native release builds pass on this combination
+(`step5-integrated-*`). The guest `-L` block passes in the first complete release
+run and is committed as `fcfcd53c`. Testing takes 13.7 minutes; both test and
+source statuses are zero.
+The separate image sequence runs as `step5-main-{release,debug}-{1,2,3}`, followed
+by `step5-dev-release-1`, against `step5-gate-sources.sha256`. The original
+step 4 passes are not reused for this milestone.
 
 While step 4's pinned sources stay frozen, a detached main-repository checkout
 at `build/russh-rebase/step5-worktree` prepares the approved parser work.
@@ -1900,18 +1951,19 @@ active keys and bind conflicts without changing the existing listener. Distinct 
 requests create distinct registrations. Publish the group before reporting success.
 
 Each accepted socket acquires a forward permit without waiting, then a separate task opens
-`Handle::channel_open_forwarded_tcpip` and relays it. A slow channel open cannot block
+`Handle::channel_open_forwarded_tcpip_with_credit` and relays it. A slow channel open cannot block
 accepts. `cancel_tcpip_forward` removes only a matching group on that connection, stops
 and joins its accept tasks, and releases every listening socket before success. Unknown
 registrations fail. Existing forwarded connections continue. Connection loss cancels all
 listeners, pending opens, and relays. No separate listener-count cap is added; admission
 and bookkeeping still obey the pressure policy.
 
-For these server-initiated channels, take `receive_credit` in `channel_open_confirmation`
-and hand it to the opener. The pinned callback runs before the next data packet is
-dispatched; prove this with immediate-data and cancelled-open tests, and clean up abandoned
-handoffs. If the existing API cannot satisfy this contract, propose the additional
-**russh fork change** before implementation rather than silently expanding step 4.
+For these server-initiated channels, use the published additive credit API at
+`d16a1df`. The earlier callback-map proposal failed its cancellation contract;
+the user-approved fork extension owns the handoff and releases cancelled
+application state before a late confirmation. The main encrypted contracts
+cover the first window, paused opener, rekey, refusal and both cancellation
+phases. No application confirmation map is needed.
 
 ## Security
 
