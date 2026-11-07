@@ -83,6 +83,7 @@ fn main() -> Result {
 
     fs::create_dir(&output)?;
     check_init(&output)?;
+    check_discovery(&output)?;
     check_bounded_inputs(&output)?;
     #[cfg(target_os = "motor")]
     check_loose_ref_limit(&output)?;
@@ -457,6 +458,58 @@ fn check_bounded_inputs(output: &Path) -> Result {
             actual: 1
         })
     ));
+    Ok(())
+}
+
+fn check_discovery(output: &Path) -> Result {
+    let worktree = output.join("discovery");
+    fs::create_dir(&worktree)?;
+    let nested = worktree.join("nested/deep");
+    fs::create_dir_all(&nested)?;
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    motor_gix::init::run(
+        &worktree,
+        &["init.defaultBranch=main"],
+        false,
+        &cancellation,
+    )?;
+
+    let opened = motor_gix::repository::open(&nested, &[], false)?;
+    let worktree = worktree.canonicalize()?;
+    assert_eq!(
+        opened.repo.workdir(),
+        Some(worktree.as_path()),
+        "discovery did not select the worktree root"
+    );
+    assert_eq!(
+        opened.repo.git_dir(),
+        worktree.join(".git").as_path(),
+        "discovery selected the wrong git directory"
+    );
+    assert_eq!(opened.prefix.as_bstr(), b"nested/deep".as_bstr());
+
+    fs::write(worktree.join("root-file"), b"root\n")?;
+    fs::write(nested.join("nested-file"), b"nested\n")?;
+    let mut status = Vec::new();
+    motor_gix::status::collect(&opened, &cancellation)?.write_to(&mut status, &cancellation)?;
+    assert_eq!(status, b"?? nested-file\n?? ../../root-file\n");
+
+    motor_gix::add::run(&opened, false, &["nested-file".into()], &cancellation)?;
+    let mut status = Vec::new();
+    motor_gix::status::collect(&opened, &cancellation)?.write_to(&mut status, &cancellation)?;
+    assert_eq!(status, b"A  nested-file\n?? ../../root-file\n");
+
+    let mut diff = Vec::new();
+    motor_gix::diff::run(
+        &opened,
+        true,
+        &["nested-file".into()],
+        &cancellation,
+        &mut diff,
+    )?;
+    let diff = String::from_utf8(diff)?;
+    assert!(diff.contains("--- /dev/null\n"), "{diff}");
+    assert!(diff.contains("+++ b/nested/deep/nested-file\n"), "{diff}");
     Ok(())
 }
 

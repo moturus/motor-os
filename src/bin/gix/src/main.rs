@@ -45,6 +45,7 @@ fn run() -> Result {
                 .short('r')
                 .long("repository")
                 .value_name("REPOSITORY")
+                .help("Worktree to operate on, or a directory within one")
                 .value_parser(value_parser!(PathBuf))
                 .default_value(".")
                 .global(true),

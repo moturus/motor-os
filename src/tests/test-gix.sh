@@ -906,6 +906,69 @@ EOF
   done
   [ "$(sha256sum "$fixture/.git/index")" = "$index_before" ] ||
     fail "gix status or diff modified the source index"
+  mkdir -p "$fixture/discovery/deep"
+  (cd "$fixture/discovery/deep" && \
+    "${app_env[@]}" "$gix_binary" -c core.abbrev=12 log) > "$temporary/subdir.log"
+  verify_log "$temporary/subdir.log"
+  rm -r "$fixture/discovery"
+
+  relative="$temporary/relative"
+  "${app_env[@]}" "$gix_binary" init "$relative" \
+    > "$temporary/relative-init.out" ||
+    fail "gix init for the relative-path fixture failed"
+  mkdir -p "$relative/sub/deep"
+  printf 'base\n' > "$relative/sub/deep/file"
+  (cd "$relative/sub/deep" && "${app_env[@]}" "$gix_binary" add file) ||
+    fail "gix add from a subdirectory failed"
+  "${app_env[@]}" "$gix_binary" -r "$relative" \
+    -c user.name=Test -c user.email=test@example.invalid commit -m base \
+    > "$temporary/relative-commit.out" ||
+    fail "gix commit for the relative-path fixture failed"
+  printf 'changed\n' > "$relative/sub/deep/file"
+  printf 'root\n' > "$relative/root-untracked"
+  cat > "$temporary/expected-relative.status" <<'STATUS'
+?? ../../root-untracked
+ M file
+STATUS
+  (cd "$relative/sub/deep" && "${app_env[@]}" "$gix_binary" status) \
+    > "$temporary/relative.status"
+  cmp "$temporary/expected-relative.status" "$temporary/relative.status" >/dev/null ||
+    fail "gix status paths are not relative to the invocation directory"
+  (cd "$relative/sub/deep" && "${app_env[@]}" "$gix_binary" diff file) \
+    > "$temporary/relative.diff"
+  for line in '--- a/sub/deep/file' '+++ b/sub/deep/file' '-base' '+changed'; do
+    grep -Fqx -- "$line" "$temporary/relative.diff" ||
+      fail "subdirectory diff lacks $line"
+  done
+  (cd "$relative/sub/deep" && "${app_env[@]}" "$gix_binary" add ../..) ||
+    fail "gix add with a parent path from a subdirectory failed"
+  cat > "$temporary/expected-relative-staged.status" <<'STATUS'
+A  ../../root-untracked
+M  file
+STATUS
+  (cd "$relative/sub/deep" && "${app_env[@]}" "$gix_binary" status) \
+    > "$temporary/relative-staged.status"
+  cmp "$temporary/expected-relative-staged.status" "$temporary/relative-staged.status" >/dev/null ||
+    fail "gix add did not resolve paths relative to the invocation directory"
+  (cd "$relative/sub/deep" && "${app_env[@]}" "$gix_binary" unstage file) ||
+    fail "gix unstage from a subdirectory failed"
+  cat > "$temporary/expected-relative-unstaged.status" <<'STATUS'
+A  ../../root-untracked
+ M file
+STATUS
+  (cd "$relative/sub/deep" && "${app_env[@]}" "$gix_binary" status) \
+    > "$temporary/relative-unstaged.status"
+  cmp "$temporary/expected-relative-unstaged.status" "$temporary/relative-unstaged.status" >/dev/null ||
+    fail "gix unstage did not resolve paths relative to the invocation directory"
+  (cd "$relative/sub/deep" && "${app_env[@]}" "$gix_binary" restore file) ||
+    fail "gix restore from a subdirectory failed"
+  cat > "$temporary/expected-relative-restored.status" <<'STATUS'
+A  ../../root-untracked
+STATUS
+  (cd "$relative/sub/deep" && "${app_env[@]}" "$gix_binary" status) \
+    > "$temporary/relative-restored.status"
+  cmp "$temporary/expected-relative-restored.status" "$temporary/relative-restored.status" >/dev/null ||
+    fail "gix restore did not resolve paths relative to the invocation directory"
   [ ! -e "$temporary/git-invoked" ] || fail "repository open invoked installed Git"
   echo "test-gix host PASS"
   exit

@@ -27,6 +27,8 @@ impl Default for Change {
 pub struct Report {
     operation: Option<String>,
     changes: BTreeMap<BString, Change>,
+    /// Paths are shown relative to this directory, like Git from a subdirectory.
+    prefix: BString,
 }
 
 impl Report {
@@ -42,13 +44,57 @@ impl Report {
                 "{}{} {}",
                 change.staged,
                 change.worktree,
-                path.to_str_lossy().escape_debug()
+                relative_path(path.as_bstr(), self.prefix.as_bstr())
+                    .to_str_lossy()
+                    .escape_debug()
             )?;
         }
         cancellation.check()?;
         out.flush()?;
         cancellation.check()
     }
+}
+
+/// Rebase a repository-relative path on the invocation directory.
+fn relative_path(path: &BStr, prefix: &BStr) -> BString {
+    if prefix.is_empty() {
+        return path.to_owned();
+    }
+    let trailing_slash = path.as_bytes().last() == Some(&b'/');
+    let mut path = path
+        .as_bytes()
+        .split(|byte| *byte == b'/')
+        .filter(|part| !part.is_empty())
+        .peekable();
+    let mut prefix = prefix
+        .as_bytes()
+        .split(|byte| *byte == b'/')
+        .filter(|part| !part.is_empty())
+        .peekable();
+    while path.peek().is_some() && path.peek() == prefix.peek() {
+        path.next();
+        prefix.next();
+    }
+    let mut out = Vec::new();
+    for _ in prefix {
+        if !out.is_empty() {
+            out.push(b'/');
+        }
+        out.extend_from_slice(b"..");
+    }
+    for part in path {
+        if !out.is_empty() {
+            out.push(b'/');
+        }
+        out.extend_from_slice(part);
+    }
+    if out.is_empty() {
+        out.push(b'.');
+    }
+    if trailing_slash && out.last() != Some(&b'/') {
+        out.push(b'/');
+    }
+    out.into()
 }
 
 pub fn collect(opened: &OpenedRepository, cancellation: &Cancellation) -> crate::Result<Report> {
@@ -151,10 +197,19 @@ pub fn collect(opened: &OpenedRepository, cancellation: &Cancellation) -> crate:
     }
     cancellation.check()?;
 
+    let relative_paths = repo
+        .config_snapshot()
+        .boolean("status.relativePaths")
+        .unwrap_or(true);
     Ok(Report {
         operation: mutation::owned_operation(repo.git_dir())?
             .or_else(|| repo.state().map(|state| operation_name(state).to_owned())),
         changes,
+        prefix: if relative_paths {
+            opened.prefix.clone()
+        } else {
+            BString::default()
+        },
     })
 }
 
@@ -186,5 +241,39 @@ fn operation_name(state: gix::state::InProgress) -> &'static str {
         gix::state::InProgress::RebaseInteractive => "rebase-interactive",
         gix::state::InProgress::Revert => "revert",
         gix::state::InProgress::RevertSequence => "revert-sequence",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::relative_path;
+    use gix::bstr::{BStr, BString, ByteSlice};
+
+    #[test]
+    fn paths_are_shown_relative_to_the_invocation_directory() {
+        assert_eq!(
+            relative_path(b"a/b".as_bstr(), BStr::new("")),
+            BString::from("a/b")
+        );
+        assert_eq!(
+            relative_path(b"sub/deep/file".as_bstr(), BStr::new("sub/deep")),
+            BString::from("file")
+        );
+        assert_eq!(
+            relative_path(b"root".as_bstr(), BStr::new("sub/deep")),
+            BString::from("../../root")
+        );
+        assert_eq!(
+            relative_path(b"sub/other".as_bstr(), BStr::new("sub/deep")),
+            BString::from("../other")
+        );
+        assert_eq!(
+            relative_path(b"discovery/".as_bstr(), BStr::new("discovery/deep")),
+            BString::from("../")
+        );
+        assert_eq!(
+            relative_path(b"untracked/".as_bstr(), BStr::new("sub")),
+            BString::from("../untracked/")
+        );
     }
 }

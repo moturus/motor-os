@@ -424,6 +424,7 @@ mod tests {
         assert!(out.ends_with(b"\n"));
     }
 
+    #[cfg(not(target_os = "motor"))]
     #[test]
     fn linux_builds_never_ask() {
         let error = ask("https://example.test", &Cancellation::new())
