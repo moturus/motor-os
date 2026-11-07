@@ -163,6 +163,26 @@ async fn read_window(channel: &mut Channel<server::Msg>) {
 }
 
 #[tokio::test]
+async fn refusal_after_a_legacy_open_is_cancelled_keeps_the_transport_alive() {
+    timeout(Duration::from_secs(5), async {
+        let mut pair = Pair::connect().await;
+        let handle = pair.server.handle();
+        let mut opening =
+            Box::pin(handle.channel_open_forwarded_tcpip("target", 1234, "origin", 5678));
+        let (_channel, reply) = tokio::select! {
+            opened = pair.opened.recv() => opened.unwrap(),
+            result = opening.as_mut() => panic!("open completed before reply: {result:?}"),
+        };
+        drop(opening);
+        reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
+        pair.client.send_ping().await.unwrap();
+        pair.finish().await;
+    })
+    .await
+    .expect("refusal of a cancelled legacy open ended the transport");
+}
+
+#[tokio::test]
 async fn credit_handoff_precedes_confirmation_and_survives_a_paused_opener() {
     timeout(Duration::from_secs(5), async {
         let mut pair = Pair::connect().await;
