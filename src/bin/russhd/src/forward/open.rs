@@ -40,13 +40,7 @@ pub async fn direct_tcpip(
     credit: ReceiveCredit,
     window: usize,
 ) -> io::Result<()> {
-    let connected = connect_resolved(lookup_host((host.as_str(), port)))
-        .await
-        .and_then(|socket| {
-            socket.set_nodelay(true)?;
-            Ok(socket)
-        });
-    let socket = match connected {
+    let socket = match connect_target(&host, port).await {
         Ok(socket) => socket,
         Err(_) => {
             reply.reject(ChannelOpenFailure::ConnectFailed).await;
@@ -56,6 +50,12 @@ pub async fn direct_tcpip(
     credit.defer_close();
     reply.accept().await;
     super::relay(channel, socket, credit, window, memory_pressure).await
+}
+
+pub async fn connect_target(host: &str, port: u16) -> io::Result<TcpStream> {
+    let socket = connect_resolved(lookup_host((host, port))).await?;
+    socket.set_nodelay(true)?;
+    Ok(socket)
 }
 
 async fn connect_resolved<F, I>(resolved: F) -> io::Result<TcpStream>

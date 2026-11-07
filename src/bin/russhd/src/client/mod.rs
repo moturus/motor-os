@@ -5,6 +5,7 @@ pub mod forwarding;
 pub mod known_hosts;
 pub mod local;
 pub mod prompt;
+pub mod remote;
 pub mod session;
 pub mod sftp;
 pub mod socks;

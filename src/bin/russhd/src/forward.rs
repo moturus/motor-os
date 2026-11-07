@@ -9,7 +9,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 mod open;
 pub mod remote;
 mod tasks;
-pub use open::{direct_tcpip, memory_pressure, validate_target};
+pub use open::{connect_target, direct_tcpip, memory_pressure, validate_target};
 pub use tasks::{Reservation, Tasks};
 
 const BLOCK_SIZE: usize = 32 * 1024;
