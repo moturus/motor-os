@@ -105,6 +105,14 @@ zero source-check status. Its complete developer-release gate also passes,
 including ordinary and service Wasm checks on both 256 MiB images. Their evidence
 is retained separately under `step5-reserved-dev-wasm-evidence/run-1` and `run-2`.
 
+The final acceptance review adds the planned guest GatewayPorts check to the
+prepared step 7 and step 8 scripts. A second guest daemon reports readiness on
+its terminal, then the host client requests an allocated remote port. Connections
+from the private tap and guest IPv6 loopback must both reach the host target,
+and the controlling command must remain usable. This covers Motor's wildcard
+port-allocation path; actual guest validation is pending step 7. The active
+step 6 sources and runner scripts remain unchanged.
+
 ## Implementation history
 
 The checkpoint notes below retain intermediate designs, failures and validation.
