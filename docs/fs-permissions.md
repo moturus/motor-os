@@ -33,6 +33,20 @@ partition; memfs usage appears in the listing and the `fs.memfs.*` totals.
 
 ## Permission model
 
+Motor FS mounts may set `read_only = true` in `/system/cfg/sys-fs.toml`.
+Every modifying request, including permission changes and either side of a
+rename, then returns `NotAllowed` (`PermissionDenied` in std) for every role,
+including System. Reads, listing, locks, copies out and execution remain
+available. `findmnt` and `df` show each mount's state and sampled usage.
+
+`[root] read_only = true` requires a writable mount at exactly `/system/logs`.
+strobe reclaims old logs against that mount's capacity. The default image keeps
+root writable; on a read-only root, writes such as SSH key generation and
+editor configuration fail unless their destinations have writable mounts.
+Opening a mount can recover a journal on writable backing before enforcing
+the mount flag. VMM read-only backing requires a clean journal and an explicitly
+read-only configuration; it never receives recovery writes.
+
 A Motor OS filesystem mode contains three permission triplets in **System, Interactive,
 None** order. For example, `rw-r-----` grants System read/write, Interactive
 read, and None no access. The legal triplets are `rwx`, `rw-`, `r-x`, `r--`,

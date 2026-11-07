@@ -213,7 +213,37 @@ fn stuck_rotation() {
     std::fs::remove_file(path).unwrap();
 }
 
+fn log_mount_capacity() {
+    use moto_sdk::io::fs::MountKind;
+    let mut mounts: Vec<_> = ["/", "/system/log", "/system/logs", "/system/logs/child"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, path)| MountInfo {
+            id: index as u32,
+            kind: MountKind::MemFs,
+            path: path.into(),
+            corrupted: false,
+            read_only: false,
+            source: None,
+            used: Some(7),
+            entries: None,
+            cap: Some(100 * (index as u64 + 1)),
+        })
+        .collect();
+    assert_eq!(log_available_bytes(&mounts[..1]), Some(93));
+    assert_eq!(log_available_bytes(&mounts[..2]), Some(93));
+    assert_eq!(log_available_bytes(&mounts), Some(293));
+    mounts[2].used = None;
+    assert_eq!(log_available_bytes(&mounts), None);
+    mounts[2].used = Some(301);
+    assert_eq!(log_available_bytes(&mounts), None);
+    mounts[2].path = "/system".into();
+    mounts[2].used = Some(9);
+    assert_eq!(log_available_bytes(&mounts), Some(291));
+}
+
 pub fn run() {
+    log_mount_capacity();
     write_progress_and_flush_policy();
     empty_records_and_disconnect();
     ordinary_write_errors();

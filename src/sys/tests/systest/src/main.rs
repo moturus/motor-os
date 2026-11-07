@@ -11,6 +11,7 @@ mod raw_spawn;
 mod sched_fairness;
 // mod channel_test;
 mod alloc_bench;
+mod block_mounts;
 mod boot_identity;
 mod closerace;
 mod command_output;
@@ -1332,6 +1333,10 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "findmnt" {
         sysbox_findmnt::run_test();
+        return;
+    }
+    if args.len() == 2 && args[1] == "block-ro-root" {
+        block_mounts::read_only_root();
         return;
     }
     if args.len() == 2 && args[1] == "mounts-none" {

@@ -130,9 +130,17 @@ if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   set -m
   timeout "${TIMEOUT}s" "$0" "${ORIGINAL_ARGS[@]}" < /dev/null
   status=$?
+  main_status=$status
   set +m
+  if [ "$status" -eq 0 ]; then
+    # Block-mount fixtures have their own deadline; the one-vCPU main suite
+    # already consumes its budget. Keep the existing main deadline unchanged.
+    block_mount_args=(--vmm "$VMM")
+    [ "$BUILD" != release ] || block_mount_args+=(--release)
+    "$WD/test-block-mounts.sh" "${block_mount_args[@]}" || status=$?
+  fi
   testing_seconds=$((SECONDS - testing_started))
-  if [ "$status" -eq 124 ]; then
+  if [ "$main_status" -eq 124 ]; then
     echo "full-test: timed out after $TIMEOUT seconds of testing" >&2
   elif [ "$status" -ne 0 ]; then
     echo "FULL TEST FAIL: status $status after $(minutes "$testing_seconds") minutes of testing" >&2

@@ -1,0 +1,19 @@
+[root]
+read_only = true
+
+[[mount]]
+path = "/none/tmp"
+type = "memfs"
+
+[[mount]]
+path = "/system/tmp"
+type = "memfs"
+
+[[mount]]
+path = "/user/tmp"
+type = "memfs"
+
+[[mount]]
+path = "/system/logs"
+type = "memfs"
+max_size = "16M"

@@ -370,7 +370,7 @@ pub(super) async fn write_resolv_conf(
     const TEMP_NAME: &str = ".resolv.conf.dhcp";
     let contents = resolv_conf_contents(servers);
     let root = runtime.root()?;
-    let mut fs = root.write().await?;
+    let fs = root.read().await?;
 
     let Some((system, _)) = fs
         .stat(
@@ -398,6 +398,8 @@ pub(super) async fn write_resolv_conf(
         return Ok(());
     };
     let libc = root.check_local(libc)?;
+    drop(fs);
+    let mut fs = root.write().await?;
 
     if let Some((stale, _)) = fs
         .stat(moto_sdk::async_fs::Role::System, libc, TEMP_NAME)
