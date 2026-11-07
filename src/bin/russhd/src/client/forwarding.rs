@@ -224,7 +224,11 @@ mod tests {
     async fn setup_failure_keeps_other_listeners_or_releases_them_when_exit_is_required() {
         let blocked = TcpListener::bind("127.0.0.1:0").await.unwrap();
         for exit in [false, true] {
-            let available = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            // Keep the port out of the ephemeral allocator across setup.
+            // Reuse lets the forwarding code bind this reserved address.
+            let available = tokio::net::TcpSocket::new_v4().unwrap();
+            available.set_reuseaddr(true).unwrap();
+            available.bind("127.0.0.1:0".parse().unwrap()).unwrap();
             let address = available.local_addr().unwrap();
             let mut options = options(Some("127.0.0.1"), false);
             options.exit_on_forward_failure = exit;
@@ -232,19 +236,20 @@ mod tests {
             let mut refused = options.local_forwards[0].clone();
             refused.listen.port = blocked.local_addr().unwrap().port();
             options.local_forwards.push(refused);
-            drop(available);
             let result = Listeners::bind(&options).await;
             if exit {
                 assert!(result.is_err());
                 assert!(TcpStream::connect(address).await.is_err());
             } else {
                 let mut listeners = result.unwrap();
+                assert_eq!(listeners.sockets.len(), 1);
                 let client = TcpStream::connect(address).await.unwrap();
                 assert_eq!(
                     listeners.accept().await.unwrap().originator,
                     client.local_addr().unwrap()
                 );
             }
+            drop(available);
         }
     }
 
