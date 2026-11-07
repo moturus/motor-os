@@ -24,6 +24,7 @@ impl Listeners {
         &mut self,
         address: &str,
         port: u32,
+        gateway_ports: bool,
         handle: russh::server::Handle,
         tasks: Arc<super::Tasks>,
         window: usize,
@@ -35,7 +36,11 @@ impl Listeners {
                 "remote forward already registered",
             ));
         }
-        let bound = BoundListeners::loopback(address, u32::from(port)).await?;
+        let bound = if gateway_ports {
+            BoundListeners::wildcard(port).await?
+        } else {
+            BoundListeners::loopback(address, u32::from(port)).await?
+        };
         let port = bound.port;
         let key = (address.to_owned(), port);
         if self.groups.contains_key(&key) {
@@ -144,6 +149,29 @@ fn validate_request(address: &str, port: u32) -> io::Result<u16> {
 }
 
 impl BoundListeners {
+    pub async fn wildcard(port: u16) -> io::Result<Self> {
+        if port != 0 {
+            return Self::bind(
+                vec![
+                    IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                    IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                ],
+                port,
+            )
+            .await;
+        }
+        // Motor OS requires an explicit port for wildcard listeners. Select it
+        // here on every platform, so the same bounded search is tested on hosts.
+        let listener = ephemeral_v4(rand::random_range(49152..=u16::MAX)).await?;
+        let port = listener.local_addr()?.port();
+        let mut sockets = vec![listener];
+        match TcpListener::bind((Ipv6Addr::UNSPECIFIED, port)).await {
+            Ok(listener) => sockets.push(listener),
+            Err(error) => log::warn!("cannot bind remote forward [::]:{port}: {error}"),
+        }
+        Ok(Self { sockets, port })
+    }
+
     /// GatewayPorts no: only an explicit loopback address selects one family.
     /// Other valid requests bind both loopback families, without resolving names.
     pub async fn loopback(address: &str, port: u32) -> io::Result<Self> {
@@ -184,9 +212,56 @@ impl BoundListeners {
     }
 }
 
+async fn ephemeral_v4(start: u16) -> io::Result<TcpListener> {
+    const FIRST: u32 = 49152;
+    const COUNT: u32 = 16384;
+    for offset in 0..64 {
+        let port = (FIRST + (u32::from(start) - FIRST + offset) % COUNT) as u16;
+        match TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).await {
+            Ok(listener) => return Ok(listener),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::AddrInUse | io::ErrorKind::AlreadyExists
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AddrInUse,
+        "all 64 wildcard port candidates are occupied",
+    ))
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn wildcard_zero_uses_a_selected_port_shared_by_every_family() {
+        let bound = BoundListeners::wildcard(0).await.unwrap();
+        assert!(bound.port >= 49152);
+        assert!(!bound.sockets.is_empty());
+        for socket in &bound.sockets {
+            let actual = socket.local_addr().unwrap();
+            assert!(actual.ip().is_unspecified());
+            assert_eq!(actual.port(), bound.port);
+        }
+    }
+
+    #[tokio::test]
+    async fn wildcard_port_search_skips_a_live_listener_and_wraps_the_range() {
+        let first = ephemeral_v4(u16::MAX).await.unwrap();
+        let first_port = first.local_addr().unwrap().port();
+        let second = ephemeral_v4(first_port).await.unwrap();
+        let second_port = second.local_addr().unwrap().port();
+        assert!(first_port >= 49152);
+        assert!(second_port >= 49152);
+        assert_ne!(first_port, second_port);
+        // If 65535 was free, the second search wraps past our live listener;
+        // otherwise the first search already wrapped past its existing owner.
+        assert!(first_port != u16::MAX || second_port < first_port);
+    }
 
     #[test]
     fn remote_requests_bound_text_and_ports_without_resolving_names() {

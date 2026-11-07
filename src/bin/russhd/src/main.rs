@@ -553,6 +553,7 @@ impl server::Handler for ConnectionHandler {
             .register(
                 address,
                 *port,
+                self.config.gateway_ports(),
                 session.handle(),
                 tasks.clone(),
                 local_session::SSH_RECEIVE_WINDOW as usize,

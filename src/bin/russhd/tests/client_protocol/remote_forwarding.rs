@@ -3,7 +3,11 @@ use tokio::net::TcpListener;
 
 #[test]
 fn remote_listener_requests_require_policy_and_validate_addresses() {
-    for (extra, enabled) in [("", false), ("allow_tcp_forwarding = true", true)] {
+    for (extra, enabled) in [
+        ("", false),
+        ("gateway_ports = true", false),
+        ("allow_tcp_forwarding = true", true),
+    ] {
         let fixture = Fixture::configured(extra);
         block_on(async {
             let session = fixture.connect().await;

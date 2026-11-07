@@ -115,6 +115,36 @@ async fn round_trip(mut socket: TcpStream, mut opened: Opened) {
 }
 
 #[test]
+fn gateway_ports_overrides_explicit_loopback_with_wildcard_binds_and_allocated_ports() {
+    let fixture = Fixture::configured("allow_tcp_forwarding = true\ngateway_ports = true");
+    block_on(async {
+        let (session, mut incoming) = connect(&fixture).await;
+        let mut requested = 0;
+        for _ in 0..2 {
+            let reply = session.tcpip_forward("::1", requested).await.unwrap();
+            let port = if requested == 0 {
+                reply
+            } else {
+                assert_eq!(reply, 0);
+                requested
+            };
+            assert!((49152..=65535).contains(&port));
+            // An explicit IPv6 loopback request is exposed over IPv4 too.
+            let socket = TcpStream::connect(("127.0.0.1", port as u16))
+                .await
+                .unwrap();
+            let opened = incoming.recv().await.unwrap();
+            assert_eq!(opened.address, "::1");
+            assert_eq!(opened.port, port);
+            round_trip(socket, opened).await;
+            session.cancel_tcpip_forward("::1", port).await.unwrap();
+            let _released = TcpListener::bind(("0.0.0.0", port as u16)).await.unwrap();
+            requested = port;
+        }
+    });
+}
+
+#[test]
 fn cancelling_a_listener_preserves_an_admitted_open_and_its_bind_identity() {
     let fixture = Fixture::configured("allow_tcp_forwarding = true");
     block_on(async {

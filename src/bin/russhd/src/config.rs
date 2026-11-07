@@ -21,6 +21,9 @@ struct ServiceConfig {
     #[serde(default)]
     allow_tcp_forwarding: bool,
 
+    #[serde(default)]
+    gateway_ports: bool,
+
     users_file: String,          // absolute path
     authorized_keys_dir: String, // absolute path
 }
@@ -31,6 +34,7 @@ pub struct Config {
     path: String,
     auth_store: Arc<AuthStore>,
     allow_tcp_forwarding: bool,
+    gateway_ports: bool,
 }
 
 fn invalid(message: String) -> russh::Error {
@@ -83,6 +87,7 @@ nl+jD/WcRBBUjL54uT3TAAAAAAECAwQF
             path: conf.path,
             auth_store: Arc::new(auth_store),
             allow_tcp_forwarding: conf.allow_tcp_forwarding,
+            gateway_ports: conf.gateway_ports,
         }))
     }
 
@@ -104,6 +109,10 @@ nl+jD/WcRBBUjL54uT3TAAAAAAECAwQF
 
     pub fn allow_tcp_forwarding(&self) -> bool {
         self.allow_tcp_forwarding
+    }
+
+    pub fn gateway_ports(&self) -> bool {
+        self.gateway_ports
     }
 }
 

@@ -4,15 +4,36 @@ use russhd::config::*;
 
 const CONFIG: &str = include_str!("sshd.toml");
 
-fn check(name: &str, text: &str) -> Result<bool, String> {
+fn read(name: &str, text: &str) -> Result<std::sync::Arc<Config>, String> {
     let path: PathBuf = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("russhd-config-{}-{name}.toml", std::process::id()));
     std::fs::write(&path, text).unwrap();
     let result = read_from_file(path.to_str().unwrap());
     std::fs::remove_file(&path).unwrap();
-    result
-        .map(|config| config.allow_tcp_forwarding())
-        .map_err(|error| error.to_string())
+    result.map_err(|error| error.to_string())
+}
+
+fn check(name: &str, text: &str) -> Result<bool, String> {
+    read(name, text).map(|config| config.allow_tcp_forwarding())
+}
+
+#[test]
+fn gateway_ports_is_an_optional_boolean_defaulting_to_loopback() {
+    assert!(!read("gateway-absent", CONFIG).unwrap().gateway_ports());
+    for (value, expected) in [("true", true), ("false", false)] {
+        assert_eq!(
+            read(
+                "gateway-policy",
+                &format!("gateway_ports = {value}\n{CONFIG}")
+            )
+            .unwrap()
+            .gateway_ports(),
+            expected
+        );
+    }
+    for value in ["1", "'true'", "[]"] {
+        assert!(read("bad-gateway", &format!("gateway_ports = {value}\n{CONFIG}")).is_err());
+    }
 }
 
 #[test]
@@ -51,7 +72,7 @@ fn shipped_configs_parse() {
         include_str!("../../../../img_files/motor-os-base/system/cfg/sshd.toml"),
         include_str!("../../../../img_files/motor-os-dev/system/cfg/sshd.toml"),
     ] {
-        check("shipped", text).unwrap();
+        assert!(!read("shipped", text).unwrap().gateway_ports());
     }
 }
 

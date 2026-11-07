@@ -195,10 +195,14 @@ username is offered the same methods, whether or not it exists. A connection
 runs one session channel at a time, so a multiplexing client's second session is
 refused until the first closes. Independent TCP forwards can share the connection.
 
-To use `russhd` as a jump host or accept local forwards from another SSH client,
+To use `russhd` as a jump host or accept TCP forwards from another SSH client,
 set `allow_tcp_forwarding = true` in `sshd.toml` and restart the service. This
 optional version 2 setting defaults to false; shipped images enable it. It
-allows connections to any destination reachable by the server.
+allows connections to any destination reachable by the server, and remote
+listener requests such as OpenSSH's `-R`. Remote listeners bind loopback by
+default. `gateway_ports = true` exposes every remote listener on all interfaces,
+as with OpenSSH's `GatewayPorts yes`; shipped images leave it false. Cancelling
+a remote listener stops new accepts while existing forwarded connections finish.
 
 A key file holds `KEYTYPE BASE64 [COMMENT]` lines, blank lines, and `#`
 comments, with LF or CRLF line endings. A key listed for two names is listed in

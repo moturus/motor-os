@@ -13,7 +13,7 @@ const REGISTRY_VERSION: &str = "1";
 const MAX_USER_NAME_BYTES: usize = 64;
 // russhd refuses a whole registry past this, which denies every login.
 const MAX_USERS: usize = 1024;
-const SERVICE_FIELDS: [&str; 7] = [
+const SERVICE_FIELDS: [&str; 8] = [
     "version",
     "listen_on",
     "path",
@@ -21,6 +21,7 @@ const SERVICE_FIELDS: [&str; 7] = [
     "users_file",
     "authorized_keys_dir",
     "allow_tcp_forwarding",
+    "gateway_ports",
 ];
 
 struct Table<'a> {
@@ -454,8 +455,14 @@ mod tests {
 
     #[test]
     fn preserves_forwarding_policy_when_replacing_the_host_key() {
-        for policy in ["true", "false"] {
-            let source = format!("{SERVICE}allow_tcp_forwarding = {policy}\n");
+        for (policy, gateway) in [
+            ("true", "false"),
+            ("false", "true"),
+            ("true", "true"),
+            ("false", "false"),
+        ] {
+            let source =
+                format!("{SERVICE}allow_tcp_forwarding = {policy}\ngateway_ports = {gateway}\n");
             check_service(&source).unwrap();
             assert_eq!(
                 text(set_host_key(&source, "new").unwrap()),
