@@ -12,7 +12,7 @@ fixture="$(mktemp -d "$ROOT_DIR/build/host-tests/ssh-config.XXXXXX")"
 guest="$TEST_TMP/ssh-config"
 config=/user/cfg/ssh/config
 staged=0
-loopback_log_pid="" shell_pid=""
+loopback_log_pid="" shell_pid="" gateway_pid="" gateway_log_pid=""
 SSH=(ssh -F /dev/null -p 2222 -i "$WD/test.key" -o IdentitiesOnly=yes -o BatchMode=yes
   -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" motor@192.168.4.2)
 SFTP=(sftp -F /dev/null -P 2222 -i "$WD/test.key" -o IdentitiesOnly=yes -o BatchMode=yes
@@ -23,6 +23,8 @@ cleanup() {
   trap - EXIT
   set +e
   if [ -n "$shell_pid" ]; then kill "$shell_pid" 2>/dev/null; wait "$shell_pid"; fi
+  if [ -n "$gateway_pid" ]; then kill "$gateway_pid" 2>/dev/null; wait "$gateway_pid"; fi
+  if [ -n "$gateway_log_pid" ]; then wait "$gateway_log_pid" || status=1; fi
   stop_ssh_client_host
   if [ -n "$loopback_log_pid" ]; then wait "$loopback_log_pid" || status=1; fi
   if [ "$staged" -eq 1 ]; then
@@ -215,4 +217,93 @@ exec {socks_input}>&-
 wait "$shell_pid" || fail "Motor SOCKS session failed"
 shell_pid=""
 exec {socks_output}>&-
+echo '-- Motor server remote TCP forwarding --'
+mkfifo "$fixture/server-remote.input" "$fixture/server-remote.output"
+exec {remote_input}<>"$fixture/server-remote.input"
+exec {remote_output}<>"$fixture/server-remote.output"
+(
+  exec {remote_input}>&-
+  exec {remote_output}>&-
+  exec ssh -F "$fixture/host.cfg" -T -o ExitOnForwardFailure=yes \
+    -R "127.0.0.1:34309:127.0.0.1:$loopback_port" guest \
+    'read before && echo "$before" && read after && echo "$after"' \
+    < "$fixture/server-remote.input" > "$fixture/server-remote.output"
+) 2>"$fixture/server-remote.log" &
+shell_pid="$!"
+printf 'server-remote-ready\n' >&"$remote_input"
+IFS= read -r -t 5 out <&"$remote_output" || fail "Motor remote listener did not start"
+[ "$out" = server-remote-ready ] || fail "unexpected remote-forward session output '$out'"
+out="$("${SSH[@]}" "/user/bin/ssh -p 34309 -i $guest/key \
+  -o UserKnownHostsFile=$guest/known_hosts -o StrictHostKeyChecking=accept-new \
+  -o BatchMode=yes motor@127.0.0.1 /bin/echo motor-server-remote-ok")"
+[ "$out" = motor-server-remote-ok ] || fail "Motor server remote forward returned '$out'"
+printf 'server-remote-still-alive\n' >&"$remote_input"
+IFS= read -r -t 5 out <&"$remote_output" || fail "remote-forward EOF stopped the session"
+[ "$out" = server-remote-still-alive ] || fail "unexpected later remote-forward output '$out'"
+exec {remote_input}>&-
+wait "$shell_pid" || fail "Motor server remote-forward session failed"
+shell_pid=""
+exec {remote_output}>&-
+echo '-- Motor gateway remote forwarding with an allocated port --'
+# A separate guest daemon exercises wildcard port allocation without changing
+# the shipped loopback policy. Its terminal provides the readiness event.
+"${SSH[@]}" /system/bin/cat /system/cfg/sshd.toml |
+  sed -e "s/^listen_on = .*/listen_on = '0.0.0.0:34310'/" \
+    -e 's/^gateway_ports = .*/gateway_ports = true/' > "$fixture/gateway.toml"
+grep -qx 'gateway_ports = true' "$fixture/gateway.toml" || fail "gateway fixture was not enabled"
+printf 'put %s %s/gateway.toml\n' "$fixture/gateway.toml" "$guest" | "${SFTP[@]}" >/dev/null
+mkfifo "$fixture/gateway.daemon"
+"${SSH[@]}" -tt "/system/services/russhd $guest/gateway.toml" \
+  < /dev/null > "$fixture/gateway.daemon" 2>&1 &
+gateway_pid="$!"
+exec {gateway_output}<"$fixture/gateway.daemon"
+gateway_ready=0
+gateway_deadline=$((SECONDS + 5))
+while [ "$SECONDS" -lt "$gateway_deadline" ]; do
+  gateway_remaining=$((gateway_deadline - SECONDS))
+  IFS= read -r -t "$gateway_remaining" line <&"$gateway_output" || break
+  printf '%s\n' "$line" >> "$fixture/gateway-daemon.log"
+  case "$line" in
+    *'Listening on 0.0.0.0:34310'*) gateway_ready=1; break ;;
+  esac
+done
+[ "$gateway_ready" -eq 1 ] || fail "gateway daemon did not report readiness"
+cat <&"$gateway_output" >> "$fixture/gateway-daemon.log" &
+gateway_log_pid="$!"
+exec {gateway_output}<&-
+mkfifo "$fixture/gateway.input" "$fixture/gateway.output"
+exec {gateway_input}<>"$fixture/gateway.input"
+exec {gateway_result}<>"$fixture/gateway.output"
+(
+  exec {gateway_input}>&-
+  exec {gateway_result}>&-
+  exec ssh -F "$fixture/host.cfg" -p 34310 -T -o LogLevel=INFO \
+    -o ExitOnForwardFailure=yes -R "0:127.0.0.1:$loopback_port" guest \
+    'read before && echo "$before" && read after && echo "$after"' \
+    < "$fixture/gateway.input" > "$fixture/gateway.output"
+) 2>"$fixture/gateway.log" &
+shell_pid="$!"
+printf 'gateway-ready\n' >&"$gateway_input"
+IFS= read -r -t 5 out <&"$gateway_result" || fail "gateway forwarding session did not start"
+[ "$out" = gateway-ready ] || fail "unexpected gateway session output '$out'"
+gateway_port="$(sed -n 's/^Allocated port \([0-9][0-9]*\) for remote forward to .*$/\1/p' "$fixture/gateway.log")"
+[[ "$gateway_port" =~ ^[0-9]+$ ]] || fail "missing allocated gateway port"
+[ "$gateway_port" -ge 49152 ] && [ "$gateway_port" -le 65535 ] ||
+  fail "allocated gateway port is outside the selected range"
+# Reaching the guest from the tap proves this listener is a wildcard bind.
+out="$(ssh -F /dev/null -p "$gateway_port" -i "$WD/test.key" -o IdentitiesOnly=yes \
+  -o UserKnownHostsFile="$fixture/gateway-known" -o StrictHostKeyChecking=accept-new \
+  -o BatchMode=yes -o LogLevel=ERROR motor@192.168.4.2 /bin/echo motor-gateway-ok)"
+[ "$out" = motor-gateway-ok ] || fail "gateway forward returned '$out'"
+out="$("${SSH[@]}" "/user/bin/ssh -p $gateway_port -i $guest/key \
+  -o UserKnownHostsFile=$guest/known_hosts -o StrictHostKeyChecking=accept-new \
+  -o BatchMode=yes 'motor@[::1]' /bin/echo motor-gateway-ipv6-ok")"
+[ "$out" = motor-gateway-ipv6-ok ] || fail "gateway IPv6 forward returned '$out'"
+printf 'gateway-still-alive\n' >&"$gateway_input"
+IFS= read -r -t 5 out <&"$gateway_result" || fail "gateway-forward EOF stopped the session"
+[ "$out" = gateway-still-alive ] || fail "unexpected later gateway output '$out'"
+exec {gateway_input}>&-
+wait "$shell_pid" || fail "gateway-forward session failed"
+shell_pid=""
+exec {gateway_result}>&-
 echo "test-ssh-config: PASS"
