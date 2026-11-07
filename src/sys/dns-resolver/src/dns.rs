@@ -193,7 +193,10 @@ pub(super) fn build_query(name: &[u8], qtype: u16, id: u16) -> Result<Vec<u8>, S
     query.extend_from_slice(&0x0100u16.to_be_bytes());
     query.extend_from_slice(&1u16.to_be_bytes());
     query.extend_from_slice(&[0; 6]);
-    for label in name.split(|byte| *byte == b'.') {
+    for label in name
+        .split(|byte| *byte == b'.')
+        .filter(|_| !name.is_empty())
+    {
         if label.is_empty() || label.len() > 63 {
             return Err(Status::InvalidRequest);
         }

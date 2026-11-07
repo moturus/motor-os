@@ -15,19 +15,12 @@ pub fn lookup(name: &[u8], family: AddressFamily) -> Result {
     let Some(name) = canonical_name(name) else {
         return failure(Status::InvalidRequest);
     };
-    if let Ok(address) = std::str::from_utf8(&name).unwrap().parse::<IpAddr>() {
-        return if family_matches(address, family) {
-            success([address])
-        } else {
+    if let Some(addresses) = local_addresses(&name, family) {
+        return if addresses.is_empty() {
             failure(Status::NotFound)
+        } else {
+            success(addresses)
         };
-    }
-
-    if let Ok(contents) = std::fs::read_to_string(HOSTS_PATH) {
-        let addresses = hosts_lookup(&contents, &name, family);
-        if !addresses.is_empty() {
-            return success(addresses);
-        }
     }
 
     let servers = match super::config::nameservers() {
@@ -52,6 +45,19 @@ pub fn lookup(name: &[u8], family: AddressFamily) -> Result {
     }
 
     failure(merge_failures(v4.as_ref(), v6.as_ref()))
+}
+
+pub(super) fn local_addresses(name: &[u8], family: AddressFamily) -> Option<Vec<IpAddr>> {
+    if let Ok(address) = std::str::from_utf8(name).ok()?.parse::<IpAddr>() {
+        return Some(if family_matches(address, family) {
+            vec![address]
+        } else {
+            vec![]
+        });
+    }
+    let contents = std::fs::read_to_string(HOSTS_PATH).ok()?;
+    let addresses = hosts_lookup(&contents, name, family);
+    (!addresses.is_empty()).then_some(addresses)
 }
 
 fn canonical_name(name: &[u8]) -> Option<Vec<u8>> {

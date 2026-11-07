@@ -167,8 +167,8 @@ read_udp_socket_count() {
     if output="$(vm_ssh /system/bin/stats get 2 2>&1)"; then
       count="$(printf '%s\n' "$output" |
         awk '$2 == "net.udp_sockets" { print $3 }')"
-      if [ "$count" = "0" ]; then
-        printf '0\n'
+      if [ "$count" = "1" ]; then
+        printf '1\n'
         return
       fi
       [ -z "$count" ] || last_count="$count"
@@ -298,8 +298,8 @@ ping_external google.com
 expect_ping_error does-not-exist.motor.invalid NotFound
 
 udp_sockets="$(read_udp_socket_count)"
-[ "$udp_sockets" = "0" ] ||
-  fail "DNS tests left $udp_sockets active UDP socket(s)"
+[ "$udp_sockets" = "1" ] ||
+  fail "DNS tests left $udp_sockets active UDP socket(s), expected one DNS listener"
 
 # Verify that numeric lookup is independent of the service, lookup failure is
 # defined, and a later per-call client reconnects after the service restarts.
@@ -327,8 +327,8 @@ done
 ping_external google.com
 
 udp_sockets="$(read_udp_socket_count)"
-[ "$udp_sockets" = "0" ] ||
-  fail "restarted DNS service left $udp_sockets active UDP socket(s)"
+[ "$udp_sockets" = "1" ] ||
+  fail "restarted DNS service left $udp_sockets active UDP socket(s), expected one DNS listener"
 
 # Let systest output flow to the console as it happens; tee keeps a copy so
 # the verdict can still be checked. pipefail makes the pipeline carry

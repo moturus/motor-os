@@ -2,6 +2,7 @@ mod bridge;
 mod config;
 mod dns;
 mod order;
+mod server;
 
 use std::sync::mpsc;
 use std::time::Duration;
@@ -169,6 +170,7 @@ fn worker(worker_id: usize, ready: mpsc::Sender<std::result::Result<(), moto_rt:
 
 fn run_service() -> ! {
     initialize_logging();
+    server::start().expect("dns-resolver: failed to bind loopback DNS listeners");
     let (ready_tx, ready_rx) = mpsc::channel();
     let mut workers = Vec::with_capacity(WORKER_COUNT);
     for worker_id in 0..WORKER_COUNT {
@@ -281,6 +283,7 @@ fn bridge_self_test() {
 
 fn resolver_policy_self_test() {
     bridge::self_test();
+    server::self_test();
     order::self_test();
 
     let v4 = bridge::Result {
