@@ -411,19 +411,10 @@ impl<'a> Socket<'a> {
                     state.rebind_at = rebind_at;
                     state.rebinding = false;
                     state.expires_at = expires_at;
-                    // The `receive_packet_buffer` field isn't populated until
-                    // the client asks for the state, but receiving any packet
-                    // will change it, so we indicate that the config has
-                    // changed every time if the receive packet buffer is set,
-                    // but we only write changes to the rest of the config now.
-                    let config_changed =
-                        state.config != config || self.receive_packet_buffer.is_some();
-                    if state.config != config {
-                        state.config = config;
-                    }
-                    if config_changed {
-                        self.config_changed();
-                    }
+                    state.config = config;
+                    // Lease consumers must see extended deadlines even when
+                    // the address, routes, and nameservers did not change.
+                    self.config_changed();
                 }
             }
             (ClientState::Renewing(_), DhcpMessageType::Nak) => {
@@ -739,7 +730,18 @@ impl<'a> Socket<'a> {
         });
     }
 
-    /// Query the socket for configuration changes.
+    /// Current renewal, rebinding, and expiry deadlines. Read alongside a
+    /// Configured event to publish the lease's newly acknowledged lifetime.
+    pub fn lease_times(&self) -> Option<(Instant, Instant, Instant)> {
+        match &self.state {
+            ClientState::Renewing(state) => {
+                Some((state.renew_at, state.rebind_at, state.expires_at))
+            }
+            _ => None,
+        }
+    }
+
+    /// Query the socket for configuration changes, including lease renewals.
     ///
     /// The socket has an internal "configuration changed" flag. If
     /// set, this function returns the configuration and resets the flag.
@@ -1301,7 +1303,16 @@ mod test {
         }
 
         send!(s, time 500_000, (IP_RECV, UDP_RECV, dhcp_ack()));
+        assert!(matches!(s.poll(), Some(Event::Configured(_))));
         assert_eq!(s.poll(), None);
+        assert_eq!(
+            s.lease_times(),
+            Some((
+                Instant::from_secs(1000),
+                Instant::from_secs(1375),
+                Instant::from_secs(1500),
+            ))
+        );
 
         match &s.state {
             ClientState::Renewing(r) => {
@@ -1426,6 +1437,8 @@ mod test {
 
         recv!(s, time 500_000, [(IP_SEND, UDP_SEND, DHCP_RENEW)]);
         send!(s, time 500_000, (IP_SERVER_BROADCAST, UDP_RECV, DHCP_NAK));
+        assert_eq!(s.lease_times(), None);
+        assert_eq!(s.poll(), Some(Event::Deconfigured));
         recv!(s, time 500_000, [(IP_BROADCAST, UDP_SEND, DHCP_DISCOVER)]);
     }
 }
