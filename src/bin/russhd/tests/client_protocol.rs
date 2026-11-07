@@ -22,6 +22,8 @@ mod forwarding_jump;
 mod forwarding_progress;
 #[path = "client_protocol/local_forwarding.rs"]
 mod local_forwarding;
+#[path = "client_protocol/remote_failures.rs"]
+mod remote_failures;
 #[path = "client_protocol/remote_forwarding.rs"]
 mod remote_forwarding;
 #[path = "client_protocol/remote_relay.rs"]
