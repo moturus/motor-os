@@ -253,7 +253,7 @@ fn parse(
                 None
             };
             if let Some(error) = error {
-                return Err(named(&format!("{source:?}: {error}")));
+                return Err(named(&error));
             }
             sources.push(*source);
         }

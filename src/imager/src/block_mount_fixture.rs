@@ -187,6 +187,44 @@ async fn check_recovery(image: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn corrupt(image: &Path, kind: &str) -> io::Result<()> {
+    use std::io::Write;
+    let mut file = OpenOptions::new().read(true).write(true).open(image)?;
+    let length = file.metadata()?.len();
+    let mut put = |offset, bytes: &[u8]| -> io::Result<()> {
+        file.seek(SeekFrom::Start(offset))?;
+        file.write_all(bytes)
+    };
+    match kind {
+        "magic" | "version" | "count" => {
+            let (offset, size) = root_region(image)?;
+            let (field, value) = match kind {
+                "magic" => (0, 0),
+                "version" => (8, 2),
+                _ => (16, size / 4096 + 1),
+            };
+            put(offset + field, &value.to_le_bytes())?;
+        }
+        "mbr-signature" => put(510, &[0; 2])?,
+        "mbr-start" => put(454, &[0; 4])?,
+        "mbr-length" => put(458, &[0; 4])?,
+        "mbr-outside" => put(458, &u32::MAX.to_le_bytes())?,
+        "mbr-unaligned" => put(458, &127u32.to_le_bytes())?,
+        "mbr-type" => put(450, &[0x83])?,
+        "mbr-empty" => put(446, &[0; 16])?,
+        "mbr-overlap" => {
+            put(466, &[0x83])?;
+            put(470, &1u32.to_le_bytes())?;
+            put(474, &8u32.to_le_bytes())?;
+        }
+        "short" => file.set_len(64 * 4096)?,
+        "unaligned" => file.set_len(length + 512)?,
+        "resized" => file.set_len(length + 4096)?,
+        _ => return Err(invalid("unknown fixture corruption")),
+    }
+    file.sync_all()
+}
+
 pub fn run(args: &[String]) -> io::Result<()> {
     let runtime = tokio::runtime::LocalRuntime::new()?;
     match args {
@@ -219,12 +257,13 @@ pub fn run(args: &[String]) -> io::Result<()> {
         [operation, image, output] if operation == "extract-root" => {
             extract_root(Path::new(image), Path::new(output))
         }
+        [operation, image, kind] if operation == "corrupt" => corrupt(Path::new(image), kind),
         [operation, image] if operation == "dirty" => runtime.block_on(dirty(Path::new(image))),
         [operation, image] if operation == "check-recovery" => {
             runtime.block_on(check_recovery(Path::new(image)))
         }
         _ => Err(invalid(
-            "usage: block-mount-fixture create ROOT_RAW NEW_DIR | config IMAGE TOML | extract-root IMAGE OUTPUT | dirty IMAGE | check-recovery IMAGE",
+            "usage: block-mount-fixture create ROOT_RAW NEW_DIR | config IMAGE TOML | extract-root IMAGE OUTPUT | corrupt IMAGE KIND | dirty IMAGE | check-recovery IMAGE",
         )),
     }
 }
