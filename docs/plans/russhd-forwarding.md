@@ -36,10 +36,10 @@ Developer-image validation remains release-only.
 | 1 | Complete: 224 MiB matrix removal `dd716bf4`, complete-line wait fix `0f419641`, and validated 30-minute budget `1d4694e8`; 3/3 debug, 3/3 release, and complete developer-image release gate passed | None |
 | 2 | Complete: step 2a published `2a07f3a` and passed its separate 3+3 and developer-image gates. Step 2b integrates direct opens and optional configuration, resolves SDK/sys from crates.io, and passes 183 host tests, clippy, native builds, and its own 3+3 image gates | None |
 | 3 | Complete: guest jump transfers, native server forwarding/DNS/100-channel probe, shipped configuration and docs pass 3/3 release, 3/3 debug, and the complete developer-image release gate | None |
-| 4 | External `motor-v0.65.1` is ready through `d4a1cc4`, including outgoing handoff with OpenSSH's pending-open lifecycle. All 307 fork tests and four drafted main contracts pass | User publication, actual pin, integrate contracts, 3+3 main-image and complete developer-image release gates |
-| 5 | Not started | Client options, connection lifetime, `-L`/`-N` integration and guest coverage, milestone gates |
-| 6 | Not started | SOCKS parser, `-D` integration and guest coverage, milestone gates |
-| 7 | Not started | Server remote listeners, credit handoff, `gateway_ports`, host/guest coverage, milestone gates |
+| 4 | User published `d4a1cc4`; the actual pin and four main contracts pass all 187 component tests, clippy, native release builds, 3/3 release and 3/3 debug image gates, and the complete developer-image release gate. The subsequently discovered callback-open regression is fixed and tested in fork commit `88e1181` | Publish and integrate the repair |
+| 5 | `-L`/`-N` options, config, listeners, shared lifetime, cancellation and shared-loop progress are committed in isolated `build/russh-rebase/step5-worktree`; 212 component tests plus the offline OpenSSH oracle, clippy and native release builds pass; guest check is staged | Guest validation; merge after step 4's gates and fork repair publication; milestone gates |
+| 6 | Prepared separately in `build/russh-rebase/step6-worktree`: bounded SOCKS4/4a/5, `-D`, configuration and relay pass 224 component tests plus the offline mixed-forward oracle, clippy and Motor release builds; shared probe builds natively and passes on the host | Guest validation; integrate after step 5; milestone gates |
+| 7 | Additive server outgoing-credit API `f3ae114` and encrypted contracts `d16a1df` are committed in the external fork, after helper `ccfd16c` and compatibility repair `88e1181`; all 317 fork tests, selected clippy, formatting and native builds pass | User publication, actual main pin/contracts, server remote listeners, `gateway_ports`, host/guest coverage, milestone gates |
 | 8 | Not started | Client remote-forward authorization and ordering, `-R` integration and guest coverage, milestone gates |
 
 ### Step 2b: relay foundation
@@ -491,6 +491,240 @@ from `build/russh-rebase/fork` to `motor-v0.65.1`. Stop at this publication
 handoff. Only after publication update the real dependency pin and Rust
 branch description, integrate the two contract patches, and run step 4's
 own 3+3 main-image gates and complete developer-image release gate.
+
+The user has now published `d4a1cc45cc0f36dbbd60b8951cf66b2ad92534c4`;
+`git ls-remote` confirms the exact revision. `facbd37b` updates only the four
+fork revisions in `src/bin/russhd/Cargo.lock` and describes client/server
+receive-window support in `rust.html`. Crate versions and the SDK registry
+dependencies are unchanged. `72fb23dc` integrates the real relay contract,
+and `225c755f` integrates the three encrypted outgoing-open contracts. The
+existing `full-test.sh` host phase discovers all four automatically.
+
+All 187 component tests and all-target clippy pass against the actual
+published pin, and both Motor release binaries build. Evidence uses
+`step4-published-*` under `build/russh-rebase/`. Automatic permission review
+timed out before the first clippy invocation started; the unchanged offline
+check succeeded inside the workspace sandbox. No test failure or source
+change was involved in that access fallback.
+
+Step 4's image gates now run against the committed `225c755f` source snapshot,
+with checksums in `step4-gate-sources.sha256`. Logs use
+`step4-published-{release,debug}-{1,2,3}` and `step4-dev-release-1`; the
+developer gate retains ordinary/service Wasm evidence separately in
+`step4-dev-wasm-evidence`. These gates are independent of step 3's passes.
+
+All three `step4-published-release` runs pass: testing takes 13.7, 13.5 and
+13.6 minutes, with test/source statuses zero. All three debug runs also pass
+in 28.4, 28.6 and 27.8 minutes. The complete developer-image release gate
+also passes without source changes (`step4-dev-release-1.log`, test and source
+status both zero). Its archived Wasm runs cover ordinary Javy, 141 Wasmtime
+commands and Linux identity checks on each of `wasm:256` and `dev:256`, followed
+by all 56 role/service commands on each image. Both runs and their console and
+image evidence are retained separately in `step4-dev-wasm-evidence/run-{1,2}`.
+
+### Step 5: isolated parser preparation
+
+While step 4's pinned sources stay frozen, a detached main-repository checkout
+at `build/russh-rebase/step5-worktree` prepares the approved parser work.
+`f92e6e39` adds bounded forwarding endpoint parsing, and `4e981531` adds
+`LocalForward`, `GatewayPorts`, and `ExitOnForwardFailure` configuration.
+Forwards accumulate across matching blocks, exact duplicates are suppressed,
+and `-o` uses the same arity and validation as files. Four endpoint tests,
+the configuration tests, the complete 193-test component suite and all-target
+clippy pass in that checkout. No step 5 code is merged into the gated branch.
+
+The first standalone worktree suite failed 13 authentication cases because
+Git checked out `src/tests/test.key` with mode 0664. Both SSH clients correctly
+rejected it before exercising data flow. Applying the required 0600 fixture
+permission made the complete suite pass; no authentication check or code was
+changed. The original failure remains in `step5-config-component.log`, and
+the verified result in `step5-config-key-mode-fixed-component.log`.
+
+`4c038f0c` adds SSH-only `-L`, `-N` and `-g` parsing. `334b5d3e`
+interrupts transport reads, writes and shutdown independently of blocked SSH
+messages; it also exposes connection termination with shared peer references.
+`e2f2eed0` tracks the final session before the opener resumes, separates its
+closure from forward closure, stops stdin and preserves buffered output.
+All 198 component tests, clippy and both Motor release binaries pass at that
+checkpoint (`step5-session-scope-*`). `9ace811f` adds explicit cancellation
+and draining of admitted jobs, including pending opens; all six task tests and
+all-target clippy pass. Local-listener preparation follows in the same isolated
+checkout. These commits remain separate from step 4's frozen sources.
+
+`be8e8939`, `18c26beb` and `64363f17` bind local listeners, relay accepted
+sockets with manual receive credit, and run them alongside a command or under
+`-N`. The resolved final-hop options control setup. Listeners stop at session
+close; admitted opens and relays drain before status return. Transport loss,
+escape and native Ctrl+C can interrupt the connection without a queued SSH
+message. Help and both client documentation copies describe the new options.
+The integrated 205-test checkpoint, clippy and Motor release builds pass.
+
+`18ee28ba` covers setup failures, one-line target refusal, a real jump, and
+SCP/SFTP configuration without listeners. `cd16a828` covers a command closing
+before a forward is confirmed. Its first fixture incorrectly awaited a close
+acknowledgement from a receiver that local close deliberately releases;
+`step5-pending-open-drain.log` preserves that failure. A subsequent rejected
+global request establishes the wire ordering without a timer or library change,
+and the original pending forward then transfers successfully before status 7.
+`085bfece` covers `-N` with piped stdin and forced terminal allocation, pending
+opens and zero-window writes, and both transport loss and Ctrl+C. All 210
+component tests and all-target clippy pass (`step5-local-complete-component.log`,
+`step5-tunnel-cancellation*`). The guest local-forward check is added to the
+existing `test-ssh-config.sh` path and awaits image validation.
+
+`87360d16` adds real-binary shared-loop checks: a stalled local reader leaves
+another forward and the command responsive, and both TCP peers can write an
+entire SSH window before reading. All 212 component tests and clippy pass
+(`step5-final-host.log`, `step5-final-clippy.log`).
+
+### Step 6: isolated dynamic forwarding preparation
+
+A second main-repository checkout at `build/russh-rebase/step6-worktree`, based
+on `87360d16`, keeps this preparation separate from both earlier image milestones.
+`a3c32d0a` bounds SOCKS4/4a user IDs and hostnames; `e7dcc391` adds SOCKS5
+no-authentication CONNECT, IPv4/IPv6/domain requests and failure replies.
+Seven pure protocol tests cover limits, malformed requests, every truncated
+SOCKS5 prefix and preservation of pipelined payload. The parser uses a buffered
+socket that stays attached to the relay, without a handshake timer or local DNS.
+The protocol references are the retained OpenSSH `channels.c` and
+[RFC 1928](https://www.rfc-editor.org/rfc/rfc1928.html).
+
+`eacaa043` runs negotiation, outgoing open, reply and relay inside the existing
+task reservation. Its encrypted test delays confirmation and verifies that
+success is withheld, early buffered payload is preserved, and shared peer
+references disappear at completion. Clippy rejected the initial fixture's
+async block returning a future (`step6-dynamic-relay-clippy.log`); awaiting
+the complete server task fixes the fixture and all checks pass. No suppression
+or library change was used.
+
+`96e815fa` adds SSH-only `-D` and `DynamicForward`; a single ordered local-forward
+list retains mixed `-L`/`-D` setup order and duplicate suppression. Real-binary
+contracts cover every address form, invalid requests without target dialing,
+and a stalled handshake remaining independent until transport cancellation.
+`cd24bf0c` shares a standard-Rust SOCKS/SSH-banner probe between host and guest.
+The probe runs against the real host listener and builds for Motor OS with
+warnings denied. All 224 component tests, clippy and both Motor release binaries
+pass (`step6-dynamic-options-*`). The guest `-D` check is staged in the existing
+`test-ssh-config.sh` path; its image validation remains pending.
+
+### Step 7: server-open API gap and implemented fork extension
+
+The published server callback can take receive credit before the next packet:
+a real encrypted probe holds an 8 KiB first window while the opener remains
+unpolled, keeps a ping responsive, then resumes only after actual consumption.
+Its first teardown raced disconnect against an unread final byte and close;
+`step7-server-credit-immediate-teardown.log` identifies `BrokenPipe`. Consuming
+that byte and waiting for the peer's close acknowledgement resolves the
+fixture without accepting an I/O error or changing a timeout.
+
+The ordered probe still fails both cancellation cases. Dropping the opener
+before confirmation or after confirmation leaves one receive-credit handoff
+in the application map. The cancelled caller never obtained the channel ID
+needed to claim it. A subsequent ping orders this observation after the
+confirmation; this is not a timeout-based failure. The source and logs are
+retained as `step7-server-credit-contract-probe.rs` and
+`step7-server-credit-contract-ordered-close.log` in `build/russh-rebase/`.
+The temporary probe is removed from the prepared step 6 test targets.
+
+The additional work is explicitly in the **external russh fork**, checkout
+`build/russh-rebase/fork`, branch `motor-v0.65.1`, after published `d4a1cc4`:
+
+```rust
+server::Handle::channel_open_forwarded_tcpip_with_credit(
+    connected_address, connected_port, originator_address, originator_port,
+) -> Result<(Channel<server::Msg>, ReceiveCredit), Error>
+```
+
+Commit `f3ae114` mirrors the approved client API: install manual accounting before dispatch,
+transfer its credit together with cancellation ownership, skip cancelled work
+before dispatch, and use priority cancellation to release receiver, payload
+and handoff. Retain only the outstanding protocol record until refusal,
+confirmation or disconnect, closing a late success without an application
+confirmation callback, as already approved for OpenSSH-compatible client
+opens. The method is additive and reuses the shared ownership helper.
+Five unit tests cover cancellation before dispatch, late confirmation/refusal,
+parked-data cleanup, callback-only server opens, and a further refusal bug:
+the old server path propagated a failed notification to a dropped receiver
+as a connection-level `SendError`. It now treats that receiver as cancelled,
+as the client already does, while preserving the peer's refusal for live callers.
+The full suite passes 314 active tests and selected clippy is clean
+(`step7-server-api-{all-tests,clippy}.log`). Both Motor release consumers
+build with existing registry versions; the isolated manifest and lock are
+restored (`step7-server-api-native.log`).
+
+Commit `d16a1df` adds three encrypted contracts covering both cancellation
+phases, first-window/rekey with an unpolled opener, refusal and transport loss.
+All three pass, as does selected clippy including the existing client
+regressions (`step7-server-open-wire{,-clippy}.log`). The complete final fork
+suite passes all 317 active tests; selected clippy is clean and the format
+check passes (`step7-final-fork-{tests,clippy,fmt}.log`). The fork is clean at
+`d16a1df4a0fbc60e61f5410e3adf42024b41d0b0`, four commits after `d4a1cc4`.
+No push is performed. User publication of this new fork series is a required
+handoff before a main-repository pin or
+server remote-forward integration can depend on it.
+
+### Client callback compatibility repair
+
+The earlier cancellation patch `404d3a8`, included in published `d4a1cc4`,
+closes a confirmed client channel whenever `Session::channels` has no receiver.
+The public synchronous `client::Session::channel_open_session()` and related
+methods legitimately create no receiver: they return a channel ID and deliver
+events through the handler's callbacks. That valid path is now mistaken for
+an abandoned handle open, so confirmation is skipped and the channel closes.
+Motor's current handle-based connection path does not exercise this API case.
+
+A new hermetic test calls the existing public synchronous method, confirms
+that no receiver exists, then processes a valid peer confirmation and data.
+On the published guard it fails at the skipped confirmation callback
+(`step7-client-callback-only-reproduction.log`). The affected file is unchanged
+from `d4a1cc4`; `git blame` attributes the guard to `404d3a8`. Changing only the
+diagnostic guard to close a known dropped receiver makes the same confirmation,
+data and live-channel assertions pass
+(`step7-client-callback-only-guard-diagnostic.log`). That diagnostic condition
+alone is not a complete cancellation fix: an explicit marker must distinguish
+an abandoned protocol record from a valid callback-managed channel.
+
+Both temporary source changes are restored byte-for-byte. The focused test
+patch and diagnostic guard patch are retained as
+`step7-client-callback-only-{test,guard-diagnostic}.patch` in
+`build/russh-rebase/`. The user then explicitly authorized fixing this and any
+other preexisting russhd issues without another scope question. That
+authorization supersedes the general stop-for-guidance rule for this work.
+
+The repair records an explicitly abandoned open in its protocol parameters.
+Confirmation preserves a valid callback channel without a receiver, while
+closing an abandoned open or one with a known dropped receiver. The original
+regression and all 31 focused client tests pass, as does a new encrypted
+public-API test that opens a session from a handler callback and verifies
+confirmation, data and close. The first encrypted fixture incorrectly waited
+for an acknowledgement through a receiver already released by local close;
+ordering shutdown with the peer's callback and a ping fixes that fixture
+without changing a timeout. Evidence is `step7-client-callback-fix-focused.log`
+and `step7-client-callback-wire-ordered.log`. Commit `88e1181` includes the
+repair and both regressions. The complete fork suite passes all 309 active
+tests, and selected clippy is clean under the fork's selected 1.91 toolchain
+(`step7-client-callback-fix-{all-tests,clippy}.log`). Both Motor release
+binaries build with the repair in an isolated temporary path resolution that
+retains every registry version (`step7-client-fix-native-minimal-lock.log`).
+That worktree's manifest and lock are restored byte-for-byte. Publication,
+the actual main pin, and full-test coverage of the public regression remain
+the next integration handoff.
+
+The external fork also has a tested preparatory commit beyond `d4a1cc4`:
+`ccfd16c` shares the existing outgoing-credit ownership helper without changing
+its cleanup behavior. All 307 existing tests pass. Selected clippy passes
+under the fork's selected 1.91 toolchain with one existing library warning.
+A broader all-targets attempt fails on unchanged upstream test lint debt,
+including `russh/src/tests.rs` and `russh/src/compression.rs`; that failure is
+preserved in `step7-shared-open-guard-clippy.log`. No upstream lint suppression
+or unrelated test change is part of the helper commit. The server method
+and its cancellation contracts are committed on top of the repair.
+
+The main implementation snapshot remains `225c755f`; its complete developer-image
+release gate has passed on unchanged sources. This plan is committed after
+that gate completes. The `-L` and `-D` feature patches remain isolated and their
+new guest checks await image validation. `a282332d` and `2329f681` add the
+passing offline OpenSSH configuration comparisons for local and mixed forwards.
 
 ### Commit count and delivered functionality
 
