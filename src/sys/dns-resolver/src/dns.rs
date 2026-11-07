@@ -18,10 +18,19 @@ enum ParsedResponse {
 }
 
 pub(super) fn lookup(name: &[u8], qtype: u16, servers: &[IpAddr]) -> Result<Vec<IpAddr>, Status> {
+    lookup_on_port(name, qtype, servers, DNS_PORT)
+}
+
+fn lookup_on_port(
+    name: &[u8],
+    qtype: u16,
+    servers: &[IpAddr],
+    port: u16,
+) -> Result<Vec<IpAddr>, Status> {
     let mut last_error = Status::TemporaryFailure;
     for _ in 0..ATTEMPTS {
         for server in servers {
-            match udp_attempt(name, qtype, *server) {
+            match udp_attempt(name, qtype, *server, port) {
                 Ok(addresses) => return Ok(addresses),
                 Err(Status::NotFound) => return Err(Status::NotFound),
                 Err(error) => last_error = error,
@@ -31,10 +40,36 @@ pub(super) fn lookup(name: &[u8], qtype: u16, servers: &[IpAddr]) -> Result<Vec<
     Err(last_error)
 }
 
-fn udp_attempt(name: &[u8], qtype: u16, server: IpAddr) -> Result<Vec<IpAddr>, Status> {
+fn udp_attempt(name: &[u8], qtype: u16, server: IpAddr, port: u16) -> Result<Vec<IpAddr>, Status> {
+    let packet = udp_response(name, qtype, server, port)?;
+    let id = read_u16(&packet, 0).ok_or(Status::ResolverFailure)?;
+    match parse_response(&packet, id, name, qtype) {
+        ParsedResponse::Answer(addresses) => Ok(addresses),
+        ParsedResponse::Error(error) => Err(error),
+        _ => Err(Status::ResolverFailure),
+    }
+}
+
+/// Keep the full DNS response, including PTR/CNAME data, TTLs and negative
+/// answers. The loopback frontend only changes its transaction ID.
+pub(super) fn forward(name: &[u8], qtype: u16, servers: &[IpAddr]) -> Result<Vec<u8>, Status> {
+    let mut error = Status::TemporaryFailure;
+    for _ in 0..ATTEMPTS {
+        for server in servers {
+            match udp_response(name, qtype, *server, DNS_PORT) {
+                Ok(packet) if packet[3] & 15 != 2 => return Ok(packet),
+                Ok(_) => error = Status::TemporaryFailure,
+                Err(failure) => error = failure,
+            }
+        }
+    }
+    Err(error)
+}
+
+fn udp_response(name: &[u8], qtype: u16, server: IpAddr, port: u16) -> Result<Vec<u8>, Status> {
     let id = random_id();
     let query = build_query(name, qtype, id)?;
-    let remote = SocketAddr::new(server, DNS_PORT);
+    let remote = SocketAddr::new(server, port);
     let fd =
         moto_rt::net::udp_bind_for_remote(&remote.into()).map_err(|_| Status::TemporaryFailure)?;
     // The successful bind returns a new descriptor owned by this query.
@@ -52,25 +87,22 @@ fn udp_attempt(name: &[u8], qtype: u16, server: IpAddr) -> Result<Vec<IpAddr>, S
             .set_read_timeout(Some(remaining))
             .map_err(map_io_error)?;
         let len = socket.recv(&mut packet).map_err(map_io_error)?;
-        match parse_response(&packet[..len], id, name, qtype) {
-            ParsedResponse::Ignore => continue,
-            ParsedResponse::Truncated => return tcp_attempt(&query, id, name, qtype, server),
-            ParsedResponse::Answer(addresses) => return Ok(addresses),
-            ParsedResponse::Error(error) => return Err(error),
+        match validate_packet(&packet[..len], id, name, qtype)? {
+            None => continue,
+            Some(true) => return tcp_response(&query, id, name, qtype, remote),
+            Some(false) => return Ok(packet[..len].to_vec()),
         }
     }
 }
 
-fn tcp_attempt(
+fn tcp_response(
     query: &[u8],
     id: u16,
     name: &[u8],
     qtype: u16,
-    server: IpAddr,
-) -> Result<Vec<IpAddr>, Status> {
-    let mut stream =
-        TcpStream::connect_timeout(&SocketAddr::new(server, DNS_PORT), ATTEMPT_TIMEOUT)
-            .map_err(map_io_error)?;
+    remote: SocketAddr,
+) -> Result<Vec<u8>, Status> {
+    let mut stream = TcpStream::connect_timeout(&remote, ATTEMPT_TIMEOUT).map_err(map_io_error)?;
     stream
         .set_read_timeout(Some(ATTEMPT_TIMEOUT))
         .map_err(map_io_error)?;
@@ -86,11 +118,67 @@ fn tcp_attempt(
     stream.read_exact(&mut len).map_err(map_io_error)?;
     let mut packet = vec![0u8; u16::from_be_bytes(len) as usize];
     stream.read_exact(&mut packet).map_err(map_io_error)?;
-    match parse_response(&packet, id, name, qtype) {
-        ParsedResponse::Answer(addresses) => Ok(addresses),
-        ParsedResponse::Error(error) => Err(error),
-        ParsedResponse::Ignore | ParsedResponse::Truncated => Err(Status::ResolverFailure),
+    match validate_packet(&packet, id, name, qtype)? {
+        Some(false) => Ok(packet),
+        _ => Err(Status::ResolverFailure),
     }
+}
+
+// None is an unrelated transaction; true requests TCP; false is a complete
+// response. Validate all section boundaries before forwarding opaque RDATA.
+fn validate_packet(
+    packet: &[u8],
+    id: u16,
+    name: &[u8],
+    qtype: u16,
+) -> Result<Option<bool>, Status> {
+    if packet.len() < 12 || read_u16(packet, 0) != Some(id) {
+        return Ok(None);
+    }
+    let flags = read_u16(packet, 2).unwrap();
+    if flags & 0xf800 != 0x8000 || read_u16(packet, 4) != Some(1) {
+        return Err(Status::ResolverFailure);
+    }
+    let (question, mut offset) = read_name(packet, 12).map_err(|_| Status::ResolverFailure)?;
+    if !question.eq_ignore_ascii_case(name)
+        || read_u16(packet, offset) != Some(qtype)
+        || read_u16(packet, offset + 2) != Some(1)
+    {
+        return Err(Status::ResolverFailure);
+    }
+    if flags & 0x0200 != 0 {
+        return Ok(Some(true));
+    }
+    offset += 4;
+    let count = [6, 8, 10]
+        .iter()
+        .map(|&offset| read_u16(packet, offset).unwrap() as usize)
+        .sum::<usize>();
+    for _ in 0..count {
+        offset = read_name(packet, offset)
+            .map_err(|_| Status::ResolverFailure)?
+            .1;
+        let kind = read_u16(packet, offset).ok_or(Status::ResolverFailure)?;
+        let length = read_u16(packet, offset + 8).ok_or(Status::ResolverFailure)? as usize;
+        offset += 10;
+        let end = offset
+            .checked_add(length)
+            .filter(|end| *end <= packet.len())
+            .ok_or(Status::ResolverFailure)?;
+        if matches!(kind, 2 | 5 | 12)
+            && read_name(packet, offset)
+                .map_err(|_| Status::ResolverFailure)?
+                .1
+                != end
+        {
+            return Err(Status::ResolverFailure);
+        }
+        offset = end;
+    }
+    if offset != packet.len() {
+        return Err(Status::ResolverFailure);
+    }
+    Ok(Some(false))
 }
 
 fn random_id() -> u16 {
@@ -99,7 +187,7 @@ fn random_id() -> u16 {
     u16::from_ne_bytes(bytes)
 }
 
-fn build_query(name: &[u8], qtype: u16, id: u16) -> Result<Vec<u8>, Status> {
+pub(super) fn build_query(name: &[u8], qtype: u16, id: u16) -> Result<Vec<u8>, Status> {
     let mut query = Vec::with_capacity(name.len() + 18);
     query.extend_from_slice(&id.to_be_bytes());
     query.extend_from_slice(&0x0100u16.to_be_bytes());
@@ -206,7 +294,7 @@ fn parse_response(packet: &[u8], id: u16, name: &[u8], qtype: u16) -> ParsedResp
     }
 }
 
-fn read_name(packet: &[u8], start: usize) -> Result<(Vec<u8>, usize), ()> {
+pub(super) fn read_name(packet: &[u8], start: usize) -> Result<(Vec<u8>, usize), ()> {
     let mut name = Vec::new();
     let mut cursor = start;
     let mut next = None;
@@ -257,6 +345,11 @@ fn map_io_error(error: std::io::Error) -> Status {
 }
 
 pub(super) fn self_test() {
+    assert_eq!(
+        forward(b"example.test", 1, &[]),
+        Err(Status::TemporaryFailure)
+    );
+    forwarding_self_test();
     let name = b"example.test";
     let query = build_query(name, 1, 0x1234).unwrap();
     let mut response = Vec::from(&query[..]);
@@ -281,6 +374,38 @@ pub(super) fn self_test() {
 
     transport_self_test();
     packet_device_self_test();
+}
+
+fn forwarding_self_test() {
+    let name = b"1.0.0.127.in-addr.arpa";
+    let mut packet = build_query(name, 12, 73).unwrap();
+    packet[2..4].copy_from_slice(&0x8180u16.to_be_bytes());
+    packet[6..8].copy_from_slice(&1u16.to_be_bytes());
+    packet.extend_from_slice(&[0xc0, 0x0c, 0, 12, 0, 1, 0, 0, 0, 30, 0, 11]);
+    let data_offset = packet.len();
+    packet.extend_from_slice(b"\x09localhost\0");
+    assert_eq!(validate_packet(&packet, 73, name, 12), Ok(Some(false)));
+    assert_eq!(validate_packet(&packet, 74, name, 12), Ok(None));
+    assert!(validate_packet(&packet, 73, b"other.test", 12).is_err());
+    assert!(validate_packet(&packet[..packet.len() - 1], 73, name, 12).is_err());
+    let mut cyclic = packet[..data_offset].to_vec();
+    cyclic[data_offset - 2..].copy_from_slice(&2u16.to_be_bytes());
+    cyclic.extend_from_slice(&[0xc0, data_offset as u8]);
+    assert!(validate_packet(&cyclic, 73, name, 12).is_err());
+
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket.set_read_timeout(Some(ATTEMPT_TIMEOUT)).unwrap();
+    let port = socket.local_addr().unwrap().port();
+    let expected = packet.clone();
+    let fixture = std::thread::spawn(move || {
+        let mut request = [0; 512];
+        let (_, peer) = socket.recv_from(&mut request).unwrap();
+        packet[..2].copy_from_slice(&request[..2]);
+        socket.send_to(&packet, peer).unwrap();
+    });
+    let response = udp_response(name, 12, "127.0.0.1".parse().unwrap(), port).unwrap();
+    assert_eq!(&response[2..], &expected[2..]);
+    fixture.join().unwrap();
 }
 
 fn packet_device_self_test() {
@@ -376,9 +501,10 @@ fn packet_device_self_test() {
 }
 
 fn transport_self_test() {
-    let udp = UdpSocket::bind(("127.0.0.1", DNS_PORT)).unwrap();
+    let udp = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+    let port = udp.local_addr().unwrap().port();
     udp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-    let tcp = TcpListener::bind(("127.0.0.1", DNS_PORT)).unwrap();
+    let tcp = TcpListener::bind(("127.0.0.1", port)).unwrap();
     let server = std::thread::spawn(move || {
         let mut packet = [0u8; UDP_RESPONSE_MAX];
         let _ = udp.recv_from(&mut packet).unwrap();
@@ -403,10 +529,11 @@ fn transport_self_test() {
     });
 
     assert_eq!(
-        lookup(
+        lookup_on_port(
             b"example.test",
             1,
-            &["127.0.0.1".parse::<IpAddr>().unwrap()]
+            &["127.0.0.1".parse::<IpAddr>().unwrap()],
+            port,
         )
         .unwrap(),
         ["192.0.2.9".parse::<IpAddr>().unwrap()]
