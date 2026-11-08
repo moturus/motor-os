@@ -83,8 +83,19 @@ pub(crate) async fn resolve_path(
     Ok(entry_id)
 }
 
+/// Whether the image is one Motor FS without a partition table, as `mkfs` makes.
+pub(crate) fn is_bare_motor_fs(image: &Path) -> io::Result<bool> {
+    let mut header = [0_u8; 8];
+    File::open(image)?.read_exact(&mut header)?;
+    Ok(motor_fs::has_superblock_magic(&header))
+}
+
 fn chmod_raw(image: &Path, path: &Path, permissions: RolePermissions) -> io::Result<()> {
-    let (offset, length) = motor_fs_region(image)?;
+    let (offset, length) = if is_bare_motor_fs(image)? {
+        (0, fs::metadata(image)?.len())
+    } else {
+        motor_fs_region(image)?
+    };
     let image = Utf8Path::from_path(image)
         .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "image path is not UTF-8"))?;
     let runtime = tokio::runtime::LocalRuntime::new()?;

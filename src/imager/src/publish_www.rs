@@ -186,9 +186,7 @@ async fn recreate(
     let parent = chmod::resolve_path(fs, parent).await?;
     if let Some((old, _)) = fs.stat(Role::System, parent, name).await? {
         if fs.metadata(Role::System, old).await?.try_kind()? != kind {
-            return Err(invalid(
-                "publish-www destination exists with the wrong entry kind",
-            ));
+            return Err(invalid("destination exists with the wrong entry kind"));
         }
         delete_tree(fs, old).await?;
     }
@@ -205,7 +203,7 @@ async fn recreate(
         .await
 }
 
-async fn write_file(
+pub(crate) async fn write_file(
     fs: &mut Fs,
     path: &Path,
     permissions: RolePermissions,
@@ -351,11 +349,7 @@ pub(super) fn run(args: &[OsString]) -> io::Result<()> {
         })
         .collect::<io::Result<Vec<_>>>()?;
     let args = parse(&args)?;
-    let policy = PermissionPolicy::parse(
-        include_str!("../motor-os-permissions.yaml"),
-        PathBuf::from("motor-os-permissions.yaml"),
-    )
-    .map_err(io::Error::other)?;
+    let policy = PermissionPolicy::builtin().map_err(io::Error::other)?;
     let nodes = walk(args.www)?;
     let host_key = Credentials::generate_host_key()?;
     let credentials = [

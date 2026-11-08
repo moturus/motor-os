@@ -154,7 +154,7 @@ async fn async_runtime(started: moto_sdk::async_runtime::oneshot::Sender<()>) {
         match discovered.kind {
             virtio_async::VirtioDeviceKind::Block => {
                 let (bus, slot, function) = discovered.pci_address;
-                log::info!(
+                log::debug!(
                     "virtio{}: PCI {bus:02x}:{slot:02x}.{function}, transport {}",
                     block_devices.len(),
                     if device.is_ok() { "parsed" } else { "invalid" }

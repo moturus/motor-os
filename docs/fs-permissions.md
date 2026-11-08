@@ -48,6 +48,9 @@ partition = 2      # MBR slot 1–4; omit for a whole-device Motor FS image
 Device numbers follow the PCI scan order shown in sys-io's boot log; failed
 devices keep their numbers. Partitions retain their MBR slot numbers. Omitting
 `partition` requires a bare Motor FS image and does not search for an MBR.
+`imager mkfs` creates such an image, and `imager mkdir` and `imager put` add
+a mount target and configuration offline
+([imager.md](imager.md#create-a-data-filesystem)).
 Mounts are applied in file order, so a later target can be inside an earlier
 mount. Motor FS preserves the mounted filesystem's stored permissions.
 

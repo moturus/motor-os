@@ -106,6 +106,14 @@ impl PermissionPolicy {
             .map_err(|error| format!("image config '{}': {error}", config_path.display()))
     }
 
+    /// The policy of the shipped images, which offline edits apply.
+    pub(crate) fn builtin() -> Result<Self, String> {
+        Self::parse(
+            include_str!("../motor-os-permissions.yaml"),
+            PathBuf::from("motor-os-permissions.yaml"),
+        )
+    }
+
     pub(crate) fn parse(contents: &str, source: PathBuf) -> Result<Self, String> {
         let raw: RawPolicy = serde_yaml::from_str(contents)
             .map_err(|error| format!("permission policy '{}': {error}", source.display()))?;
@@ -353,7 +361,7 @@ fn parse_path(value: &str, kind: &str, source: &Path) -> Result<PathBuf, String>
     Ok(PathBuf::from(value))
 }
 
-fn normalized_absolute_path(value: &str) -> bool {
+pub(crate) fn normalized_absolute_path(value: &str) -> bool {
     value == "/"
         || (value.starts_with('/')
             && !value.ends_with('/')
@@ -362,7 +370,10 @@ fn normalized_absolute_path(value: &str) -> bool {
                 .all(|component| !component.is_empty() && !matches!(component, "." | "..")))
 }
 
-fn validate_entry_mode(kind: ImageEntryKind, mode: RolePermissions) -> Result<(), &'static str> {
+pub(crate) fn validate_entry_mode(
+    kind: ImageEntryKind,
+    mode: RolePermissions,
+) -> Result<(), &'static str> {
     match kind {
         ImageEntryKind::Directory if mode.system != AccessPermissions::Rwx => {
             Err("directory modes must grant System rwx")

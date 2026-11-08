@@ -26,8 +26,8 @@ and several useful scripts:
   ([fs-permissions.md](fs-permissions.md)); a read-only root disk needs a
   read-only root configured in the image.
 
-For host-side image creation, permission changes, resizing, and SSH/TLS
-credential replacement, see the [imager command reference](imager.md).
+For host-side image creation, data filesystems, guest files, permission
+changes, resizing, and SSH/TLS credential replacement, see the [imager command reference](imager.md).
 
 ## Vsock test prerequisites
 

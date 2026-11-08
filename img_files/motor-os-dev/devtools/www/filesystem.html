@@ -445,7 +445,9 @@ partition = 2         # MBR slot 1-4; omit for a disk holding one bare Motor OS 
 # read_only = true
 # cache_mb = 8        # this mount's block cache; at least 1 MiB</code></pre>
 <p>Failed devices keep their numbers, and nothing is formatted, partitioned, or resized at
-mount time. A later mount may sit inside an earlier one, and mounted filesystems keep
+mount time. On the host, <code>imager mkfs</code> creates a bare filesystem image, and
+<code>imager mkdir</code> and <code>put</code> add a mount target and configuration to an image
+(see <a href="imager.html#create-a-data-filesystem">Imager</a>). A later mount may sit inside an earlier one, and mounted filesystems keep
 their stored permissions. Additional mounts share a cache budget equal to root's unless
 <code>cache_mb</code> sets one. Any invalid entry or missing source stops boot before the
 filesystem service starts. GPT, hotplug, and mounting or unmounting at run time are not
