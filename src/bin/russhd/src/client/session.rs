@@ -44,21 +44,35 @@ enum SessionEnd {
     Escape,
 }
 
+#[cfg(all(test, unix))]
+#[path = "session/accept_tests.rs"]
+mod accept_tests;
+
 async fn run_forwarding(
     peer: &Arc<transport::Peer>,
     options: &ConnectionOptions,
     args: SshArgs,
 ) -> Result<SessionEnd, russh::Error> {
-    let no_session = args.no_session;
     #[cfg(target_os = "motor")]
-    if no_session {
+    if args.no_session {
         // Registration precedes requests that may wait indefinitely for a peer.
         start_ctrl_c(None, peer.interrupt())?;
     }
-    let mut listeners = Some(tokio::select! {
+    let listeners = tokio::select! {
         result = Listeners::bind(options) => result?,
         () = peer.wait_closed() => return Err(russh::Error::Disconnect),
-    });
+    };
+    run_with_listeners(peer, options, args, listeners).await
+}
+
+async fn run_with_listeners(
+    peer: &Arc<transport::Peer>,
+    options: &ConnectionOptions,
+    args: SshArgs,
+    listeners: Listeners,
+) -> Result<SessionEnd, russh::Error> {
+    let no_session = args.no_session;
+    let mut listeners = Some(listeners);
     let tasks = Arc::new(Tasks::default());
     let remote = (!options.remote_forwards.is_empty())
         .then(|| Arc::new(remote::Forwards::new(tasks.clone(), peer.receive_window())));

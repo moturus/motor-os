@@ -115,6 +115,7 @@ pub(crate) mod test_support {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
     use tokio::net::TcpSocket;
+    use tokio::sync::{mpsc, oneshot};
 
     // A concurrent fork can retain even CLOEXEC listeners until its exec finishes.
     // Keep process spawning separate from tests that assert immediate port release.
@@ -132,6 +133,32 @@ pub(crate) mod test_support {
             .unwrap();
         // Keep the port out of both ephemeral allocators across listener retirement.
         (port, [ipv4, ipv6])
+    }
+
+    #[derive(Debug)]
+    struct Handled(Option<oneshot::Sender<()>>);
+
+    impl std::fmt::Display for Handled {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("injected accept failure")
+        }
+    }
+    impl std::error::Error for Handled {}
+    impl Drop for Handled {
+        fn drop(&mut self) {
+            let _ = self.0.take().unwrap().send(());
+        }
+    }
+
+    pub fn inject(
+        sender: &mpsc::UnboundedSender<io::Error>,
+        kind: io::ErrorKind,
+    ) -> oneshot::Receiver<()> {
+        let (done, observed) = oneshot::channel();
+        sender
+            .send(io::Error::new(kind, Handled(Some(done))))
+            .unwrap();
+        observed
     }
 }
 
