@@ -30,8 +30,12 @@ struct DetailedEntry {
 
 impl DetailedEntry {
     fn is_executable(&self) -> bool {
+        // The triplets are in System, Interactive, None order. System owns
+        // installed content and may execute files that no lower role can.
         self.kind == DetailedEntryKind::File
-            && self.permissions.iter().any(|permission| permission.execute)
+            && self.permissions[1..]
+                .iter()
+                .any(|permission| permission.execute)
     }
 }
 

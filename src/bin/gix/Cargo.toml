@@ -23,6 +23,7 @@ path = "tests/https_server.rs"
 harness = false
 
 [dependencies]
+base64 = "0.22.1"
 clap = { version = "=4.6.0", default-features = false, features = [
     "error-context",
     "help",

@@ -6,7 +6,7 @@ use std::{
 
 use crate::{cancellation::Cancellation, object_database::Reader, push_objects::Selection};
 
-const MAX_PACK_BYTES: u64 = 128 * 1024 * 1024;
+pub(crate) const MAX_PACK_BYTES: u64 = 128 * 1024 * 1024;
 const WRITER_BUFFER_BYTES: usize = 64 * 1024;
 const SHA1_BYTES: usize = 20;
 

@@ -280,12 +280,12 @@ the VM with accurate per-ref results, and every M1 and M2 gate still passes.
 
 ### M4 — extensions, each a separately reviewed slice
 
-Token HTTPS (D4 mechanism, origin-bound, redaction fixtures); local-path
-clone; native GC honouring jj's operation store and `refs/jj/keep/` (own
-plan); sideband and report-status-v2; push-options and atomic push; HTTPS
-push; `git://` with a local daemon fixture only; SHA-256 with an
+Local-path clone; native GC honouring jj's operation store and
+`refs/jj/keep/` (own plan); sideband and report-status-v2; push-options and
+atomic push; `git://` with a local daemon fixture only; SHA-256 with an
 interoperability fixture; the scm-record selector; native builds through
-Lorry.
+Lorry. HTTPS push for gix, with a login asked on the terminal and never
+stored instead of token HTTPS, follows [gix-https-push.md](gix-https-push.md).
 
 ## 5. Push engine
 

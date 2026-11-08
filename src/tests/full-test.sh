@@ -6,8 +6,7 @@ ORIGINAL_ARGS=("$@")
 
 BUILD="debug"
 VMM=qemu
-# Guest size. The defaults match the VM launchers; --cpus and --memory pick a
-# smaller guest, e.g. the 1 vCPU / 256 MiB shape cloud providers sell.
+# Guest size. The defaults match the VM launchers; --cpus and --memory pick a different guest.
 CPUS="${MOTO_SMP-4}"
 MEMORY_MIB="${MOTO_MEMORY_MIB-1024}"
 SEEN_RELEASE=0
@@ -1098,6 +1097,13 @@ case "$out" in
   *$'\033'"[?1049l"*) ;;
   *) fail "rmux did not give the console back" ;;
 esac
+# And it asks the console for bracketed paste, so that a paste reaches a pane as
+# one piece of text rather than as the keys it looks like -- which is what used
+# to turn a multi-line paste into a line at a time (rmux/details.md §7.6).
+case "$out" in
+  *$'\033'"[?2004h"*) ;;
+  *) fail "rmux did not ask its console for bracketed paste" ;;
+esac
 
 # Rush and rmux cooperate on Motor window names: an interactive Rush emits OSC
 # 2 around a foreground external command, while `command &` leaves the shell's
@@ -1161,7 +1167,7 @@ printf 'sleep 314159\n' >&"$RMUX_TITLE_IN_FD"
 wait_motor_process "sleep 314159" present "rmux foreground command"
 RMUX_TITLE_OUTPUT=""
 printf '\001r' >&"$RMUX_TITLE_IN_FD"
-wait_rmux_title_output "0:sleep*" "rmux foreground title"
+wait_rmux_title_output "0:sleep" "rmux foreground title"
 
 printf '\003' >&"$RMUX_TITLE_IN_FD"
 wait_motor_process "sleep 314159" absent "interrupted rmux command"
@@ -1170,15 +1176,15 @@ printf 'echo RMUX_TITLE_RESTORED\n' >&"$RMUX_TITLE_IN_FD"
 wait_rmux_title_output "RMUX_TITLE_RESTORED" "rmux shell restoration marker"
 RMUX_TITLE_OUTPUT=""
 printf '\001r' >&"$RMUX_TITLE_IN_FD"
-wait_rmux_title_output "0:rush*" "restored Rush title"
+wait_rmux_title_output "0:rush" "restored Rush title"
 
 RMUX_TITLE_OUTPUT=""
 printf 'sleep 271828 &\n' >&"$RMUX_TITLE_IN_FD"
 wait_motor_process "sleep 271828" present "rmux background command"
 printf '\001r' >&"$RMUX_TITLE_IN_FD"
-wait_rmux_title_output "0:rush*" "background Rush title"
+wait_rmux_title_output "0:rush" "background Rush title"
 case "$RMUX_TITLE_OUTPUT" in
-  *"0:sleep*"*) fail "a background command took rmux's title" ;;
+  *"0:sleep"*) fail "a background command took rmux's title" ;;
 esac
 
 printf 'kill $!\nwait\nexit 0\n' >&"$RMUX_TITLE_IN_FD"
@@ -1416,14 +1422,17 @@ esac
 rmux_caps /user/bin/rmux kill-session -t priv
 
 # sysbox ls colors directory names orange, executable files bright red, and
-# non-executable files with the terminal's default color. A pane
-# supplies the terminal that enables colors; the child names do not appear in
-# the command, so they only match ls output.
+# other files with the terminal's default color. A file counts as executable
+# here only when the Interactive or None role may execute it, so System-only
+# executables stay uncolored. A pane supplies the terminal that enables colors;
+# the child names do not appear in the command, so they only match ls output.
 vm_ssh /system/bin/mkdir "$TEST_TMP/sysbox-ls-color"
 vm_ssh /system/bin/mkdir "$TEST_TMP/sysbox-ls-color/amber-dir"
 vm_ssh /system/bin/mkdir "$TEST_TMP/sysbox-ls-color/z-directory"
 vm_ssh /system/bin/cp /system/bin/ls "$TEST_TMP/sysbox-ls-color/a-file"
 vm_ssh /system/bin/cp /system/bin/ls "$TEST_TMP/sysbox-ls-color/default-file"
+# A runtime-created regular file grants execute to System only.
+vm_ssh "echo system-only > $TEST_TMP/sysbox-ls-color/system-only-file"
 rmux_ls() {
   sleep 3
   # Debug rt.vdso diagnostics intentionally share the pane's terminal. Start
@@ -1443,7 +1452,7 @@ check_ls_colors() {
 
   output="$(rmux_ls "$option" "$TEST_TMP/sysbox-ls-color" | vm_rmux 2>&1)"
   case "$output" in
-    *"amber-dir"*"a-file"*) ;;
+    *"amber-dir"*"a-file"*"system-only-file"*) ;;
     *) fail "ls $option did not list the color-test entries: '$output'" ;;
   esac
   prefix="${output%%amber-dir*}"
@@ -1454,6 +1463,12 @@ check_ls_colors() {
   style="$(printf '%s' "$prefix" | grep -Eao $'\033''\[[0-9;]*m' | tail -1)"
   [ "$style" = $'\033'"[0;91m" ] ||
     fail "ls $option executable style was '$style'"
+  prefix="${output%%system-only-file*}"
+  style="$(printf '%s' "$prefix" | grep -Eao $'\033''\[[0-9;]*m' | tail -1)"
+  case "$style" in
+    ""|$'\033'"[0m") ;;
+    *) fail "ls $option System-only executable style was '$style'" ;;
+  esac
 
   # Files created at run time are executable by System, so use a shipped one,
   # listed alone: a listing of /user/cfg can wrap inside the name on the
@@ -1478,7 +1493,7 @@ check_ls_colors "-l"
 for option in "" "-l"; do
   sorted_ls="$(vm_ssh_stdout /system/bin/ls $option "$TEST_TMP/sysbox-ls-color")"
   case "$sorted_ls" in
-    *"amber-dir"*"z-directory"*"a-file"*"default-file"*) ;;
+    *"amber-dir"*"z-directory"*"a-file"*"default-file"*"system-only-file"*) ;;
     *) fail "ls $option did not sort directories before files: '$sorted_ls'" ;;
   esac
 done
@@ -1493,6 +1508,10 @@ esac
 case "$long_ls" in
   *"-rwxr-xr-x"*"default-file"*) ;;
   *) fail "ls -l did not report file permissions: '$long_ls'" ;;
+esac
+case "$long_ls" in
+  *"-rwxrw-r--"*"system-only-file"*) ;;
+  *) fail "ls -l did not report System-only executable permissions: '$long_ls'" ;;
 esac
 
 # rmux: scrollback and copy mode on the real thing (M8, rmux/details.md §7.5,

@@ -42,7 +42,7 @@ pub fn run(
         }
         Selection::all()
     } else {
-        Selection::from_paths(workdir, paths)?
+        Selection::from_paths(workdir, opened.prefix.as_bstr(), paths)?
     };
 
     cancellation.check()?;

@@ -1369,6 +1369,7 @@ checksum = "4d8ec4efe5d19efe27a3457f7fabf6a9a68f4ea51b8bc21f7ec494f27e74d1ec"
 name = "motor-gix"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "clap",
  "gix",
  "gix-features",

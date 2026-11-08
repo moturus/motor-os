@@ -54,11 +54,21 @@ wait_https_line() {
   done
   fail "HTTPS server did not print '$expected': $(cat "$temporary/https-server.stderr")"
 }
+# Each argument is the start of the fixture's next request line, in order.
+expect_https_requests() {
+  local expected line
+  for expected in "$@"; do
+    IFS= read -r -t 20 line <&"$https_out_fd" ||
+      fail "HTTPS server logged no request; want '$expected'"
+    printf '%s\n' "$line" >> "$temporary/https-server.stdout"
+    [[ "$line" == "$expected"* ]] || fail "HTTPS server logged '$line', want '$expected'"
+  done
+}
 start_https_server() {
   local bind="$1" name="$2"
   coproc HTTPS_SERVER {
-    exec "$https_server" "$https_remote" "$temporary/https-server-work" "$bind" \
-      </dev/null 2> "$temporary/https-server.stderr"
+    exec "$https_server" "$https_remote" "$https_push_remote" \
+      "$temporary/https-server-work" "$bind" </dev/null 2> "$temporary/https-server.stderr"
   }
   https_pid="$HTTPS_SERVER_PID"
   exec {https_out_fd}<&"${HTTPS_SERVER[0]}"
@@ -83,6 +93,7 @@ stop_https_server() {
   [ "$server_status" -eq 143 ] || fail "HTTPS server stopped with status $server_status"
   [ ! -s "$temporary/https-server.stderr" ] ||
     fail "HTTPS server wrote stderr: $(cat "$temporary/https-server.stderr")"
+  rm -r "$temporary/https-server-work"
 }
 
 fixture="$temporary/fixture"
@@ -162,6 +173,48 @@ wait_ssh_fixture_file() {
   [ -e "$path" ] || fail "SSH fixture did not create $label"
 }
 
+# Run guest command $1 on a terminal; its output collects in $terminal_output.
+start_guest_terminal() {
+  coproc GIX_PTY {
+    ssh "${SSH_OPTIONS[@]}" -e none -tt motor@192.168.4.2 "$1" 2>&1
+  }
+  gix_pty_pid="$GIX_PTY_PID"
+  exec {gix_pty_out}<&"${GIX_PTY[0]}"
+  exec {gix_pty_in}>&"${GIX_PTY[1]}"
+  terminal_output=
+}
+wait_terminal_text() {
+  local char deadline=$((SECONDS + 20))
+  while [[ "$terminal_output" != *"$1"* ]]; do
+    [ "$SECONDS" -lt "$deadline" ] || fail "terminal never showed '$1': $terminal_output"
+    IFS= read -r -N 1 -t 20 char <&"$gix_pty_out" ||
+      fail "terminal closed before showing '$1': $terminal_output"
+    terminal_output+="$char"
+  done
+}
+# Collect the rest of the output and the exit status in $terminal_status.
+finish_guest_terminal() {
+  set +e
+  terminal_output+="$(cat <&"$gix_pty_out")"
+  wait "$gix_pty_pid"
+  terminal_status=$?
+  set -e
+  gix_pty_pid=
+  exec {gix_pty_in}>&-
+  exec {gix_pty_out}<&-
+  gix_pty_in=
+  gix_pty_out=
+}
+# Answer gix's questions on the terminal of guest command $1 with token $2.
+answer_credentials() {
+  start_guest_terminal "$1"
+  wait_terminal_text "Username for '$https_origin': "
+  printf 'fixture-user\r' >&"$gix_pty_in"
+  wait_terminal_text "Password or token for 'https://fixture-user@${https_origin#https://}': "
+  printf '%s\r' "$2" >&"$gix_pty_in"
+  finish_guest_terminal
+}
+
 build_fixture() {
   local initial_id link_id utf8_name
   utf8_name=$'caf\xc3\xa9'
@@ -198,6 +251,8 @@ build_fixture
 https_remote="$temporary/https-remote.git"
 clean_git clone -q --bare --no-hardlinks "$fixture" "$https_remote"
 https_initial_head="$(clean_git --git-dir="$https_remote" rev-parse refs/heads/main)"
+https_push_remote="$temporary/https-push.git"
+clean_git init --bare -q "$https_push_remote"
 git_fixture log --format='%h %s' --abbrev=12 > "$temporary/expected.log"
 prepare_user_config() {
   mkdir -p "$temporary/xdg/git" "$temporary/fake-bin"
@@ -416,6 +471,57 @@ verify_push_pack() {
   [ "$(clean_git -C "$receiver" show main:side-two)" = two ] ||
     fail "incremental push pack lost the second parent content"
   clean_git -C "$receiver" fsck --strict --no-dangling >/dev/null
+}
+
+# Anonymous push through the fixture's receive-pack routes. $1 runs gix on the
+# push-pack source with the fixture CA; $2 and $3 are that fixture's C0 and M.
+verify_https_push() {
+  local gix="$1" c0="$2" m="$3" url="$https_origin/push.git" output
+  local get="GET /push.git/info/refs?service=git-receive-pack -> 200"
+  local post="POST /push.git/git-receive-pack -> 200"
+  output="$("$gix" push "$url" "$c0:refs/heads/main")" || fail "HTTPS push failed"
+  [ "$output" = "remote accepted: refs/heads/main -> $c0" ] ||
+    fail "HTTPS push output differs: $output"
+  expect_https_requests "$get" "$post"
+  output="$("$gix" push --dry-run "$url" HEAD:refs/heads/main)" || fail "HTTPS dry run failed"
+  [ "$output" = "would update: refs/heads/main -> $m" ] ||
+    fail "HTTPS dry run output differs: $output"
+  expect_https_requests "$get"
+  output="$("$gix" push "$url" HEAD:refs/heads/main)" || fail "HTTPS fast-forward failed"
+  [ "$output" = "remote accepted: refs/heads/main -> $m" ] ||
+    fail "HTTPS fast-forward output differs: $output"
+  expect_https_requests "$get" "$post"
+  output="$("$gix" push "$url" HEAD:refs/heads/main)" || fail "HTTPS no-op push failed"
+  [ "$output" = "up to date: refs/heads/main -> $m" ] ||
+    fail "HTTPS no-op output differs: $output"
+  expect_https_requests "$get"
+  if "$gix" push "--force-with-lease=refs/heads/main:$c0" "$url" HEAD:refs/heads/main \
+    > /dev/null 2> "$temporary/https-stale.err"; then
+    fail "HTTPS push accepted a stale lease"
+  fi
+  grep -F 'push lease does not match the advertised destination' \
+    "$temporary/https-stale.err" > /dev/null || fail "stale HTTPS lease was not reported"
+  expect_https_requests "$get"
+  if "$gix" push "--force-with-lease=refs/heads/main:$m" \
+    "$https_origin/fast-forward-only/push.git" "$c0:refs/heads/main" \
+    > /dev/null 2> "$temporary/https-rejected.err"; then
+    fail "HTTPS push succeeded where the server refuses rewrites"
+  fi
+  grep -F 'remote rejected the update: non-fast-forward' "$temporary/https-rejected.err" \
+    > /dev/null || fail "HTTPS remote rejection was not reported: $(cat "$temporary/https-rejected.err")"
+  expect_https_requests "GET /fast-forward-only/push.git/info/refs?service=git-receive-pack -> 200" \
+    "POST /fast-forward-only/push.git/git-receive-pack -> 200"
+  output="$("$gix" -c "remote.fixture.url=$https_origin/repo.git" \
+    -c "remote.fixture.pushUrl=$url" push fixture "$c0:refs/tags/published")" ||
+    fail "HTTPS push to a configured pushUrl failed"
+  [ "$output" = "remote accepted: refs/tags/published -> $c0" ] ||
+    fail "HTTPS pushUrl output differs: $output"
+  expect_https_requests "$get" "$post"
+  [ "$(clean_git --git-dir="$https_push_remote" rev-parse refs/heads/main)" = "$m" ] ||
+    fail "HTTPS push left main at the wrong commit"
+  [ "$(clean_git --git-dir="$https_push_remote" rev-parse refs/tags/published)" = "$c0" ] ||
+    fail "HTTPS pushUrl push wrote the wrong tag"
+  clean_git --git-dir="$https_push_remote" fsck --strict --no-dangling > /dev/null
 }
 
 cargo="$(cd "$ROOT_DIR" && rustup which cargo)"
@@ -684,6 +790,24 @@ EOF
     clone "$https_origin/repo.git" "$temporary/good-after-bad"
   stop_https_server
 
+  start_https_server 127.0.0.1 localhost
+  host_https_gix() {
+    "${app_env[@]}" "$gix_binary" -r "$temporary/host-output/push-pack/source" \
+      -c "http.sslCAInfo=$ca" "$@"
+  }
+  read -r push_c0 < "$temporary/host-output/push-pack/C0"
+  read -r push_m < "$temporary/host-output/push-pack/M"
+  verify_https_push host_https_gix "$push_c0" "$push_m"
+  # Linux builds never ask, so an authenticating server gets no update.
+  if host_https_gix push "$https_origin/auth/push.git" "$push_c0:refs/heads/auth" \
+    > /dev/null 2> "$temporary/https-auth.err"; then
+    fail "HTTPS push succeeded without credentials"
+  fi
+  grep -F "$https_origin wants a user name and password" "$temporary/https-auth.err" \
+    > /dev/null || fail "missing credentials were not reported: $(cat "$temporary/https-auth.err")"
+  expect_https_requests "GET /auth/push.git/info/refs?service=git-receive-pack -> 401 anonymous"
+  stop_https_server
+
   prepare_policy_fixture
   "${app_env[@]}" "$gix_binary" -r "$fixture" -c core.abbrev=12 \
     --config-paths log > "$temporary/log.out" 2> "$temporary/config-paths.out"
@@ -782,6 +906,69 @@ EOF
   done
   [ "$(sha256sum "$fixture/.git/index")" = "$index_before" ] ||
     fail "gix status or diff modified the source index"
+  mkdir -p "$fixture/discovery/deep"
+  (cd "$fixture/discovery/deep" && \
+    "${app_env[@]}" "$gix_binary" -c core.abbrev=12 log) > "$temporary/subdir.log"
+  verify_log "$temporary/subdir.log"
+  rm -r "$fixture/discovery"
+
+  relative="$temporary/relative"
+  "${app_env[@]}" "$gix_binary" init "$relative" \
+    > "$temporary/relative-init.out" ||
+    fail "gix init for the relative-path fixture failed"
+  mkdir -p "$relative/sub/deep"
+  printf 'base\n' > "$relative/sub/deep/file"
+  (cd "$relative/sub/deep" && "${app_env[@]}" "$gix_binary" add file) ||
+    fail "gix add from a subdirectory failed"
+  "${app_env[@]}" "$gix_binary" -r "$relative" \
+    -c user.name=Test -c user.email=test@example.invalid commit -m base \
+    > "$temporary/relative-commit.out" ||
+    fail "gix commit for the relative-path fixture failed"
+  printf 'changed\n' > "$relative/sub/deep/file"
+  printf 'root\n' > "$relative/root-untracked"
+  cat > "$temporary/expected-relative.status" <<'STATUS'
+?? ../../root-untracked
+ M file
+STATUS
+  (cd "$relative/sub/deep" && "${app_env[@]}" "$gix_binary" status) \
+    > "$temporary/relative.status"
+  cmp "$temporary/expected-relative.status" "$temporary/relative.status" >/dev/null ||
+    fail "gix status paths are not relative to the invocation directory"
+  (cd "$relative/sub/deep" && "${app_env[@]}" "$gix_binary" diff file) \
+    > "$temporary/relative.diff"
+  for line in '--- a/sub/deep/file' '+++ b/sub/deep/file' '-base' '+changed'; do
+    grep -Fqx -- "$line" "$temporary/relative.diff" ||
+      fail "subdirectory diff lacks $line"
+  done
+  (cd "$relative/sub/deep" && "${app_env[@]}" "$gix_binary" add ../..) ||
+    fail "gix add with a parent path from a subdirectory failed"
+  cat > "$temporary/expected-relative-staged.status" <<'STATUS'
+A  ../../root-untracked
+M  file
+STATUS
+  (cd "$relative/sub/deep" && "${app_env[@]}" "$gix_binary" status) \
+    > "$temporary/relative-staged.status"
+  cmp "$temporary/expected-relative-staged.status" "$temporary/relative-staged.status" >/dev/null ||
+    fail "gix add did not resolve paths relative to the invocation directory"
+  (cd "$relative/sub/deep" && "${app_env[@]}" "$gix_binary" unstage file) ||
+    fail "gix unstage from a subdirectory failed"
+  cat > "$temporary/expected-relative-unstaged.status" <<'STATUS'
+A  ../../root-untracked
+ M file
+STATUS
+  (cd "$relative/sub/deep" && "${app_env[@]}" "$gix_binary" status) \
+    > "$temporary/relative-unstaged.status"
+  cmp "$temporary/expected-relative-unstaged.status" "$temporary/relative-unstaged.status" >/dev/null ||
+    fail "gix unstage did not resolve paths relative to the invocation directory"
+  (cd "$relative/sub/deep" && "${app_env[@]}" "$gix_binary" restore file) ||
+    fail "gix restore from a subdirectory failed"
+  cat > "$temporary/expected-relative-restored.status" <<'STATUS'
+A  ../../root-untracked
+STATUS
+  (cd "$relative/sub/deep" && "${app_env[@]}" "$gix_binary" status) \
+    > "$temporary/relative-restored.status"
+  cmp "$temporary/expected-relative-restored.status" "$temporary/relative-restored.status" >/dev/null ||
+    fail "gix restore did not resolve paths relative to the invocation directory"
   [ ! -e "$temporary/git-invoked" ] || fail "repository open invoked installed Git"
   echo "test-gix host PASS"
   exit
@@ -965,6 +1152,73 @@ printf 'get "%s" "%s"\n' \
   "${sftp_command[@]}"
 [ ! -s "$temporary/native-incomplete-clone" ] ||
   fail "cancelled native clone marker was not empty"
+stop_https_server
+
+start_https_server 192.168.4.1 192.168.4.1
+guest_https_gix() {
+  vm_ssh "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_root/output/push-pack/source -c http.sslCAInfo=$guest_root/test-ca.pem $*"
+}
+read -r push_c0 < "$temporary/guest-push-pack/C0"
+read -r push_m < "$temporary/guest-push-pack/M"
+verify_https_push guest_https_gix "$push_c0" "$push_m"
+
+auth_url="$https_origin/auth/push.git"
+auth_get="GET /auth/push.git/info/refs?service=git-receive-pack"
+auth_post="POST /auth/push.git/git-receive-pack"
+guest_auth_push="HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_root/output/push-pack/source -c http.sslCAInfo=$guest_root/test-ca.pem push $auth_url"
+# A plain SSH command has no terminal to ask on.
+if guest_https_gix push "$auth_url" "$push_c0:refs/heads/auth" \
+  > /dev/null 2> "$temporary/guest-auth.err"; then
+  fail "HTTPS push succeeded without a terminal"
+fi
+grep -F "$https_origin wants a user name and password" "$temporary/guest-auth.err" > /dev/null ||
+  fail "missing credentials were not reported: $(cat "$temporary/guest-auth.err")"
+expect_https_requests "$auth_get -> 401 anonymous"
+
+answer_credentials "$guest_auth_push $push_c0:refs/heads/auth" fixture-token
+[ "$terminal_status" -eq 0 ] ||
+  fail "authenticated HTTPS push exited $terminal_status: $terminal_output"
+[[ "$terminal_output" == *"Username for '$https_origin': fixture-user"* ]] ||
+  fail "the terminal did not show the user name: $terminal_output"
+[[ "$terminal_output" != *fixture-token* ]] || fail "the terminal showed the token"
+[[ "$terminal_output" == *"remote accepted: refs/heads/auth -> $push_c0"* ]] ||
+  fail "authenticated HTTPS push output differs: $terminal_output"
+expect_https_requests "$auth_get -> 401 anonymous" "$auth_get -> 200 good-credentials" \
+  "$auth_post -> 200 good-credentials"
+[ "$(clean_git --git-dir="$https_push_remote" rev-parse refs/heads/auth)" = "$push_c0" ] ||
+  fail "authenticated HTTPS push wrote the wrong ref"
+
+answer_credentials "$guest_auth_push HEAD:refs/heads/auth" wrong-token
+[ "$terminal_status" -eq 1 ] || fail "a refused token exited $terminal_status: $terminal_output"
+[[ "$terminal_output" == *"the server refused the credentials"* ]] ||
+  fail "the refused token was not reported: $terminal_output"
+expect_https_requests "$auth_get -> 401 anonymous" "$auth_get -> 401 bad-credentials"
+
+start_guest_terminal "$guest_auth_push HEAD:refs/heads/auth"
+wait_terminal_text "Username for '$https_origin': "
+printf 'fixture-user\r' >&"$gix_pty_in"
+wait_terminal_text "Password or token for "
+printf '\003' >&"$gix_pty_in"
+finish_guest_terminal
+[ "$terminal_status" -eq 130 ] ||
+  fail "Ctrl+C at the password question exited $terminal_status: $terminal_output"
+expect_https_requests "$auth_get -> 401 anonymous"
+[ "$(clean_git --git-dir="$https_push_remote" rev-parse refs/heads/auth)" = "$push_c0" ] ||
+  fail "an unanswered HTTPS push changed the remote"
+
+answer_credentials "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -c http.sslCAInfo=$guest_root/test-ca.pem clone $https_origin/auth/repo.git $guest_root/auth-clone" fixture-token
+[ "$terminal_status" -eq 0 ] ||
+  fail "authenticated HTTPS clone exited $terminal_status: $terminal_output"
+auth_clone_get="GET /auth/repo.git/info/refs?service=git-upload-pack"
+expect_https_requests "$auth_clone_get -> 401 anonymous" "$auth_clone_get -> 200 good-credentials" \
+  "POST /auth/repo.git/git-upload-pack -> 200 good-credentials" \
+  "POST /auth/repo.git/git-upload-pack -> 200 good-credentials"
+printf 'get -r "%s" "%s"\n' "$guest_root/auth-clone" "$temporary/guest-auth-clone" |
+  "${sftp_command[@]}"
+[ "$(clean_git -C "$temporary/guest-auth-clone" rev-parse HEAD)" = \
+  "$(clean_git --git-dir="$https_remote" rev-parse refs/heads/main)" ] ||
+  fail "authenticated HTTPS clone checked out the wrong commit"
+clean_git -C "$temporary/guest-auth-clone" fsck --strict > /dev/null
 stop_https_server
 
 BUILD=release

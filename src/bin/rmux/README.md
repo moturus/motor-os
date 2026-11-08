@@ -69,6 +69,12 @@ pane. Copy mode is vi by default: `hjklwb0$`, `g`/`G`, `C-u`/`C-d`/`C-f`/`C-b`,
 `Enter` to take it, `q` to leave. `mode-keys = "emacs"` swaps in tmux's other
 table — `C-b`/`C-f`, `M-b`/`M-f`, `C-Space` and `M-w`, `C-r`/`C-s`.
 
+`Ctrl+J` reaches a pane as LF, distinct from Enter. Shift/Ctrl-modified Enter
+reaches it as `CSI 13 ; modifiers u` when the outer terminal sends that distinct
+key sequence. Applications that understand CSI-u can then recognize the modifiers.
+The client requests the Kitty keyboard protocol from capable outer terminals and
+restores the previous keyboard mode on detach or exit.
+
 Overrides go in `/user/cfg/rmux.toml` on Motor OS and `$HOME/.config/rmux.toml`
 on Linux. It is the `key = value` subset of TOML plus three binding tables, and
 a missing file is not a problem — see `details.md` §2.2, whose example config is
@@ -114,8 +120,9 @@ quietly fixed or quietly introduced.
   key takes the row back. It is drawn in near-black on amber — one fixed
   palette, carrying its own background so it reads the same on a dark terminal
   and a light one. The current window takes a deeper amber against the lighter
-  bar, and keeps tmux's `*` for a terminal with no colour at all. The lines
-  dividing panes are drawn in the same amber, so the chrome reads as one thing.
+  bar and has no other mark, so a switch moves the highlight and leaves every
+  title where it was. The lines dividing panes are drawn in the same amber, so
+  the chrome reads as one thing.
 - **Rendering**: a frame diff over absolute positioning. A keystroke echoed in a
   pane costs one byte, and moving between panes repaints no pane content.
 - **Resizing**: `prefix C-`arrow moves a border a cell and `prefix M-`arrow

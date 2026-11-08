@@ -17,7 +17,7 @@ pub fn run(
     let workdir = repo
         .workdir()
         .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "unstage requires a worktree"))?;
-    let selection = Selection::from_paths(workdir, paths)?;
+    let selection = Selection::from_paths(workdir, opened.prefix.as_bstr(), paths)?;
 
     cancellation.check()?;
     let mut guard = Guard::acquire(repo)?;

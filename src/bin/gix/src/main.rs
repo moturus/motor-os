@@ -45,6 +45,7 @@ fn run() -> Result {
                 .short('r')
                 .long("repository")
                 .value_name("REPOSITORY")
+                .help("Worktree to operate on, or a directory within one")
                 .value_parser(value_parser!(PathBuf))
                 .default_value(".")
                 .global(true),
@@ -154,7 +155,7 @@ fn run() -> Result {
         )
         .subcommand(
             Command::new("push")
-                .about("Push one explicit branch or tag to an SSH remote")
+                .about("Push one branch or tag to an HTTPS or SSH remote")
                 .arg(
                     Arg::new("dry-run")
                         .long("dry-run")
@@ -170,7 +171,8 @@ fn run() -> Result {
                 .arg(
                     Arg::new("refspec")
                         .required(true)
-                        .value_name("SOURCE:DESTINATION"),
+                        .value_name("SOURCE[:DESTINATION]")
+                        .help("The source ref; the destination defaults to it, and short names resolve like git"),
                 ),
         )
         .subcommand(
@@ -370,17 +372,22 @@ fn run() -> Result {
         }
         Some("push") => {
             let command = matches.subcommand_matches("push").expect("matched push");
+            let policy = network::Policy::new(&overrides, &cancellation)?;
+            let request = push::Request {
+                remote: command
+                    .get_one::<String>("remote")
+                    .expect("required remote"),
+                refspec: command
+                    .get_one::<String>("refspec")
+                    .expect("required refspec"),
+                lease: command.get_one::<String>("lease").map(String::as_str),
+                dry_run: command.get_flag("dry-run"),
+            };
             // Push retains confirmed publication facts across late cancellation itself.
             return push::run(
                 &opened.repo,
-                command
-                    .get_one::<String>("remote")
-                    .expect("required remote"),
-                command
-                    .get_one::<String>("refspec")
-                    .expect("required refspec"),
-                command.get_one::<String>("lease").map(String::as_str),
-                command.get_flag("dry-run"),
+                request,
+                &policy,
                 &cancellation,
                 io::stdout().lock(),
             );

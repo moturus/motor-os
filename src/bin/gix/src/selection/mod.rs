@@ -20,13 +20,13 @@ impl Selection {
         Selection { paths: Vec::new() }
     }
 
-    pub fn from_paths(workdir: &Path, paths: &[String]) -> crate::Result<Selection> {
+    pub fn from_paths(workdir: &Path, prefix: &BStr, paths: &[String]) -> crate::Result<Selection> {
         if paths.is_empty() {
             return Err(invalid("at least one path is required").into());
         }
         let mut normalized = paths
             .iter()
-            .map(|path| normalize(path, workdir))
+            .map(|path| normalize(prefix, path, workdir))
             .collect::<io::Result<Vec<_>>>()?;
         normalized.sort();
         normalized.dedup();
@@ -61,7 +61,7 @@ impl Selection {
     }
 }
 
-fn normalize(input: &str, workdir: &Path) -> io::Result<BString> {
+fn normalize(prefix: &BStr, input: &str, workdir: &Path) -> io::Result<BString> {
     if input.is_empty() {
         return Err(invalid("an empty path is not valid"));
     }
@@ -72,19 +72,29 @@ fn normalize(input: &str, workdir: &Path) -> io::Result<BString> {
             input.escape_debug()
         )));
     }
-    let mut out = Vec::<u8>::new();
+    // Paths are relative to the directory Git was started in, like Git's
+    // prefix handling. Work in bytes so non-UTF-8 worktree names stay usable.
+    let mut components = prefix
+        .as_bytes()
+        .split(|byte| *byte == b'/')
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
     for component in path.components() {
         match component {
-            std::path::Component::CurDir => continue,
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if components.pop().is_none() {
+                    return Err(invalid(format!(
+                        "path '{}' leaves the worktree",
+                        input.escape_debug()
+                    )));
+                }
+            }
             std::path::Component::Normal(component) => {
                 let component = component
                     .to_str()
                     .ok_or_else(|| invalid("path is not UTF-8"))?;
-                validate_component(component)?;
-                if !out.is_empty() {
-                    out.push(b'/');
-                }
-                out.extend_from_slice(component.as_bytes());
+                components.push(component.as_bytes());
             }
             _ => {
                 return Err(invalid(format!(
@@ -94,7 +104,16 @@ fn normalize(input: &str, workdir: &Path) -> io::Result<BString> {
             }
         }
     }
-    validate_length(&out, workdir)?;
+    let mut out = Vec::<u8>::new();
+    for component in &components {
+        if !out.is_empty() {
+            out.push(b'/');
+        }
+        out.extend_from_slice(component);
+    }
+    if !out.is_empty() {
+        validate_normalized(out.as_slice().as_bstr(), workdir)?;
+    }
     Ok(out.into())
 }
 
@@ -234,13 +253,16 @@ mod tests {
     #[test]
     fn literal_normalization_and_selection() -> crate::Result {
         let root = Path::new("/work");
-        assert_eq!(normalize(".", root)?.as_bstr(), "");
-        assert_eq!(normalize("./dir//file/", root)?.as_bstr(), "dir/file");
-        for invalid in ["", "/file", "dir/../file", ".git/config", "literal*"] {
-            assert!(normalize(invalid, root).is_err(), "{invalid}");
+        let none = BStr::new("");
+        assert_eq!(normalize(none, ".", root)?.as_bstr(), "");
+        assert_eq!(normalize(none, "./dir//file/", root)?.as_bstr(), "dir/file");
+        assert_eq!(normalize(none, "dir/../file", root)?.as_bstr(), "file");
+        for invalid in ["", "/file", "dir/../../file", ".git/config", "literal*"] {
+            assert!(normalize(none, invalid, root).is_err(), "{invalid}");
         }
         let selection = Selection::from_paths(
             root,
+            none,
             &[
                 "dir/file".into(),
                 "dir".into(),
@@ -257,12 +279,37 @@ mod tests {
             selection.pathspecs()[2].as_bstr(),
             ":(top,literal)literal[ab]"
         );
-        let with_root = Selection::from_paths(root, &[".".into(), "ignored".into()])?;
+        let with_root = Selection::from_paths(root, none, &[".".into(), "ignored".into()])?;
         assert_eq!(
             with_root.paths,
             [BString::default(), BString::from("ignored")]
         );
         assert!(with_root.pathspecs().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn paths_are_relative_to_the_invocation_directory() -> crate::Result {
+        let root = Path::new("/work");
+        let none = BStr::new("");
+        let prefix = BStr::new("sub/deep");
+        assert_eq!(normalize(prefix, ".", root)?.as_bstr(), "sub/deep");
+        assert_eq!(normalize(prefix, "file", root)?.as_bstr(), "sub/deep/file");
+        assert_eq!(normalize(prefix, "..", root)?.as_bstr(), "sub");
+        assert_eq!(normalize(prefix, "../..", root)?.as_bstr(), "");
+        assert_eq!(
+            normalize(prefix, "../sibling", root)?.as_bstr(),
+            "sub/sibling"
+        );
+        assert_eq!(
+            normalize(prefix, "./.././other", root)?.as_bstr(),
+            "sub/other"
+        );
+        for outside in ["../../..", "../../../../file"] {
+            assert!(normalize(prefix, outside, root).is_err(), "{outside}");
+        }
+        assert!(normalize(none, "..", root).is_err());
+        assert!(normalize(prefix, ".git/config", root).is_err());
         Ok(())
     }
 }

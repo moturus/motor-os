@@ -1,6 +1,6 @@
 use std::io::{self, Read, Write};
 
-use gix_transport::client::{MessageKind, WriteMode, blocking_io::Transport};
+use gix_transport::client::{MessageKind, TransportWithoutIO, WriteMode, blocking_io::Transport};
 
 use crate::{
     cancellation::Cancellation,
@@ -10,6 +10,10 @@ use crate::{
 
 // Git pkt-lines permit 65,520 bytes including their four-byte length prefix.
 const MAX_PACKET_DATA_BYTES: usize = 65_516;
+
+/// The largest request `send` writes: one command packet, a flush and the pack.
+pub const MAX_REQUEST_BYTES: u64 =
+    crate::push_pack::MAX_PACK_BYTES + (MAX_PACKET_DATA_BYTES as u64 + 4) + 4;
 
 /// Construct one bounded command before preparing a pack or sending any update.
 pub fn command(
@@ -41,6 +45,10 @@ pub fn finish_discovery(
     cancellation: &Cancellation,
 ) -> crate::Result {
     cancellation.check()?;
+    // Only an SSH session stays open. Over HTTPS, Git sends no request either.
+    if !transport.connection_persists_across_multiple_requests() {
+        return Ok(());
+    }
     let mut request = transport.request(WriteMode::Binary, MessageKind::Flush, false)?;
     request.write_message(MessageKind::Flush)?;
     request.flush()?;
@@ -95,6 +103,7 @@ fn invalid(message: &'static str) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gix_transport::client;
 
     #[test]
     fn command_fits_exactly_one_packet_at_the_limit() -> crate::Result {
@@ -117,5 +126,46 @@ mod tests {
         let too_long = gix::refs::FullName::try_from(name + "a")?;
         assert!(command(None, id, too_long.as_ref()).is_err());
         Ok(())
+    }
+
+    struct Stateless;
+
+    impl TransportWithoutIO for Stateless {
+        fn to_url(&self) -> std::borrow::Cow<'_, gix::bstr::BStr> {
+            std::borrow::Cow::Borrowed("https://example.test/repo".into())
+        }
+
+        fn connection_persists_across_multiple_requests(&self) -> bool {
+            false
+        }
+
+        fn configure(&mut self, _: &dyn std::any::Any) -> crate::Result {
+            Ok(())
+        }
+    }
+
+    impl Transport for Stateless {
+        fn handshake<'a>(
+            &mut self,
+            _: gix_transport::Service,
+            _: &'a [(&'a str, Option<&'a str>)],
+        ) -> Result<gix_transport::client::blocking_io::SetServiceResponse<'_>, client::Error>
+        {
+            unreachable!("discovery is complete")
+        }
+
+        fn request(
+            &mut self,
+            _: WriteMode,
+            _: MessageKind,
+            _: bool,
+        ) -> Result<gix_transport::client::blocking_io::RequestWriter<'_>, client::Error> {
+            panic!("a stateless discovery must end without a request")
+        }
+    }
+
+    #[test]
+    fn stateless_discovery_ends_without_a_request() -> crate::Result {
+        finish_discovery(&mut Stateless, &Cancellation::new())
     }
 }

@@ -47,13 +47,16 @@ pub mod ipc;
 #[cfg(not(unix))]
 mod motor;
 #[cfg(not(unix))]
-pub use motor::{END_OF_INPUT, ENTER, PANE_NEWLINE_MODE, config_file, detach, spawn_pane};
+pub use motor::{
+    END_OF_INPUT, ENTER, PANE_NEWLINE_MODE, config_file, detach, panes_are_none_role, spawn_pane,
+};
 
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
 pub use unix::{
-    END_OF_INPUT, ENTER, PANE_NEWLINE_MODE, config_file, detach, port_file, spawn_pane,
+    END_OF_INPUT, ENTER, PANE_NEWLINE_MODE, config_file, detach, panes_are_none_role, port_file,
+    spawn_pane,
 };
 
 /// Tell a pane's terminal how big it has become.

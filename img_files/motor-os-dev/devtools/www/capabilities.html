@@ -594,6 +594,10 @@ default rule never passes System on. Programs listed by name under
 <code>spawn-detached</code> in <code>/user/cfg/rush.toml</code> (the image lists
 <code>rmux</code>) also get <code>CAP_SPAWN_DETACHED</code>, so they can leave a server
 running after the session ends.</p>
+<p>Rush's default prompt shows the shell's role: red for System, amber for Interactive,
+and light green for None. The color comes from the shell's own mask, so
+<code>MOTOR_OS_CAPS=0x204 sh</code> in an SSH session starts a shell with a green
+prompt. Setting <code>PS1</code> replaces the colored default.</p>
 
 <h3 id="rush-explicit">Giving a command an explicit mask</h3>
 <p><code>MOTOR_OS_CAPS</code> works in rush both as a command assignment and as an exported

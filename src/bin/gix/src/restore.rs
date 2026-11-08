@@ -26,7 +26,7 @@ pub fn run(
     let workdir = repo
         .workdir()
         .ok_or_else(|| unsupported("restore requires a worktree"))?;
-    let selection = Selection::from_paths(workdir, paths)?;
+    let selection = Selection::from_paths(workdir, opened.prefix.as_bstr(), paths)?;
     cancellation.check()?;
     let guard = Guard::acquire(repo)?;
     let index = guard.index();

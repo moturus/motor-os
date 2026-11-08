@@ -55,6 +55,14 @@ impl HttpsUrl {
         &self.request_url
     }
 
+    /// `https://host`, with `:port` unless the port is 443.
+    pub fn origin(&self) -> String {
+        match self.origin.port {
+            443 => format!("https://{}", self.origin.host),
+            port => format!("https://{}:{port}", self.origin.host),
+        }
+    }
+
     pub fn same_origin_redirect(&self, value: &str) -> io::Result<HttpsUrl> {
         let next = Self::parse(value)?;
         if next.origin != self.origin {

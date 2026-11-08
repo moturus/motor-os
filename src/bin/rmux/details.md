@@ -1071,9 +1071,27 @@ active pane — as *input bytes*, exactly as if typed.
 
 Pasting as keystrokes is what tmux does and it is worth stating plainly: pasted
 text goes through the same path as typing, so a paste into a shell runs whatever
-newlines it contains. rmux disables bracketed paste on its own console
-(`ESC[?2004l`, as red does) but should pass `?2004h` through *from* a pane that
-asks for it, wrapping pasted text in the markers that pane expects.
+newlines it contains. Bracketed paste is the other half of that, and both halves
+are rmux's: it asks its *own* console for the markers (`ESC[?2004h`) so that a
+paste arrives as one piece of text rather than as the keys it looks like, and it
+passes `?2004h` through *from* a pane that asks for it, wrapping the paste in the
+markers that pane expects.
+
+Asking its own console for the markers is a correction, reported from use. The
+first version disabled them (`ESC[?2004l`, as red does), on the argument that
+rmux interprets keys now and a paste is keystrokes — and what that did was turn
+every newline in a paste into `Enter`: a multi-line paste into a full-screen
+program in a pane was submitted a line at a time, the first newline in it ending
+the line before. The same paste into the same program with no multiplexer in
+between arrives whole, so rmux was not passing a paste through, it was
+interpreting one. A marked paste is now text the whole way: bare to a pane that
+asked for nothing, wrapped in the pane's markers when it asked (§7.6's `red`
+still gets keystrokes, because red asks for nothing), and held as *one* paste
+across as many frames as its length needs, so that neither a mode changing nor a
+program printing `?2004l` halfway through can cut the pair of markers in half.
+A paste in a mode is the mode's, as a key is (§8.2): text into the line a prompt
+is holding — one line, so the breaks in it are not characters it can hold —
+and nothing at all in copy mode or the session list.
 
 Buffers are a small stack, **server-global** (§7.3): copy in one pane, paste in
 any other, in any window, in any session. That is the only state that crosses a
@@ -1100,9 +1118,11 @@ bugs:
   (`red/src/terminal.rs:14` writes `ESC[?2004l`), so rmux has nothing to wrap the
   paste in that red would honor. Document it; do not try to be clever.
 
-rmux still disables bracketed paste on its *own* console (`ESC[?2004l`, as red
-does), and passes `?2004h` through from a pane that asks for it, wrapping pasted
-text in the markers that pane expects — for panes that do want it.
+rmux asks bracketed paste of its *own* console (`ESC[?2004h`), which is what
+makes a console paste and `prefix-]` arrive at a pane the same way: text, bare or
+wrapped in the markers the pane asked for, and in either case one paste rather
+than the keys it looks like. `?2004h` is also passed through *from* a pane that
+asks for it — for panes that do want the markers.
 
 ---
 
@@ -2091,13 +2111,15 @@ description:
 - **§8.1 "Forward bytes, do not re-encode"** is reversed: the client decodes a
   keystroke into a [`keys::Key`] and the server encodes it back into the bytes a
   pane's child is given (`keys::Key::encode`). This is the one place the port
-  costs something rather than saving it, and the cost is bounded: rmux enables
-  neither mouse reporting nor bracketed paste on its own console, so a pane's
-  program asking for either is talking to rmux's emulator and never to the
-  terminal; function keys are named ([`keys::Code::F`]) and pass through; and
-  what is left — the kitty keyboard protocol, and sequences no terminal on this
-  platform emits — nothing on Motor OS sends. §8.3's measured encodings are now
-  asserted in the *other* direction, as what a pane is handed.
+  costs something rather than saving it, and the cost is bounded: rmux enables no
+  mouse reporting on its own console, so a pane's program asking for it is
+  talking to rmux's emulator and never to the terminal; function keys are named
+  ([`keys::Code::F`]) and pass through; and what is left — the kitty keyboard
+  protocol, and sequences no terminal on this platform emits — nothing on Motor
+  OS sends. Bracketed paste is enabled on that console, and is the one thing
+  that arrives there without becoming a key: it is text, and takes the paste
+  path (§7.6). §8.3's measured encodings are now asserted in the *other*
+  direction, as what a pane is handed.
 
 What did not change: the key tables (§8.2), the emulator (§5), the compositor
 and its byte-cost claims (§6), and everything in the server. The protocol
