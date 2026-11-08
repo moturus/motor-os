@@ -117,7 +117,12 @@ async fn run_forwarding(
                 }
             }, if accepting && listeners.is_some() => match socket {
                 Ok(socket) => socket.spawn(peer.clone(), &tasks),
-                Err(error) => break Err(error.into()),
+                Err(failure) => {
+                    listeners.as_mut().unwrap().failed(failure);
+                    // A stream of failed incoming connections must still let
+                    // the command and connection cancellation make progress.
+                    tokio::task::yield_now().await;
+                }
             }
         }
     };

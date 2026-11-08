@@ -121,7 +121,7 @@ async fn serve(
             Err(err) => {
                 log::warn!("accept failed: {err:?}");
                 // The cause lasts while pressure does; do not spin on it.
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                tokio::time::sleep(forward::ACCEPT_PAUSE).await;
                 continue;
             }
         };

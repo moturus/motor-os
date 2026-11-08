@@ -39,7 +39,7 @@ their original reviewed source snapshot.
 | R1 | P1 | Outgoing close deferral starts after the peer can close | Fixed in published fork 3891276; integrated and validated |
 | R2 | P2 | Client protocol disconnect can block in final flush | Fixed in published fork 3891276; integrated and validated |
 | R3 | P2 | Server protocol disconnect retains resources until transport EOF | Fixed in published fork 3891276; integrated and validated |
-| R4 | P2 | Local accept error aborts the entire SSH connection | Approved policy implemented locally with recovery/isolation regressions; final gate pending |
+| R4 | P2 | Local accept error aborts the entire SSH connection | Fixed; shared classification and per-socket recovery preserve unrelated SSH work |
 | R5 | P2 | Remote accept error leaves a dead listener registered | Local recovery and registration cleanup with regressions ready; final gate pending |
 | R6 | P2 | Rejected remote bind strings enter logs unsanitized | Fixed; rejected text omitted and setup/cancellation log regressions pass |
 | R7 | P3 | User documentation says implemented `-R` is unsupported | Corrected in 85f39f3d; text reviewed |

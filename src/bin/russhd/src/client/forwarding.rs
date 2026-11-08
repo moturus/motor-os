@@ -9,15 +9,28 @@ use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
 use super::args::ConnectionOptions;
-use super::forward_args::{ListenAddress, TargetAddress};
+use super::forward_args::{ListenAddress, LocalForward, TargetAddress};
 use super::socks;
 use super::transport::Peer;
+use crate::forward::accept::{AcceptSocket, ErrorAction, classify};
 use crate::forward::{Tasks, memory_pressure, relay};
 
 #[derive(Default)]
 pub struct Listeners {
-    sockets: Vec<(TcpListener, Option<TargetAddress>)>,
+    sockets: Vec<Listener>,
+    forwards: Vec<LocalForward>,
     next: usize,
+}
+
+struct Listener {
+    socket: AcceptSocket,
+    forward: usize,
+}
+
+#[derive(Debug)]
+pub struct AcceptFailure {
+    index: usize,
+    error: io::Error,
 }
 
 pub struct Accepted {
@@ -100,14 +113,20 @@ async fn forward<S: AsyncRead + AsyncWrite + Unpin>(
 
 impl Listeners {
     pub async fn bind(options: &ConnectionOptions) -> io::Result<Self> {
-        let mut listeners = Self::default();
-        for forward in &options.local_forwards {
+        let mut listeners = Self {
+            forwards: options.local_forwards.clone(),
+            ..Self::default()
+        };
+        for (index, forward) in options.local_forwards.iter().enumerate() {
             match bind(&forward.listen, options.gateway_ports).await {
-                Ok(sockets) => listeners.sockets.extend(
-                    sockets
-                        .into_iter()
-                        .map(|socket| (socket, forward.target.clone())),
-                ),
+                Ok(sockets) => {
+                    listeners
+                        .sockets
+                        .extend(sockets.into_iter().map(|socket| Listener {
+                            socket: AcceptSocket::new(socket),
+                            forward: index,
+                        }))
+                }
                 Err(error) => {
                     let message = format!(
                         "local forward {}:{}: {error}",
@@ -124,23 +143,61 @@ impl Listeners {
         Ok(listeners)
     }
 
-    pub async fn accept(&mut self) -> io::Result<Accepted> {
+    pub async fn accept(&mut self) -> Result<Accepted, AcceptFailure> {
         std::future::poll_fn(|cx| {
             for offset in 0..self.sockets.len() {
                 let index = (self.next + offset) % self.sockets.len();
-                let (listener, target) = &self.sockets[index];
-                if let Poll::Ready(result) = listener.poll_accept(cx) {
+                let listener = &mut self.sockets[index];
+                if let Poll::Ready(result) = listener.socket.poll_accept(cx) {
+                    let forward = listener.forward;
                     self.next = (index + 1) % self.sockets.len();
-                    return Poll::Ready(result.map(|(socket, originator)| Accepted {
-                        socket,
-                        originator,
-                        target: target.clone(),
-                    }));
+                    return Poll::Ready(
+                        result
+                            .map(|(socket, originator)| Accepted {
+                                socket,
+                                originator,
+                                target: self.forwards[forward].target.clone(),
+                            })
+                            .map_err(|error| AcceptFailure { index, error }),
+                    );
                 }
             }
             Poll::Pending
         })
         .await
+    }
+
+    pub fn failed(&mut self, failure: AcceptFailure) {
+        let AcceptFailure { index, error } = failure;
+        let address = self.sockets[index]
+            .socket
+            .local_addr()
+            .map(|address| address.to_string())
+            .unwrap_or_else(|_| "unknown socket".into());
+        match classify(&error) {
+            ErrorAction::Continue => log::debug!("local forward accept {address}: {error}"),
+            ErrorAction::Pause => {
+                eprintln!("Warning: local forward accept {address}: {error}; pausing this socket");
+                self.sockets[index].socket.pause();
+            }
+            ErrorAction::Retire => {
+                eprintln!("Warning: local forward accept {address}: {error}; retiring this socket");
+                let retired = self.sockets.remove(index);
+                self.next = index % self.sockets.len().max(1);
+                if !self
+                    .sockets
+                    .iter()
+                    .any(|socket| socket.forward == retired.forward)
+                {
+                    let address = &self.forwards[retired.forward].listen;
+                    eprintln!(
+                        "Warning: local forward {}:{} has no listening sockets",
+                        address.host.as_deref().unwrap_or("localhost"),
+                        address.port
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -252,7 +309,7 @@ mod tests {
             peer.share_connection();
             let peer = Arc::new(peer);
             let mut listeners = Listeners::bind(&options).await.unwrap();
-            let address = listeners.sockets[0].0.local_addr().unwrap();
+            let address = listeners.sockets[0].socket.local_addr().unwrap();
             let tasks = Tasks::default();
             for version in [4, 5] {
                 let mut application = TcpStream::connect(address).await.unwrap();
@@ -322,7 +379,7 @@ mod tests {
         let addresses: Vec<_> = listeners
             .sockets
             .iter()
-            .map(|(s, _)| s.local_addr().unwrap())
+            .map(|s| s.socket.local_addr().unwrap())
             .collect();
         assert_eq!(addresses.len(), 2);
         assert!(addresses.iter().all(|a| a.ip().is_loopback()));
@@ -331,7 +388,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(listeners.sockets.len(), 1);
-        let address = listeners.sockets[0].0.local_addr().unwrap();
+        let address = listeners.sockets[0].socket.local_addr().unwrap();
         assert!(
             TcpStream::connect(("127.0.0.2", address.port()))
                 .await
@@ -350,7 +407,7 @@ mod tests {
             // Linux's second wildcard bind overlaps IPv4; Motor binds both families.
             #[cfg(target_os = "linux")]
             assert_eq!(listeners.sockets.len(), 1);
-            let address = listeners.sockets[0].0.local_addr().unwrap();
+            let address = listeners.sockets[0].socket.local_addr().unwrap();
             assert!(address.ip().is_unspecified());
             let client = TcpStream::connect(("127.0.0.2", address.port()))
                 .await
@@ -405,7 +462,7 @@ mod tests {
         let mut clients = Vec::new();
         for index in [0, 0, 1] {
             clients.push(
-                TcpStream::connect(listeners.sockets[index].0.local_addr().unwrap())
+                TcpStream::connect(listeners.sockets[index].socket.local_addr().unwrap())
                     .await
                     .unwrap(),
             );

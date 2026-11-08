@@ -6,9 +6,11 @@ use std::io;
 use russh::{Channel, ChannelId, ChannelMsg, ReceiveCredit};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
+pub(crate) mod accept;
 mod open;
 pub mod remote;
 mod tasks;
+pub use accept::ACCEPT_PAUSE;
 pub use open::{connect_target, direct_tcpip, memory_pressure, validate_target};
 pub use tasks::{Reservation, Tasks};
 
