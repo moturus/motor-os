@@ -756,6 +756,9 @@ mod tests {
         use std::os::unix::fs::DirBuilderExt;
         use std::task::Poll;
 
+        // A concurrent fork would keep the cancelled listener open until its exec.
+        let _process_and_rebind =
+            crate::forward::accept::test_support::PROCESS_AND_REBIND.blocking_lock();
         let root = std::env::temp_dir().join(format!("motor-bind-cancel-{}", std::process::id()));
         std::fs::DirBuilder::new()
             .mode(0o700)
