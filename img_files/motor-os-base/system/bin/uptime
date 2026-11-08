@@ -1,4 +1,4 @@
 #!/system/bin/rush
 
-/system/bin/sysbox uptime $@
+/system/bin/sysbox uptime "$@"
 

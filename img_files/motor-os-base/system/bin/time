@@ -1,4 +1,4 @@
 #!/system/bin/rush
 
-/system/bin/sysbox time $@
+/system/bin/sysbox time "$@"
 

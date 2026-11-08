@@ -1,4 +1,4 @@
 #!/system/bin/rush
 
-/system/bin/sysbox top $@
+/system/bin/sysbox top "$@"
 
