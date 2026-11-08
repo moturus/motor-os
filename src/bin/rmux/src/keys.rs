@@ -17,11 +17,14 @@
 //! does not model could be mangled on the way. Decoding and re-encoding is a
 //! deliberate change of that rule: a key rmux has no name for is now dropped
 //! rather than passed through. What that costs is bounded by what can reach a
-//! console rmux owns — it enables neither mouse reporting nor bracketed paste on
-//! its own terminal, and a pane's program asking for either is talking to rmux's
-//! emulator rather than to the terminal, so those bytes never arrive. What is
-//! left is function keys and the like, which [`Code`] names, and the kitty
-//! keyboard protocol, which nothing on Motor OS speaks.
+//! console rmux owns — it enables no mouse reporting on its own terminal, and a
+//! pane's program asking for it is talking to rmux's emulator rather than to the
+//! terminal, so those bytes never arrive. Bracketed paste is the exception, and
+//! deliberately: rmux asks its console for the markers, so that a paste can be
+//! carried as a paste rather than as the keys it looks like (§7.6); it is not a
+//! key that arrives here, though — it is text, and takes the paste path instead.
+//! What is left is function keys and the like, which [`Code`] names. Modified
+//! Enter uses CSI-u so its shift and control modifiers survive the round trip.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -158,11 +161,8 @@ impl Key {
         }
 
         let code = match event.code {
-            // `^J` is Enter and `^H` is Backspace: a console that sends a bare
-            // LF for Enter reaches raw mode as `^J`, and terminals disagree
-            // about which byte Backspace sends. Both were true of the byte
-            // decoder this replaces, so neither key is losing a binding.
-            KeyCode::Char('j') if mods == Key::CTRL => return Some(Key::plain(Code::Enter)),
+            // Preserve Ctrl+J as LF, distinct from Enter's CR (CR LF on Motor).
+            // Terminals disagree about Backspace's byte, so retain its alias.
             KeyCode::Char('h') if mods == Key::CTRL => return Some(Key::plain(Code::Backspace)),
             KeyCode::Char(c) => {
                 mods &= !Key::SHIFT;
@@ -198,6 +198,11 @@ impl Key {
     /// xterm's encodings, which is what the decoder on the other side of every
     /// pane expects and what rmux's own tables were written against (§8.3).
     pub fn encode(&self) -> Vec<u8> {
+        // CR cannot carry shift or control. CSI-u can, including alt when it
+        // accompanies either; plain Alt+Enter retains its legacy ESC prefix.
+        if self.code == Code::Enter && self.mods & (Key::SHIFT | Key::CTRL) != 0 {
+            return format!("\x1b[13;{}u", self.modifier()).into_bytes();
+        }
         let alt = self.mods & Key::ALT != 0;
         let ctrl = self.mods & Key::CTRL != 0;
         let mut out = Vec::new();
@@ -357,13 +362,17 @@ mod tests {
     }
 
     #[test]
-    fn the_two_keys_terminals_disagree_about_have_both_spellings() {
-        // Both were true of the byte decoder this replaces: `\n` and `\r` were
-        // Enter, `0x08` and `0x7f` were Backspace.
+    fn ctrl_j_is_distinct_from_enter() {
         assert_eq!(
             key(KeyCode::Char('j'), KeyModifiers::CONTROL),
-            Some(Key::plain(Code::Enter))
+            Some(Key::ctrl('j'))
         );
+        assert_eq!(encoded(Key::ctrl('j')), b"\n");
+        assert_ne!(encoded(Key::ctrl('j')), encoded(Key::plain(Code::Enter)));
+    }
+
+    #[test]
+    fn backspace_has_both_terminal_spellings() {
         assert_eq!(
             key(KeyCode::Char('h'), KeyModifiers::CONTROL),
             Some(Key::plain(Code::Backspace))
@@ -434,6 +443,42 @@ mod tests {
         // synthesizes both and a program must behave the same inside a pane as
         // outside one.
         assert_eq!(encoded(Key::plain(Code::Enter)), sys::ENTER);
+    }
+
+    #[test]
+    fn modified_enter_preserves_shift_control_and_alt() {
+        let cases: &[(KeyModifiers, u8, &[u8])] = &[
+            (KeyModifiers::SHIFT, Key::SHIFT, b"\x1b[13;2u"),
+            (
+                KeyModifiers::SHIFT | KeyModifiers::ALT,
+                Key::SHIFT | Key::ALT,
+                b"\x1b[13;4u",
+            ),
+            (KeyModifiers::CONTROL, Key::CTRL, b"\x1b[13;5u"),
+            (
+                KeyModifiers::SHIFT | KeyModifiers::CONTROL,
+                Key::SHIFT | Key::CTRL,
+                b"\x1b[13;6u",
+            ),
+            (
+                KeyModifiers::ALT | KeyModifiers::CONTROL,
+                Key::ALT | Key::CTRL,
+                b"\x1b[13;7u",
+            ),
+            (
+                KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL,
+                Key::SHIFT | Key::ALT | Key::CTRL,
+                b"\x1b[13;8u",
+            ),
+        ];
+        for &(modifiers, mods, bytes) in cases {
+            let key = key(KeyCode::Enter, modifiers).unwrap();
+            assert_eq!(key, Key::with(Code::Enter, mods));
+            assert_eq!(encoded(key), bytes);
+        }
+        let mut alt_enter = vec![0x1b];
+        alt_enter.extend_from_slice(sys::ENTER);
+        assert_eq!(encoded(Key::with(Code::Enter, Key::ALT)), alt_enter);
     }
 
     #[test]

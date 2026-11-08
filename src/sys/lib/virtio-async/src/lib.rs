@@ -26,6 +26,7 @@ pub use virtio_queue::tests::{
 #[cfg(feature = "test-support")]
 pub mod virtio_test_support {
     pub use crate::pci::{checked_virtio_notify_offset, valid_virtio_cap_access};
+    pub use crate::virtio_blk::select_block_features;
     pub use crate::virtio_device::{
         msix_region_lengths, supported_virtio_cap, valid_msix_cap_offset, valid_virtio_cap_bar,
     };
@@ -51,7 +52,9 @@ pub use pci::le32;
 pub use pci::le64;
 
 pub use virtio_blk::{BlockDevice, RawCompletion};
-pub use virtio_device::{VirtioDevice, VirtioDeviceKind, discover_virtio_devices};
+pub use virtio_device::{
+    DiscoveredDevice, VirtioDevice, VirtioDeviceKind, discover_virtio_devices,
+};
 pub use virtio_queue::WriteCompletion;
 
 pub(crate) use virtio_device::mapper;

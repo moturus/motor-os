@@ -894,6 +894,7 @@ pub(super) struct NetDev<'a> {
     pub(super) pending_tasks: usize,
     dhcp_socket: Option<moto_netstack::iface::SocketHandle>,
     dhcp_lease: Option<DhcpLease>,
+    pub(super) dhcp_details: Option<super::dhcp::Lease>,
 
     /// [`NetstackDevice::is_external`], taken once at construction because both
     /// the netstack configuration and every ephemeral allocation need it.
@@ -920,7 +921,7 @@ struct DhcpLease {
 pub(super) struct PollResult {
     pub activity: moto_netstack::iface::PollResult,
     pub addresses_changed: bool,
-    pub dns_servers: Option<Vec<Ipv4Addr>>,
+    pub dhcp_changed: bool,
     pub tx_exhausted: bool,
 }
 
@@ -929,7 +930,6 @@ enum DhcpUpdate {
     Configured {
         address: IpNetwork,
         router: Option<Ipv4Addr>,
-        dns_servers: Vec<Ipv4Addr>,
     },
 }
 
@@ -939,7 +939,7 @@ fn apply_dhcp_update(
     iface: &mut moto_netstack::iface::Interface,
     current: &mut Option<DhcpLease>,
     update: DhcpUpdate,
-) -> (bool, Vec<Ipv4Addr>) {
+) -> bool {
     let old_lease = current.take();
     if let Some(old) = &old_lease {
         config.cidrs.retain(|cidr| cidr != &old.address);
@@ -948,13 +948,9 @@ fn apply_dhcp_update(
         }
     }
 
-    let (new_lease, dns_servers) = match update {
-        DhcpUpdate::Deconfigured => (None, Vec::new()),
-        DhcpUpdate::Configured {
-            address,
-            router,
-            dns_servers,
-        } => {
+    let new_lease = match update {
+        DhcpUpdate::Deconfigured => None,
+        DhcpUpdate::Configured { address, router } => {
             let route = router.and_then(|gateway| {
                 if address.contains(IpAddr::V4(gateway)) {
                     Some(config::IpRoute {
@@ -970,7 +966,7 @@ fn apply_dhcp_update(
             if let Some(route) = &route {
                 config.routes.push(route.clone());
             }
-            (Some(DhcpLease { address, route }), dns_servers)
+            Some(DhcpLease { address, route })
         }
     };
 
@@ -1009,7 +1005,7 @@ fn apply_dhcp_update(
         }
     }
 
-    (addresses_changed, dns_servers)
+    addresses_changed
 }
 
 impl<'a> NetDev<'a> {
@@ -1119,6 +1115,7 @@ impl<'a> NetDev<'a> {
             sockets,
             dhcp_socket,
             dhcp_lease: None,
+            dhcp_details: None,
             external,
             udp_ports_in_use: std::collections::HashSet::new(),
             udp_addresses_in_use: std::collections::HashSet::new(),
@@ -1253,6 +1250,7 @@ impl<'a> NetDev<'a> {
             sockets,
             dhcp_socket,
             dhcp_lease,
+            dhcp_details,
             udp_ports_in_use,
             udp_addresses_in_use,
             tcp_ports_in_use,
@@ -1288,26 +1286,39 @@ impl<'a> NetDev<'a> {
 
         let dhcp_update = dhcp_socket.and_then(|handle| {
             let socket = sockets.get_mut::<moto_netstack::socket::dhcpv4::Socket>(handle);
+            let times = socket.lease_times();
             socket.poll().map(|event| match event {
-                moto_netstack::socket::dhcpv4::Event::Deconfigured => DhcpUpdate::Deconfigured,
-                moto_netstack::socket::dhcpv4::Event::Configured(lease) => DhcpUpdate::Configured {
-                    address: IpNetwork::new(
-                        IpAddr::V4(lease.address.address().into()),
-                        lease.address.prefix_len(),
-                    )
-                    .unwrap(),
-                    router: lease.router.map(Into::into),
-                    dns_servers: lease.dns_servers.iter().copied().map(Into::into).collect(),
-                },
+                moto_netstack::socket::dhcpv4::Event::Deconfigured => {
+                    *dhcp_details = None;
+                    DhcpUpdate::Deconfigured
+                }
+                moto_netstack::socket::dhcpv4::Event::Configured(lease) => {
+                    let (renew, rebind, expires) = times.unwrap();
+                    *dhcp_details = Some(super::dhcp::Lease {
+                        address: lease.address.to_string(),
+                        router: lease.router.map(Into::into),
+                        dns_servers: lease.dns_servers.iter().copied().map(Into::into).collect(),
+                        server_address: lease.server.address.into(),
+                        server_identifier: lease.server.identifier.into(),
+                        acquired_at_unix_ms: moto_netstack::time::Instant::now().total_millis(),
+                        renew_at_unix_ms: renew.total_millis(),
+                        rebind_at_unix_ms: rebind.total_millis(),
+                        expires_at_unix_ms: expires.total_millis(),
+                    });
+                    DhcpUpdate::Configured {
+                        address: IpNetwork::new(
+                            IpAddr::V4(lease.address.address().into()),
+                            lease.address.prefix_len(),
+                        )
+                        .unwrap(),
+                        router: lease.router.map(Into::into),
+                    }
+                }
             })
         });
-        let (addresses_changed, dns_servers) = match dhcp_update {
-            Some(update) => {
-                let (changed, dns) = apply_dhcp_update(name, config, iface, dhcp_lease, update);
-                (changed, Some(dns))
-            }
-            None => (false, None),
-        };
+        let dhcp_changed = dhcp_update.is_some();
+        let addresses_changed = dhcp_update
+            .is_some_and(|update| apply_dhcp_update(name, config, iface, dhcp_lease, update));
         for waiter in waiters {
             let _ = waiter.send(());
         }
@@ -1442,7 +1453,7 @@ impl<'a> NetDev<'a> {
         PollResult {
             activity: result,
             addresses_changed,
-            dns_servers,
+            dhcp_changed,
             tx_exhausted,
         }
     }
@@ -1911,9 +1922,8 @@ pub(crate) mod self_test {
         let configured = DhcpUpdate::Configured {
             address: "192.0.2.10/24".parse().unwrap(),
             router: Some("192.0.2.1".parse().unwrap()),
-            dns_servers: vec!["192.0.2.53".parse().unwrap()],
         };
-        let (changed, dns) = apply_dhcp_update(
+        let changed = apply_dhcp_update(
             &dev.name,
             &mut dev.config,
             &mut dev.iface,
@@ -1921,15 +1931,11 @@ pub(crate) mod self_test {
             configured,
         );
         st_assert!(changed);
-        st_assert_eq!(
-            dns,
-            vec!["192.0.2.53".parse::<std::net::Ipv4Addr>().unwrap()]
-        );
         st_assert!(dev.ip_addesses().contains(&"192.0.2.10".parse().unwrap()));
         st_assert_eq!(dev.config.cidrs.len(), 2);
         st_assert_eq!(dev.config.routes.len(), 2);
 
-        let (changed, dns) = apply_dhcp_update(
+        let changed = apply_dhcp_update(
             &dev.name,
             &mut dev.config,
             &mut dev.iface,
@@ -1937,7 +1943,6 @@ pub(crate) mod self_test {
             DhcpUpdate::Deconfigured,
         );
         st_assert!(changed);
-        st_assert!(dns.is_empty());
         st_assert_eq!(
             dev.ip_addesses(),
             vec!["2001:db8::2".parse::<std::net::IpAddr>().unwrap()]

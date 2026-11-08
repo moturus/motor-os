@@ -136,6 +136,26 @@ enum Mode {
     },
 }
 
+/// Where a paste from the console is going (§7.6).
+///
+/// Decided once, when the console says the paste has started, and kept for as
+/// many frames as the paste takes: a paste is one thing, and neither a mode
+/// changing nor a program printing `?2004l` halfway through it may cut that
+/// thing in half.
+#[derive(Clone, Copy)]
+enum Pasting {
+    /// To the pane in front, with the markers a program there asked for — or
+    /// bare, when it asked for none.
+    Pane { bracketed: bool },
+    /// To a line being typed on the status row: a rename prompt, a command, a
+    /// copy-mode needle. Text rather than bytes, because what is holding it
+    /// holds characters.
+    Line,
+    /// Nowhere: a paste in copy mode or the session list is not input, and
+    /// swallowing it whole is the one answer that does not guess (§8.2).
+    Dropped,
+}
+
 #[derive(Clone, Copy)]
 enum Prompt {
     RenameWindow,
@@ -180,6 +200,10 @@ struct Attached {
     mode: Mode,
     /// Whether the prefix is held, while rmux is waiting to see what follows it.
     prefix_held: bool,
+    /// The paste from the console that is under way, and where it is going
+    /// (§7.6). `None` between pastes, which is what makes a stray piece of one
+    /// not text for the pane.
+    pasting: Option<Pasting>,
     /// The last thing searched for, and which way, so that `n` and `N` still
     /// mean something after copy mode has been left and entered again.
     search: Option<(String, Search)>,
@@ -193,6 +217,11 @@ struct Attached {
 /// 50; rmux's stack is not settable, and this is deep enough that the buffer a
 /// user wants is on it and shallow enough that nothing has to prune it.
 const BUFFERS: usize = 10;
+
+/// The markers a program that asked for bracketed paste wraps pasted text in
+/// (§7.6): `CSI 200 ~` and `CSI 201 ~`, which is what `?2004h` promises it.
+const PASTE_START_MARKER: &[u8] = b"\x1b[200~";
+const PASTE_END_MARKER: &[u8] = b"\x1b[201~";
 
 /// Observe an asynchronous shell-to-command pty handoff without polling while
 /// rmux is otherwise idle. The backoff keeps an Enter on a builtin cheap; the
@@ -239,6 +268,8 @@ pub struct Server {
     /// to say it to. The server is started before any client has attached, so
     /// at the moment it reads the file there is no status row to put this on.
     greeting: Option<String>,
+    /// The chrome's colours, which say what role this server's panes have.
+    palette: status::Palette,
 }
 
 impl Server {
@@ -262,6 +293,7 @@ impl Server {
             retitle: None,
             greeting: (!complaints.is_empty())
                 .then(|| format!("rmux.toml: {}", complaints.join("; "))),
+            palette: status::Palette::for_panes(crate::sys::panes_are_none_role()),
         }
     }
 
@@ -380,6 +412,7 @@ impl Server {
                     screen: Screen::new(),
                     mode: Mode::Normal,
                     prefix_held: false,
+                    pasting: None,
                     search: None,
                     message: None,
                     farewell: client.farewell,
@@ -420,6 +453,9 @@ impl Server {
             } => self.attach(id, session, detach_others, rows, cols),
             ToServer::NewSession { name, rows, cols } => self.new_session(id, name, rows, cols),
             ToServer::Key(key) => self.key(id, key),
+            ToServer::PasteStart => self.paste_start(id),
+            ToServer::PasteText(text) => self.paste_text(id, &text),
+            ToServer::PasteEnd => self.paste_end(id),
             ToServer::Resize { rows, cols } => {
                 if let Some(client) = self.client_mut(id) {
                     client.rows = rows;
@@ -665,6 +701,89 @@ impl Server {
         }
     }
 
+    /// The console says a paste has begun (§7.6).
+    ///
+    /// Where it goes is settled here, once, and kept in the client until
+    /// [`Server::paste_end`]: a paste is one thing however many frames carry
+    /// it. A pane that asked for bracketed paste gets the opening marker now
+    /// and the closing one at the end, so the pair wraps the whole of it; the
+    /// answer is read here rather than with each piece so that a program
+    /// printing `?2004l` in the middle of a paste cannot leave the pair
+    /// unbalanced.
+    fn paste_start(&mut self, id: ClientId) {
+        let Some(mode) = self.client(id).map(|client| &client.mode) else {
+            return;
+        };
+        let pasting = match mode {
+            // A mode owns a paste as it owns a key (§8.2), and a line being
+            // typed can hold text where a scrollback view has nowhere to put
+            // it.
+            Mode::Prompt { .. } => Pasting::Line,
+            Mode::Copy {
+                typing: Some(_), ..
+            } => Pasting::Line,
+            Mode::Copy { .. } | Mode::Sessions { .. } => Pasting::Dropped,
+            Mode::Normal => match self.bracketed_paste(id) {
+                Some(bracketed) => Pasting::Pane { bracketed },
+                // Connected but not attached: no pane, nothing to paste into.
+                None => return,
+            },
+        };
+        if let Some(client) = self.client_mut(id) {
+            client.pasting = Some(pasting);
+        }
+        if let Pasting::Pane { bracketed: true } = pasting {
+            self.forward(id, PASTE_START_MARKER);
+        }
+    }
+
+    /// A piece of the paste that is under way (§7.6).
+    ///
+    /// Bytes for a pane, exactly as they arrived — a paste reaches a program the
+    /// way the console handed it over, which is the whole point of asking for
+    /// the markers — and characters for a line being typed, minus the breaks,
+    /// which a one-line prompt has nowhere to put.
+    fn paste_text(&mut self, id: ClientId, text: &str) {
+        match self.client(id).and_then(|client| client.pasting) {
+            Some(Pasting::Pane { .. }) => self.forward(id, text.as_bytes()),
+            Some(Pasting::Line) => {
+                let typed: Vec<char> = text.chars().filter(|c| !c.is_control()).collect();
+                if let Some(client) = self.client_mut(id) {
+                    match &mut client.mode {
+                        Mode::Prompt { typed: line, .. } => line.extend(typed),
+                        Mode::Copy {
+                            typing: Some((_, needle)),
+                            ..
+                        } => needle.extend(typed),
+                        _ => {}
+                    }
+                }
+            }
+            Some(Pasting::Dropped) => {}
+            // A piece whose beginning rmux never saw is not a paste it is
+            // carrying, and it is not text either: nothing is forwarded.
+            None => {}
+        }
+    }
+
+    /// The paste is over: the marker that opened it is closed, and the next key
+    /// is a key again (§7.6).
+    fn paste_end(&mut self, id: ClientId) {
+        let Some(pasting) = self.client_mut(id).and_then(|client| client.pasting.take()) else {
+            return;
+        };
+        if let Pasting::Pane { bracketed: true } = pasting {
+            self.forward(id, PASTE_END_MARKER);
+        }
+    }
+
+    /// Whether the pane this client is looking at asked for bracketed paste
+    /// (§7.6). `None` when there is no pane to ask.
+    fn bracketed_paste(&self, id: ClientId) -> Option<bool> {
+        let session = self.client(id)?.session?;
+        Some(self.sessions.get(session)?.pane()?.grid().bracketed_paste())
+    }
+
     /// A key while a prompt, the session list or copy mode is up.
     fn mode_key(&mut self, id: ClientId, key: Key) {
         if matches!(
@@ -889,7 +1008,7 @@ impl Server {
         let bracketed = pane.grid().bracketed_paste();
         let mut bytes = Vec::new();
         if bracketed {
-            bytes.extend_from_slice(b"\x1b[200~");
+            bytes.extend_from_slice(PASTE_START_MARKER);
         }
         for (at, line) in text.split('\n').enumerate() {
             if at > 0 {
@@ -898,7 +1017,7 @@ impl Server {
             bytes.extend_from_slice(line.as_bytes());
         }
         if bracketed {
-            bytes.extend_from_slice(b"\x1b[201~");
+            bytes.extend_from_slice(PASTE_END_MARKER);
         }
         let _ = pane.write(&bytes);
     }
@@ -1273,6 +1392,7 @@ impl Server {
     /// Paint every attached client, each against its own screen.
     fn render(&mut self) {
         let status_shown = self.config.status;
+        let palette = self.palette;
         let listing = self.describe();
         for client in &mut self.clients {
             let Some(session) = client.session.and_then(|id| self.sessions.get(id)) else {
@@ -1312,7 +1432,7 @@ impl Server {
                     col,
                     Cell {
                         ch: glyph,
-                        attrs: status::border(),
+                        attrs: status::border(palette),
                     },
                 );
             }
@@ -1324,7 +1444,10 @@ impl Server {
                 (Mode::Normal | Mode::Copy { typing: None, .. }, Some(text))
                     if rows > status::HEIGHT =>
                 {
-                    frame.set_row(rows - status::HEIGHT, &status::message_row(text, cols));
+                    frame.set_row(
+                        rows - status::HEIGHT,
+                        &status::message_row(text, cols, palette),
+                    );
                 }
                 // vi shows the needle where it shows everything else, and so
                 // does this: on the row the status line was using.
@@ -1338,7 +1461,7 @@ impl Server {
                     let label = if *which == Search::Forward { "/" } else { "?" };
                     frame.set_row(
                         rows - status::HEIGHT,
-                        &status::prompt_row(label, typed, cols),
+                        &status::prompt_row(label, typed, cols, palette),
                     );
                 }
                 // The indicator is the only thing on screen that says copy mode
@@ -1347,17 +1470,17 @@ impl Server {
                     let indicator = reading.as_ref().map_or("", |(_, text)| text.as_str());
                     frame.set_row(
                         rows - status::HEIGHT,
-                        &status::prompt_row("-- copy mode --", indicator, cols),
+                        &status::prompt_row("-- copy mode --", indicator, cols, palette),
                     );
                 }
                 (Mode::Prompt { what, typed }, _) if rows > status::HEIGHT => {
                     frame.set_row(
                         rows - status::HEIGHT,
-                        &status::prompt_row(what.label(), typed, cols),
+                        &status::prompt_row(what.label(), typed, cols, palette),
                     );
                 }
                 (Mode::Sessions { at }, _) => {
-                    for (row, cells) in status::session_overlay(&listing, *at, cols)
+                    for (row, cells) in status::session_overlay(&listing, *at, cols, palette)
                         .iter()
                         .enumerate()
                     {
@@ -1365,7 +1488,7 @@ impl Server {
                     }
                 }
                 _ if status_shown && rows > status::HEIGHT => {
-                    frame.set_row(rows - status::HEIGHT, &status::row(session, cols));
+                    frame.set_row(rows - status::HEIGHT, &status::row(session, cols, palette));
                 }
                 _ => {}
             }
@@ -1602,6 +1725,7 @@ mod tests {
             screen: Screen::new(),
             mode: Mode::Normal,
             prefix_held: false,
+            pasting: None,
             search: None,
             message: None,
             farewell,
@@ -1824,6 +1948,68 @@ mod tests {
         let (mut server, _queue, _outbox, id) = served();
         typed(&mut server, id, "\x01]");
         assert!(server.buffers.is_empty());
+    }
+
+    #[test]
+    fn a_paste_from_the_console_goes_to_the_pane_as_one_paste() {
+        // §7.6: the markers are the pane's answer, read once at the start, so a
+        // program turning them off halfway through a paste cannot leave the pair
+        // unbalanced.
+        let (mut server, _queue, _outbox, id) = served();
+        front_pane(&mut server).feed(b"\x1b[?2004h");
+        server.paste_start(id);
+        assert!(matches!(
+            server.clients[0].pasting,
+            Some(Pasting::Pane { bracketed: true })
+        ));
+
+        front_pane(&mut server).feed(b"\x1b[?2004l");
+        server.paste_text(id, "one\ntwo");
+        server.paste_end(id);
+        assert!(server.clients[0].pasting.is_none());
+    }
+
+    #[test]
+    fn a_paste_into_a_pane_that_asked_for_nothing_is_sent_bare() {
+        let (mut server, _queue, _outbox, id) = served();
+        server.paste_start(id);
+        assert!(matches!(
+            server.clients[0].pasting,
+            Some(Pasting::Pane { bracketed: false })
+        ));
+        server.paste_end(id);
+    }
+
+    #[test]
+    fn a_paste_into_a_prompt_is_text_and_not_bytes_for_the_pane() {
+        // §8.2: a mode owns a paste as it owns a key. A prompt is a line, so the
+        // paste's breaks are not characters it has room for.
+        let (mut server, _queue, _outbox, id) = served();
+        server.open_prompt(id, Prompt::RenameWindow);
+        server.paste_start(id);
+        server.paste_text(id, "left\nright\t");
+        server.paste_end(id);
+
+        match &server.clients[0].mode {
+            Mode::Prompt { typed, .. } => assert_eq!(typed, "leftright"),
+            _ => panic!("the prompt is gone"),
+        }
+    }
+
+    #[test]
+    fn a_paste_in_copy_mode_is_not_input() {
+        // The whole point of copy mode is that a stray key cannot reach the
+        // shell being read; a paste is not the exception.
+        let (mut server, _queue, _outbox, id) = served();
+        typed(&mut server, id, "\x01[");
+        server.paste_start(id);
+        server.paste_text(id, "not a motion");
+        server.paste_end(id);
+
+        assert!(matches!(
+            server.clients[0].mode,
+            Mode::Copy { typing: None, .. }
+        ));
     }
 
     #[test]

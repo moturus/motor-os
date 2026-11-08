@@ -73,7 +73,7 @@ directory. Put `--` in front of a name that starts with a dash. `gix COMMAND
 | `checkout [--track] -b NEW [START]` | Create a branch and move to it. |
 | `merge REV`, `merge --abort` | Merge a commit into the current branch, or give up on a merge. |
 | `recover` | Finish or undo an operation that was interrupted. |
-| `push [OPTIONS] REMOTE SOURCE:DESTINATION` | Publish one branch or tag over SSH. |
+| `push [OPTIONS] REMOTE SOURCE:DESTINATION` | Publish one branch or tag over HTTPS or SSH. |
 
 A few things work differently from Git:
 
@@ -149,18 +149,32 @@ HTTPS and `/user/bin/ssh` for SSH, and their paths cannot be configured.
 
 ### HTTPS
 
-You can clone and fetch over HTTPS without logging in. The server's
-certificate is always checked against the system's trusted certificates. If
-your server uses a private certificate authority, name it on the command
-line:
+You can clone, fetch and push over HTTPS. The server's certificate is always
+checked against the system's trusted certificates. If your server uses a
+private certificate authority, name it on the command line:
 
 ```sh
 gix -c http.sslCAInfo=/path/to/ca.pem clone https://git.example.test/project.git
 ```
 
 A repository's own configuration cannot replace the trusted certificates or
-turn the check off. HTTPS with a login, pushing over HTTPS, plain HTTP, and
-cloning from a local path do not work.
+turn the check off. Plain HTTP and cloning from a local path do not work.
+
+When the server wants you to log in, gix asks on the terminal for your user
+name, and then for your password or token, which it does not show:
+
+```text
+Username for 'https://github.com': you
+Password or token for 'https://you@github.com':
+```
+
+Gix asks every time a server wants a login, and it keeps nothing: it stores
+no credentials, reads none from files, and ignores credential helpers. URLs
+that contain a user name or password are refused. Servers such as GitHub
+want a personal access token instead of your password, and they want a
+login for every push, even to a public repository. Without a terminal, for
+example in a script, a command that needs a login fails. Ctrl+C at a question
+stops the command. Linux builds of gix never ask.
 
 ### SSH
 
@@ -172,18 +186,20 @@ fails.
 
 ### Pushing
 
-Push goes over SSH only. You name the remote, by its configured name or by
-its SSH URL, and exactly one source and destination. If the remote has a
+Push works over HTTPS and SSH. You name the remote, by its configured name or
+by its URL, and exactly one source and destination. If the remote has a
 `pushurl`, gix uses it. For example, to publish a branch from the HTTPS clone
 above:
 
 ```sh
-gix -r project push --dry-run git@example.test:project.git HEAD:refs/heads/topic
-gix -r project push git@example.test:project.git HEAD:refs/heads/topic
+gix -r project push --dry-run origin HEAD:refs/heads/topic
+gix -r project push origin HEAD:refs/heads/topic
 ```
 
-`--dry-run` contacts the server and checks that the push would be allowed,
-but changes nothing.
+Naming an SSH address instead, such as `git@example.test:project.git`, pushes
+over SSH. `--dry-run` contacts the server and checks that the push would be
+allowed, but changes nothing. Over HTTPS, it asks for a login just like a
+push.
 
 The source is a local branch or tag, `HEAD`, or a full 40-character object
 ID. The destination is a full name under `refs/heads/` or `refs/tags/`, and a
@@ -202,10 +218,10 @@ Push has no default destination, cannot push several branches at once, cannot
 delete, and has no plain `--force`. It does not update your `origin/…`
 branches either; run `fetch` afterwards.
 
-Gix never repeats a network operation on its own. If a push ends with an
-unknown result, look at the branch on the server before you push again. If
-the server accepted the push, gix says so even when something goes wrong
-afterwards, for instance while cleaning up.
+Gix never sends an update twice. If a push ends with an unknown result, look
+at the branch on the server before you push again. If the server accepted the
+push, gix says so even when something goes wrong afterwards, for instance
+while cleaning up.
 
 ## Merging
 
@@ -294,6 +310,8 @@ A few more things to know:
 | A loose reference file | 8 MiB |
 | One HTTPS response, all the data of one SSH session, or one outgoing push pack | 128 MiB each |
 | SSH session | 8 MiB for the list of references, 64 KiB of error output, 30 seconds to connect, 300 seconds in total |
+| HTTPS request | 30 seconds to connect, 300 seconds in total, 30 seconds without data; the last includes the time a server spends checking a pushed pack |
+| HTTPS login | 256 bytes of user name, 4 KiB of password or token |
 | One push | 65,536 objects, 65,536 commits, 131,072 parent links, and 65,536 changes between any two trees |
 
 As in Git, there is no limit on the size of a single file or object. Gix

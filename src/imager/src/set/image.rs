@@ -90,8 +90,34 @@ fn update_probed(
         })
     })
 }
+/// Copies `source` into the empty `destination`, leaving zero chunks as holes.
+fn sparse_copy(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::io::Read;
+    use std::os::unix::fs::FileExt;
+    let mut input = File::open(source)?;
+    let output = OpenOptions::new().write(true).open(destination)?;
+    let mut buf = vec![0_u8; 1 << 16];
+    let mut offset = 0;
+    loop {
+        let len = match input.read(&mut buf) {
+            Ok(0) => break,
+            Ok(len) => len,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if buf[..len].iter().any(|&byte| byte != 0) {
+            output.write_all_at(&buf[..len], offset)?;
+        }
+        offset += len as u64;
+    }
+    output.set_len(offset)
+}
+
 /// Only the final rename touches the original, including for raw images.
-fn staged_update(image: &Path, operation: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
+pub(crate) fn staged_update(
+    image: &Path,
+    operation: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<()> {
     let metadata = fs::symlink_metadata(image)?;
     if !metadata.is_file() {
         return Err(invalid("image must be a regular file, not a symlink"));
@@ -102,10 +128,7 @@ fn staged_update(image: &Path, operation: impl FnOnce(&Path) -> io::Result<()>) 
         crate::convert_qcow2_to_raw(image, raw.path())?;
     } else {
         // fs::copy would copy the source's potentially public permissions too.
-        io::copy(
-            &mut File::open(image)?,
-            &mut OpenOptions::new().write(true).open(raw.path())?,
-        )?;
+        sparse_copy(image, raw.path())?;
     }
     operation(raw.path())?;
     let result = if qcow2 {
@@ -128,7 +151,25 @@ fn staged_update(image: &Path, operation: impl FnOnce(&Path) -> io::Result<()>) 
     })
 }
 
-fn with_fs<T>(raw: &Path, operation: impl AsyncFnOnce(&mut Fs) -> io::Result<T>) -> io::Result<T> {
+/// Opens the image's Motor FS: a bare one, or the single MBR partition.
+pub(crate) fn with_fs<T>(
+    raw: &Path,
+    operation: impl AsyncFnOnce(&mut Fs) -> io::Result<T>,
+) -> io::Result<T> {
+    let (offset, length) = if chmod::is_bare_motor_fs(raw)? {
+        (0, fs::metadata(raw)?.len())
+    } else {
+        mbr_region(raw)?
+    };
+    let raw = Utf8Path::from_path(raw).ok_or_else(|| invalid("image path must be UTF-8"))?;
+    tokio::runtime::LocalRuntime::new()?.block_on(async {
+        let device = AsyncFileBlockDevice::open_region(raw, offset, length).await?;
+        let mut fs = Fs::open(Box::new(device)).await?;
+        operation(&mut fs).await
+    })
+}
+
+fn mbr_region(raw: &Path) -> io::Result<(u64, u64)> {
     let (offset, length) = chmod::motor_fs_region(raw)?;
     let file_len = fs::metadata(raw)?.len();
     if offset < u64::from(crate::SECTOR_SIZE)
@@ -151,12 +192,7 @@ fn with_fs<T>(raw: &Path, operation: impl AsyncFnOnce(&mut Fs) -> io::Result<T>)
             return Err(invalid("Motor FS partition overlaps another partition"));
         }
     }
-    let raw = Utf8Path::from_path(raw).ok_or_else(|| invalid("image path must be UTF-8"))?;
-    tokio::runtime::LocalRuntime::new()?.block_on(async {
-        let device = AsyncFileBlockDevice::open_region(raw, offset, length).await?;
-        let mut fs = Fs::open(Box::new(device)).await?;
-        operation(&mut fs).await
-    })
+    Ok((offset, length))
 }
 
 fn utf8(bytes: &[u8]) -> io::Result<&str> {

@@ -25,6 +25,7 @@ mod host {
     pub(super) fn run() -> Result {
         let mut args = std::env::args_os().skip(1);
         let repository = fs::canonicalize(args.next().ok_or("repository required")?)?;
+        let push_repository = fs::canonicalize(args.next().ok_or("push repository required")?)?;
         let work = PathBuf::from(args.next().ok_or("scratch directory required")?);
         let bind: IpAddr = args
             .next()
@@ -77,6 +78,8 @@ mod host {
                 "reject-origin",
                 "bad-protocol",
                 "stall",
+                "fast-forward-only",
+                "auth",
             ]
             .into_iter()
             .find_map(|case| {
@@ -86,9 +89,11 @@ mod host {
                     .map(|path| (case, path))
             })
             .unwrap_or(("good", &request.path));
-            let advertisement = match (request.method.as_str(), path) {
-                ("GET", "/repo.git/info/refs?service=git-upload-pack") => true,
-                ("POST", "/repo.git/git-upload-pack") => false,
+            let (service, advertisement) = match (request.method.as_str(), path) {
+                ("GET", "/repo.git/info/refs?service=git-upload-pack") => ("upload-pack", true),
+                ("POST", "/repo.git/git-upload-pack") => ("upload-pack", false),
+                ("GET", "/push.git/info/refs?service=git-receive-pack") => ("receive-pack", true),
+                ("POST", "/push.git/git-receive-pack") => ("receive-pack", false),
                 _ => {
                     return Err(format!(
                         "unexpected fixture request: {} {}",
@@ -96,6 +101,13 @@ mod host {
                     )
                     .into());
                 }
+            };
+            let (repository, config) = match service {
+                "upload-pack" => (&repository, None),
+                _ if case == "fast-forward-only" => {
+                    (&push_repository, Some("receive.denyNonFastForwards=true"))
+                }
+                _ => (&push_repository, None),
             };
 
             if case == "stall" {
@@ -122,13 +134,23 @@ mod host {
                 continue;
             }
 
+            // Basic credentials for fixture-user with the password fixture-token.
+            let credentials = match request.authorization.as_deref() {
+                None => "anonymous",
+                Some("Basic Zml4dHVyZS11c2VyOmZpeHR1cmUtdG9rZW4=") => "good-credentials",
+                Some(_) => "bad-credentials",
+            };
             let mut status = 200;
             let mut location = None;
-            let mut kind = if advertisement {
-                "application/x-git-upload-pack-advertisement"
-            } else {
-                "application/x-git-upload-pack-result"
-            };
+            let mut challenge = false;
+            let mut kind = format!(
+                "application/x-git-{service}-{}",
+                if advertisement {
+                    "advertisement"
+                } else {
+                    "result"
+                }
+            );
             let output = match case {
                 "redirect" if advertisement => {
                     status = 302;
@@ -147,12 +169,24 @@ mod host {
                     status = 401;
                     b"fixture denied".to_vec()
                 }
+                "auth" if credentials != "good-credentials" => {
+                    status = 401;
+                    challenge = true;
+                    b"fixture requires credentials".to_vec()
+                }
                 "reject-type" => {
-                    kind = "text/plain";
+                    kind = "text/plain".to_owned();
                     b"wrong Git media type".to_vec()
                 }
                 "bad-protocol" if !advertisement => vec![b'z'; 128 * 1024],
-                _ => upload_pack(&repository, &work, number, advertisement, &request)?,
+                _ => git_service(
+                    repository,
+                    &work,
+                    number,
+                    (service, config),
+                    advertisement,
+                    &request,
+                )?,
             };
             write!(
                 stream,
@@ -162,12 +196,15 @@ mod host {
             if let Some(location) = location {
                 write!(stream, "Location: {location}\r\n")?;
             }
+            if challenge {
+                write!(stream, "WWW-Authenticate: Basic realm=\"gix fixture\"\r\n")?;
+            }
             stream.write_all(b"\r\n")?;
             stream.write_all(&output)?;
             stream.conn.send_close_notify();
             stream.flush()?;
             println!(
-                "{} {}: {} -> {} bytes",
+                "{} {} -> {status} {credentials}: {} -> {} bytes",
                 request.method,
                 request.path,
                 request.body.len(),
@@ -182,6 +219,7 @@ mod host {
         method: String,
         path: String,
         protocol_v2: bool,
+        authorization: Option<String>,
         body: Vec<u8>,
     }
 
@@ -211,6 +249,7 @@ mod host {
 
         let mut length = None;
         let mut protocol_v2 = false;
+        let mut authorization = None;
         for line in lines.filter(|line| !line.is_empty()) {
             let (name, value) = line.split_once(':').ok_or("invalid header")?;
             if name.eq_ignore_ascii_case("Content-Length") {
@@ -224,6 +263,10 @@ mod host {
                     return Err("unexpected Git protocol header".into());
                 }
                 protocol_v2 = true;
+            } else if name.eq_ignore_ascii_case("Authorization")
+                && authorization.replace(value.trim().to_owned()).is_some()
+            {
+                return Err("duplicate authorization header".into());
             }
         }
         let length = match (first[0], length) {
@@ -240,14 +283,17 @@ mod host {
             method: first[0].to_owned(),
             path: first[1].to_owned(),
             protocol_v2,
+            authorization,
             body,
         })
     }
 
-    fn upload_pack(
+    /// Run host `git upload-pack` or `git receive-pack` for one stateless request.
+    fn git_service(
         repository: &Path,
         work: &Path,
         number: usize,
+        (service, config): (&str, Option<&str>),
         advertisement: bool,
         request: &Request,
     ) -> Result<Vec<u8>> {
@@ -263,12 +309,11 @@ mod host {
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_TEMPLATE_DIR", work.join("template"))
             .env("GIT_NO_REPLACE_OBJECTS", "1")
-            .args([
-                "-c",
-                "core.hooksPath=/dev/null",
-                "upload-pack",
-                "--stateless-rpc",
-            ]);
+            .args(["-c", "core.hooksPath=/dev/null"]);
+        if let Some(config) = config {
+            git.args(["-c", config]);
+        }
+        git.args([service, "--stateless-rpc"]);
         if request.protocol_v2 {
             git.env("GIT_PROTOCOL", "version=2");
         }
@@ -286,7 +331,7 @@ mod host {
         cleanup?;
         if !output.status.success() {
             return Err(format!(
-                "upload-pack {}: {}",
+                "{service} {}: {}",
                 output.status,
                 output.stderr.escape_ascii()
             )
@@ -294,7 +339,8 @@ mod host {
         }
         let mut response = Vec::new();
         if advertisement && !request.protocol_v2 {
-            response.extend_from_slice(b"001e# service=git-upload-pack\n0000");
+            let announcement = format!("# service=git-{service}\n");
+            write!(response, "{:04x}{announcement}0000", announcement.len() + 4)?;
         }
         response.extend_from_slice(&output.stdout);
         Ok(response)

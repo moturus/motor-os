@@ -2,7 +2,7 @@ use std::io;
 
 use gix::{bstr::ByteSlice, remote::Direction};
 
-use crate::{cancellation::Cancellation, object_database::Reader, ssh::Prepared};
+use crate::{cancellation::Cancellation, network, object_database::Reader};
 
 pub struct Spec {
     source: String,
@@ -12,11 +12,26 @@ pub struct Spec {
 
 impl Spec {
     pub fn parse(refspec: &str, lease: Option<&str>) -> crate::Result<Self> {
-        let (source, destination) = refspec
-            .split_once(':')
-            .filter(|(source, _)| !source.is_empty() && !source.starts_with('+'))
-            .ok_or_else(|| invalid("push requires one explicit SOURCE:DESTINATION"))?;
-        let destination: gix::refs::FullName = destination.try_into()?;
+        // As `git push` does, a lone ref names both the source and destination.
+        let (source, destination) = match refspec.split_once(':') {
+            Some((source, destination)) => (source, destination),
+            None => (refspec, refspec),
+        };
+        if source.is_empty() {
+            return Err(invalid("push requires a non-empty source ref").into());
+        }
+        if source.starts_with('+') {
+            return Err(invalid(
+                "forced push is not supported; pass an explicit --force-with-lease",
+            )
+            .into());
+        }
+        if destination.is_empty() {
+            return Err(
+                invalid("push requires a destination; deleting a ref is not supported").into(),
+            );
+        }
+        let destination = Self::destination_name(destination)?;
         if !destination.as_bstr().starts_with(b"refs/heads/")
             && !destination.as_bstr().starts_with(b"refs/tags/")
         {
@@ -44,6 +59,17 @@ impl Spec {
             destination,
             lease,
         })
+    }
+
+    /// Expand a short destination as `git push` does: a name without a
+    /// `refs/` prefix names a local branch, so `dev` becomes `refs/heads/dev`.
+    fn destination_name(destination: &str) -> crate::Result<gix::refs::FullName> {
+        let full = if destination.starts_with("refs/") {
+            destination.to_owned()
+        } else {
+            format!("refs/heads/{destination}")
+        };
+        Ok(full.as_str().try_into()?)
     }
 
     /// Capture the exact object without peeling tags or accepting revision expressions.
@@ -135,15 +161,17 @@ impl Spec {
 }
 
 /// Resolve exactly one push-direction URL, validating it before and after rewrites.
-pub fn remote(repo: &gix::Repository, requested: &str) -> crate::Result<Prepared> {
+pub fn remote(repo: &gix::Repository, requested: &str) -> crate::Result<gix::url::Url> {
     let mut remote = match repo.try_find_remote_without_url_rewrite(requested.as_bytes().as_bstr())
     {
         Some(remote) => remote?,
         None => repo.remote_at_without_url_rewrite(requested)?,
     };
-    Prepared::new(one_url(&remote)?)?;
+    network::validate_url(&one_url(&remote)?)?;
     remote.rewrite_urls()?;
-    Prepared::new(one_url(&remote)?)
+    let url = one_url(&remote)?;
+    network::validate_url(&url)?;
+    Ok(url)
 }
 
 fn one_url(remote: &gix::Remote<'_>) -> crate::Result<gix::url::Url> {
@@ -180,7 +208,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn explicit_destination_and_lease_are_required_even_for_noop() -> crate::Result {
+    fn short_and_omitted_refspecs_expand_like_git() -> crate::Result {
+        for (refspec, expected) in [
+            ("dev", "refs/heads/dev"),
+            ("dev:dev", "refs/heads/dev"),
+            ("refs/heads/dev", "refs/heads/dev"),
+            ("refs/heads/dev:refs/heads/dev", "refs/heads/dev"),
+            ("HEAD:dev", "refs/heads/dev"),
+            ("dev:refs/heads/other", "refs/heads/other"),
+            ("v1:refs/tags/v1", "refs/tags/v1"),
+        ] {
+            assert_eq!(
+                Spec::parse(refspec, None)?.destination.to_string(),
+                expected,
+                "{refspec}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn destination_and_lease_rules() -> crate::Result {
         let destination = "refs/heads/main";
         let id = gix::ObjectId::from_hex(b"1111111111111111111111111111111111111111")?;
         let absent = Spec::parse("HEAD:refs/heads/main", Some("refs/heads/main:"))?;
@@ -191,10 +239,11 @@ mod tests {
         exact.check_lease(Some(id))?;
         assert!(exact.check_lease(None).is_err());
         for refspec in [
-            "HEAD",
+            "",
             ":refs/heads/main",
             "+HEAD:refs/heads/main",
-            "HEAD:main",
+            "HEAD:",
+            "dev:",
             "HEAD:refs/remotes/origin/main",
             "HEAD:refs/tags/*",
             "HEAD:refs/heads/main:other",

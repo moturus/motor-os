@@ -19,9 +19,15 @@ and several useful scripts:
   images. `run-fc.sh` requires a raw image and defaults to the base image.
   `make raw.img` (or `make raw.img BUILD=release`) explicitly builds
   `motor-os.img`, the standard image in raw format; ordinary `make` does not.
+  The three launchers also take `--cpus N`, `--memory SIZE`,
+  `--root-read-only`, and repeatable `--extra-disk FILE` /
+  `--extra-disk-ro FILE` (a plain file name next to the launcher). Extra disks
+  are used only through Motor FS mounts in `/system/cfg/sys-fs.toml`
+  ([fs-permissions.md](fs-permissions.md)); a read-only root disk needs a
+  read-only root configured in the image.
 
-For host-side image creation, permission changes, resizing, and SSH/TLS
-credential replacement, see the [imager command reference](imager.md).
+For host-side image creation, data filesystems, guest files, permission
+changes, resizing, and SSH/TLS credential replacement, see the [imager command reference](imager.md).
 
 ## Vsock test prerequisites
 
@@ -155,7 +161,7 @@ The shell is somewhat barebones now (contributions are welcome!).
 
 The developer image includes `/devtools/bin/gix` for Git repositories:
 HTTPS/SSH clone and fetch, local inspection and authoring, branch switching,
-merging, and single-ref SSH push. See [gix on Motor OS](gix.md) for commands,
-configuration, recovery and limits.
+merging, and single-ref HTTPS/SSH push. See [gix on Motor OS](gix.md) for
+commands, configuration, recovery and limits.
 
 For more details, see [https://motor-os.org](https://motor-os.org).

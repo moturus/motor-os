@@ -465,6 +465,15 @@ expect <code>cloud-hypervisor-static</code> and <code>firecracker</code> on
 </table>
 </div>
 
+<p><code>run-qemu.sh</code>, <code>run-chv.sh</code>, and <code>run-fc.sh</code> also take
+<code>--cpus N</code> and <code>--memory SIZE</code> (with an <code>M</code> or
+<code>G</code> suffix), which override the variables above. <code>--extra-disk FILE</code>
+attaches another disk, and <code>--extra-disk-ro FILE</code> attaches one read-only; both
+may repeat, and FILE is a plain file name in the launcher's directory. <code>--root-read-only</code>
+attaches the image itself read-only, which needs a read-only root configured in the image.
+Extra disks are used only through <a href="filesystem.html#mounts">mounts</a> configured
+in <code>/system/cfg/sys-fs.toml</code>; Firecracker requires raw disks.</p>
+
 <p>The VM's address is <code>192.168.4.2</code>. Serial console output, including the
 kernel log and the logs of headless services, appears in the terminal that started the
 VM; keep it, because it is the only diagnostic channel when networking or sys-io itself

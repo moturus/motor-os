@@ -20,6 +20,7 @@ mod completed;
 mod config;
 mod device;
 mod devices;
+mod dhcp;
 mod half_open;
 mod icmp;
 mod packet_device;
@@ -41,6 +42,7 @@ pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
     device::self_test::TESTS,
     device::udp_policy_tests::TESTS,
     devices::self_test::TESTS,
+    dhcp::TESTS,
     half_open::self_test::TESTS,
     icmp::self_test::TESTS,
     packet_device::self_test::TESTS,
@@ -98,10 +100,6 @@ struct NetRuntimeInner {
 
     // IP => Dev idx.
     ip_addresses: HashMap<IpAddr, usize>,
-
-    // Resolver servers are kept per device so losing one DHCP lease does not
-    // discard another device's static or leased configuration.
-    dns_servers: Vec<Vec<IpAddr>>,
 
     vsock: vsock::VsockRuntime,
 
@@ -178,12 +176,12 @@ struct NetRuntime {
     // Bounds sockets that finish a graceful close after their client exits.
     orphan_lingers: Rc<Cell<usize>>,
 
-    // Filesystem is used to write log/stats.
+    // DHCP state is published through the mounted filesystem namespace.
     fs: super::fs::RootFs,
 
-    // A fixed temporary filename is safe only while resolver publications are
-    // serialized; the newest waiter recomputes the aggregate after acquiring.
-    dns_write_lock: Rc<moto_sdk::async_runtime::LocalMutex<()>>,
+    // A fixed temporary filename is safe only while DHCP publications are
+    // serialized; each waiter snapshots current state after acquiring.
+    dhcp_write_lock: Rc<moto_sdk::async_runtime::LocalMutex<()>>,
 
     channel_budget: Rc<channel_budget::ChannelBudget>,
 }
@@ -310,11 +308,8 @@ impl NetRuntime {
                 if outcome.addresses_changed {
                     this.rebuild_ip_addresses();
                 }
-                if let Some(servers) = outcome.dns_servers {
-                    this.update_dns_servers(
-                        device_idx,
-                        servers.into_iter().map(IpAddr::V4).collect(),
-                    );
+                if outcome.dhcp_changed {
+                    this.publish_dhcp();
                 }
                 // A poll that refused a connection request has just deepened
                 // that listener's pool; the growth needs a way back.
@@ -914,31 +909,18 @@ impl NetRuntime {
         }
     }
 
-    fn update_dns_servers(&self, device_idx: usize, servers: Vec<IpAddr>) {
-        {
-            let mut inner = self.inner.borrow_mut();
-            if inner.dns_servers[device_idx] == servers {
-                return;
-            }
-            inner.dns_servers[device_idx] = servers;
-        }
-
+    fn publish_dhcp(&self) {
         let this = self.clone();
         moto_sdk::async_runtime::LocalRuntime::spawn(async move {
-            let _writer = this.dns_write_lock.lock().await;
-            let servers = {
-                let inner = this.inner.borrow();
-                let mut seen = HashSet::new();
-                inner
-                    .dns_servers
-                    .iter()
-                    .flatten()
-                    .copied()
-                    .filter(|server| seen.insert(*server))
-                    .collect::<Vec<_>>()
-            };
-            if let Err(err) = config::write_resolv_conf(&this.fs, &servers).await {
-                log::error!("failed to publish DNS servers: {err:?}");
+            let _writer = this.dhcp_write_lock.lock().await;
+            let snapshot = dhcp::snapshot(&this.inner.borrow().devices);
+            match snapshot {
+                Ok(snapshot) => {
+                    if let Err(error) = this.fs.publish_dhcp(&snapshot).await {
+                        log::error!("failed to publish DHCP state: {error}");
+                    }
+                }
+                Err(error) => log::error!("failed to encode DHCP state: {error}"),
             }
         });
     }
@@ -1141,6 +1123,10 @@ pub(super) async fn init(
         log::warn!("VirtioNET device {:?} not configured.", device.mac());
     }
 
+    fs.root_fs()
+        .publish_dhcp(&dhcp::snapshot(&devices)?)
+        .await?;
+
     if devices.iter().next().is_none() && vsock_device.is_none() {
         log::warn!(
             "NET runtime intentionally disabled: valid configuration produced zero usable devices."
@@ -1157,10 +1143,6 @@ pub(super) async fn init(
         device_idx += 1;
     }
 
-    let dns_servers = devices
-        .iter()
-        .map(|(_, device)| device.config().dns_servers.clone())
-        .collect::<Vec<_>>();
     let runtime = NetRuntime {
         interface_policy: (&config).into(),
         inner: Rc::new(RefCell::new(NetRuntimeInner {
@@ -1169,7 +1151,6 @@ pub(super) async fn init(
             tcp_listeners: HashMap::new(),
             devices,
             ip_addresses,
-            dns_servers,
             vsock: vsock::VsockRuntime::new(vsock_device),
             clients: HashMap::new(),
         })),
@@ -1191,24 +1172,12 @@ pub(super) async fn init(
         orphan_lingers: Rc::new(Cell::new(0)),
         free_caches: fs.free_caches.clone(),
         fs: fs.root_fs(),
-        dns_write_lock: Rc::new(moto_sdk::async_runtime::LocalMutex::new(())),
+        dhcp_write_lock: Rc::new(moto_sdk::async_runtime::LocalMutex::new(())),
         channel_budget,
     };
 
     runtime.stats.num_devices.set(device_idx as u64);
     if device_idx != 0 {
-        let initial_dns_servers = {
-            let inner = runtime.inner.borrow();
-            let mut seen = HashSet::new();
-            inner
-                .dns_servers
-                .iter()
-                .flatten()
-                .copied()
-                .filter(|server| seen.insert(*server))
-                .collect::<Vec<_>>()
-        };
-        config::write_resolv_conf(&runtime.fs, &initial_dns_servers).await?;
         stats::spawn_stats_responder(runtime.clone());
     }
 

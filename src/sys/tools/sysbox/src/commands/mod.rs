@@ -6,6 +6,7 @@ pub mod date;
 pub mod diff;
 pub mod echo;
 pub mod find;
+pub mod findmnt;
 pub mod free;
 pub mod head;
 pub mod less;

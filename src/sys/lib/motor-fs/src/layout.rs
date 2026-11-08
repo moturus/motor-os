@@ -131,6 +131,11 @@ pub const ROOT_DIR_ID: EntryId = unsafe { core::mem::transmute(ROOT_DIR_ID_INTER
 /// Just a random number.
 pub(crate) const MAGIC: u64 = 0x0c51_a0bb_b108_3d15;
 
+/// Identifies a whole-device filesystem; opening still validates its header.
+pub fn has_superblock_magic(bytes: &[u8]) -> bool {
+    bytes.get(..8) == Some(MAGIC.to_le_bytes().as_slice())
+}
+
 #[derive(Pod, Clone, Copy)]
 #[repr(C)]
 pub(crate) struct TxnLogData {
@@ -147,7 +152,7 @@ unsafe impl bytemuck::Zeroable for TxnLogData {}
 pub(crate) struct Superblock {
     magic: u64,             // MAGIC.
     version: u64,           // 1 at the moment.
-    num_blocks: u64,        // Num blocks (may be less than what the device has).
+    num_blocks: u64,        // Must match the extent: its end locates the journal.
     free_blocks: u64,       // The number of unused blocks.
     generation: u64,        // Incremented for new directory entries. Used in EntryId.
     freelist_head: BlockNo, // The head of the block freelist.
@@ -160,6 +165,13 @@ const _: () = assert!(core::mem::size_of::<Superblock>() < BLOCK_SIZE);
 unsafe impl bytemuck::Zeroable for Superblock {}
 
 impl Superblock {
+    pub(crate) fn validate(&self, extent_blocks: u64) -> Result<()> {
+        if self.magic != MAGIC || self.version != 1 || self.num_blocks != extent_blocks {
+            return Err(ErrorKind::InvalidData.into());
+        }
+        Ok(())
+    }
+
     /// Returns the superblock and the root dir.
     pub fn format(num_blocks: u64) -> (Block, Block) {
         use bytemuck::Zeroable;

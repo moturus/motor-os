@@ -114,6 +114,8 @@ run_qemu() {
 
 run_chv() {
   PATH="$FAKE_BIN:$PATH" MOTOR_VM_ARG_LOG="$ARG_LOG" \
+    MOTO_QEMU_LOCK="$TEST_ROOT/qemu.lock" \
+    MOTOR_VM_EXPECT_LOCK="$TEST_ROOT/qemu.lock" \
     MOTO_CHV_RUNTIME_DIR="$TEST_ROOT/chv" "$VM_DIR/run-chv.sh" "$@" \
     >/dev/null 2>&1
 }
@@ -301,5 +303,45 @@ grep -Fq "expected qemu or chv" "$ERROR_LOG" ||
   assert_arg -monitor
   assert_arg 'unix:monitor path,server'
 )
+
+for runner in qemu chv fc; do
+  "run_$runner" --root-read-only --extra-disk first.img --extra-disk-ro second.raw >/dev/null 2>&1
+  case "$runner" in
+    qemu)
+      assert_arg "file=$VM_DIR/motor-os.qcow2,if=none,id=drive0,format=qcow2,readonly=on"
+      assert_arg "file=$VM_DIR/first.img,if=none,id=drive1,format=raw,readonly=off"
+      assert_arg "file=$VM_DIR/second.raw,if=none,id=drive2,format=raw,readonly=on"
+      ;;
+    chv)
+      assert_arg "path=$VM_DIR/motor-os.qcow2,image_type=qcow2,readonly=on"
+      assert_arg "path=$VM_DIR/first.img,image_type=raw,readonly=off"
+      assert_arg "path=$VM_DIR/second.raw,image_type=raw,readonly=on"
+      ;;
+    fc)
+      grep -Fq '"is_read_only": true' "$TEST_ROOT/fc/fc-config.json" || fail 'root read-only flag missing'
+      grep -Fq '"drive_id":"disk1","path_on_host":"'"$VM_DIR"'/first.img","is_root_device":false,"is_read_only":false' \
+        "$TEST_ROOT/fc/fc-config.json" || fail 'first extra disk missing'
+      grep -Fq '"drive_id":"disk2","path_on_host":"'"$VM_DIR"'/second.raw","is_root_device":false,"is_read_only":true' \
+        "$TEST_ROOT/fc/fc-config.json" || fail 'read-only extra disk missing'
+      ;;
+  esac
+  for bad in '' '../outside.img' 'data space.img' 'data,bad.img' 'data:bad.img' 'data.bad'; do
+    rm -f "$ARG_LOG"
+    if "run_$runner" --extra-disk "$bad" > "$ERROR_LOG" 2>&1; then
+      fail "$runner accepted invalid extra disk '$bad'"
+    fi
+    [ ! -e "$ARG_LOG" ] || fail "$runner launched with an invalid extra disk"
+  done
+  if "run_$runner" --extra-disk > "$ERROR_LOG" 2>&1; then fail "$runner accepted a missing extra disk"; fi
+done
+run_qemu --extra-disk data.qcow2
+assert_arg "file=$VM_DIR/data.qcow2,if=none,id=drive1,format=qcow2,readonly=off"
+run_chv --extra-disk data.qcow2
+assert_arg "path=$VM_DIR/data.qcow2,image_type=qcow2,readonly=off"
+if run_fc --extra-disk data.qcow2 > "$ERROR_LOG" 2>&1; then fail 'Firecracker accepted qcow2 extra disk'; fi
+PATH="$FAKE_BIN:$PATH" MOTOR_VM_ARG_LOG="$ARG_LOG" MOTO_QEMU_LOCK="$TEST_ROOT/qemu.lock" \
+  "$VM_DIR/run-qemu-echr.sh" --root-read-only --extra-disk first.img >/dev/null 2>&1
+assert_arg "file=$VM_DIR/first.img,if=none,id=drive1,format=raw,readonly=off"
+assert_arg -echr
 
 echo "test-vm-image-format: PASS"

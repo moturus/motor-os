@@ -22,7 +22,9 @@ use std::{collections::BTreeMap, collections::BTreeSet, fs, path::Path};
 use mbrman::BOOT_ACTIVE;
 use std::io::{self, Seek, SeekFrom};
 
+mod block_mount_fixture;
 mod chmod;
+mod edit;
 mod permissions;
 mod publish_www;
 mod resize;
@@ -670,13 +672,14 @@ fn use_assembly_image_root(config: &mut Config, root: Option<&Path>) -> Result<(
     Ok(())
 }
 
-fn print_usage_and_exit() -> ! {
-    eprintln!(
-        "
+const USAGE: &str = "
 Motor OS image builder usage:
     imager $MOTORH debug|release <config.yaml>
     imager $MOTORH debug|release <config.yaml> --raw-output <image.img>
     imager chmod MODE VM_IMAGE FILE_PATH
+    imager mkfs --size X[M|G] [--mode MODE] OUTPUT_IMG
+    imager mkdir [--mode MODE] VM_IMAGE DIR_PATH
+    imager put [--mode MODE] VM_IMAGE HOST_FILE FILE_PATH
     imager resize -i INPUT_IMG -o OUTPUT_IMG --size X[M|G]
     imager set [--ssh-user <NAME> | --ssh-new-user <NAME>] --ssh-password <PWD> -i <IMG FILE>
     imager set [--ssh-user <NAME> | --ssh-new-user <NAME>] --ssh-key <PUBLIC KEY FILE> -i <IMG FILE>
@@ -687,6 +690,19 @@ Motor OS image builder usage:
 
 resize copies INPUT_IMG into a new OUTPUT_IMG (qcow2 or raw, by its .qcow2,
 .img or .raw suffix) whose data partition is X MB or GB large.
+
+mkfs creates OUTPUT_IMG (qcow2 or raw, by its suffix) holding one Motor FS of
+X MB or GB without a partition table, for a sys-fs.toml mount that omits
+`partition`. Its root is rwxrwxr-x unless --mode says otherwise. It never
+replaces an existing file.
+
+mkdir creates one directory whose parent exists. put creates or replaces
+FILE_PATH with the contents of HOST_FILE. Both edit a stopped VM's raw or
+qcow2 image, partitioned or made by mkfs, using a staged copy; chmod also
+accepts both kinds of image.
+MODE has three triplets in System, Interactive, None order (e.g. rwxrwxr-x);
+without --mode, entries get the mode the image permission policy gives their
+path and, for put, HOST_FILE's kind (regular, script or ELF).
 
 set updates a stopped VM's raw or qcow2 image using a staged copy. Allow space
 for the image copy and a raw intermediate; qcow2 snapshots are not preserved.
@@ -708,8 +724,10 @@ publish-www replaces /user/www-home with a copy of WWW-DIR, writes /user/bin/www
 to serve it with httpd-axum on port 443, sets the password, login key and TLS
 pair as set does for motor, and installs a newly generated Ed25519 SSH host
 key, all in one staged update. It prints the new host public key and its fingerprint.
-"
-    );
+";
+
+fn print_usage_and_exit() -> ! {
+    eprintln!("{USAGE}");
     std::process::exit(1);
 }
 
@@ -751,6 +769,29 @@ fn main() {
         return;
     }
     let args: Vec<String> = std::env::args().collect();
+    if args.len() == 2 && matches!(args[1].as_str(), "-h" | "--help" | "help") {
+        print!("{USAGE}");
+        return;
+    }
+    if let Some(command @ ("mkfs" | "mkdir" | "put")) = args.get(1).map(String::as_str) {
+        let result = match command {
+            "mkfs" => edit::mkfs(&args[2..]),
+            "mkdir" => edit::mkdir(&args[2..]),
+            _ => edit::put(&args[2..]),
+        };
+        if let Err(error) = result {
+            eprintln!("imager {command}: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if args.get(1).is_some_and(|arg| arg == "block-mount-fixture") {
+        if let Err(error) = block_mount_fixture::run(&args[2..]) {
+            eprintln!("imager block-mount-fixture: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.get(1).is_some_and(|arg| arg == "chmod") {
         if args.len() != 5 {
             print_usage_and_exit();

@@ -1,5 +1,5 @@
 use crate::logging::{LogRecord, RawLogRecord};
-use moto_sdk::io::fs::{AccessPermissions, EntryKind, FsClient, RolePermissions};
+use moto_sdk::io::fs::{AccessPermissions, EntryKind, FsClient, MountInfo, RolePermissions};
 use moto_sys::SysHandle;
 use std::{
     collections::{HashMap, VecDeque},
@@ -29,13 +29,25 @@ const LOG_FILE_PERMISSIONS: RolePermissions = RolePermissions::new(
     AccessPermissions::None,
 );
 
+fn log_available_bytes(mounts: &[MountInfo]) -> Option<u64> {
+    let mount = mounts
+        .iter()
+        .filter(|mount| {
+            mount.path == "/"
+                || mount.path == LOG_DIR_PATH
+                || LOG_DIR_PATH
+                    .strip_prefix(&mount.path)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        })
+        .max_by_key(|mount| mount.path.len())?;
+    mount.cap?.checked_sub(mount.used?)
+}
+
 fn available_bytes() -> Option<u64> {
-    let provider = moto_sdk::stats::Collector::provider_by_name("sys-io")?;
-    let metric = moto_sdk::stats::Collector::describe(&provider)
-        .ok()?
-        .into_iter()
-        .find(|metric| metric.name == "fs.available_bytes")?;
-    moto_sdk::stats::Collector::read(&provider, metric.id, moto_sdk::stats::SCOPE_GLOBAL).ok()
+    let mounts = moto_sdk::async_runtime::LocalRuntime::new()
+        .block_on(async { FsClient::connect()?.mounts().await })
+        .ok()?;
+    log_available_bytes(&mounts)
 }
 
 fn oldest_previous_log() -> Option<PathBuf> {

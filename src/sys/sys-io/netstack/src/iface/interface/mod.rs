@@ -1725,7 +1725,7 @@ impl Interface {
         if !refused && let Some(id) = first_served {
             // One past the completed pass's lead, so the ring's early slots
             // move around the set even when every pass completes.
-            self.egress_cursor = id + 1;
+            self.egress_cursor = id.wrapping_add(1);
         }
         self.egress_order = order;
         result

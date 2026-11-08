@@ -514,6 +514,8 @@ dependencies = [
  "moto-rt",
  "moto-sdk",
  "moto-sys",
+ "serde",
+ "toml",
 ]
 
 [[package]]

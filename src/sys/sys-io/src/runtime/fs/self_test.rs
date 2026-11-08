@@ -8,7 +8,148 @@ pub(super) const TESTS: &[crate::self_test::SelfTest] = &[
     ("fs::mount_records", records),
     ("fs::replace_without_traverse", replace_without_traverse),
     ("fs::quarantined_unlock", quarantined_unlock),
+    ("fs::flush_after_error", flush_after_error),
+    ("fs::dhcp_snapshot", dhcp_snapshot),
 ];
+
+fn dhcp_snapshot() -> std::result::Result<(), String> {
+    moto_sdk::async_runtime::LocalRuntime::new()
+        .block_on(async {
+            let runtime = runtime()?;
+            let mode = RolePermissions::new(
+                AccessPermissions::Rwx,
+                AccessPermissions::Rx,
+                AccessPermissions::None,
+            );
+            let root = runtime.root()?;
+            let mut fs = root.write().await?;
+            let system = fs
+                .create_entry(Role::System, 0, EntryKind::Directory, "system", mode)
+                .await?;
+            let shadowed = fs
+                .create_entry(Role::System, system, EntryKind::Directory, "tmp", mode)
+                .await?;
+            drop(fs);
+            let child = FS::MemFs(memfs::MemFs::new(memfs::MemFsConfig {
+                max_size: 64 * 1024,
+                free_cache_cap: 0,
+                root_mode: mode,
+            })?);
+            runtime.mounts.borrow_mut().insert(
+                child,
+                mounts::MountPoint {
+                    mount: 0,
+                    shadowed,
+                    path: "/system/tmp".into(),
+                },
+            )?;
+            runtime.mounts.borrow_mut().find_mut(0).unwrap().read_only = true;
+            for contents in ["x".repeat(9000), "[devices]\n".to_owned()] {
+                runtime.root_fs().publish_dhcp(&contents).await?;
+                let path = "/system/tmp/sys-io/dhcp.toml";
+                ensure(
+                    mounts::stat_path(&runtime.mounts, Role::None, path)
+                        .await
+                        .is_err(),
+                    "None read DHCP",
+                )?;
+                let (id, _) = mounts::stat_path(&runtime.mounts, Role::Interactive, path).await?;
+                let entry = runtime.resolve(id)?;
+                ensure(entry.mount != 0, "DHCP wrote the root filesystem")?;
+                let fs = entry.read().await?;
+                let metadata = fs.metadata(Role::Interactive, entry.local).await?;
+                ensure(metadata.size == contents.len() as u64, "stale DHCP tail")?;
+                ensure(
+                    metadata.permissions()?
+                        == RolePermissions::new(
+                            AccessPermissions::Rw,
+                            AccessPermissions::R,
+                            AccessPermissions::None,
+                        ),
+                    "DHCP permissions",
+                )?;
+                let mut bytes = vec![0; contents.len()];
+                for offset in (0..bytes.len()).step_by(moto_sdk::async_fs::BLOCK_SIZE) {
+                    let end = (offset + moto_sdk::async_fs::BLOCK_SIZE).min(bytes.len());
+                    fs.read(
+                        Role::Interactive,
+                        entry.local,
+                        offset as u64,
+                        &mut bytes[offset..end],
+                    )
+                    .await?;
+                }
+                ensure(bytes == contents.as_bytes(), "incomplete DHCP snapshot")?;
+                drop(fs);
+                ensure(
+                    entry
+                        .write()
+                        .await?
+                        .write(Role::Interactive, entry.local, 0, b"bad")
+                        .await
+                        .is_err(),
+                    "Interactive wrote DHCP",
+                )?;
+            }
+            Ok(())
+        })
+        .map_err(|error: std::io::Error| error.to_string())
+}
+
+fn flush_after_error() -> std::result::Result<(), String> {
+    use std::future::{Future, poll_fn};
+    use std::task::Poll;
+    moto_sdk::async_runtime::LocalRuntime::new()
+        .block_on(async {
+            let runtime = runtime()?;
+            let mut entries = Vec::new();
+            for index in 1..=3 {
+                let id = runtime.mounts.borrow_mut().insert(
+                    memfs(8192)?,
+                    mounts::MountPoint {
+                        mount: 0,
+                        shadowed: index,
+                        path: format!("/flush-{index}"),
+                    },
+                )?;
+                entries.push(mounts::Resolved::on_mount(&runtime.mounts, id, 0)?);
+            }
+            let first = entries[0].write().await?;
+            let read_only = entries[1].write().await?;
+            let last = entries[2].write().await?;
+            runtime.mounts.borrow_mut().find_mut(2).unwrap().read_only = true;
+            ensure(
+                runtime.root()?.check_local(1 << 112).is_err(),
+                "quarantine flush root",
+            )?;
+            let mut flush = core::pin::pin!(mounts::flush(&runtime.mounts));
+            // The first failure must not prevent later writable mounts from locking.
+            ensure(
+                poll_fn(|cx| Poll::Ready(flush.as_mut().poll(cx)))
+                    .await
+                    .is_pending(),
+                "flush stopped before first healthy mount",
+            )?;
+            drop(first);
+            ensure(
+                poll_fn(|cx| Poll::Ready(flush.as_mut().poll(cx)))
+                    .await
+                    .is_pending(),
+                "flush stopped before last healthy mount",
+            )?;
+            drop(last);
+            match poll_fn(|cx| Poll::Ready(flush.as_mut().poll(cx))).await {
+                Poll::Ready(result) => ensure(
+                    result.is_err_and(|error| error.kind() == ErrorKind::InvalidData),
+                    "flush lost original error",
+                )?,
+                Poll::Pending => return Err(std::io::Error::other("flush locked read-only mount")),
+            }
+            drop(read_only);
+            Ok(())
+        })
+        .map_err(|error: std::io::Error| error.to_string())
+}
 
 pub(super) fn memfs(cap: u64) -> Result<FS> {
     Ok(FS::MemFs(memfs::MemFs::new(memfs::MemFsConfig {
@@ -144,6 +285,69 @@ async fn requests() -> Result<()> {
             && bytes.iter().all(|byte| *byte == 7),
         "copy data",
     )?;
+
+    // Exercise the mount gate independently of its backend. Memfs remains
+    // writable in configuration; these isolated flags model Motor FS mounts.
+    for ro_mount in [0, id] {
+        runtime
+            .mounts
+            .borrow_mut()
+            .find_mut(ro_mount)
+            .unwrap()
+            .read_only = true;
+        let (ro_file, rw_file, ro_parent, rw_parent) = if ro_mount == 0 {
+            (source, entry, 0, mounted.id)
+        } else {
+            (entry, source, mounted.id, 0)
+        };
+        let ro = runtime.resolve(ro_file)?;
+        ensure(ro.read().await.is_ok(), "read-only read lock")?;
+        ensure(
+            ro.write().await.err().unwrap().raw_os_error() == Some(moto_rt::E_NOT_ALLOWED as i32),
+            "read-only write lock",
+        )?;
+        for role in [Role::System, Role::Interactive, Role::None] {
+            for replace in [false, true] {
+                for (file, parent) in [(ro_file, rw_parent), (rw_file, ro_parent)] {
+                    ensure(
+                        move_entry(&runtime, role, file, parent, "moved", replace)
+                            .await
+                            .unwrap_err()
+                            .raw_os_error()
+                            == Some(moto_rt::E_NOT_ALLOWED as i32),
+                        "read-only rename must precede CrossesDevices",
+                    )?;
+                }
+            }
+            ensure(
+                copy_file_range(&runtime, role, ro_file, 0, rw_file, 0, 1).await? == 1,
+                "copy out of read-only mount",
+            )?;
+            for size in [0, 1] {
+                ensure(
+                    copy_file_range(&runtime, role, rw_file, 0, ro_file, 0, size)
+                        .await
+                        .unwrap_err()
+                        .raw_os_error()
+                        == Some(moto_rt::E_NOT_ALLOWED as i32),
+                    "copy into read-only mount",
+                )?;
+            }
+        }
+        mounts::flush(&runtime.mounts).await?;
+        if ro_mount == 0 {
+            ensure(
+                runtime.resolve(shadowed)?.write().await.is_ok(),
+                "writable mount under read-only root",
+            )?;
+        }
+        runtime
+            .mounts
+            .borrow_mut()
+            .find_mut(ro_mount)
+            .unwrap()
+            .read_only = false;
+    }
 
     let listener = io_channel::listen("sys-io-mount-test");
     let (client, mut responses) =
@@ -593,6 +797,8 @@ fn records() -> std::result::Result<(), String> {
                 kind: MountKind::MemFs,
                 path: path.clone(),
                 corrupted,
+                read_only: false,
+                source: None,
                 used: (!corrupted).then_some(0),
                 entries: None,
                 cap: (!corrupted).then_some(u64::MAX),
@@ -603,6 +809,47 @@ fn records() -> std::result::Result<(), String> {
             st_assert!(MountInfo::decode(&bytes[..len + 1]).is_err());
             bytes[5] = 255;
             st_assert!(MountInfo::decode(&bytes[..len]).is_err());
+        }
+    }
+    for partition in [None, Some(1), Some(4)] {
+        for read_only in [false, true] {
+            for corrupted in [false, true] {
+                let mut record = MountInfo {
+                    id: 0,
+                    kind: MountKind::MotorFs,
+                    path: "/".into(),
+                    corrupted,
+                    read_only,
+                    source: Some(api_fs::MountBlockSource {
+                        device: u32::MAX,
+                        partition,
+                    }),
+                    used: (!corrupted).then_some(0),
+                    entries: None,
+                    cap: (!corrupted).then_some(u64::MAX),
+                };
+                let len = record.encode(&mut bytes).map_err(|err| err.to_string())?;
+                st_assert_eq!(MountInfo::decode(&bytes[..len]).unwrap(), record.clone());
+                for (offset, value) in [(5, 64), (36, 5), (37, 1), (38, 1), (39, 1)] {
+                    let saved = bytes[offset];
+                    bytes[offset] = value;
+                    st_assert!(MountInfo::decode(&bytes[..len]).is_err());
+                    bytes[offset] = saved;
+                }
+                // A source payload without its presence bit is not canonical.
+                bytes[5] &= !32;
+                st_assert!(MountInfo::decode(&bytes[..len]).is_err());
+                record.kind = MountKind::MemFs;
+                st_assert!(record.encode(&mut bytes).is_err());
+                record.kind = MountKind::MotorFs;
+                record.source.as_mut().unwrap().partition = Some(0);
+                st_assert!(record.encode(&mut bytes).is_err());
+                record.source.as_mut().unwrap().partition = Some(5);
+                st_assert!(record.encode(&mut bytes).is_err());
+                record.source = None;
+                let len = record.encode(&mut bytes).map_err(|err| err.to_string())?;
+                st_assert_eq!(MountInfo::decode(&bytes[..len]).unwrap(), record);
+            }
         }
     }
     let mut malformed = api_fs::get_mounts_req_encode(0);

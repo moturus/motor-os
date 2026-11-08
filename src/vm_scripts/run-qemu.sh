@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 WD="$(dirname "$0")"
 SMP="${MOTO_SMP:-4}"
@@ -48,7 +48,7 @@ fi
 echo "run-qemu: -smp ${SMP}, memory ${MEMORY_MIB} MiB${MOTO_CPU_AFFINITY:+ (pinned to host cpus ${MOTO_CPU_AFFINITY})}" 1>&2
 
 if [ "${MOTO_QEMU_USER_NET:-0}" = "1" ]; then
-  NETDEV="user,net=192.168.4.0/24,host=192.168.4.1,hostfwd=tcp:127.0.0.1:10023-192.168.4.2:2222,id=nic0"
+  NETDEV="user,net=192.168.4.0/24,host=192.168.4.1,dhcpstart=192.168.4.2,hostfwd=tcp:127.0.0.1:10023-192.168.4.2:2222,id=nic0"
 else
   NETDEV="tap,ifname=moto-tap,script=no,downscript=no,id=nic0"
 fi
@@ -94,10 +94,24 @@ fi
 # qemu as a child, and a harness that backgrounds this script and kills "$!"
 # kills only the wrapper: qemu is orphaned to init and keeps holding moto-tap
 # and the image, so the next run's ssh silently reaches the stale guest.
+EXTRA_DISKS=()
+DISK_INDEX=1
+for DISK in $VM_DISKS; do
+  DISK_NAME="${DISK%:*}"
+  vm_extra_disk_format "$DISK_NAME"
+  EXTRA_DISKS+=(
+    -device "virtio-blk-pci,drive=drive$DISK_INDEX,id=virtblk$DISK_INDEX,num-queues=1,disable-legacy=on"
+    -drive "file=$WD/$DISK_NAME,if=none,id=drive$DISK_INDEX,format=$VM_DISK_FORMAT,readonly=${DISK#*:}"
+  )
+  DISK_INDEX=$((DISK_INDEX + 1))
+done
+ROOT_DISK_MODE=""
+[ "$VM_ROOT_READ_ONLY" != on ] || ROOT_DISK_MODE=,readonly=on
 exec $TASKSET qemu-system-x86_64 -m "${MEMORY_MIB}M" $MEMORY_BACKEND $MACHINE_MEMORY_BACKEND -enable-kvm -cpu host -smp "${SMP}" \
   -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
   -device virtio-blk-pci,drive=drive0,id=virtblk0,num-queues=1,disable-legacy=on \
-  -drive file="$WD/$IMAGE",if=none,id=drive0,format="$IMAGE_FORMAT" \
+  -drive file="$WD/$IMAGE",if=none,id=drive0,format="$IMAGE_FORMAT$ROOT_DISK_MODE" \
+  "${EXTRA_DISKS[@]}" \
   -netdev "$NETDEV" \
   -device virtio-net-pci,disable-legacy=on,mac=a4:a1:c2:00:00:01,netdev=nic0 \
   -no-reboot -nographic "$@"

@@ -2247,10 +2247,10 @@ fn test_udp_binding_invalidation() {
         }
     }
 
-    // This fixture owns all application UDP sockets. The preceding driver's
+    // Only the DNS listener persists in the standard/developer image. The preceding driver's
     // exit closes its channel before sys-io necessarily finishes teardown;
     // do not capture those disappearing sockets as a persistent baseline.
-    crate::tcp::wait_for_sys_io_metric("net.udp_sockets", |n| n == 0);
+    crate::tcp::wait_for_sys_io_metric("net.udp_sockets", |n| n == 1);
     moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (client, driver_task) = host_channel().await;
         let anchor = client.try_reserve().unwrap();
@@ -2336,7 +2336,7 @@ fn test_udp_binding_invalidation() {
     });
     // Test events model server removal; closing the test channel reclaims the
     // real server handles left behind by that injection.
-    crate::tcp::wait_for_sys_io_metric("net.udp_sockets", |n| n == 0);
+    crate::tcp::wait_for_sys_io_metric("net.udp_sockets", |n| n == 1);
     println!("net_driver::test_udp_binding_invalidation PASS");
 }
 

@@ -7,18 +7,25 @@ use std::{
 };
 
 use gix::tempfile::{AutoRemove, ContainingDirectory, Handle, handle::Writable};
-use gix_transport::client::blocking_io::http::{
-    self as transport_http, GetResponse, Http, PostBodyDataKind, PostResponse,
+use gix_transport::{
+    Service,
+    client::blocking_io::http::{
+        self as transport_http, GetResponse, Http, PostBodyDataKind, PostResponse,
+    },
 };
 
 use crate::{
     cancellation::Cancellation,
     curl,
-    http_request::{Client, MAX_UPLOAD_BYTES, Response},
+    http_request::{self, Client, Response},
     https_url::HttpsUrl,
+    prompt::Credential,
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Asks for the credentials of an origin when its server first answers 401.
+pub type Ask = Box<dyn FnMut(&str) -> crate::Result<Credential> + Send>;
 
 pub struct Adapter {
     client: Arc<Client>,
@@ -26,6 +33,7 @@ pub struct Adapter {
     cancellation: Cancellation,
     redirected_base_url: Option<String>,
     may_follow_redirects: bool,
+    ask: Option<Ask>,
 }
 
 impl Adapter {
@@ -33,6 +41,8 @@ impl Adapter {
         ca_bundle: impl Into<PathBuf>,
         staging: impl Into<PathBuf>,
         response_limit: u64,
+        service: Service,
+        ask: Ask,
         cancellation: Cancellation,
     ) -> io::Result<Adapter> {
         let staging = staging.into();
@@ -41,12 +51,14 @@ impl Adapter {
                 ca_bundle,
                 staging.clone(),
                 response_limit,
+                service,
                 cancellation.clone(),
             )?),
             staging,
             cancellation,
             redirected_base_url: None,
             may_follow_redirects: true,
+            ask: Some(ask),
         })
     }
 
@@ -83,7 +95,7 @@ impl Adapter {
             Upload {
                 file: writer,
                 written: 0,
-                limit: MAX_UPLOAD_BYTES,
+                limit: self.client.upload_limit(),
                 cancellation: self.cancellation.clone(),
                 _guard: guard.clone(),
             },
@@ -106,10 +118,11 @@ impl Http for Adapter {
     ) -> Result<GetResponse<Self::Headers, Self::ResponseBody>, transport_http::Error> {
         let (url, base_url, headers) = self.parse_request(url, base_url, headers)?;
         let follow = std::mem::take(&mut self.may_follow_redirects);
-        let response = self
-            .client
-            .request(url, base_url.clone(), &headers, None, follow)
-            .map_err(http_error)?;
+        let client = &self.client;
+        let response = with_credentials(client, &mut self.ask, &base_url.origin(), || {
+            client.request(url.clone(), base_url.clone(), &headers, None, follow)
+        })
+        .map_err(http_error)?;
         if response.base_url != base_url {
             self.redirected_base_url = Some(response.base_url.as_str().to_owned());
         }
@@ -331,6 +344,40 @@ impl BufRead for Body {
     }
 }
 
+/// Run `request`. If the server answers 401 before this client sent credentials,
+/// ask for them once and run `request` once more with them.
+fn with_credentials<T>(
+    client: &Client,
+    ask: &mut Option<Ask>,
+    origin: &str,
+    mut request: impl FnMut() -> crate::Result<T>,
+) -> crate::Result<T> {
+    match request() {
+        Err(error) if http_request::is_unauthorized(error.as_ref()) && !client.has_credential() => {
+            let Some(mut ask) = ask.take() else {
+                return Err(error);
+            };
+            let credential = ask(origin).map_err(|refusal| unanswered(refusal, error))?;
+            client.set_credential(credential)?;
+            request()
+        }
+        result => result,
+    }
+}
+
+/// Keep the server's 401 as the cause of a question that failed, unless the
+/// user cancelled it.
+fn unanswered(refusal: BoxError, unauthorized: BoxError) -> BoxError {
+    if crate::cancellation::was_cancelled(refusal.as_ref()) {
+        return refusal;
+    }
+    let kind = refusal
+        .downcast_ref::<io::Error>()
+        .map_or(io::ErrorKind::Other, io::Error::kind);
+    let failure = crate::network::Failure::new(refusal.to_string(), unauthorized);
+    io::Error::new(kind, failure).into()
+}
+
 fn header(content_type: String) -> Vec<u8> {
     format!("Content-Type: {content_type}\n").into_bytes()
 }
@@ -365,6 +412,8 @@ mod tests {
             "/unused-test-ca.pem",
             std::env::temp_dir(),
             16,
+            Service::UploadPack,
+            Box::new(|_| panic!("unexpected credential question")),
             cancellation,
         )
         .expect("adapter")
@@ -439,6 +488,80 @@ mod tests {
             panic!("io::Error was not preserved");
         };
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        Ok(())
+    }
+
+    #[test]
+    fn a_401_asks_once_and_repeats_the_request_once() -> crate::Result {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let origin = "https://example.test";
+        let new_client = || {
+            let staging = std::env::temp_dir();
+            Client::new(
+                "/unused-test-ca.pem",
+                staging,
+                16,
+                Service::ReceivePack,
+                Cancellation::new(),
+            )
+        };
+        let unauthorized = || Err::<(), BoxError>(http_request::unauthorized("401".into()).into());
+        let asking = |asked: &Arc<AtomicUsize>| -> Option<Ask> {
+            let asked = asked.clone();
+            Some(Box::new(move |question| {
+                assert_eq!(question, "https://example.test");
+                asked.fetch_add(1, Ordering::Relaxed);
+                Ok(Credential::new("user", "token")?)
+            }))
+        };
+        for accepted in [true, false] {
+            let client = new_client()?;
+            let asked = Arc::new(AtomicUsize::new(0));
+            let mut ask = asking(&asked);
+            let mut requests = 0;
+            let result = with_credentials(&client, &mut ask, origin, || {
+                requests += 1;
+                if requests == 2 && accepted {
+                    Ok(())
+                } else {
+                    unauthorized()
+                }
+            });
+            assert_eq!(result.is_ok(), accepted);
+            assert_eq!((requests, asked.load(Ordering::Relaxed)), (2, 1));
+            assert!(ask.is_none() && client.has_credential());
+        }
+
+        // No question for a local permission error, or once the question was asked.
+        let client = new_client()?;
+        let asked = Arc::new(AtomicUsize::new(0));
+        let mut ask = asking(&asked);
+        let local = with_credentials(&client, &mut ask, origin, || {
+            Err::<(), BoxError>(io::Error::from(io::ErrorKind::PermissionDenied).into())
+        });
+        assert!(local.is_err() && ask.is_some());
+        assert!(with_credentials(&client, &mut None, origin, unauthorized).is_err());
+        assert_eq!(asked.load(Ordering::Relaxed), 0);
+
+        // A question that fails ends the request, keeping the 401 as its cause.
+        let mut ask: Option<Ask> = Some(Box::new(|_| Err(io::Error::other("no terminal").into())));
+        let mut requests = 0;
+        let error = with_credentials(&client, &mut ask, origin, || {
+            requests += 1;
+            unauthorized()
+        })
+        .unwrap_err();
+        assert_eq!((requests, error.to_string().as_str()), (1, "no terminal"));
+        assert_eq!(
+            error.source().map(ToString::to_string).as_deref(),
+            Some("401")
+        );
+        let cancellation = Cancellation::new();
+        cancellation.cancel();
+        let mut ask: Option<Ask> = Some(Box::new(move |_| Err(cancellation.check().unwrap_err())));
+        let error = with_credentials(&client, &mut ask, origin, unauthorized).unwrap_err();
+        assert!(crate::cancellation::was_cancelled(error.as_ref()));
         Ok(())
     }
 }

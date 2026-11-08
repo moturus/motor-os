@@ -1,8 +1,9 @@
 # Imager command reference
 
-`imager` is the host tool in `src/imager` for creating Motor OS disk images,
-changing guest permissions, resizing the data partition, and replacing SSH
-or TLS credentials. It operates on image files while the VM is stopped.
+`imager` is the host tool in `src/imager` for creating Motor OS disk images
+and data filesystems, adding guest directories and files, changing guest
+permissions, resizing the data partition, and replacing SSH or TLS
+credentials. It operates on image files while the VM is stopped.
 
 ## Invocation
 
@@ -10,6 +11,9 @@ or TLS credentials. It operates on image files while the VM is stopped.
 imager <REPO ROOT> debug|release <CONFIG YAML>
 imager <REPO ROOT> debug|release <CONFIG YAML> --raw-output <FILENAME>
 imager chmod <MODE> <IMAGE> <GUEST PATH>
+imager mkdir [--mode <MODE>] <IMAGE> <GUEST PATH>
+imager put [--mode <MODE>] <IMAGE> <HOST FILE> <GUEST PATH>
+imager mkfs --size <SIZE> [--mode <MODE>] <OUTPUT IMAGE>
 imager resize -i <INPUT IMAGE> -o <OUTPUT IMAGE> --size <SIZE>
 imager set [--ssh-user <NAME> | --ssh-new-user <NAME>] --ssh-password <PASSWORD> -i <IMAGE>
 imager set [--ssh-user <NAME> | --ssh-new-user <NAME>] --ssh-key <PUBLIC KEY FILE> -i <IMAGE>
@@ -36,6 +40,7 @@ before using these commands.
 
 Successful commands exit with status 0; errors exit nonzero and report a
 diagnostic. Running without arguments prints usage and exits nonzero.
+`imager --help` prints the same usage to standard output and exits 0.
 
 ## Create an image
 
@@ -153,7 +158,65 @@ This offline command can change sealed entries through the image
 administration API. Raw images are edited directly. Qcow2 images are
 converted to a temporary raw image, edited, converted back, and replaced at
 the original path. The qcow2 result retains the host file's permission mode.
+`IMAGE` holds an MBR with one Motor OS filesystem partition, or a bare
+filesystem made by `mkfs`.
 See [filesystem permissions](fs-permissions.md) for runtime permission rules.
+
+## Add directories and files
+
+```sh
+imager mkdir image.qcow2 /user/data
+imager put image.qcow2 sys-fs.toml /system/cfg/sys-fs.toml
+imager put --mode rwx------ image.qcow2 setup.sh /user/bin/setup.sh
+```
+
+`mkdir` creates one directory whose parent exists and fails if the entry
+exists. `put` creates `GUEST PATH` with the contents of the regular host file,
+replacing an existing file but never a directory; its parent must exist.
+Guest paths follow the `chmod` rules and cannot be `/`.
+
+Without `--mode`, the entry gets the mode the shipped
+[permission policy](fs-permissions.md#imager-enforcement) gives its path, as
+image creation would; for `put` the policy also uses the host file's kind:
+regular, `#!` script, or ELF executable. A replaced file does not keep its
+old mode. `--mode` takes a `chmod` mode that obeys the policy's rules:
+directories grant System `rwx`, only System may execute a regular file, and
+an ELF is executable and writable by no role.
+
+Both commands accept the images `chmod` accepts, raw or qcow2, and update them
+as `set` does: they edit a raw copy next to the image and rename the result
+over the original. Raw copies stay sparse.
+
+## Create a data filesystem
+
+```sh
+imager mkfs --size 10G data.qcow2
+imager mkfs --size 512M --mode rwxr-xr-x data.img
+```
+
+`mkfs` creates an image holding one empty Motor OS filesystem of `SIZE`
+(as for `resize`) without a partition table, for a
+`/system/cfg/sys-fs.toml` mount that omits `partition`
+([fs-permissions.md](fs-permissions.md)). The output suffix chooses qcow2 or
+raw, as for `resize`, and an existing file is never replaced. The
+filesystem root gets `--mode`, or `rwxrwxr-x`, which lets Interactive users
+write; a mount keeps that mode. The image is sparse and readable only by its
+owner; a qcow2 output's raw scratch uses the host temporary directory.
+`mkdir`, `put`, and `chmod` can populate it.
+
+To mount a new 10 GiB disk at `/user/data` in a copy of the standard image
+(`tools/imager` in `vm_images/PROFILE/` is the installed copy):
+
+```sh
+cd vm_images/release
+tools/imager mkfs --size 10G data.qcow2
+cp motor-os.qcow2 my-os.qcow2
+tools/imager mkdir my-os.qcow2 /user/data
+cp ../../img_files/motor-os-base/system/cfg/sys-fs.toml .
+printf '\n[[mount]]\npath = "/user/data"\ntype = "motor-fs"\ndevice = 1\n' >> sys-fs.toml
+tools/imager put my-os.qcow2 sys-fs.toml /system/cfg/sys-fs.toml
+MOTO_IMAGE=my-os.qcow2 ./run-chv.sh --extra-disk data.qcow2
+```
 
 ## Resize the data partition
 

@@ -5768,6 +5768,28 @@ fn the_udp_port_map_is_the_demux() {
     assert_eq!(device.tx_queue.len(), 1);
 }
 
+#[test]
+#[cfg(all(feature = "medium-ethernet", feature = "socket-dhcpv4"))]
+fn dhcp_discovery_with_max_socket_id() {
+    use crate::wire::{DhcpMessageType, DhcpPacket, DhcpRepr};
+
+    let (mut iface, mut sockets, mut device) = setup(Medium::Ethernet);
+    iface.update_ip_addrs(|addresses| addresses.clear());
+    // sys-io reserves the highest ID for the interface's internal DHCP socket.
+    sockets.add(u64::MAX, crate::socket::dhcpv4::Socket::new());
+    iface.poll(Instant::ZERO, &mut device, &mut sockets);
+    assert_eq!(device.tx_queue.len(), 1);
+    let frame = device.tx_queue.pop_front().unwrap();
+    let ethernet = EthernetFrame::new_checked(&frame).unwrap();
+    let ip = Ipv4Packet::new_checked(ethernet.payload()).unwrap();
+    let udp = UdpPacket::new_checked(ip.payload()).unwrap();
+    let packet = DhcpPacket::new_checked(udp.payload()).unwrap();
+    let dhcp = DhcpRepr::parse(&packet).unwrap();
+    assert_eq!(udp.src_port(), 68);
+    assert_eq!(udp.dst_port(), 67);
+    assert_eq!(dhcp.message_type, DhcpMessageType::Discover);
+}
+
 /// Egress service rotates. A pass starts where the device last refused a
 /// socket -- that socket goes first -- and a completed pass moves its lead,
 /// so a TX ring smaller than the ready set spreads across every socket

@@ -44,9 +44,17 @@ async fn open_fs(tag: &str) -> Result<MotorFs> {
     MotorFs::open(Box::new(bd)).await
 }
 
+#[derive(Default)]
+struct DeviceState {
+    fail_flush: Cell<bool>,
+    fail_write: Cell<bool>,
+    writes: Cell<usize>,
+    flushes: Cell<usize>,
+}
+
 struct FlushErrorBlockDevice {
     inner: AsyncFileBlockDevice,
-    fail_flush: Rc<Cell<bool>>,
+    state: Rc<DeviceState>,
 }
 
 #[async_trait::async_trait(?Send)]
@@ -70,6 +78,10 @@ impl AsyncBlockDevice for FlushErrorBlockDevice {
         block_no: u64,
         block: T,
     ) -> (T, Result<()>) {
+        self.state.writes.set(self.state.writes.get() + 1);
+        if self.state.fail_write.get() {
+            return (block, Err(ErrorKind::Other.into()));
+        }
         self.inner.write_block(block_no, block).await
     }
 
@@ -78,13 +90,20 @@ impl AsyncBlockDevice for FlushErrorBlockDevice {
         first_block_no: u64,
         blocks: Vec<moto_sdk::async_fs::block_cache::CheckpointedBlock>,
     ) -> Result<Self::Completion> {
+        self.state
+            .writes
+            .set(self.state.writes.get() + blocks.len());
+        if self.state.fail_write.get() {
+            return Err(ErrorKind::Other.into());
+        }
         self.inner
             .write_blocks_with_completion(first_block_no, blocks)
             .await
     }
 
     async fn flush(&self) -> Result<()> {
-        if self.fail_flush.get() {
+        self.state.flushes.set(self.state.flushes.get() + 1);
+        if self.state.fail_flush.get() {
             Err(ErrorKind::Other.into())
         } else {
             self.inner.flush().await
@@ -158,6 +177,99 @@ fn flush_covers_timed_out_batch() {
     let rt = tokio::runtime::LocalRuntime::new().unwrap();
 
     rt.block_on(flush_covers_timed_out_batch_test()).unwrap();
+}
+
+#[test]
+fn recovery_policy_and_completion() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+    rt.block_on(async {
+        use crate::RecoveryPolicy::{Recover, RequireClean};
+        use std::io::Read;
+
+        let tag = "motor_fs_recovery_policy_test";
+        let path = Utf8PathBuf::from_path_buf(std::env::temp_dir().join(tag)).unwrap();
+        let mut fs = create_fs(tag, 1024).await?;
+        fs.flush().await?;
+        let mut old_main = [0; 2 * moto_sdk::async_fs::BLOCK_SIZE];
+        std::fs::File::open(&path)?.read_exact(&mut old_main)?;
+        fs.create_entry(
+            Role::System,
+            crate::ROOT_DIR_ID,
+            EntryKind::Directory,
+            "recovered",
+            RolePermissions::all(AccessPermissions::Rwx),
+        )
+        .await?;
+        fs.flush().await?;
+        drop(fs);
+
+        // Restore the old main superblock and root while retaining the committed
+        // journal. Each attempt starts at the same recovery boundary.
+        for (policy, fail_write, fail_flush) in [
+            (RequireClean, false, false),
+            (Recover, true, false),
+            (Recover, false, true),
+            (Recover, false, false),
+        ] {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)?
+                .write_all(&old_main)?;
+            let state = Rc::new(DeviceState::default());
+            state.fail_write.set(fail_write);
+            state.fail_flush.set(fail_flush);
+            let device = FlushErrorBlockDevice {
+                inner: AsyncFileBlockDevice::open(&path).await?,
+                state: state.clone(),
+            };
+            let result =
+                crate::MotorFs::open_with_recovery_policy(Box::new(device), 256, policy).await;
+            if policy == RequireClean {
+                let error = result.err().expect("dirty journal accepted");
+                assert_eq!(error.kind(), ErrorKind::InvalidData);
+                assert!(error.to_string().contains("recovery required"));
+                assert_eq!(state.writes.get(), 0);
+                assert_eq!(state.flushes.get(), 0);
+            } else if fail_write || fail_flush {
+                assert!(result.is_err(), "open completed before recovery failed");
+                assert!(state.writes.get() > 0);
+                if fail_flush {
+                    assert!(state.flushes.get() > 0);
+                }
+            } else {
+                let fs = result?;
+                assert!(fs.replayed_txn_log_on_open());
+                assert!(state.writes.get() > 0);
+                assert!(state.flushes.get() > 0);
+                assert!(
+                    fs.stat(Role::System, crate::ROOT_DIR_ID, "recovered")
+                        .await?
+                        .is_some()
+                );
+            }
+        }
+
+        // Recovery was durable when open returned; a clean read-only reopen has
+        // neither write submissions nor a flush, and sees the recovered entry.
+        let state = Rc::new(DeviceState::default());
+        let device = FlushErrorBlockDevice {
+            inner: AsyncFileBlockDevice::open(&path).await?,
+            state: state.clone(),
+        };
+        let fs =
+            crate::MotorFs::open_with_recovery_policy(Box::new(device), 256, RequireClean).await?;
+        assert!(!fs.replayed_txn_log_on_open());
+        assert!(
+            fs.stat(Role::System, crate::ROOT_DIR_ID, "recovered")
+                .await?
+                .is_some()
+        );
+        assert_eq!(state.writes.get(), 0);
+        assert_eq!(state.flushes.get(), 0);
+        Ok::<(), std::io::Error>(())
+    })
+    .unwrap();
 }
 
 #[test]
@@ -362,10 +474,10 @@ async fn flush_error_test() -> Result<()> {
     std::fs::remove_file(path.clone()).ok();
 
     let inner = AsyncFileBlockDevice::create(&path, NUM_BLOCKS).await?;
-    let fail_flush = Rc::new(Cell::new(false));
+    let state = Rc::new(DeviceState::default());
     let block_device = FlushErrorBlockDevice {
         inner,
-        fail_flush: fail_flush.clone(),
+        state: state.clone(),
     };
     let mut fs = crate::MotorFs::format(Box::new(block_device)).await?;
     fs.create_entry(
@@ -377,7 +489,7 @@ async fn flush_error_test() -> Result<()> {
     )
     .await?;
 
-    fail_flush.set(true);
+    state.fail_flush.set(true);
     assert_eq!(ErrorKind::Other, fs.flush().await.unwrap_err().kind());
     Ok(())
 }
@@ -4635,4 +4747,44 @@ fn lookup_unchecked() {
     init_logger();
     let rt = tokio::runtime::LocalRuntime::new().unwrap();
     rt.block_on(lookup_unchecked_test()).unwrap();
+}
+
+#[test]
+fn superblock_header_validation() {
+    use std::io::{Read, Seek, SeekFrom};
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+    rt.block_on(async {
+        const TAG: &str = "motor_fs_superblock_header_validation";
+        let mut fs = create_fs(TAG, 1024).await?;
+        fs.flush().await?;
+        drop(fs);
+        let path = std::env::temp_dir().join(TAG);
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        let mut original = [0; 24];
+        file.read_exact(&mut original)?;
+        assert!(crate::has_superblock_magic(&original));
+        assert!(!crate::has_superblock_magic(&original[..7]));
+        for (offset, value) in [(0, crate::MAGIC ^ 1), (8, 2), (16, 1023), (16, 1025)] {
+            let mut bad = original;
+            bad[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+            file.seek(SeekFrom::Start(0))?;
+            file.write_all(&bad)?;
+            assert!(
+                matches!(open_fs(TAG).await, Err(error) if error.kind() == ErrorKind::InvalidData)
+            );
+        }
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(&original)?;
+        drop(open_fs(TAG).await?);
+        // Extending the backing file must not silently move the journal.
+        file.set_len(1025 * 4096)?;
+        assert!(matches!(open_fs(TAG).await, Err(error) if error.kind() == ErrorKind::InvalidData));
+        drop(file);
+        std::fs::remove_file(path)?;
+        Ok::<(), std::io::Error>(())
+    })
+    .unwrap();
 }

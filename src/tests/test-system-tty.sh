@@ -171,6 +171,10 @@ scp -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
   motor@192.168.4.2:/none/tmp/capability-systest
 run_console /user/tmp/capability-mode-done \
   'chmod r-xr-xr-x /none/tmp/capability-systest'
+run_console /user/tmp/findmnt-done \
+  'MOTOR_OS_CAPS=0x205 /none/tmp/capability-systest findmnt > /user/tmp/findmnt.log; echo $? > /user/tmp/findmnt.status'
+test "$(ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 'cat /user/tmp/findmnt.status')" = 0 ||
+  fail "System findmnt tests failed"
 # CAP_SYS does not substitute for the sys-io bits: a System parent without
 # CAP_NET cannot grant it, a System child without CAP_FS_WRITE is refused
 # writes, and the System process itself is refused network access.

@@ -21,8 +21,8 @@ Everything else is unprotected. Protection is not inherited further: a
 great-grandchild of sys-io is unprotected unless it has the System role.
 Parentage is the actual one, also for a spawn that sys-io performs on
 another process's behalf. In the shipped image the protected set is sys-io,
-sys-init and strobe (System), sys-tty and russhd (Interactive) and
-dns-resolver (None). Every program a user starts is a great-grandchild of
+sys-init and strobe (System), and sys-tty, russhd and dns-resolver (Interactive).
+Every program a user starts is a great-grandchild of
 sys-io and can be killed.
 
 Protected processes are never chosen as OOM victims and allocate under the

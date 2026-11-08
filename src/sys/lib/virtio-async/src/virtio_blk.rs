@@ -46,6 +46,14 @@ const VIRTIO_BLK_F_RO: u64 = 1u64 << 5;
 // const VIRTIO_BLK_F_CONFIG_WCE: u64 = 1u64 << 11;
 const VIRTIO_BLK_F_FLUSH: u64 = 1u64 << 9;
 
+pub fn select_block_features(offered: u64) -> Result<u64> {
+    let version = super::virtio_device::VIRTIO_F_VERSION_1;
+    if offered & version == 0 {
+        return Err(ErrorKind::Unsupported.into());
+    }
+    Ok(offered & (version | VIRTIO_BLK_F_SEG_MAX | VIRTIO_BLK_F_RO | VIRTIO_BLK_F_FLUSH))
+}
+
 pub(crate) fn effective_seg_max(queue_size: u16, offered: usize) -> Result<usize> {
     let half_queue = usize::from(queue_size) / 2;
     if half_queue <= 2 {
@@ -81,6 +89,10 @@ impl BlockDevice {
     /// The number of sectors (512 bytes) the device has.
     pub fn capacity(&self) -> u64 {
         self.capacity
+    }
+
+    pub fn read_only(&self) -> bool {
+        self.read_only
     }
 
     /// The maximum number of data descriptors (segments) per request.
@@ -247,17 +259,13 @@ impl BlockDevice {
             return Err(ErrorKind::Other.into());
         }
 
-        let mut features_acked = super::virtio_device::VIRTIO_F_VERSION_1;
+        let features_acked = select_block_features(features_available)?;
         if (features_available & VIRTIO_BLK_F_FLUSH) == 0 {
             log::debug!("VirtioBLK: VIRTIO_BLK_F_FLUSH feature is not available");
-        } else {
-            features_acked |= VIRTIO_BLK_F_FLUSH;
         }
 
         let seg_max_offered = (features_available & VIRTIO_BLK_F_SEG_MAX) != 0;
-        if seg_max_offered {
-            features_acked |= VIRTIO_BLK_F_SEG_MAX;
-        } else {
+        if !seg_max_offered {
             // Without the feature the device may support only a single data
             // descriptor per request (Firecracker does exactly that).
             log::debug!(
@@ -280,9 +288,6 @@ impl BlockDevice {
         }
         */
 
-        // | VIRTIO_BLK_F_RO;
-        // (VIRTIO_F_VERSION_1 | VIRTIO_BLK_F_SIZE_MAX | VIRTIO_BLK_F_SEG_MAX | VIRTIO_BLK_F_RO | VIRTIO_BLK_F_BLK_SIZE);
-        //  | VIRTIO_BLK_F_RO);
         dev.write_enabled_features(features_acked);
         dev.confirm_features()?;
         dev.virtio_features_negotiated = features_acked;

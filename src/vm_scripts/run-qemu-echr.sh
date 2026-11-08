@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 #
 # run-qemu.sh, but with qemu's console-escape character moved off Ctrl-A.
 #
@@ -18,4 +18,11 @@ vm_parse_options "$@"
 shift "$VM_ARGS_SHIFT"
 export MOTO_SMP="$SMP" MOTO_MEMORY_MIB="$MEMORY_MIB"
 
-exec "$WD/run-qemu.sh" -- -echr 0x14 "$@"
+DISK_OPTIONS=()
+[ "$VM_ROOT_READ_ONLY" != on ] || DISK_OPTIONS+=(--root-read-only)
+for DISK in $VM_DISKS; do
+  OPTION=--extra-disk
+  [ "${DISK#*:}" != on ] || OPTION=--extra-disk-ro
+  DISK_OPTIONS+=("$OPTION" "${DISK%:*}")
+done
+exec "$WD/run-qemu.sh" "${DISK_OPTIONS[@]}" -- -echr 0x14 "$@"

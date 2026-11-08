@@ -73,7 +73,7 @@ mod tests {
         let mut screen = screen::Screen::new();
         let mut bytes = paint(&mut screen, "-- copy mode -- [0/28]");
         bytes.extend(paint(&mut screen, "-- copy mode -- [28/28]"));
-        bytes.extend(paint(&mut screen, "[0] 0:rush*"));
+        bytes.extend(paint(&mut screen, "[0]  0:rush"));
         let raw = String::from_utf8_lossy(&bytes);
         assert!(raw.contains("copy mode -- [0/28]"));
         assert!(!raw.contains("copy mode -- [28/28]"));
@@ -92,7 +92,7 @@ mod tests {
             Some("copy mode -- [0/28]")
         );
         bytes.extend(paint(&mut screen, "-- copy mode -- [7/28]"));
-        bytes.extend(paint(&mut screen, "[0] 0:rush*"));
+        bytes.extend(paint(&mut screen, "[0]  0:rush"));
         assert_eq!(
             latest_indicator(&bytes).as_deref(),
             Some("copy mode -- [7/28]")
@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn debug_output_after_the_counter_does_not_hide_copy_mode() {
         let mut screen = screen::Screen::new();
-        let mut bytes = paint(&mut screen, "[0] 0:rush*");
+        let mut bytes = paint(&mut screen, "[0]  0:rush");
         // An out-of-band diagnostic paints cells Screen does not know about.
         bytes.extend_from_slice(b"\x1b[24;1H322:245: DEBUG: incoming msg TcpStreamRx");
         bytes.extend(paint(&mut screen, "-- copy mode -- [28/28]"));

@@ -39,14 +39,17 @@ use std::sync::mpsc::channel;
 use std::time::Duration;
 use std::time::Instant;
 
-use crossterm::event::DisableBracketedPaste;
 use crossterm::event::EnableBracketedPaste;
 use crossterm::event::Event;
 use crossterm::event::KeyEventKind;
+use crossterm::event::KeyboardEnhancementFlags;
+use crossterm::event::PopKeyboardEnhancementFlags;
+use crossterm::event::PushKeyboardEnhancementFlags;
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
 use crossterm::terminal::disable_raw_mode;
 use crossterm::terminal::enable_raw_mode;
+use crossterm::terminal::is_raw_mode_enabled;
 use crossterm::{cursor, execute};
 
 use crate::keys::Key;
@@ -104,6 +107,10 @@ const ATTEMPTS: usize = 2;
 
 enum Local {
     Key(Key),
+    /// Text the console marked as pasted (§7.6). Not keys: nothing in a paste
+    /// is looked up in a table, and the newlines in it are text rather than
+    /// Enter.
+    Paste(String),
     /// The console is a different shape: rows, then columns.
     Resized(u16, u16),
     ConsoleEof,
@@ -226,26 +233,39 @@ fn settle_size(fallback: (u16, u16), queue: &Receiver<Local>) -> ((u16, u16), Ve
 }
 
 /// Take the console over: raw mode, the alternate screen so that leaving
-/// restores whatever the user was looking at, and bracketed paste off — as red
-/// does, because the server is the thing interpreting keys now. A pane that
-/// wants `?2004h` gets it inside its own emulator (§7.6); this is rmux's own
-/// console.
+/// restores whatever the user was looking at, and bracketed paste on.
+///
+/// The markers are what make a paste a paste (§7.6): unmarked, a multi-line
+/// paste arrives as the keys it looks like and the first newline in it ends the
+/// line before, so a full-screen program in a pane saw it a line at a time
+/// rather than whole. A pane's own `?2004h` is answered by rmux's emulator,
+/// which is where the markers *round* the text come from.
 fn enter_console() -> std::io::Result<()> {
     crossterm::event::enable_ctrl_c_events()?;
     enable_raw_mode()?;
     execute!(
         std::io::stdout(),
         EnterAlternateScreen,
-        DisableBracketedPaste
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+        EnableBracketedPaste
     )
 }
 
 /// Give back everything [`enter_console`] took.
+///
+/// Bracketed paste goes back *on* rather than off: what rmux interrupted was a
+/// shell that had asked for it, and a paste that arrives unmarked anywhere is
+/// the same bug in a new place.
 fn leave_console() {
+    // The relay can restore before reporting an error, then run restores again.
+    if !is_raw_mode_enabled().unwrap_or(false) {
+        return;
+    }
     let _ = execute!(
         std::io::stdout(),
         cursor::Show,
         EnableBracketedPaste,
+        PopKeyboardEnhancementFlags,
         LeaveAlternateScreen
     );
     let _ = disable_raw_mode();
@@ -280,6 +300,7 @@ fn relay(
 
         match event {
             Local::Key(key) => send(server, &ToServer::Key(key))?,
+            Local::Paste(text) => pasted(server, &text)?,
             Local::Resized(rows, cols) => {
                 if (rows, cols) != known {
                     known = (rows, cols);
@@ -390,6 +411,22 @@ fn send(server: &mut impl Write, message: &ToServer) -> std::io::Result<()> {
     server.flush()
 }
 
+/// Relay one paste, as a paste rather than as the keys it would have been typed
+/// with (§7.6).
+///
+/// The console marked where it began and ended, and the server needs to know:
+/// a pane whose program asked for bracketed paste wants one pair of markers
+/// round the whole of it, and a mode — a rename prompt, copy mode — owns it as
+/// it owns every other key. So it goes as three messages rather than one, and
+/// in as many frames as its length needs ([`proto::paste_chunks`]).
+fn pasted(server: &mut impl Write, text: &str) -> std::io::Result<()> {
+    send(server, &ToServer::PasteStart)?;
+    for piece in proto::paste_chunks(text) {
+        send(server, &ToServer::PasteText(piece.to_owned()))?;
+    }
+    send(server, &ToServer::PasteEnd)
+}
+
 /// Read the server for as long as it has anything to say.
 ///
 /// `frames` is where [`first_words`] left off: whatever it read past the
@@ -434,6 +471,10 @@ fn read_console(events: Sender<Local>) {
                     None => continue,
                 }
             }
+            // A paste the console marked: text for the pane, in the console's
+            // own bytes, and the one thing here that is not decoded and
+            // re-encoded — a paste was never typed (§7.6).
+            Event::Paste(text) => Local::Paste(text),
             Event::Resize(cols, rows) => Local::Resized(rows, cols),
             _ => continue,
         };

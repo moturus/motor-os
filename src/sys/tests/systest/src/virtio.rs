@@ -1,6 +1,7 @@
 pub fn run_tests() {
     virtio_async::test_descriptor_waiters();
     test_virtio_cap_metadata();
+    test_block_features();
     test_vsock_discovery_features();
     test_vsock_wire();
     for kind in ["block", "network"] {
@@ -82,6 +83,25 @@ pub fn run_tests() {
         );
     }
     println!("virtio descriptor tests PASS");
+}
+
+fn test_block_features() {
+    use virtio_async::virtio_test_support::select_block_features;
+    const VERSION: u64 = 1 << 32;
+    const RO: u64 = 1 << 5;
+    const SEG_MAX: u64 = 1 << 2;
+    const FLUSH: u64 = 1 << 9;
+    assert!(select_block_features(!VERSION).is_err());
+    for optional in [0, RO, SEG_MAX, FLUSH, RO | SEG_MAX | FLUSH] {
+        assert_eq!(
+            select_block_features(VERSION | optional).unwrap(),
+            VERSION | optional
+        );
+    }
+    assert_eq!(
+        select_block_features(u64::MAX).unwrap(),
+        VERSION | RO | SEG_MAX | FLUSH
+    );
 }
 
 fn test_virtio_cap_metadata() {

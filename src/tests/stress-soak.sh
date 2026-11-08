@@ -344,7 +344,7 @@ gate_udp_socket_count() {
     if output="$(vssh_n /system/bin/stats get 2 2>&1)"; then
       count="$(printf '%s\n' "$output" |
         awk '$2 == "net.udp_sockets" { print $3 }')"
-      [ "$count" = 0 ] && { GATE_UDP_SOCKET_COUNT=0; return; }
+      [ "$count" = 1 ] && { GATE_UDP_SOCKET_COUNT=1; return; }
       [ -z "$count" ] || last_count="$count"
     fi
     sleep 0.1
@@ -371,8 +371,8 @@ gate_ssh 60 "DNS resolver self-test" /system/services/dns-resolver --self-test
 gate_ping_external google.com
 gate_expect_ping_error does-not-exist.motor.invalid NotFound
 gate_udp_socket_count
-[ "$GATE_UDP_SOCKET_COUNT" = 0 ] ||
-  gate_fail "DNS tests left $GATE_UDP_SOCKET_COUNT UDP socket(s)"
+[ "$GATE_UDP_SOCKET_COUNT" = 1 ] ||
+  gate_fail "DNS tests left $GATE_UDP_SOCKET_COUNT UDP socket(s), expected one DNS listener"
 
 resolver_pid="$(vssh_n /system/bin/ps |
   awk '$NF == "/system/services/dns-resolver" { gsub(/[+*?]/, "", $1); print $1; exit }')"
@@ -381,7 +381,7 @@ gate_ssh 30 "stop DNS resolver" "/system/bin/rush -c 'kill $resolver_pid'"
 gate_ssh 30 "numeric ping without DNS" /system/bin/ping -c 1 127.0.0.1
 gate_wait_for_ping_error google.com NotConnected
 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
-  MOTOR_OS_CAPS=0x108 /system/services/dns-resolver \
+  MOTOR_OS_CAPS=0x148 /system/services/dns-resolver \
   >>"$GATE_LOG" 2>&1 &
 DNS_RESOLVER_SSH_PID=$!
 resolver_restarted=0
@@ -395,8 +395,8 @@ done
 [ "$resolver_restarted" = 1 ] || gate_fail "dns-resolver did not restart"
 gate_ping_external google.com
 gate_udp_socket_count
-[ "$GATE_UDP_SOCKET_COUNT" = 0 ] ||
-  gate_fail "restarted DNS left $GATE_UDP_SOCKET_COUNT UDP socket(s)"
+[ "$GATE_UDP_SOCKET_COUNT" = 1 ] ||
+  gate_fail "restarted DNS left $GATE_UDP_SOCKET_COUNT UDP socket(s), expected one DNS listener"
 
 log "VM gate: systest"
 run_timeout 900 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \

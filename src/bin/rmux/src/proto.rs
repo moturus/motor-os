@@ -53,6 +53,39 @@ pub trait Message: Sized {
 /// length is an allocation the size of whatever those bytes said.
 const MAX_PAYLOAD: usize = 1 << 20;
 
+/// How much of a paste one frame carries.
+///
+/// A paste is text with no length of its own (§7.6), and `MAX_PAYLOAD` is a
+/// bound rather than a suggestion, so the client cuts a long one into pieces
+/// each of which is a frame. Well under the bound on purpose: the pieces are
+/// what the pane's writer thread is handed, and nothing needs a frame as big as
+/// a bound allows one to be.
+pub const PASTE_CHUNK: usize = 1 << 15;
+
+/// `text` in pieces no longer than [`PASTE_CHUNK`], cut between characters.
+///
+/// The cut is the client's because the paste is: crossterm hands it over whole,
+/// and a paste longer than a frame has to be split to be sent at all. An empty
+/// paste is no pieces — its markers still go, which is what a console sending
+/// `ESC[200~ ESC[201~` means.
+pub fn paste_chunks(text: &str) -> Vec<&str> {
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    let mut len = 0;
+    for (at, character) in text.char_indices() {
+        if len > 0 && len + character.len_utf8() > PASTE_CHUNK {
+            pieces.push(&text[start..at]);
+            start = at;
+            len = 0;
+        }
+        len += character.len_utf8();
+    }
+    if start < text.len() {
+        pieces.push(&text[start..]);
+    }
+    pieces
+}
+
 /// Client to server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToServer {
@@ -79,6 +112,20 @@ pub enum ToServer {
     /// pane is given for it is [`crate::keys::Key::encode`], on the server,
     /// where the pane is.
     Key(crate::keys::Key),
+    /// A paste began at the console (§7.6).
+    ///
+    /// Everything up to [`ToServer::PasteEnd`] is text for the pane rather than
+    /// keys for the tables: a paste is not typed, so nothing in it is looked up
+    /// in a binding, and it is *one* paste however many frames it takes to
+    /// carry, so the markers a pane asked for go round the whole of it.
+    PasteStart,
+    /// A piece of the paste that began with [`ToServer::PasteStart`].
+    ///
+    /// In pieces because a frame has a bound (`MAX_PAYLOAD`) and a paste does
+    /// not; the client cuts a long one up ([`paste_chunks`]).
+    PasteText(String),
+    /// The paste is over.
+    PasteEnd,
     /// This client's console is a different shape now.
     Resize { rows: u16, cols: u16 },
     /// This client's console has no more input, so a shell reading a script
@@ -127,6 +174,9 @@ const LIST: u8 = 6;
 const KILL: u8 = 7;
 const NEW_SESSION: u8 = 8;
 const ATTACH_DETACH_OTHERS: u8 = 9;
+const PASTE_START: u8 = 10;
+const PASTE_TEXT: u8 = 11;
+const PASTE_END: u8 = 12;
 
 const WRITE: u8 = 65;
 const EXIT: u8 = 66;
@@ -145,6 +195,9 @@ impl Message for ToServer {
             ToServer::Attach { .. } => ATTACH,
             ToServer::NewSession { .. } => NEW_SESSION,
             ToServer::Key(_) => KEY,
+            ToServer::PasteStart => PASTE_START,
+            ToServer::PasteText(_) => PASTE_TEXT,
+            ToServer::PasteEnd => PASTE_END,
             ToServer::Resize { .. } => RESIZE,
             ToServer::EndInput => END_INPUT,
             ToServer::Detach => DETACH,
@@ -171,11 +224,16 @@ impl Message for ToServer {
                 put_str(session.as_deref().unwrap_or(""), out);
             }
             ToServer::Key(key) => put_key(*key, out),
+            ToServer::PasteText(text) => out.extend_from_slice(text.as_bytes()),
             ToServer::Resize { rows, cols } => {
                 put_u16(*rows, out);
                 put_u16(*cols, out);
             }
-            ToServer::EndInput | ToServer::Detach | ToServer::List => {}
+            ToServer::PasteStart
+            | ToServer::PasteEnd
+            | ToServer::EndInput
+            | ToServer::Detach
+            | ToServer::List => {}
             ToServer::Kill(name) => put_str(name, out),
         }
     }
@@ -206,6 +264,9 @@ impl Message for ToServer {
                 }
             }
             KEY => ToServer::Key(take_key(payload)?),
+            PASTE_START => ToServer::PasteStart,
+            PASTE_TEXT => ToServer::PasteText(String::from_utf8(payload.to_vec()).ok()?),
+            PASTE_END => ToServer::PasteEnd,
             RESIZE => ToServer::Resize {
                 rows: take_u16(payload, 0)?,
                 cols: take_u16(payload, 2)?,
@@ -449,6 +510,10 @@ mod tests {
             )),
             ToServer::Key(crate::keys::Key::plain(crate::keys::Code::Char('日'))),
             ToServer::Key(crate::keys::Key::plain(crate::keys::Code::F(12))),
+            ToServer::PasteStart,
+            ToServer::PasteText("one\ntwo\t日本".into()),
+            ToServer::PasteText(String::new()),
+            ToServer::PasteEnd,
             ToServer::Resize { rows: 1, cols: 1 },
             ToServer::EndInput,
             ToServer::Detach,
@@ -471,6 +536,26 @@ mod tests {
         for reply in replies {
             assert_eq!(round_trip(reply.clone(), usize::MAX), reply);
         }
+    }
+
+    #[test]
+    fn a_paste_is_cut_into_pieces_that_fit_a_frame() {
+        assert!(PASTE_CHUNK < MAX_PAYLOAD);
+        assert!(paste_chunks("").is_empty());
+        assert_eq!(paste_chunks("one\ntwo"), vec!["one\ntwo"]);
+
+        // Cut between characters, and round-tripped by joining: a wide
+        // character cannot be split down the middle of its encoding.
+        let text = "日本".repeat(PASTE_CHUNK);
+        let pieces = paste_chunks(&text);
+        assert!(pieces.len() > 1);
+        assert!(pieces.iter().all(|piece| piece.len() <= PASTE_CHUNK));
+        assert!(
+            pieces
+                .iter()
+                .all(|piece| piece.chars().all(|c| c == '日' || c == '本'))
+        );
+        assert_eq!(pieces.concat(), text);
     }
 
     #[test]

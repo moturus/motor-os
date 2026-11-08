@@ -346,6 +346,34 @@ fn rotation_and_space_cleanup(slot: &str) {
     println!("logging::rotation_and_space_cleanup test PASS");
 }
 
+pub fn read_only_root_rotation() {
+    let root = moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+        FsClient::connect()
+            .unwrap()
+            .mounts()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|mount| mount.id == 0)
+            .unwrap()
+    });
+    assert!(root.cap.unwrap() - root.used.unwrap() > MIN_LOG_AVAILABLE_BYTES);
+    let tag = "ro-mount-rotation";
+    let path = log_path(tag);
+    // First connection rotates an existing log. The logs mount is only 16 MiB,
+    // so reclaim must use its space even though root still has free blocks.
+    std::fs::write(&path, vec![b'x'; LOG_FILE_MAX_BYTES as usize]).unwrap();
+    let (mut conn, tag_id) = connected_tag(tag);
+    let marker = "rotation on the logs mount".to_owned();
+    prepare_log(&mut conn, tag_id, marker.as_bytes());
+    assert_eq!(rpc_result(&mut conn), moto_rt::E_OK);
+    wait_for_records(&path, &[marker]);
+    assert!(!std::fs::exists(format!("{path}.prev")).unwrap());
+    assert!(std::fs::metadata(&path).unwrap().len() < LOG_FILE_MAX_BYTES);
+    assert_permissions(&path, LOG_FILE_PERMISSIONS);
+    println!("block mounts: log rotation PASS");
+}
+
 fn basic(slot: &str) {
     let path = log_path(slot);
     moto_sdk::log::init(slot).unwrap();

@@ -491,8 +491,9 @@ ordinary descendants of an Interactive process, but every explicit
    `img_files/motor-os/system/cfg/sys-init.cfg` and
    `img_files/motor-os-base/system/cfg/sys-init.cfg` grant russhd decimal mask
    `1020` (`252 | CAP_NET | CAP_FS_WRITE`): it serves SSH and writes files for
-   SFTP. dns-resolver (`svc:264`, `CAP_LOG | CAP_NET`) stays role None and
-   cannot modify the filesystem. sys-init launches strobe separately with
+   SFTP. dns-resolver (`svc:328`, `CAP_LOG | CAP_NET | CAP_INTERACTIVE`) runs
+   as Interactive to read `/system/tmp/sys-io/dhcp.toml`; it has no filesystem
+   write capability. sys-init launches strobe separately with
    `CAP_SYS | CAP_LOG | CAP_FS_WRITE` and no network access; this makes strobe
    the only process that writes and rotates `/system/logs` while leaving its
    public stats-registry channel available to lower roles.

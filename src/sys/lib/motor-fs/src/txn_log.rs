@@ -302,10 +302,12 @@ impl TxnLogger {
     #[allow(clippy::await_holding_refcell_ref)]
     pub(crate) async fn open<BD: AsyncBlockDevice + 'static>(
         block_cache: &mut BlockCache<BD>,
+        recovery: crate::RecoveryPolicy,
     ) -> Result<Self> {
         let sb_block = block_cache.get_block(0).await?;
         let superblock_ref = sb_block.block();
         let superblock = superblock_ref.get_at_offset::<Superblock>(0);
+        superblock.validate(block_cache.total_blocks())?;
         let last_checkpointed_txn_id = superblock.txn_log_data.txn_id;
         drop(superblock_ref);
 
@@ -320,7 +322,10 @@ impl TxnLogger {
             replayed_log_on_open: false,
         };
 
-        this.replay_txn_log_if_needed(block_cache).await?;
+        this.replay_txn_log_if_needed(block_cache, recovery).await?;
+        if this.replayed_log_on_open {
+            this.flush().await?;
+        }
 
         Ok(this)
     }
@@ -329,6 +334,7 @@ impl TxnLogger {
     async fn replay_txn_log_if_needed<BD: AsyncBlockDevice + 'static>(
         &mut self,
         block_cache: &mut BlockCache<BD>,
+        recovery: crate::RecoveryPolicy,
     ) -> Result<()> {
         let txn_log_start = Self::txn_log_start(&self.block_cache_stub);
         let sb_main = block_cache.get_block(0).await?;
@@ -352,6 +358,13 @@ impl TxnLogger {
                 "Motor FS: corrupted TXN log:\n\tmain txn id {main_txn_id} vs last logged txn id {last_logged_txn_id}."
             );
             return Err(ErrorKind::InvalidData.into());
+        }
+
+        if recovery == crate::RecoveryPolicy::RequireClean {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                "Motor FS journal recovery required on read-only backing",
+            ));
         }
 
         // The last TXN was committed to the txn log, but not to the main block area.

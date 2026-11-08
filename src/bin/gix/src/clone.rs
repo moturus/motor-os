@@ -136,6 +136,7 @@ fn clone_created(
         let opened = repository::OpenedRepository {
             repo,
             command_policy,
+            prefix: Default::default(),
         };
         let state = checkout::initial(&opened, cancellation)?;
         cancellation.check()?;

@@ -28,6 +28,13 @@ pub enum VirtioDeviceKind {
     Rng,
 }
 
+/// A discovered function retains its identity even when its transport is invalid.
+pub struct DiscoveredDevice {
+    pub pci_address: (u8, u8, u8),
+    pub kind: VirtioDeviceKind,
+    pub device: Result<VirtioDevice>,
+}
+
 impl VirtioDeviceKind {
     pub(crate) fn from_device_id(device_id: u16) -> Self {
         match device_id {
@@ -220,16 +227,8 @@ impl VirtioDevice {
     //   step 6 re-read dev status to ensure FEATURES_OK
     //   step 7 generic init of virtqueues
     //   step 8 confirm drive ok
-    fn parse(device_id: PciDeviceID) -> Result<Self> {
+    fn parse(device_id: PciDeviceID, kind: VirtioDeviceKind) -> Result<Self> {
         // Step 0: init.
-        if device_id.vendor_id() != 0x1af4 {
-            log::debug!(
-                "\n\tSkipping non-VirtIO device_id with vendor 0x{:x}",
-                device_id.vendor_id()
-            );
-            return Err(ErrorKind::Unsupported.into());
-        }
-
         if device_id.header_type() & 0x7F != 0 {
             log::warn!(
                 "\n\tSkipping VirtIO device_id with wrong header type {}",
@@ -238,7 +237,6 @@ impl VirtioDevice {
             return Err(ErrorKind::InvalidData.into());
         }
 
-        let kind = VirtioDeviceKind::from_device_id(device_id.device_id());
         if let VirtioDeviceKind::Unknown(x) = kind {
             log::warn!("Skipping VirtIO device_id with unknown device_id id 0x{x:x}");
             return Err(ErrorKind::Unsupported.into());
@@ -844,7 +842,7 @@ pub(super) fn mapper() -> &'static dyn super::KernelAdapter {
 
 pub fn discover_virtio_devices(
     mapper: &'static dyn super::KernelAdapter,
-) -> std::io::Result<Vec<VirtioDevice>> {
+) -> std::io::Result<Vec<DiscoveredDevice>> {
     static ONCE: AtomicBool = AtomicBool::new(false);
     assert!(
         ONCE.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -857,9 +855,15 @@ pub fn discover_virtio_devices(
     let mut devices = vec![];
 
     for dev in &pci_devices {
-        if let Ok(device) = VirtioDevice::parse(*dev) {
-            devices.push(device);
+        if dev.vendor_id() != 0x1af4 {
+            continue;
         }
+        let kind = VirtioDeviceKind::from_device_id(dev.device_id());
+        devices.push(DiscoveredDevice {
+            pci_address: (dev.bus, dev.slot, dev.func),
+            kind,
+            device: VirtioDevice::parse(*dev, kind),
+        });
     }
     #[cfg(debug_assertions)]
     log::debug!("done initializing VirtIO");

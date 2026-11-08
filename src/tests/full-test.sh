@@ -6,8 +6,7 @@ ORIGINAL_ARGS=("$@")
 
 BUILD="debug"
 VMM=qemu
-# Guest size. The defaults match the VM launchers; --cpus and --memory pick a
-# smaller guest, e.g. the 1 vCPU / 256 MiB shape cloud providers sell.
+# Guest size. The defaults match the VM launchers; --cpus and --memory pick a different guest.
 CPUS="${MOTO_SMP-4}"
 MEMORY_MIB="${MOTO_MEMORY_MIB-1024}"
 SEEN_RELEASE=0
@@ -130,9 +129,17 @@ if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
   set -m
   timeout "${TIMEOUT}s" "$0" "${ORIGINAL_ARGS[@]}" < /dev/null
   status=$?
+  main_status=$status
   set +m
+  if [ "$status" -eq 0 ]; then
+    # Block-mount fixtures have their own deadline; the one-vCPU main suite
+    # already consumes its budget. Keep the existing main deadline unchanged.
+    block_mount_args=(--vmm "$VMM")
+    [ "$BUILD" != release ] || block_mount_args+=(--release)
+    "$WD/test-block-mounts.sh" "${block_mount_args[@]}" || status=$?
+  fi
   testing_seconds=$((SECONDS - testing_started))
-  if [ "$status" -eq 124 ]; then
+  if [ "$main_status" -eq 124 ]; then
     echo "full-test: timed out after $TIMEOUT seconds of testing" >&2
   elif [ "$status" -ne 0 ]; then
     echo "FULL TEST FAIL: status $status after $(minutes "$testing_seconds") minutes of testing" >&2
@@ -317,7 +324,7 @@ fi
 # The netstack's own tests, under the exact feature closure sys-io builds it
 # with: its packet-facing regressions run nowhere else in this suite, and a
 # feature set that differs from sys-io's compiles different code.
-NETSTACK_FEATURES="async,assembler-max-segment-count-32,fragmentation-buffer-size-65536,iface-neighbor-cache-count-64,medium-ethernet,medium-ip,proto-ipv4,proto-ipv4-fragmentation,proto-ipv6,proto-ipv6-fragmentation,reassembly-buffer-count-4,reassembly-buffer-size-65536,socket-icmp,socket-tcp,socket-udp"
+NETSTACK_FEATURES="async,assembler-max-segment-count-32,fragmentation-buffer-size-65536,iface-neighbor-cache-count-64,medium-ethernet,medium-ip,proto-ipv4,proto-ipv4-fragmentation,proto-ipv6,proto-ipv6-fragmentation,reassembly-buffer-count-4,reassembly-buffer-size-65536,socket-dhcpv4,socket-icmp,socket-tcp,socket-udp"
 if [ "$BUILD" = "release" ]; then
   cargo test --release \
     --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \
@@ -483,6 +490,7 @@ wait_for_ping_error() {
 }
 
 read_udp_socket_count() {
+  local expected="${1:-1}"
   local output=""
   local count=""
   local last_count=""
@@ -492,8 +500,8 @@ read_udp_socket_count() {
     if output="$(vm_ssh /system/bin/stats get 2 2>&1)"; then
       count="$(printf '%s\n' "$output" |
         awk '$2 == "net.udp_sockets" { print $3 }')"
-      if [ "$count" = "0" ]; then
-        printf '0\n'
+      if [ "$count" = "$expected" ]; then
+        printf '%s\n' "$expected"
         return
       fi
       [ -z "$count" ] || last_count="$count"
@@ -511,6 +519,7 @@ read_udp_socket_count() {
 }
 
 DNS_RESOLVER_SSH_PID=""
+DNS_PORT_HOLDER_SSH_PID=""
 VMM_PID=""
 RMUX_TITLE_SSH_PID=""
 RMUX_TITLE_IN_FD=""
@@ -542,6 +551,10 @@ cleanup_full_test() {
   if [ -n "$DNS_RESOLVER_SSH_PID" ]; then
     kill "$DNS_RESOLVER_SSH_PID" 2>/dev/null
     wait "$DNS_RESOLVER_SSH_PID"
+  fi
+  if [ -n "$DNS_PORT_HOLDER_SSH_PID" ]; then
+    kill "$DNS_PORT_HOLDER_SSH_PID" 2>/dev/null
+    wait "$DNS_PORT_HOLDER_SSH_PID"
   fi
   set -e
   [ "$status" -ne 0 ] && return "$status"
@@ -798,19 +811,68 @@ ping_external google.com
 expect_ping_error does-not-exist.motor.invalid NotFound
 
 udp_sockets="$(read_udp_socket_count)"
-[ "$udp_sockets" = "0" ] ||
-  fail "DNS tests left $udp_sockets active UDP socket(s)"
+[ "$udp_sockets" = "1" ] ||
+  fail "DNS tests left $udp_sockets active UDP socket(s), expected one DNS listener"
+
+# PID of the guest process running `program`, or nothing.
+guest_pid() {
+  vm_ssh /system/bin/ps |
+    awk -v program="$1" '$NF == program { gsub(/[+*?]/, "", $1); print $1; exit }'
+}
 
 # Verify that numeric lookup is independent of the service, lookup failure is
 # defined, and a later per-call client reconnects after the service restarts.
-resolver_pid="$(vm_ssh /system/bin/ps |
-  awk '$NF == "/system/services/dns-resolver" { gsub(/[+*?]/, "", $1); print $1; exit }')"
+resolver_pid="$(guest_pid /system/services/dns-resolver)"
 [ -n "$resolver_pid" ] || fail "could not find the dns-resolver process"
 vm_ssh "/system/bin/rush -c 'kill $resolver_pid'"
 vm_ssh /system/bin/ping -c 1 127.0.0.1
 wait_for_ping_error google.com NotConnected
 
-"${SSH[@]}" MOTOR_OS_CAPS=0x108 /system/services/dns-resolver \
+# A loopback listener that cannot bind must leave native resolution running.
+# Hold port 53 first; check IPC lookups and the logged startup failure.
+: > /tmp/full-test-dns-port-holder.log
+"${SSH[@]}" MOTOR_OS_CAPS=0x140 "$TEST_BIN/systest" hold-dns-port \
+  >> /tmp/full-test-dns-port-holder.log 2>&1 &
+DNS_PORT_HOLDER_SSH_PID="$!"
+holder_pid=""
+for _ in $(seq 1 100); do
+  holder_pid="$(awk '/^holding 127.0.0.1:53 as pid / { print $NF; exit }' \
+    /tmp/full-test-dns-port-holder.log)"
+  [ -z "$holder_pid" ] || break
+  sleep 0.1
+done
+[ -n "$holder_pid" ] || fail "systest did not take the loopback DNS port"
+"${SSH[@]}" MOTOR_OS_CAPS=0x148 /system/services/dns-resolver \
+  >> /tmp/full-test-dns-resolver.log 2>&1 &
+DNS_RESOLVER_SSH_PID="$!"
+# Wait only for service discovery; a failed lookup must fail the test.
+vm_ssh /system/services/dns-resolver --test-service-ready
+vm_ssh "$TEST_BIN/systest" dns-lookup motor-dns-test ||
+  fail "native resolution failed while the loopback DNS port was held"
+logged=0
+for _ in $(seq 1 50); do
+  if vm_ssh cat /system/logs/dns-resolver.log | grep -Fq 'loopback DNS startup incomplete'; then
+    logged=1
+    break
+  fi
+  sleep 0.1
+done
+[ "$logged" = "1" ] || fail "dns-resolver did not report its loopback DNS startup failure"
+resolver_pid="$(guest_pid /system/services/dns-resolver)"
+[ -n "$resolver_pid" ] || fail "could not find the IPC-only dns-resolver process"
+vm_ssh "/system/bin/rush -c 'kill $resolver_pid'"
+vm_ssh "/system/bin/rush -c 'kill $holder_pid'"
+wait_for_ping_error google.com NotConnected
+udp_sockets="$(read_udp_socket_count 0)"
+[ "$udp_sockets" = "0" ] ||
+  fail "the held DNS port and the IPC-only resolver left $udp_sockets UDP socket(s)"
+# Each SSH session ends with the status of its killed command.
+for pid in "$DNS_PORT_HOLDER_SSH_PID" "$DNS_RESOLVER_SSH_PID"; do
+  wait "$pid" || true
+done
+DNS_PORT_HOLDER_SSH_PID=""
+
+"${SSH[@]}" MOTOR_OS_CAPS=0x148 /system/services/dns-resolver \
   >> /tmp/full-test-dns-resolver.log 2>&1 &
 DNS_RESOLVER_SSH_PID="$!"
 
@@ -820,8 +882,8 @@ vm_ssh /system/services/dns-resolver --self-test
 ping_external google.com
 
 udp_sockets="$(read_udp_socket_count)"
-[ "$udp_sockets" = "0" ] ||
-  fail "restarted DNS service left $udp_sockets active UDP socket(s)"
+[ "$udp_sockets" = "1" ] ||
+  fail "restarted DNS service left $udp_sockets active UDP socket(s), expected one DNS listener"
 
 # Let systest output flow to the console as it happens; tee keeps a copy so
 # the verdict can still be checked. pipefail makes the pipeline carry
@@ -1036,6 +1098,13 @@ case "$out" in
   *$'\033'"[?1049l"*) ;;
   *) fail "rmux did not give the console back" ;;
 esac
+# And it asks the console for bracketed paste, so that a paste reaches a pane as
+# one piece of text rather than as the keys it looks like -- which is what used
+# to turn a multi-line paste into a line at a time (rmux/details.md §7.6).
+case "$out" in
+  *$'\033'"[?2004h"*) ;;
+  *) fail "rmux did not ask its console for bracketed paste" ;;
+esac
 
 # Rush and rmux cooperate on Motor window names: an interactive Rush emits OSC
 # 2 around a foreground external command, while `command &` leaves the shell's
@@ -1099,7 +1168,7 @@ printf 'sleep 314159\n' >&"$RMUX_TITLE_IN_FD"
 wait_motor_process "sleep 314159" present "rmux foreground command"
 RMUX_TITLE_OUTPUT=""
 printf '\001r' >&"$RMUX_TITLE_IN_FD"
-wait_rmux_title_output "0:sleep*" "rmux foreground title"
+wait_rmux_title_output "0:sleep" "rmux foreground title"
 
 printf '\003' >&"$RMUX_TITLE_IN_FD"
 wait_motor_process "sleep 314159" absent "interrupted rmux command"
@@ -1108,15 +1177,15 @@ printf 'echo RMUX_TITLE_RESTORED\n' >&"$RMUX_TITLE_IN_FD"
 wait_rmux_title_output "RMUX_TITLE_RESTORED" "rmux shell restoration marker"
 RMUX_TITLE_OUTPUT=""
 printf '\001r' >&"$RMUX_TITLE_IN_FD"
-wait_rmux_title_output "0:rush*" "restored Rush title"
+wait_rmux_title_output "0:rush" "restored Rush title"
 
 RMUX_TITLE_OUTPUT=""
 printf 'sleep 271828 &\n' >&"$RMUX_TITLE_IN_FD"
 wait_motor_process "sleep 271828" present "rmux background command"
 printf '\001r' >&"$RMUX_TITLE_IN_FD"
-wait_rmux_title_output "0:rush*" "background Rush title"
+wait_rmux_title_output "0:rush" "background Rush title"
 case "$RMUX_TITLE_OUTPUT" in
-  *"0:sleep*"*) fail "a background command took rmux's title" ;;
+  *"0:sleep"*) fail "a background command took rmux's title" ;;
 esac
 
 printf 'kill $!\nwait\nexit 0\n' >&"$RMUX_TITLE_IN_FD"
@@ -1354,14 +1423,17 @@ esac
 rmux_caps /user/bin/rmux kill-session -t priv
 
 # sysbox ls colors directory names orange, executable files bright red, and
-# non-executable files with the terminal's default color. A pane
-# supplies the terminal that enables colors; the child names do not appear in
-# the command, so they only match ls output.
+# other files with the terminal's default color. A file counts as executable
+# here only when the Interactive or None role may execute it, so System-only
+# executables stay uncolored. A pane supplies the terminal that enables colors;
+# the child names do not appear in the command, so they only match ls output.
 vm_ssh /system/bin/mkdir "$TEST_TMP/sysbox-ls-color"
 vm_ssh /system/bin/mkdir "$TEST_TMP/sysbox-ls-color/amber-dir"
 vm_ssh /system/bin/mkdir "$TEST_TMP/sysbox-ls-color/z-directory"
 vm_ssh /system/bin/cp /system/bin/ls "$TEST_TMP/sysbox-ls-color/a-file"
 vm_ssh /system/bin/cp /system/bin/ls "$TEST_TMP/sysbox-ls-color/default-file"
+# A runtime-created regular file grants execute to System only.
+vm_ssh "echo system-only > $TEST_TMP/sysbox-ls-color/system-only-file"
 rmux_ls() {
   sleep 3
   # Debug rt.vdso diagnostics intentionally share the pane's terminal. Start
@@ -1381,7 +1453,7 @@ check_ls_colors() {
 
   output="$(rmux_ls "$option" "$TEST_TMP/sysbox-ls-color" | vm_rmux 2>&1)"
   case "$output" in
-    *"amber-dir"*"a-file"*) ;;
+    *"amber-dir"*"a-file"*"system-only-file"*) ;;
     *) fail "ls $option did not list the color-test entries: '$output'" ;;
   esac
   prefix="${output%%amber-dir*}"
@@ -1392,6 +1464,12 @@ check_ls_colors() {
   style="$(printf '%s' "$prefix" | grep -Eao $'\033''\[[0-9;]*m' | tail -1)"
   [ "$style" = $'\033'"[0;91m" ] ||
     fail "ls $option executable style was '$style'"
+  prefix="${output%%system-only-file*}"
+  style="$(printf '%s' "$prefix" | grep -Eao $'\033''\[[0-9;]*m' | tail -1)"
+  case "$style" in
+    ""|$'\033'"[0m") ;;
+    *) fail "ls $option System-only executable style was '$style'" ;;
+  esac
 
   # Files created at run time are executable by System, so use a shipped one,
   # listed alone: a listing of /user/cfg can wrap inside the name on the
@@ -1416,7 +1494,7 @@ check_ls_colors "-l"
 for option in "" "-l"; do
   sorted_ls="$(vm_ssh_stdout /system/bin/ls $option "$TEST_TMP/sysbox-ls-color")"
   case "$sorted_ls" in
-    *"amber-dir"*"z-directory"*"a-file"*"default-file"*) ;;
+    *"amber-dir"*"z-directory"*"a-file"*"default-file"*"system-only-file"*) ;;
     *) fail "ls $option did not sort directories before files: '$sorted_ls'" ;;
   esac
 done
@@ -1431,6 +1509,10 @@ esac
 case "$long_ls" in
   *"-rwxr-xr-x"*"default-file"*) ;;
   *) fail "ls -l did not report file permissions: '$long_ls'" ;;
+esac
+case "$long_ls" in
+  *"-rwxrw-r--"*"system-only-file"*) ;;
+  *) fail "ls -l did not report System-only executable permissions: '$long_ls'" ;;
 esac
 
 # rmux: scrollback and copy mode on the real thing (M8, rmux/details.md §7.5,

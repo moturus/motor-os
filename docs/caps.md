@@ -110,6 +110,11 @@ The role selects the corresponding filesystem permission set; it is not
 supplied by the client. See [process roles](process-roles.md) for the design
 and [filesystem permissions](fs-permissions.md) for the image policy.
 
+Rush's default prompt shows the shell's role: red for System, amber for
+Interactive, and light green for None. The color comes from the shell's own
+mask, so `MOTOR_OS_CAPS=0x204 sh` in an SSH session starts a shell with a
+green prompt. Setting `PS1` replaces the colored default.
+
 ## Child capability grants
 
 The kernel validates the requested child mask in

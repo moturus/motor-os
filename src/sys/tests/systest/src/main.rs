@@ -11,6 +11,7 @@ mod raw_spawn;
 mod sched_fairness;
 // mod channel_test;
 mod alloc_bench;
+mod block_mounts;
 mod boot_identity;
 mod closerace;
 mod command_output;
@@ -18,6 +19,7 @@ mod ctrl_c;
 mod debugger;
 mod descriptor_attr;
 mod diagnostics;
+mod dns_service;
 mod environment;
 mod executable_memory;
 mod execute_permissions;
@@ -67,6 +69,7 @@ mod sysbox_cat;
 mod sysbox_chmod;
 mod sysbox_diff;
 mod sysbox_find;
+mod sysbox_findmnt;
 mod sysbox_head;
 mod sysbox_less;
 mod sysbox_ls;
@@ -1327,6 +1330,33 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "mounts" {
         mounts::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "findmnt" {
+        sysbox_findmnt::run_test();
+        return;
+    }
+    if args.len() == 2 && args[1] == "hold-dns-port" {
+        dns_service::hold_port();
+    }
+    if args.len() == 3 && args[1] == "dns-lookup" {
+        dns_service::lookup(&args[2]);
+        return;
+    }
+    if args.len() == 2 && args[1] == "block-ro-root" {
+        block_mounts::read_only_root();
+        return;
+    }
+    if args.len() == 3 && args[1] == "block-partition" {
+        block_mounts::partition(&args[2]);
+        return;
+    }
+    if args.len() == 3 && args[1] == "block-devices" {
+        block_mounts::devices(&args[2]);
+        return;
+    }
+    if args.len() == 2 && args[1] == "block-stress" {
+        block_mounts::stress();
         return;
     }
     if args.len() == 2 && args[1] == "mounts-none" {

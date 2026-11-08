@@ -1909,3 +1909,23 @@ fn a_key_installed_by_copy_id_logs_in_on_its_own() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(output.stdout, b"ok");
 }
+
+#[test]
+fn child_closing_stdin_does_not_cut_off_output() {
+    let fixture = Fixture::start();
+    let mut ssh = fixture.ssh_args();
+    ssh.extend([
+        "motor@127.0.0.1".to_owned(),
+        format!("exec 0<&-; /usr/bin/head -c {FULL_DUPLEX_STREAM_SIZE} /dev/zero; printf remote-stderr >&2; exit 7"),
+    ]);
+    let output = run_full_duplex(&ssh, vec![0x5a; FULL_DUPLEX_STREAM_SIZE]);
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "{} stdout bytes; stderr: {}",
+        output.stdout.len(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, vec![0; FULL_DUPLEX_STREAM_SIZE]);
+    assert_eq!(output.stderr, b"remote-stderr");
+}

@@ -1,6 +1,8 @@
 mod bridge;
+mod config;
 mod dns;
 mod order;
+mod server;
 
 use std::sync::mpsc;
 use std::time::Duration;
@@ -168,6 +170,11 @@ fn worker(worker_id: usize, ready: mpsc::Sender<std::result::Result<(), moto_rt:
 
 fn run_service() -> ! {
     initialize_logging();
+    // Native programs resolve over IPC. Loopback startup failures must not
+    // prevent the IPC workers from starting.
+    if let Err(error) = server::start() {
+        log::error!("dns-resolver: loopback DNS startup incomplete; continuing with IPC: {error}");
+    }
     let (ready_tx, ready_rx) = mpsc::channel();
     let mut workers = Vec::with_capacity(WORKER_COUNT);
     for worker_id in 0..WORKER_COUNT {
@@ -280,6 +287,7 @@ fn bridge_self_test() {
 
 fn resolver_policy_self_test() {
     bridge::self_test();
+    server::self_test();
     order::self_test();
 
     let v4 = bridge::Result {
@@ -512,10 +520,33 @@ fn capability_test_child() {
             "127.0.0.1:80".parse().unwrap()
         );
     }
+    let interactive =
+        moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_INTERACTIVE != 0;
+    let snapshot = std::fs::read_to_string("/system/tmp/sys-io/dhcp.toml");
+    if interactive {
+        assert!(snapshot.unwrap().contains("active_devices"));
+    } else {
+        assert_eq!(
+            snapshot.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+    assert_eq!(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open("/system/tmp/sys-io/dhcp.toml")
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::PermissionDenied,
+    );
 }
 
 fn capability_self_test() {
-    for caps in [0, moto_sys::caps::CAP_NET] {
+    for caps in [
+        0,
+        moto_sys::caps::CAP_NET,
+        moto_sys::caps::CAP_NET | moto_sys::caps::CAP_INTERACTIVE,
+    ] {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--test-capability-child")
             .env(moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY, format!("{caps:#x}"))
@@ -539,6 +570,19 @@ fn main() {
             bridge_self_test();
             ipc_self_test(client);
         }
+        Some("--self-test-local") if args.next().is_none() => {
+            let mut client = connect_with_retry();
+            capability_self_test();
+            resolver_policy_self_test();
+            let hosts = client.lookup("motor-dns-test", AddressFamily::Any).unwrap();
+            assert!(hosts.addresses.len() >= 2);
+            assert!(!std::fs::exists("/system/cfg/libc/resolv.conf").unwrap());
+            println!("dns-resolver local self-test PASS");
+        }
+        Some("--test-service-ready") if args.next().is_none() => {
+            let _client = connect_with_retry();
+        }
+        Some("--test-dhcp") if args.next().is_none() => config::dhcp_self_test(),
         Some("--test-capabilities") if args.next().is_none() => capability_self_test(),
         Some("--test-capability-child") if args.next().is_none() => capability_test_child(),
         _ => {

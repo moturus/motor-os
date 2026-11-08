@@ -64,7 +64,7 @@ user-dev: user curl gix lorry mdbg rnetbench crossbench \
 	systest mio-test tokio-tests crossterm-smoke wg-self-test
 
 .PHONY: all images boot core sys-base sys user-base user user-dev
-.PHONY: base.img main.img raw.img dev.img wasm.img system-tty.img vsock-test.img
+.PHONY: base.img main.img raw.img dev.img wasm.img system-tty.img vsock-test.img ro-root.img
 .PHONY: mbr.bin boot.bin kloader kernel vdso
 .PHONY: strobe sys-io sys-init sys-tty dns-resolver
 .PHONY: sysbox sysbox-tests systest mio-test tokio-tests crossterm-smoke
@@ -324,6 +324,9 @@ system-tty.img: boot core sys-base user-base wg
 # An isolated System-console image for vsock tests that must run without IP.
 vsock-test.img: boot core sys-base sysbox rush systest
 	$(call BUILD_TEST_IMAGE,vsock-test)
+
+ro-root.img: boot core sys-base sysbox rush russhd dns-resolver systest
+	$(call BUILD_TEST_IMAGE,ro-root)
 
 # The minimal base image; it takes nothing from the assembly.
 base.img: boot core sys-base user-base

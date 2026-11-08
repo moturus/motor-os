@@ -12,6 +12,7 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     println!("\tsysbox diff");
     println!("\tsysbox echo");
     println!("\tsysbox find");
+    println!("\tsysbox findmnt");
     println!("\tsysbox free");
     println!("\tsysbox head");
     println!("\tsysbox help");
@@ -82,6 +83,7 @@ fn main() {
         "diff" => commands::diff::do_command(&args[1..]),
         "echo" => commands::echo::do_command(&args[1..]),
         "find" => commands::find::do_command(&args[1..]),
+        "findmnt" => commands::findmnt::do_command(&args[1..]),
         "free" => commands::free::do_command(&args[1..]),
         "head" => commands::head::do_command(&args[1..]),
         "help" => print_usage_and_exit(0),

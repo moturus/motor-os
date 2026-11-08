@@ -422,7 +422,9 @@ tested, so a difference cannot be quietly introduced or quietly fixed.</p>
   multi-line command is one history entry.</li>
   <li><kbd>^C</kbd> abandons the line and <kbd>^D</kbd> ends the session with
   <code>$?</code>.</li>
-  <li>The prompt is the colored <code>rush:$PWD$ </code> by default; <code>PS1</code>,
+  <li>The default prompt is <code>motor-os:$PWD$ </code>, colored by the shell's role: red
+  for System, amber for Interactive, and light green for None (see
+  <a href="capabilities.html#rush">Capabilities in rush</a>). <code>PS1</code>,
   <code>PS2</code>, and <code>PS4</code> are ordinary expanded variables. An interactive
   shell sources <code>$ENV</code>; a login shell also reads <code>/etc/profile</code> and
   <code>~/.profile</code>. On Motor OS, sys-tty sets <code>ENV=/system/cfg/rush.cfg</code>.</li>

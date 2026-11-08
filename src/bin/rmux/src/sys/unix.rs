@@ -251,6 +251,11 @@ pub fn config_file() -> PathBuf {
     PathBuf::from(home).join(".config/rmux.toml")
 }
 
+/// The host has no process roles: a pane runs as whoever started rmux.
+pub fn panes_are_none_role() -> bool {
+    false
+}
+
 /// Spawn `cmd`'s child in a session of its own, so it outlives this process.
 ///
 /// An orphan survives here without being asked -- init adopts it -- but it

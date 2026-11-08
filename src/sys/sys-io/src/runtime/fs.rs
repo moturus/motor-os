@@ -21,11 +21,13 @@ use crate::util::map_native_error;
 
 mod block_io;
 mod config;
+mod devices;
 mod entry_ids;
 mod lock_manager;
 mod mbr;
 pub(crate) mod memory;
 mod mounts;
+mod runtime_config;
 #[cfg(debug_assertions)]
 pub(super) mod self_test;
 mod spawn;
@@ -41,6 +43,9 @@ pub(crate) const SELF_TESTS: &[&[crate::self_test::SelfTest]] = &[
     mounts::self_test::TESTS,
     config::self_test::TESTS,
     memory::self_test::TESTS,
+    mbr::self_test::TESTS,
+    devices::self_test::TESTS,
+    virtio_partition::self_test::TESTS,
     self_test::TESTS,
     &[
         ("fs::spawn::queued_mutations", stats::test_executable_locks),
@@ -383,7 +388,7 @@ pub(crate) struct FsRuntime {
     pager: Rc<spawn::pager::Pager>,
 }
 
-/// The root filesystem as the net runtime sees it: its config and resolv.conf.
+/// Filesystem access for network configuration and mounted runtime state.
 #[derive(Clone)]
 pub(crate) struct RootFs(Rc<RefCell<mounts::MountTable>>);
 
@@ -415,6 +420,7 @@ impl FsRuntime {
     }
 
     fn admit_allocation(&self, command: u16, destination: &mounts::Resolved) -> Result<()> {
+        destination.writable()?;
         if memory::needs_memory(command, destination.kind) {
             self.free_caches.check(&self.fs_stats)?;
         }
@@ -449,83 +455,30 @@ struct PendingLockResponse {
 }
 
 pub(super) async fn init(
-    block_device: virtio_async::VirtioDevice,
+    block_devices: Vec<Result<virtio_async::VirtioDevice>>,
     channel_budget: Rc<channel_budget::ChannelBudget>,
 ) -> Result<FsRuntime> {
-    let block_device = virtio_async::BlockDevice::from(block_device)?;
     let fs_stats = Rc::new(stats::FsStats::default());
-
-    use zerocopy::FromZeros;
-
-    let first_block = moto_sdk::iobuf::VirtioIoBuf::new_from_size_align(4096).unwrap();
-    let (first_block, res) =
-        virtio_async::BlockDevice::post_read(block_device.clone(), 0, first_block)
-            .await
-            .await;
-    res?;
-
-    let mbr = mbr::Mbr::parse(&AsRef::<[u8]>::as_ref(&first_block)[..512]).map_err(|err| {
-        log::error!("Mbr::parse() failed: {err:?}.");
-        std::io::Error::from(ErrorKind::InvalidData)
-    })?;
-
-    // The boot-time MBR read has completed; all later I/O shares this owner.
-    let (block_io, inbox) = moto_sdk::async_runtime::channel::channel(64);
-    moto_sdk::async_runtime::LocalRuntime::spawn(block_io::run(
-        block_device.clone(),
-        inbox,
-        fs_stats.clone(),
-    ));
-    let mut fs: Option<FS> = None;
-    for pte in &mbr.entries {
-        log::trace!("MBR PTE: {pte:?}");
-        match pte.partition_type {
-            mbr::PartitionType::FlatFs => {
-                log::warn!("FlatFs is not (yet?) supported with async runtime");
-            }
-            mbr::PartitionType::SrFs => {
-                log::warn!("SrFs is not (yet?) supported with async runtime");
-            }
-            mbr::PartitionType::MotorFs => {
-                if fs.is_some() {
-                    log::error!("Found more than one DATA partion.");
-                    panic!();
-                }
-
-                let partition = Box::new(
-                    virtio_partition::VirtioPartition::from_virtio_bd(
-                        block_io.clone(),
-                        block_device.flush_supported(),
-                        pte.lba as u64,
-                        pte.sectors as u64,
-                    )
-                    .await
-                    .map_err(|err| {
-                        log::error!("Mbr::parse() failed: {err:?}.");
-                        std::io::Error::from(ErrorKind::InvalidData)
-                    })?,
-                );
-                fs = Some(FS::MotorFs(
-                    motor_fs::MotorFs::open_with_cache_size(partition, block_cache_blocks())
-                        .await
-                        .map_err(|err| {
-                            log::error!("Mbr::parse() failed: {err:?}.");
-                            std::io::Error::from(ErrorKind::InvalidData)
-                        })?,
-                ));
-            }
-            _ => continue,
-        }
-    }
-
-    let Some(fs) = fs else {
-        log::error!("Couldn't find a data partition.");
-        return Err(std::io::Error::from(ErrorKind::InvalidData));
-    };
+    let mut devices = devices::Devices::new(block_devices, fs_stats.clone());
+    let source = devices
+        .root()
+        .await
+        .map_err(|error| std::io::Error::new(error.kind(), format!("root /, virtio0: {error}")))?;
+    log::debug!("Root filesystem: {:?}", source.identity);
+    let fs = devices
+        .open(source, block_cache_blocks())
+        .await
+        .map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("root /, {:?}: {error}", source.identity),
+            )
+        })?;
 
     let mounts = Rc::new(RefCell::new(mounts::MountTable::new(fs)));
+    mounts.borrow_mut().find_mut(0).unwrap().source = Some(source.identity);
     let free_caches = Rc::new(memory::FreeCaches::default());
-    config::load(&mounts, &free_caches)
+    config::load(&mounts, &free_caches, &mut devices)
         .await
         .unwrap_or_else(|err| {
             panic!("Cannot apply /system/cfg/sys-fs.toml: {err}");
@@ -1650,6 +1603,8 @@ async fn move_entry(
 ) -> Result<()> {
     let entry = runtime.resolve(entry)?;
     let parent = runtime.resolve(parent)?;
+    entry.writable()?;
+    parent.writable()?;
     entry.protect_root()?;
     if entry.mount != parent.mount {
         // Root protection precedes CrossesDevices, including the destination.

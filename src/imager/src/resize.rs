@@ -57,7 +57,7 @@ pub fn parse_args(args: &[String]) -> Result<Request, String> {
     })
 }
 
-fn parse_size_mb(value: &str) -> Option<u64> {
+pub(crate) fn parse_size_mb(value: &str) -> Option<u64> {
     let (digits, multiplier) = if let Some(digits) = value.strip_suffix('M') {
         (digits, 1)
     } else {
@@ -75,7 +75,7 @@ fn invalid_input(message: impl Into<String>) -> io::Error {
     io::Error::new(ErrorKind::InvalidInput, message.into())
 }
 
-fn output_is_qcow2(output: &Path) -> io::Result<bool> {
+pub(crate) fn output_is_qcow2(output: &Path) -> io::Result<bool> {
     match output.extension().and_then(|extension| extension.to_str()) {
         Some("qcow2") => Ok(true),
         Some("img" | "raw") => Ok(false),
