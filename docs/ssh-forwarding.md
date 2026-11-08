@@ -305,8 +305,8 @@ releases the forwards already set up and exits 255.
   `ssh -L ... host cmd | slow`, can pause forwards until the pipe drains. This
   coupling is accepted; `-N` tunnels have no such dependency.
 - A jump peer still disconnects when its sole transport channel closes.
-  `relay_through` buffers the jump hop; whether it is still needed with the
-  current fork is S1 in the fixes plan.
+  The next session uses the jump channel directly; the fork's concurrent
+  transport reads and writes keep it reading while output waits for credit.
 
 ### `-D`
 

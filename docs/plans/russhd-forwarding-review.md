@@ -228,7 +228,7 @@ and evidence, but not a need for a permanent commit per progress update.
 
 | ID | Opportunity | Disposition |
 | --- | --- | --- |
-| S1 | Remove obsolete jump buffering if current transport makes it unnecessary | Removed locally; component regressions pass with the repaired fork; final gate pending |
+| S1 | Remove obsolete jump buffering if current transport makes it unnecessary | Complete; direct channel transport passes component and native image regressions |
 | S2 | Share small host-validation and bind-loop mechanics | Host grammar shared locally; binding policies remain explicit |
 | S3 | Separate current design from implementation journal | Complete; design is in docs/ssh-forwarding.md and historical gate evidence remains in Git |
 | S4 | Reduce copied test fixtures | Complete; seven copies removed and unique legacy-open case moved to the fork |
@@ -243,12 +243,11 @@ of it is resident immediately. Try direct channel transport only with the
 existing full-duplex, starved-window, multi-hop, and cancellation regressions.
 Removing it is a hypothesis, not a proven safe deletion.
 
-The local simplification now uses direct channel transport with the repaired
-fork. The existing component tests cover full-duplex transfers, starved windows,
-jumps, and cancellation. Removing the duplex pipe removes 8.125 MiB of aggregate
-buffer capacity and its copy task per jump at default settings; resident-memory
-savings have not been measured. Published dependency integration and the final
-image gate remain pending.
+The simplification uses direct channel transport with the published repaired
+fork. Existing component tests cover full-duplex transfers, starved windows,
+jumps, and cancellation, and the final image gates passed. Removing the duplex
+pipe removes 8.125 MiB of aggregate buffer capacity and its copy task per jump at
+default settings; resident-memory savings have not been measured.
 
 **S2:** hostname checks in `client/forward_args.rs:147` and `forward/open.rs:8`,
 and the bind loops in `client/forwarding.rs:147` and `forward/remote.rs:189`,
