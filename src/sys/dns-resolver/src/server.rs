@@ -10,6 +10,9 @@ const WORKERS: usize = 2;
 const MAX_QUERY: usize = 4096;
 const UDP_LIMIT: usize = 512;
 
+/// Start the optional loopback transport. Bind or spawn errors return to the
+/// caller; workers already started keep running if a later spawn fails.
+/// UDP receive or TCP accept errors are logged and stop only the affected worker.
 pub(super) fn start() -> io::Result<()> {
     let udp = Arc::new(UdpSocket::bind("127.0.0.1:53")?);
     let tcp = Arc::new(TcpListener::bind("127.0.0.1:53")?);
@@ -18,9 +21,9 @@ pub(super) fn start() -> io::Result<()> {
         std::thread::Builder::new()
             .name(format!("dns-udp:{index}"))
             .spawn(move || {
+                // Receiving fails only once the socket itself is gone.
                 if let Err(error) = serve_udp(&socket) {
-                    log::error!("DNS UDP listener failed: {error}");
-                    std::process::exit(1);
+                    log::error!("DNS UDP listener stopped: {error}");
                 }
             })?;
         let listener = tcp.clone();
@@ -28,9 +31,14 @@ pub(super) fn start() -> io::Result<()> {
             .name(format!("dns-tcp:{index}"))
             .spawn(move || {
                 for stream in listener.incoming() {
-                    let Ok(stream) = stream else {
-                        log::error!("DNS TCP listener failed");
-                        std::process::exit(1);
+                    // Accept fails for the listener or the socket pool, never
+                    // for one connection; retrying at once would only spin.
+                    let stream = match stream {
+                        Ok(stream) => stream,
+                        Err(error) => {
+                            log::error!("DNS TCP listener stopped: {error}");
+                            return;
+                        }
                     };
                     // Each worker serves one bounded connection. Slow or
                     // disconnected clients cannot grow the worker pool.

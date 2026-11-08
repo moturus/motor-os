@@ -19,6 +19,7 @@ mod ctrl_c;
 mod debugger;
 mod descriptor_attr;
 mod diagnostics;
+mod dns_service;
 mod environment;
 mod executable_memory;
 mod execute_permissions;
@@ -1333,6 +1334,13 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "findmnt" {
         sysbox_findmnt::run_test();
+        return;
+    }
+    if args.len() == 2 && args[1] == "hold-dns-port" {
+        dns_service::hold_port();
+    }
+    if args.len() == 3 && args[1] == "dns-lookup" {
+        dns_service::lookup(&args[2]);
         return;
     }
     if args.len() == 2 && args[1] == "block-ro-root" {

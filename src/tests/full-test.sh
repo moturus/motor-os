@@ -490,6 +490,7 @@ wait_for_ping_error() {
 }
 
 read_udp_socket_count() {
+  local expected="${1:-1}"
   local output=""
   local count=""
   local last_count=""
@@ -499,8 +500,8 @@ read_udp_socket_count() {
     if output="$(vm_ssh /system/bin/stats get 2 2>&1)"; then
       count="$(printf '%s\n' "$output" |
         awk '$2 == "net.udp_sockets" { print $3 }')"
-      if [ "$count" = "1" ]; then
-        printf '1\n'
+      if [ "$count" = "$expected" ]; then
+        printf '%s\n' "$expected"
         return
       fi
       [ -z "$count" ] || last_count="$count"
@@ -518,6 +519,7 @@ read_udp_socket_count() {
 }
 
 DNS_RESOLVER_SSH_PID=""
+DNS_PORT_HOLDER_SSH_PID=""
 VMM_PID=""
 RMUX_TITLE_SSH_PID=""
 RMUX_TITLE_IN_FD=""
@@ -549,6 +551,10 @@ cleanup_full_test() {
   if [ -n "$DNS_RESOLVER_SSH_PID" ]; then
     kill "$DNS_RESOLVER_SSH_PID" 2>/dev/null
     wait "$DNS_RESOLVER_SSH_PID"
+  fi
+  if [ -n "$DNS_PORT_HOLDER_SSH_PID" ]; then
+    kill "$DNS_PORT_HOLDER_SSH_PID" 2>/dev/null
+    wait "$DNS_PORT_HOLDER_SSH_PID"
   fi
   set -e
   [ "$status" -ne 0 ] && return "$status"
@@ -808,14 +814,63 @@ udp_sockets="$(read_udp_socket_count)"
 [ "$udp_sockets" = "1" ] ||
   fail "DNS tests left $udp_sockets active UDP socket(s), expected one DNS listener"
 
+# PID of the guest process running `program`, or nothing.
+guest_pid() {
+  vm_ssh /system/bin/ps |
+    awk -v program="$1" '$NF == program { gsub(/[+*?]/, "", $1); print $1; exit }'
+}
+
 # Verify that numeric lookup is independent of the service, lookup failure is
 # defined, and a later per-call client reconnects after the service restarts.
-resolver_pid="$(vm_ssh /system/bin/ps |
-  awk '$NF == "/system/services/dns-resolver" { gsub(/[+*?]/, "", $1); print $1; exit }')"
+resolver_pid="$(guest_pid /system/services/dns-resolver)"
 [ -n "$resolver_pid" ] || fail "could not find the dns-resolver process"
 vm_ssh "/system/bin/rush -c 'kill $resolver_pid'"
 vm_ssh /system/bin/ping -c 1 127.0.0.1
 wait_for_ping_error google.com NotConnected
+
+# A loopback listener that cannot bind must leave native resolution running.
+# Hold port 53 first; check IPC lookups and the logged startup failure.
+: > /tmp/full-test-dns-port-holder.log
+"${SSH[@]}" MOTOR_OS_CAPS=0x140 "$TEST_BIN/systest" hold-dns-port \
+  >> /tmp/full-test-dns-port-holder.log 2>&1 &
+DNS_PORT_HOLDER_SSH_PID="$!"
+holder_pid=""
+for _ in $(seq 1 100); do
+  holder_pid="$(awk '/^holding 127.0.0.1:53 as pid / { print $NF; exit }' \
+    /tmp/full-test-dns-port-holder.log)"
+  [ -z "$holder_pid" ] || break
+  sleep 0.1
+done
+[ -n "$holder_pid" ] || fail "systest did not take the loopback DNS port"
+"${SSH[@]}" MOTOR_OS_CAPS=0x148 /system/services/dns-resolver \
+  >> /tmp/full-test-dns-resolver.log 2>&1 &
+DNS_RESOLVER_SSH_PID="$!"
+# Wait only for service discovery; a failed lookup must fail the test.
+vm_ssh /system/services/dns-resolver --test-service-ready
+vm_ssh "$TEST_BIN/systest" dns-lookup motor-dns-test ||
+  fail "native resolution failed while the loopback DNS port was held"
+logged=0
+for _ in $(seq 1 50); do
+  if vm_ssh cat /system/logs/dns-resolver.log | grep -Fq 'loopback DNS startup incomplete'; then
+    logged=1
+    break
+  fi
+  sleep 0.1
+done
+[ "$logged" = "1" ] || fail "dns-resolver did not report its loopback DNS startup failure"
+resolver_pid="$(guest_pid /system/services/dns-resolver)"
+[ -n "$resolver_pid" ] || fail "could not find the IPC-only dns-resolver process"
+vm_ssh "/system/bin/rush -c 'kill $resolver_pid'"
+vm_ssh "/system/bin/rush -c 'kill $holder_pid'"
+wait_for_ping_error google.com NotConnected
+udp_sockets="$(read_udp_socket_count 0)"
+[ "$udp_sockets" = "0" ] ||
+  fail "the held DNS port and the IPC-only resolver left $udp_sockets UDP socket(s)"
+# Each SSH session ends with the status of its killed command.
+for pid in "$DNS_PORT_HOLDER_SSH_PID" "$DNS_RESOLVER_SSH_PID"; do
+  wait "$pid" || true
+done
+DNS_PORT_HOLDER_SSH_PID=""
 
 "${SSH[@]}" MOTOR_OS_CAPS=0x148 /system/services/dns-resolver \
   >> /tmp/full-test-dns-resolver.log 2>&1 &

@@ -20,6 +20,9 @@ a fresh `moto_dns::Client` per lookup, so a dead resolver connection is not
 cached and a restarted service is discoverable by the next call. The service
 keeps four fixed IPC workers and the versioned, pointer-free request/response
 contract in `moto-dns`. The loopback listener has two UDP and two TCP workers.
+It is optional: listener startup failures are logged and IPC startup continues.
+Workers already started remain running if a later spawn fails. A UDP receive or
+TCP accept error is logged and stops only the affected worker while IPC continues.
 Unmodified mlibc uses this listener through its default nameserver when
 `/system/cfg/libc/resolv.conf` is absent; images no longer generate that file.
 
@@ -100,4 +103,7 @@ over TCP.
 and snapshot permissions. `test-block-mounts.sh`, called by `full-test.sh`, runs
 it on a read-only root containing the libc directory. Its QEMU DHCP fixture
 checks a real acquired lease and resolver selection with `--test-dhcp`, and
-verifies that the root image remains byte-for-byte unchanged.
+verifies that the root image remains byte-for-byte unchanged. `full-test.sh` also
+restarts the service while another process holds port 53. It waits only for
+service discovery, then checks a native lookup once and verifies that the log
+reports the loopback listener startup failure.

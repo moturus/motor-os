@@ -170,7 +170,11 @@ fn worker(worker_id: usize, ready: mpsc::Sender<std::result::Result<(), moto_rt:
 
 fn run_service() -> ! {
     initialize_logging();
-    server::start().expect("dns-resolver: failed to bind loopback DNS listeners");
+    // Native programs resolve over IPC. Loopback startup failures must not
+    // prevent the IPC workers from starting.
+    if let Err(error) = server::start() {
+        log::error!("dns-resolver: loopback DNS startup incomplete; continuing with IPC: {error}");
+    }
     let (ready_tx, ready_rx) = mpsc::channel();
     let mut workers = Vec::with_capacity(WORKER_COUNT);
     for worker_id in 0..WORKER_COUNT {
@@ -574,6 +578,9 @@ fn main() {
             assert!(hosts.addresses.len() >= 2);
             assert!(!std::fs::exists("/system/cfg/libc/resolv.conf").unwrap());
             println!("dns-resolver local self-test PASS");
+        }
+        Some("--test-service-ready") if args.next().is_none() => {
+            let _client = connect_with_retry();
         }
         Some("--test-dhcp") if args.next().is_none() => config::dhcp_self_test(),
         Some("--test-capabilities") if args.next().is_none() => capability_self_test(),

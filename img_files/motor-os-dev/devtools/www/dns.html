@@ -436,10 +436,14 @@ lease deadlines. System may write it, Interactive may read it, and None has no a
 (<code>rw-r-----</code>). The resolver runs as Interactive with network and logging
 capabilities, without filesystem-write capability.</p>
 <p>The service also listens on <code>127.0.0.1:53</code> over UDP and TCP, with two fixed
-workers per transport. This is mlibc's default nameserver when <code>resolv.conf</code>
-is absent. Images no longer generate that file or write under <code>/system/cfg/libc</code>;
-read-only roots need writable <code>/system/tmp</code> and <code>/system/logs</code> mounts.
-Remove an older image's resolver file offline to select the loopback default.</p>
+workers per transport. The listener is optional: startup failures are logged and IPC
+startup continues. Workers already started remain running if a later spawn fails.
+A UDP receive or TCP accept error is logged and stops only the affected worker while
+IPC continues. This is mlibc's default nameserver when <code>resolv.conf</code> is absent.
+Images no longer generate that file or write under
+<code>/system/cfg/libc</code>; read-only roots need writable <code>/system/tmp</code> and
+<code>/system/logs</code> mounts. Remove an older image's resolver file offline to select
+the loopback default.</p>
 <p>The listener answers local A/AAAA queries and forwards other queries, including PTR,
 preserving records and TTLs. Requests are limited to one IN-class question and 4096 bytes.
 UDP replies over 512 bytes set TC for TCP fallback; TCP serves one query per connection
