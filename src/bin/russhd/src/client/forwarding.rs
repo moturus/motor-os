@@ -199,6 +199,14 @@ impl Listeners {
             }
         }
     }
+
+    #[cfg(all(test, unix))]
+    pub(super) fn inject_errors(
+        &mut self,
+        index: usize,
+    ) -> tokio::sync::mpsc::UnboundedSender<io::Error> {
+        self.sockets[index].socket.inject_errors()
+    }
 }
 
 async fn bind(address: &ListenAddress, gateway_ports: bool) -> io::Result<Vec<TcpListener>> {
@@ -357,7 +365,7 @@ mod tests {
         }).await.expect("dynamic relay stalled");
     }
 
-    fn options(bind: Option<&str>, gateway_ports: bool) -> ConnectionOptions {
+    pub(super) fn options(bind: Option<&str>, gateway_ports: bool) -> ConnectionOptions {
         let mut options = ConnectionOptions::default();
         options.gateway_ports = gateway_ports;
         options.local_forwards = vec![LocalForward {
@@ -421,6 +429,9 @@ mod tests {
 
     #[tokio::test]
     async fn setup_failure_keeps_other_listeners_or_releases_them_when_exit_is_required() {
+        let _process_and_rebind = crate::forward::accept::test_support::PROCESS_AND_REBIND
+            .lock()
+            .await;
         let blocked = TcpListener::bind("127.0.0.1:0").await.unwrap();
         for exit in [false, true] {
             // Keep the port out of the ephemeral allocator across setup.
@@ -481,3 +492,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "forwarding/accept_tests.rs"]
+mod accept_tests;

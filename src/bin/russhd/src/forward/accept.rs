@@ -101,6 +101,38 @@ impl AcceptSocket {
         }
         self.listener.poll_accept(cx)
     }
+
+    #[cfg(all(test, unix))]
+    pub fn inject_errors(&mut self) -> tokio::sync::mpsc::UnboundedSender<io::Error> {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        self.injected = Some(receiver);
+        sender
+    }
+}
+
+#[cfg(all(test, unix))]
+pub(crate) mod test_support {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    use tokio::net::TcpSocket;
+
+    // A concurrent fork can retain even CLOEXEC listeners until its exec finishes.
+    // Keep process spawning separate from tests that assert immediate port release.
+    pub static PROCESS_AND_REBIND: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    pub fn reserve_loopback_port() -> (u16, [TcpSocket; 2]) {
+        let ipv4 = TcpSocket::new_v4().unwrap();
+        ipv4.set_reuseaddr(true).unwrap();
+        ipv4.bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+            .unwrap();
+        let port = ipv4.local_addr().unwrap().port();
+        let ipv6 = TcpSocket::new_v6().unwrap();
+        ipv6.set_reuseaddr(true).unwrap();
+        ipv6.bind(SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port))
+            .unwrap();
+        // Keep the port out of both ephemeral allocators across listener retirement.
+        (port, [ipv4, ipv6])
+    }
 }
 
 #[cfg(test)]

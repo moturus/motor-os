@@ -532,6 +532,9 @@ mod tests {
     #[test]
     fn option_literals_preserve_hashes_quotes_and_backslashes() {
         #[cfg(unix)]
+        let _process_and_rebind =
+            crate::forward::accept::test_support::PROCESS_AND_REBIND.blocking_lock();
+        #[cfg(unix)]
         let root = {
             let root = std::env::temp_dir()
                 .join(format!("motor-ssh-option-oracle-{}", std::process::id()));
