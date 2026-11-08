@@ -439,7 +439,8 @@ filesystem is itself a userspace service.</p>
 <div class="table-wrap">
 <table>
   <tr><th>Command</th><th>Shows</th></tr>
-  <tr><td><code>stats</code></td><td>Any metric from any provider; <code>df</code> is a script over <code>stats get</code>.</td></tr>
+  <tr><td><code>stats</code></td><td>Any metric from any provider.</td></tr>
+  <tr><td><code>findmnt</code>, <code>df</code></td><td>Mounted filesystems with their source, state, and sampled usage; <code>df</code> runs <code>findmnt</code>.</td></tr>
   <tr><td><code>free</code></td><td>Memory totals from the kernel.</td></tr>
   <tr><td><code>ps</code>, <code>pstat PID</code></td><td>Processes with their parent and role marker (<code>ps -H</code> as a tree); the kernel's statistics for one process.</td></tr>
   <tr><td><code>top</code></td><td>CPU usage by process and by CPU, live.</td></tr>

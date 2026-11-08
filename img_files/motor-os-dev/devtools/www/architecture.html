@@ -427,7 +427,8 @@ Firecracker it boots via PVH. Either way a small loader brings the CPUs up in 64
 and loads the kernel from the initrd into high memory (hence "himem kernel"), at a fixed
 address with no address randomization. The initrd also carries <code>sys-io</code>; the
 kernel loads it as the first process, with every capability, and halts the machine if it
-ever exits. sys-io initializes the VirtIO devices, mounts the filesystem, and starts
+ever exits. sys-io initializes the VirtIO devices, mounts the root filesystem and those
+listed in <code>/system/cfg/sys-fs.toml</code>, and starts
 <code>sys-init</code>, which reads <code>/system/cfg/sys-init.cfg</code> and starts
 strobe, the configured services, and the console.</p>
 
@@ -500,10 +501,13 @@ its hot paths. Two small helper threads answer synchronous statistics queries.</
   <li><strong>Drivers</strong> (<code>src/sys/lib/virtio-async</code>): modern VirtIO over
   PCI with MSI-X. virtio-blk uses 4 KiB blocks and batched multi-block requests;
   virtio-net negotiates checksum offload and TSO on transmit and passes per-frame checksum
-  verdicts up to the stack. Exactly one block device and any number of network devices
-  are expected.</li>
-  <li><strong>Motor OS filesystem</strong>, the journaling filesystem, with a 16 MiB block cache,
-  readahead, and a lock manager for advisory locks (see
+  verdicts up to the stack. The first block device holds the root filesystem; further block
+  devices are opened only when a configured mount uses them. Any number of network devices
+  are supported.</li>
+  <li><strong>Filesystems</strong>: the journaling Motor OS filesystem for root and any
+  configured disk mounts, each with its own block cache (16 MiB for root on guests with 256 MiB or more),
+  and memfs for the volatile <code>tmp</code> directories; readahead and a lock manager
+  for advisory locks (see
   <a href="filesystem.html">Filesystem</a>).</li>
   <li><strong>moto-netstack</strong>, the networking stack, which grew out of smoltcp but
   has diverged far enough (congestion control, SACK and RACK-TLP loss recovery, timestamps,

@@ -379,14 +379,16 @@ the RPCs; nothing else blocks on strobe.
   the main image's 256 MiB data partition (`src/imager/motor-os.yaml:39`) during
   one debug `full-test.sh`.
 - **Disk-space rule.** Whenever strobe creates a log file -- at connection start
-  and at rotation -- it first reads the filesystem's available bytes the way
-  `df` does: sys-io's `fs.available_bytes` metric through
-  `moto_sdk::stats::Collector` (`src/sys/strobe/src/io_thread.rs:32-70`). If fewer
+  and at rotation -- it first reads the mount listing (`FsClient::mounts()`,
+  the data `findmnt` and `df` print) and takes capacity minus usage of the
+  deepest mount containing `/system/logs`: root by default, or the writable
+  `/system/logs` mount that a read-only root requires
+  (`src/sys/strobe/src/io_thread.rs:32-82`). If fewer
   than 50 MiB are available, strobe deletes `.prev` files in
   `/system/logs`, oldest first by the `modified` time `FsClient::metadata`
   reports, until 50 MiB are available or none remain. A live `.log` is never
-  deleted. If the provider is unreachable (sys-io registers a few moments after
-  boot), the check is skipped and nothing is deleted. The base and system-tty
+  deleted. If the listing is unavailable or the mount reports no capacity or
+  usage, the check is skipped and nothing is deleted. The base and system-tty
   images have 64 MiB data partitions, so on them the rule keeps no `.prev` at
   all; 4 MiB of current file per tag is what they retain.
 - **Boot records.** Records emitted before sys-tty registers the console stay

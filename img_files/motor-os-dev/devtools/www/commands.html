@@ -425,6 +425,7 @@ them.</p>
   <tr><td><code>cp</code>, <code>mv</code>, <code>rm</code>, <code>mkdir</code>, <code>rmdir</code></td><td>Copy (preserving permissions), move, and delete files and directories. A denied operation fails with a nonzero status.</td></tr>
   <tr><td><code>chmod MODE PATH...</code></td><td>Set permissions; MODE is nine characters in System, Interactive, None order (see <a href="filesystem.html">Filesystem</a>).</td></tr>
   <tr><td><code>ps</code>, <code>pstat</code>, <code>top</code>, <code>free</code>, <code>uptime</code>, <code>stats</code></td><td>Processes (with role markers <code>*</code> System and <code>+</code> Interactive), CPU usage, memory, and any metric (see <a href="diagnostics.html">Logs and diagnostics</a>).</td></tr>
+  <tr><td><code>findmnt</code>, <code>df</code></td><td>Mounted filesystems by mount ID: target, source (<code>virtio1p2</code> for an MBR slot, <code>virtio1</code> for a whole device, <code>-</code> for memfs), type, state (<code>rw</code>, <code>ro</code>, or <code>quarantined</code>), and sampled usage, capacity, and entries (see <a href="filesystem.html#mounts">Filesystem</a>).</td></tr>
   <tr><td><code>ss</code></td><td>TCP sockets known to sys-io.</td></tr>
   <tr><td><code>ping [-c COUNT] [-i SECONDS] [-W SECONDS] [-s BYTES] DESTINATION</code></td><td>ICMP echo to an IPv4 or IPv6 address, <code>localhost</code>, or a DNS name.</td></tr>
   <tr><td><code>date</code>, <code>time</code>, <code>sleep</code></td><td>The current time, timing a command, and pausing.</td></tr>
@@ -433,7 +434,7 @@ them.</p>
 </table>
 </div>
 <p>A few names in <code>/system/bin</code> are scripts without a sysbox applet behind
-them: <code>df</code> (over <code>stats</code>), <code>uname</code> (prints "Motor OS"),
+them: <code>uname</code> (prints "Motor OS"),
 <code>sh</code> (forwards to rush, so C library <code>system()</code> and
 <code>popen()</code> work), and <code>exit</code> (so that <code>ssh host exit 5</code>,
 which looks for an executable, works). <code>kill</code>, <code>cd</code>,

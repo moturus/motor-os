@@ -410,7 +410,8 @@ and no notion of users, links, or numeric Unix modes.</p>
   <li><strong>On-disk structures.</strong> 4 KiB blocks, B+ trees for directories and
   file data, and inline data for small files (up to 3,640 bytes live in the entry
   itself). The partition type is <code>0x2e</code>.</li>
-  <li><strong>Block cache</strong> of 4,096 blocks (16 MiB) with readahead and a
+  <li><strong>Block cache</strong> of 4,096 blocks (16 MiB) for root, less on guests below
+  256 MiB, with readahead and a
   hit/miss/dedup-wait counter set exposed as metrics.</li>
   <li><strong>Operations.</strong> stat, create (optionally with an explicit permission
   set), delete, read, write, resize and truncate, rename with and without replacing the
@@ -426,6 +427,46 @@ and no notion of users, links, or numeric Unix modes.</p>
 of moto-sdk's <code>async_fs</code>, an abstraction that also runs on a Linux host so that images
 can be built and tested there. Rust's <code>std::fs</code> works as expected on top of it,
 with the permission model below showing through <code>Permissions</code>.</p>
+
+<h2 id="mounts">Mounts</h2>
+<p>sys-io mounts root from the first block device, then applies
+<code>/system/cfg/sys-fs.toml</code> in file order. The shipped file mounts memfs, an
+in-memory filesystem, over <code>/system/tmp</code>, <code>/user/tmp</code>, and
+<code>/none/tmp</code>, so every role's scratch directory is empty after each boot. Memfs
+capacity defaults to guest RAM less 16 MiB (at least 8 MiB), and writes return
+<code>StorageFull</code> when free memory runs low.</p>
+<p>Existing Motor OS filesystems on other MBR slots or virtio-block devices can be mounted
+at boot too:</p>
+<pre><code>[[mount]]
+path = "/user/data"   # an existing directory
+type = "motor-fs"
+device = 1            # PCI scan order, logged at boot; root is device 0
+partition = 2         # MBR slot 1-4; omit for a disk holding one bare Motor OS filesystem
+# read_only = true
+# cache_mb = 8        # this mount's block cache; at least 1 MiB</code></pre>
+<p>Failed devices keep their numbers, and nothing is formatted, partitioned, or resized at
+mount time. A later mount may sit inside an earlier one, and mounted filesystems keep
+their stored permissions. Additional mounts share a cache budget equal to root's unless
+<code>cache_mb</code> sets one. Any invalid entry or missing source stops boot before the
+filesystem service starts. GPT, hotplug, and mounting or unmounting at run time are not
+supported.</p>
+<p>With <code>read_only = true</code>, every modifying request on that mount fails with
+<code>PermissionDenied</code> for every role, System included; reads, execution, locks,
+and copies out still work. A <code>[root]</code> table with <code>read_only = true</code>
+makes root read-only; it requires a writable mount at <code>/system/logs</code>, where
+strobe rotates logs against that mount's capacity, and networking needs the writable
+<code>/system/tmp</code>. Opening a mount may first replay its journal; on a disk the VMM
+attaches read-only, the journal must be clean and the mount configured read-only. The
+launchers attach such disks with <code>--root-read-only</code> and
+<code>--extra-disk-ro</code> (see <a href="running.html">Running</a>).</p>
+<p>Copies between mounts work; renames between them fail with
+<code>CrossesDevices</code> (<code>EXDEV</code> in C), so <code>mv</code> across mounts
+fails too: copy, then delete. A mount root cannot be moved, deleted, or replaced.
+<code>findmnt</code> (or <code>df</code>) lists the mounts with their source
+(<code>virtio1p2</code>, <code>virtio1</code>, or <code>-</code> for memfs), state
+(<code>rw</code>, <code>ro</code>, or <code>quarantined</code>), and sampled usage. The
+<code>fs.capacity_bytes</code> and <code>fs.available_bytes</code> metrics cover root
+only.</p>
 
 <h2>Image layout</h2>
 <div class="table-wrap">

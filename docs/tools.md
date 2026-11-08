@@ -19,6 +19,12 @@ and several useful scripts:
   images. `run-fc.sh` requires a raw image and defaults to the base image.
   `make raw.img` (or `make raw.img BUILD=release`) explicitly builds
   `motor-os.img`, the standard image in raw format; ordinary `make` does not.
+  The three launchers also take `--cpus N`, `--memory SIZE`,
+  `--root-read-only`, and repeatable `--extra-disk FILE` /
+  `--extra-disk-ro FILE` (a plain file name next to the launcher). Extra disks
+  are used only through Motor FS mounts in `/system/cfg/sys-fs.toml`
+  ([fs-permissions.md](fs-permissions.md)); a read-only root disk needs a
+  read-only root configured in the image.
 
 For host-side image creation, permission changes, resizing, and SSH/TLS
 credential replacement, see the [imager command reference](imager.md).
