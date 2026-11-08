@@ -205,7 +205,8 @@ build_lua() {
 	mkdir -p "$EXTERNAL_SOURCES"
 	( cd "$EXTERNAL_SOURCES"
 		if [ ! -d "lua-$LUA_VER" ]; then
-			curl -LO "https://www.lua.org/ftp/lua-$LUA_VER.tar.gz"
+			curl -fLO "https://www.lua.org/ftp/lua-$LUA_VER.tar.gz" ||
+				curl -fLO "https://moturus.com/lua-$LUA_VER.tar.gz"
 			tar xf "lua-$LUA_VER.tar.gz"
 			rm "lua-$LUA_VER.tar.gz"
 		fi )
