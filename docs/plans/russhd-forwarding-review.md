@@ -36,9 +36,9 @@ their original reviewed source snapshot.
 
 | ID | Priority | Finding | Status |
 | --- | --- | --- | --- |
-| R1 | P1 | Outgoing close deferral starts after the peer can close | Published fork fix integrated at 3891276; final gate pending |
-| R2 | P2 | Client protocol disconnect can block in final flush | Published fork fix integrated at 3891276; final gate pending |
-| R3 | P2 | Server protocol disconnect retains resources until transport EOF | Published fork fix integrated at 3891276; final gate pending |
+| R1 | P1 | Outgoing close deferral starts after the peer can close | Fixed in published fork 3891276; integrated and validated |
+| R2 | P2 | Client protocol disconnect can block in final flush | Fixed in published fork 3891276; integrated and validated |
+| R3 | P2 | Server protocol disconnect retains resources until transport EOF | Fixed in published fork 3891276; integrated and validated |
 | R4 | P2 | Local accept error aborts the entire SSH connection | Approved policy implemented locally with recovery/isolation regressions; final gate pending |
 | R5 | P2 | Remote accept error leaves a dead listener registered | Local recovery and registration cleanup with regressions ready; final gate pending |
 | R6 | P2 | Rejected remote bind strings enter logs unsanitized | Fixed; rejected text omitted and setup/cancellation log regressions pass |
@@ -231,7 +231,7 @@ and evidence, but not a need for a permanent commit per progress update.
 | S1 | Remove obsolete jump buffering if current transport makes it unnecessary | Removed locally; component regressions pass with the repaired fork; final gate pending |
 | S2 | Share small host-validation and bind-loop mechanics | Host grammar shared locally; binding policies remain explicit |
 | S3 | Separate current design from implementation journal | Complete; design is in docs/ssh-forwarding.md and historical gate evidence remains in Git |
-| S4 | Reduce copied test fixtures | Seven copies removed locally; unique legacy-open case moved to the fork |
+| S4 | Reduce copied test fixtures | Complete; seven copies removed and unique legacy-open case moved to the fork |
 | S5 | Squash bookkeeping and fixup commits | Recommendation for merge preparation; no history rewrite authorized |
 | S6 | Clean large ignored build/evidence directory | Inventory and retention decision first; no deletion authorized |
 
@@ -280,8 +280,8 @@ Do not replace the only durable record with an ignored build directory.
 The original comparison found exact copies for close, backpressure, and stalls,
 and small differences in the others. The fixes plan supersedes the original
 replacement-gate recommendation: fork tests stay in the fork, without a new
-pin-specific suite or runner. The seven Motor copies are removed locally, and
-`refusal_after_a_legacy_open_is_cancelled_keeps_the_transport_alive` moves to
+pin-specific suite or runner. The seven Motor copies are removed, and
+`refusal_after_a_legacy_open_is_cancelled_keeps_the_transport_alive` lives in
 `russh/tests/test_server_open_credit.rs`. Motor retains its relay and end-to-end
 tests through `full-test.sh`.
 

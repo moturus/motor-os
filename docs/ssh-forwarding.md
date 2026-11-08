@@ -22,7 +22,7 @@ per-destination policy; several session channels per connection; OpenSSH's
 
 ## The russh fork
 
-`russhd` depends on `moturus/russh`, branch `motor-v0.65.1`, which carries 28
+`russhd` depends on `moturus/russh`, branch `motor-v0.65.1`, which carries 31
 commits above upstream v0.65.1 (`b33092a`). `src/bin/russhd/Cargo.lock` records
 the exact revision. Upstream already provides the protocol at both ends:
 
@@ -45,7 +45,9 @@ The fork adds what forwarding needs and upstream lacks:
 - **Credit-mode opens.** `channel_open_direct_tcpip_with_credit` (client) and
   `channel_open_forwarded_tcpip_with_credit` (server) install the credit before
   the open is sent, so no automatic credit is returned before the opener holds
-  its handle. Cancelled opens follow OpenSSH: the small unconfirmed protocol
+  its handle. They defer close acknowledgement from dispatch until the
+  application drains and closes, or drops the last credit handle. Cancelled
+  opens follow OpenSSH: the small unconfirmed protocol
   record stays until the reply or disconnect, application handoff state is
   freed at once, a late success is closed, and unknown confirmations are
   rejected.
@@ -58,7 +60,9 @@ The fork adds what forwarding needs and upstream lacks:
   every credit handle releases that state without waiting.
 - **Session abort and transport fixes.** `RunningSession::abort()` for the login
   deadline, concurrent transport reads and writes, blocked-reply limits, and
-  the compression repair.
+  the compression repair. A received SSH disconnect releases the session,
+  transport and handler without waiting for a flush, shutdown, or peer TCP EOF.
+  Locally initiated disconnects retain their orderly shutdown path.
 
 Any further fork change must be proposed explicitly before it is made. Fork
 changes live outside the main Motor OS repository and are identified separately
