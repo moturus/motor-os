@@ -252,6 +252,13 @@ socket before success. Unknown registrations fail. Existing forwarded
 connections continue. Connection loss cancels all listeners, pending opens, and
 relays. There is no separate listener-count cap.
 
+Local and remote listeners share an accept-error policy. A failed incoming
+connection leaves its listener usable; resource exhaustion delays that socket's
+next accept by 100 ms. Permanent or unclassified errors retire the affected
+socket with a warning. Other sockets, forwards, commands, and cancellation keep
+running. A remote group loses its registration when its last socket exits,
+allowing the same key to be registered again while admitted relays continue.
+
 ## Client design
 
 ### Options

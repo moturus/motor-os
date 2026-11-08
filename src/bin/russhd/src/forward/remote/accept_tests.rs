@@ -1,10 +1,12 @@
 use super::*;
-use crate::forward::accept::test_support::inject;
+use crate::forward::accept::test_support::{inject, reserve_loopback_port};
 use russh::{Channel, client, server};
+use std::future::{Future, poll_fn};
+use std::task::Poll;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, Instant, advance, timeout};
 
 type Opened = (Channel<client::Msg>, client::ChannelOpenHandle);
 
@@ -169,6 +171,141 @@ async fn remote_connection_errors_preserve_the_listener_and_subsequent_traffic()
                 .await
                 .unwrap()
         );
+        pair.finish().await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_exhausted_remote_socket_does_not_pause_the_other_family() {
+    timeout(Duration::from_secs(5), async {
+        let mut pair = Pair::new().await;
+        let port = pair.register("localhost", 0).await;
+        let start = Instant::now();
+        inject(
+            &pair.errors("localhost", port, 0),
+            io::ErrorKind::OutOfMemory,
+        )
+        .await
+        .unwrap();
+        let paused = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        let healthy = TcpStream::connect((Ipv6Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        let opened = pair.opened.recv().await.unwrap();
+        assert_eq!(Instant::now(), start);
+        assert!(
+            poll_fn(|cx| Poll::Ready(Box::pin(pair.opened.recv()).as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        advance(Duration::from_millis(99)).await;
+        assert!(
+            poll_fn(|cx| Poll::Ready(Box::pin(pair.opened.recv()).as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        advance(Duration::from_millis(1)).await;
+        let resumed = pair.opened.recv().await.unwrap();
+        assert_eq!(Instant::now() - start, crate::forward::ACCEPT_PAUSE);
+        tokio::join!(exchange(healthy, opened), exchange(paused, resumed));
+        pair.finish().await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn total_remote_listener_loss_releases_its_key_and_preserves_admitted_relays() {
+    let _process_and_rebind = crate::forward::accept::test_support::PROCESS_AND_REBIND
+        .lock()
+        .await;
+    timeout(Duration::from_secs(5), async {
+        let mut pair = Pair::new().await;
+        let (port, _reservations) = reserve_loopback_port();
+        assert_eq!(pair.register("localhost", port.into()).await, port);
+        let first = pair.errors("localhost", port, 0);
+        let last = pair.errors("localhost", port, 1);
+        inject(&first, io::ErrorKind::NotConnected).await.unwrap();
+        assert_eq!(
+            pair.listeners
+                .groups
+                .lock()
+                .unwrap()
+                .get(&("localhost".into(), port))
+                .unwrap()
+                .remaining,
+            1
+        );
+        let released = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        drop(released);
+        let socket = TcpStream::connect((Ipv6Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        let admitted = pair.opened.recv().await.unwrap();
+        inject(&last, io::ErrorKind::Other).await.unwrap();
+        assert!(pair.listeners.groups.lock().unwrap().is_empty());
+        assert!(
+            !pair
+                .listeners
+                .cancel("localhost", port.into())
+                .await
+                .unwrap()
+        );
+        assert_eq!(pair.register("localhost", port.into()).await, port);
+        assert!(
+            pair.listeners
+                .cancel("localhost", port.into())
+                .await
+                .unwrap()
+        );
+        exchange(socket, admitted).await;
+        pair.tasks.wait_idle().await;
+        pair.client.send_ping().await.unwrap();
+        pair.finish().await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn remote_cancellation_during_a_pause_or_queued_failure_releases_every_socket() {
+    let _process_and_rebind = crate::forward::accept::test_support::PROCESS_AND_REBIND
+        .lock()
+        .await;
+    timeout(Duration::from_secs(5), async {
+        let mut pair = Pair::new().await;
+        for processed in [true, false] {
+            let (port, _reservations) = reserve_loopback_port();
+            assert_eq!(pair.register("localhost", port.into()).await, port);
+            let first = pair.errors("localhost", port, 0);
+            let last = pair.errors("localhost", port, 1);
+            let start = Instant::now();
+            if processed {
+                inject(&first, io::ErrorKind::OutOfMemory).await.unwrap();
+            } else {
+                first.send(io::ErrorKind::NotConnected.into()).unwrap();
+            }
+            assert!(
+                pair.listeners
+                    .cancel("localhost", port.into())
+                    .await
+                    .unwrap()
+            );
+            assert_eq!(Instant::now(), start);
+            assert!(first.is_closed() && last.is_closed());
+            let _v4 = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
+                .await
+                .unwrap();
+            let _v6 = TcpListener::bind((Ipv6Addr::LOCALHOST, port))
+                .await
+                .unwrap();
+        }
         pair.finish().await;
     })
     .await
