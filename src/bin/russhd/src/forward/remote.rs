@@ -3,20 +3,58 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use super::accept::{AcceptSocket, ErrorAction, classify};
+
+type Groups = Mutex<HashMap<(String, u16), Group>>;
+
 #[derive(Default)]
 pub struct Listeners {
-    groups: HashMap<(String, u16), Group>,
+    groups: Arc<Groups>,
 }
+
+#[cfg(all(test, unix))]
+#[path = "remote/accept_tests.rs"]
+mod accept_tests;
 
 struct Group {
     stop: watch::Sender<()>,
     running: Vec<JoinHandle<()>>,
+    remaining: usize,
+    #[cfg(all(test, unix))]
+    accept_errors: Vec<tokio::sync::mpsc::UnboundedSender<io::Error>>,
+}
+
+struct GroupSocket {
+    groups: Weak<Groups>,
+    key: (String, u16),
+}
+
+impl Drop for GroupSocket {
+    fn drop(&mut self) {
+        // Tasks must not keep the map's stop senders alive after its owner drops.
+        let Some(groups) = self.groups.upgrade() else {
+            return;
+        };
+        let mut groups = groups.lock().unwrap();
+        let Some(group) = groups.get_mut(&self.key) else {
+            return;
+        };
+        group.remaining -= 1;
+        if group.remaining == 0 {
+            groups.remove(&self.key);
+            log::warn!(
+                "remote forward {}:{} has no listening sockets",
+                self.key.0,
+                self.key.1
+            );
+        }
+    }
 }
 
 impl Listeners {
@@ -30,7 +68,12 @@ impl Listeners {
         window: usize,
     ) -> io::Result<u16> {
         let port = validate_request(address, port)?;
-        if self.groups.contains_key(&(address.to_owned(), port)) {
+        if self
+            .groups
+            .lock()
+            .unwrap()
+            .contains_key(&(address.to_owned(), port))
+        {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "remote forward already registered",
@@ -43,18 +86,31 @@ impl Listeners {
         };
         let port = bound.port;
         let key = (address.to_owned(), port);
-        if self.groups.contains_key(&key) {
+        let mut groups = self.groups.lock().unwrap();
+        if groups.contains_key(&key) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "allocated remote forward already registered",
             ));
         }
         let (stop, stopped) = watch::channel(());
+        let remaining = bound.sockets.len();
+        #[cfg(all(test, unix))]
+        let mut accept_errors = Vec::new();
         let running = bound
             .sockets
             .into_iter()
             .map(|listener| {
-                tokio::spawn(accept(
+                let listener = AcceptSocket::new(listener);
+                #[cfg(all(test, unix))]
+                let mut listener = listener;
+                #[cfg(all(test, unix))]
+                accept_errors.push(listener.inject_errors());
+                let registration = GroupSocket {
+                    groups: Arc::downgrade(&self.groups),
+                    key: key.clone(),
+                };
+                let accepting = accept(
                     listener,
                     stopped.clone(),
                     address.to_owned(),
@@ -62,10 +118,24 @@ impl Listeners {
                     handle.clone(),
                     tasks.clone(),
                     window,
-                ))
+                );
+                tokio::spawn(async move {
+                    // accept owns and releases the socket before the key becomes reusable.
+                    let _registration = registration;
+                    accepting.await;
+                })
             })
             .collect();
-        self.groups.insert(key, Group { stop, running });
+        groups.insert(
+            key,
+            Group {
+                stop,
+                running,
+                remaining,
+                #[cfg(all(test, unix))]
+                accept_errors,
+            },
+        );
         Ok(port)
     }
 
@@ -73,7 +143,12 @@ impl Listeners {
     /// Relay jobs have their own connection scope and keep running.
     pub async fn cancel(&mut self, address: &str, port: u32) -> io::Result<bool> {
         let port = validate_request(address, port)?;
-        let Some(group) = self.groups.remove(&(address.to_owned(), port)) else {
+        let group = self
+            .groups
+            .lock()
+            .unwrap()
+            .remove(&(address.to_owned(), port));
+        let Some(group) = group else {
             return Ok(false);
         };
         drop(group.stop);
@@ -89,7 +164,7 @@ impl Listeners {
 }
 
 async fn accept(
-    listener: TcpListener,
+    mut listener: AcceptSocket,
     mut stopped: watch::Receiver<()>,
     address: String,
     port: u16,
@@ -101,13 +176,34 @@ async fn accept(
         let accepted = tokio::select! {
             biased;
             _ = stopped.changed() => return,
-            result = listener.accept() => result,
+            result = std::future::poll_fn(|cx| listener.poll_accept(cx)) => result,
         };
         let (socket, originator) = match accepted {
             Ok(accepted) => accepted,
             Err(error) => {
-                log::warn!("remote forward accept failed: {error}");
-                return;
+                let socket = listener
+                    .local_addr()
+                    .map(|socket| socket.to_string())
+                    .unwrap_or_else(|_| "unknown socket".into());
+                match classify(&error) {
+                    ErrorAction::Continue => {
+                        log::debug!("remote forward {address}:{port} accept {socket}: {error}")
+                    }
+                    ErrorAction::Pause => {
+                        log::warn!(
+                            "remote forward {address}:{port} accept {socket}: {error}; pausing this socket"
+                        );
+                        listener.pause();
+                    }
+                    ErrorAction::Retire => {
+                        log::warn!(
+                            "remote forward {address}:{port} accept {socket}: {error}; retiring this socket"
+                        );
+                        return;
+                    }
+                }
+                tokio::task::yield_now().await;
+                continue;
             }
         };
         let Some(job) = tasks.reserve(super::memory_pressure()) else {
