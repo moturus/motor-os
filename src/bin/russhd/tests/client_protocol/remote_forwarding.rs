@@ -2,6 +2,48 @@ use super::*;
 use tokio::net::TcpListener;
 
 #[test]
+fn rejected_remote_bind_text_does_not_enter_setup_or_cancellation_logs() {
+    let mut fixture = Fixture::configured("allow_tcp_forwarding = true");
+    let invalid = ["forged\n\x1b[31mmessage".to_owned(), "x".repeat(256)];
+    block_on(async {
+        let session = fixture.connect().await;
+        let port = session.tcpip_forward("localhost", 0).await.unwrap();
+        for address in &invalid {
+            assert!(session.tcpip_forward(address, 22).await.is_err());
+            assert!(session.cancel_tcpip_forward(address, 22).await.is_err());
+        }
+        session
+            .cancel_tcpip_forward("localhost", port)
+            .await
+            .unwrap();
+        sftp_handshake(&session).await;
+    });
+    fixture.child.kill().unwrap();
+    fixture.child.wait().unwrap();
+    let logs = fixture
+        .log_thread
+        .take()
+        .unwrap()
+        .join()
+        .unwrap()
+        .join("\n");
+    assert_eq!(
+        logs.matches("remote forward port 22: invalid remote bind address")
+            .count(),
+        4,
+        "{logs}"
+    );
+    for address in invalid {
+        assert!(
+            !logs.contains(&address),
+            "rejected bind text leaked: {logs}"
+        );
+    }
+    assert!(!logs.contains("forged"), "{logs}");
+    assert!(!logs.contains('\x1b'), "{logs}");
+}
+
+#[test]
 fn remote_listener_requests_require_policy_and_validate_addresses() {
     for (extra, enabled) in [
         ("", false),

@@ -41,7 +41,7 @@ their original reviewed source snapshot.
 | R3 | P2 | Server protocol disconnect retains resources until transport EOF | Published fork fix integrated at 3891276; final gate pending |
 | R4 | P2 | Local accept error aborts the entire SSH connection | Approved policy implemented locally with recovery/isolation regressions; final gate pending |
 | R5 | P2 | Remote accept error leaves a dead listener registered | Local recovery and registration cleanup with regressions ready; final gate pending |
-| R6 | P2 | Rejected remote bind strings enter logs unsanitized | Local fix and setup/cancellation log regression ready; final gate pending |
+| R6 | P2 | Rejected remote bind strings enter logs unsanitized | Fixed; rejected text omitted and setup/cancellation log regressions pass |
 | R7 | P3 | User documentation says implemented `-R` is unsupported | Corrected in 85f39f3d; text reviewed |
 | R8 | P3 | Crate documentation still describes completed publication as pending | Corrected in 85f39f3d against local release records |
 

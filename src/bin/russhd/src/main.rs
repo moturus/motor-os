@@ -565,7 +565,7 @@ impl server::Handler for ConnectionHandler {
                 Ok(true)
             }
             Err(error) => {
-                log::info!("remote forward {address}:{port}: {error}");
+                log::info!("remote forward port {port}: {error}");
                 Ok(false)
             }
         }
@@ -583,7 +583,7 @@ impl server::Handler for ConnectionHandler {
         match listeners.cancel(address, port).await {
             Ok(cancelled) => Ok(cancelled),
             Err(error) => {
-                log::warn!("cancel remote forward {address}:{port}: {error}");
+                log::warn!("cancel remote forward port {port}: {error}");
                 Ok(false)
             }
         }

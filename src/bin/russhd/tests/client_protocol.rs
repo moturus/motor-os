@@ -62,7 +62,7 @@ fn reserve_tcp_port() -> (std::net::SocketAddr, tokio::net::TcpSocket) {
 
 struct Fixture {
     child: Child,
-    log_thread: Option<std::thread::JoinHandle<()>>,
+    log_thread: Option<std::thread::JoinHandle<Vec<String>>>,
     root: PathBuf,
     port: u16,
     known_hosts: PathBuf,
@@ -114,12 +114,15 @@ impl Fixture {
         let (address_tx, address_rx) = std::sync::mpsc::sync_channel(1);
         let log_thread = std::thread::spawn(move || {
             let mut sent = false;
+            let mut lines = Vec::new();
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 if !sent && let Some(address) = line.split("Listening on ").nth(1) {
                     let _ = address_tx.send(address.trim().to_owned());
                     sent = true;
                 }
+                lines.push(line);
             }
+            lines
         });
         let address = address_rx
             .recv_timeout(Duration::from_secs(5))
