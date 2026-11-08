@@ -1,12 +1,7 @@
 # TCP forwarding in russhd and ssh
 
 This is the design of TCP forwarding at both ends: `russhd` as a jump host or
-the far end of a tunnel, and the Motor `ssh` client opening one. It was
-extracted from the completed implementation plan; that plan's step history and
-gate records remain in the git history of `docs/plans/russhd-forwarding.md`.
-Open correctness work is tracked in
-[docs/plans/russhd-forwarding-review-fixes.md](plans/russhd-forwarding-review-fixes.md);
-update this document when those fixes land.
+the far end of a tunnel, and the Motor `ssh` client opening one.
 
 ## Scope
 

@@ -9,13 +9,7 @@ pub fn validate_target(host: &str, port: u32) -> Result<u16, ChannelOpenFailure>
     if port > u16::MAX as u32 {
         return Err(ChannelOpenFailure::AdministrativelyProhibited);
     }
-    if port == 0
-        || host.is_empty()
-        || host.len() > 255
-        || !host
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
-    {
+    if port == 0 || !super::valid_host(host) {
         return Err(ChannelOpenFailure::ConnectFailed);
     }
     Ok(port as u16)

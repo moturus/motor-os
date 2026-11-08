@@ -2,7 +2,7 @@
 
 use super::args::ParseError;
 
-const MAX_HOST: usize = 255;
+use crate::forward::{MAX_HOST, valid_host};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ListenAddress {
@@ -152,12 +152,7 @@ fn host(value: &str, bind: bool) -> Result<String, ParseError> {
     if bind && (value.is_empty() || value == "*") {
         return Ok(value.to_owned());
     }
-    if value.is_empty()
-        || value.len() > MAX_HOST
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
-    {
+    if !valid_host(value) {
         return Err(invalid());
     }
     Ok(value.to_owned())

@@ -15,6 +15,15 @@ pub use open::{connect_target, direct_tcpip, memory_pressure, validate_target};
 pub use tasks::{Reservation, Tasks};
 
 const BLOCK_SIZE: usize = 32 * 1024;
+pub(crate) const MAX_HOST: usize = 255;
+
+pub(crate) fn valid_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= MAX_HOST
+        && host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+}
 
 /// Run inside a connection-owned `Tasks` reservation: its cancellation covers
 /// every await here, including cleanup while the session's send queue is full.
