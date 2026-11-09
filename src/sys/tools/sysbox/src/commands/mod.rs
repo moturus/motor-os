@@ -27,6 +27,7 @@ pub mod ss;
 pub mod stats;
 pub mod tail;
 pub mod time;
+pub mod timeout;
 pub mod top;
 pub mod tr;
 pub mod uniq;

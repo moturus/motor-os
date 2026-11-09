@@ -5,6 +5,10 @@ license = "MIT OR Apache-2.0"
 version = "0.1.0"
 edition = "2021"
 
+[[test]]
+name = "timeout"
+harness = false
+
 [dependencies]
 # The terminal `less` pages on: keys, the size, raw mode and the alternate
 # screen. NOTE: crossterm is patched to the Motor OS fork in the workspace

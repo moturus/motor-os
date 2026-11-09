@@ -1,4 +1,4 @@
-#![feature(io_error_more)]
+#![feature(io_error_more, motor_ext)]
 
 mod commands;
 
@@ -34,6 +34,7 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     println!("\tsysbox stats");
     println!("\tsysbox tail");
     println!("\tsysbox time");
+    println!("\tsysbox timeout");
     println!("\tsysbox top");
     println!("\tsysbox tr");
     println!("\tsysbox uniq");
@@ -105,6 +106,7 @@ fn main() {
         "stats" => commands::stats::do_command(&args[1..]),
         "tail" => commands::tail::do_command(&args[1..]),
         "time" => commands::time::do_command(&args[1..]),
+        "timeout" => commands::timeout::do_command(&args[1..]),
         "top" => commands::top::do_command(&args[1..]),
         "tr" => commands::tr::do_command(&args[1..]),
         "uniq" => commands::uniq::do_command(&args[1..]),
