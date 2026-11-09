@@ -122,6 +122,8 @@ if [ "$SEEN_RELEASE" = 1 ]; then
   "$WD/test-wasm.sh" --vm wasm:256 --vm dev:256 --linux-identity "${FORWARDED_ARGS[@]}"
   "$WD/test-wasm.sh" --prepare --services --suite wasmtime --vm wasm:256 --vm dev:256 "${FORWARDED_ARGS[@]}"
   "$WD/test-wasm.sh" --services --suite wasmtime --vm wasm:256 --vm dev:256 "${FORWARDED_ARGS[@]}"
+  # QuickJS-NG's Test262 runner, built natively: compiler and libc regressions.
+  MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" "$WD/test-quickjs-test262.sh" "${FORWARDED_ARGS[@]}"
 fi
 
 echo "full-test-dev.sh ALL PASS"

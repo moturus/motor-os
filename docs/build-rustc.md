@@ -12,7 +12,7 @@ and `cargo -Vv` report the commits they were built from; do not infer them from
 a branch name or copy a historical revision from documentation.
 
 The fork uses Rust's `dev` channel. Its compiler description is the
-toolchain's name, `x86_64-unknown-motor-1.99.1`, and its Cargo reports
+toolchain's name, `x86_64-unknown-motor-1.99.1-2`, and its Cargo reports
 `1.99.1-dev` plus the exact Cargo commit. Rust's downloaded Stage 0 compiler is only a bootstrap input selected
 by that Rust revision's `src/stage0`; repository commands never select Stage 0
 or an independent nightly/stable Cargo.
@@ -20,7 +20,7 @@ or an independent nightly/stable Cargo.
 ## Linux-host toolchain
 
 The Linux-host toolchain is installed from its archive into a directory that
-rustup knows as `x86_64-unknown-motor-1.99.1` (see
+rustup knows as `x86_64-unknown-motor-1.99.1-2` (see
 [toolchain.md](toolchain.md)). It contains:
 
 - Linux-host rustc and rustdoc;

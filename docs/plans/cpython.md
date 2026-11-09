@@ -134,9 +134,11 @@ with "Cannot locate requested DSO".
 The VDSO already has what the process-related gaps need, because Rust std
 uses it: `moto_rt::process::spawn` takes `stdin`/`stdout`/`stderr` slots
 with `STDIO_MAKE_PIPE`, and `try_wait`, `kill`, `fs::duplicate`, and
-`ctrl_c_register_handler`/`ctrl_c_wait` exist. The C shim exposes none of
-them: `moto_rt_spawn` takes no stdio, `moto_rt_waitpid` only blocks, and
-there is no pipe or duplicate export. Rust std's `sys/pipe/motor.rs` is also
+`ctrl_c_register_handler`/`ctrl_c_wait` exist. Since the QuickJS port
+(2026-11-08), the C shim exposes spawn with stdio (`moto_rt_spawn_ex`),
+waits for one or any child with `WNOHANG` (`moto_rt_waitpid_ex`), and
+`moto_rt_kill`. There is still no pipe or duplicate export. Rust std's
+`sys/pipe/motor.rs` is also
 unsupported, and `set_times` is unsupported on purpose
 (`sys/fs/motor.rs`, "Let's not do that").
 
@@ -340,7 +342,12 @@ slots. CPython then needs only `_can_fork_exec` tuning and the existing
 `posix_spawn` path. This is the larger change and touches `src/sys`, but it
 also fixes Rust's `std::io::pipe`.
 
-*B. Spawn-with-stdio in the shim.* Extend `moto_rt_spawn` with three stdio
+*B. Spawn-with-stdio in the shim.* Most of this is done (QuickJS port,
+2026-11-08): `moto_rt_spawn_ex` takes the three stdio slots and returns pipe
+fds, `moto_rt_waitpid_ex` supports `WNOHANG` and any-child waits,
+`moto_rt_kill` exists, and `PosixSpawn` accepts `addopen`/`adddup2` onto fds
+0 to 2 and `addchdir_np`. `Dup`, `Dup2` and `moto_rt_dup` are still missing.
+The original proposal: extend `moto_rt_spawn` with three stdio
 arguments and return the pipe fds, matching `SpawnArgs`; add
 `moto_rt_try_wait` over `process::try_wait`, `moto_rt_kill`, and
 `moto_rt_dup` over `fs::duplicate`. mlibc's `PosixSpawn` accepts file

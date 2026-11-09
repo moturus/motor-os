@@ -7,7 +7,8 @@ trap 'rm -rf "$temporary"' EXIT
 mkdir -p "$temporary/src/tests" "$temporary/src/bin/lorry/tests" \
   "$temporary/src/bin/httpd-axum/tests" "$temporary/bin"
 cp "$WD/full-test-dev.sh" "$temporary/src/tests/"
-for script in full-test.sh test-dev-sources.sh test-native-toolchain-install.sh; do
+for script in full-test.sh test-dev-sources.sh test-native-toolchain-install.sh \
+  test-quickjs-test262.sh; do
   printf '%s\n' '#!/bin/bash' \
     'printf "%s %s %s\n" "${0##*/}" "${MOTO_MEMORY_MIB:-unset}" "$*" >> "$MEMORY_TEST_LOG"' \
     > "$temporary/src/tests/$script"
@@ -33,6 +34,7 @@ wasm_expected+=$'\ntest-wasm.sh --prepare --services --suite wasmtime --vm wasm:
 env -u MOTO_MEMORY_MIB -u MOTO_IMAGE bash "$temporary/src/tests/full-test-dev.sh" --release > "$temporary/wrapper.log"
 expected=$'full-test.sh 8192 --release\nhttpd-axum 4096 motor-os-dev.qcow2 --motor --release\ntest-dev-sources.sh 4096 --release\ntest-native-toolchain-install.sh 4096 --release'
 expected+="$wasm_expected"
+expected+=$'\ntest-quickjs-test262.sh 4096 --release'
 [ "$(<"$MEMORY_TEST_LOG")" = "$expected" ] || {
   echo 'developer VM defaults changed' >&2; exit 1;
 }
@@ -41,6 +43,7 @@ MOTO_MEMORY_MIB=6144 MOTO_IMAGE=caller.qcow2 \
   bash "$temporary/src/tests/full-test-dev.sh" --release >> "$temporary/wrapper.log"
 expected=$'full-test.sh 6144 --release\nhttpd-axum 6144 motor-os-dev.qcow2 --motor --release\ntest-dev-sources.sh 6144 --release\ntest-native-toolchain-install.sh 6144 --release'
 expected+="$wasm_expected"
+expected+=$'\ntest-quickjs-test262.sh 6144 --release'
 [ "$(<"$MEMORY_TEST_LOG")" = "$expected" ] || {
   echo 'developer VM caller override was not preserved' >&2; exit 1;
 }
@@ -51,6 +54,7 @@ env -u MOTO_MEMORY_MIB \
   >> "$temporary/wrapper.log"
 expected=$'full-test.sh 8192 --release --vmm chv\nhttpd-axum 4096 motor-os-dev.qcow2 --motor --release --vmm chv\ntest-dev-sources.sh 4096 --release --vmm chv\ntest-native-toolchain-install.sh 4096 --release --vmm chv'
 expected+="${wasm_expected//--release/--release --vmm chv}"
+expected+=$'\ntest-quickjs-test262.sh 4096 --release --vmm chv'
 [ "$(<"$MEMORY_TEST_LOG")" = "$expected" ] || {
   echo 'developer VMM selection was not forwarded to every phase' >&2; exit 1;
 }

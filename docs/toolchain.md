@@ -67,9 +67,9 @@ with its `build-toolchain.sh`, which writes them next to its checkout: in
 
 ```sh
 cd "$MOTORH"
-tar -xaf motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux.tar.zst
-motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux/install.sh
-rm -rf motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux
+tar -xaf motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux.tar.zst
+motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux/install.sh
+rm -rf motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux
 ```
 
 GNU tar needs the `zstd` program for `-a` with a `.zst` archive.
@@ -161,8 +161,8 @@ empty directory:
 ```sh
 mkdir /user/toolchain
 cd /user/toolchain
-tar -x -f /user/motor-toolchain-x86_64-unknown-motor-1.99.1.tar.zst
-motor-toolchain-x86_64-unknown-motor-1.99.1/install.sh
+tar -x -f /user/motor-toolchain-x86_64-unknown-motor-1.99.1-2.tar.zst
+motor-toolchain-x86_64-unknown-motor-1.99.1-2/install.sh
 ```
 
 `install.sh` replaces `/devtools/llvm` and `/devtools/rust` with the requested

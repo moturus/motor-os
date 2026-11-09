@@ -58,7 +58,8 @@ prepared '1:128:release qemu' env MOTO_SMP=bad MOTO_MEMORY_MIB=bad \
 # and forward only arguments understood by these existing component interfaces.
 : > "$scratch/src/tests/test-dev-path-locks.py"
 for runner in src/tests/full-test.sh src/tests/test-dev-sources.sh \
-  src/tests/test-native-toolchain-install.sh src/bin/httpd-axum/tests/run.sh; do
+  src/tests/test-native-toolchain-install.sh src/bin/httpd-axum/tests/run.sh \
+  src/tests/test-quickjs-test262.sh; do
   cat > "$scratch/$runner" <<'SH'
 #!/bin/bash
 printf '%s:%s:%s\n' "$MOTO_SMP" "$MOTO_MEMORY_MIB" "$*" >> "$MOTO_SIZE_TEST_LOG"
@@ -85,7 +86,8 @@ developer() {
     'test-wasm.sh:--prepare --vm wasm:256 --vm dev:256 --release --vmm qemu' \
     'test-wasm.sh:--vm wasm:256 --vm dev:256 --linux-identity --release --vmm qemu' \
     'test-wasm.sh:--prepare --services --suite wasmtime --vm wasm:256 --vm dev:256 --release --vmm qemu' \
-    'test-wasm.sh:--services --suite wasmtime --vm wasm:256 --vm dev:256 --release --vmm qemu' > "$scratch/expected"
+    'test-wasm.sh:--services --suite wasmtime --vm wasm:256 --vm dev:256 --release --vmm qemu' \
+    "$cpus:$source_memory:--release --vmm qemu" > "$scratch/expected"
   diff -u "$scratch/expected" "$MOTO_SIZE_TEST_LOG"
 }
 developer 4 8192 4096 "$scratch/src/tests/full-test-dev.sh" --release --vmm=qemu
