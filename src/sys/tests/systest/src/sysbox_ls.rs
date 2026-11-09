@@ -67,6 +67,7 @@ pub fn run_test() {
 
     test_operands_kept_as_typed(&root);
     test_multiple_operands(&root);
+    test_shell_globbing(&root);
 
     std::fs::remove_dir_all(root).unwrap();
     println!("sysbox_ls::run_test PASS");
@@ -196,5 +197,96 @@ fn test_multiple_operands(root: &Path) {
         stderr.contains("error reading directory 'missing'")
             && stderr.contains("error reading directory 'also-missing'"),
         "{stderr:?}"
+    );
+}
+
+/// Runs a shell command line in `cwd` through rush, the way an interactive
+/// user does; `ls` in it is the packaged /system/bin/ls wrapper.
+fn rush(cwd: &Path, command: &str) -> Output {
+    Command::new("/system/bin/rush")
+        .args(["-c", command])
+        .current_dir(cwd)
+        .output()
+        .unwrap()
+}
+
+#[track_caller]
+fn expect_rush(cwd: &Path, command: &str, status: i32, stdout: &str, errors: &[&str]) {
+    let output = rush(cwd, command);
+    assert_eq!(output.status.code(), Some(status), "{command}: {output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        stdout,
+        "{command}: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for operand in errors {
+        assert!(
+            stderr.contains(&format!("error reading directory '{operand}'")),
+            "{command}: {output:?}"
+        );
+    }
+}
+
+/// The whole path a typed `ls *.md` takes: rush expands the pattern, the
+/// packaged wrapper forwards the words intact, and sysbox lists them all.
+fn test_shell_globbing(root: &Path) {
+    let directory = root.join("glob");
+    std::fs::create_dir_all(directory.join("sub")).unwrap();
+    for name in [
+        "a.md",
+        "b.md",
+        "has space.md",
+        "*.md",
+        ".hidden.md",
+        "c.txt",
+    ] {
+        std::fs::write(directory.join(name), name).unwrap();
+    }
+    let dash = directory.join("dash");
+    std::fs::create_dir_all(&dash).unwrap();
+    std::fs::write(dash.join("-x.md"), b"dash").unwrap();
+
+    // Zero, one and several matches. An unmatched pattern stays a literal
+    // operand that does not exist. Dot files are skipped by the shell.
+    expect_rush(&directory, "ls *.rs", 2, "", &["*.rs"]);
+    expect_rush(&directory, "ls *.txt", 0, "c.txt \n", &[]);
+    expect_rush(
+        &directory,
+        "ls *.md",
+        0,
+        "*.md a.md b.md has space.md \n",
+        &[],
+    );
+    expect_rush(&directory, "ls .hidden.md", 0, ".hidden.md \n", &[]);
+    expect_rush(
+        &directory,
+        "ls -l *.txt sub",
+        0,
+        "-rwxrw-r-- 5 c.txt\n\nsub:\n",
+        &[],
+    );
+
+    // Quoted and escaped wildcards name the literal `*.md` file only; sysbox
+    // must not expand the word again.
+    expect_rush(&directory, "ls '*.md'", 0, "*.md \n", &[]);
+    expect_rush(&directory, "ls \"*.md\"", 0, "*.md \n", &[]);
+    expect_rush(&directory, "ls \\*.md", 0, "*.md \n", &[]);
+    expect_rush(&directory, "set -f; ls *.md", 0, "*.md \n", &[]);
+    expect_rush(&directory, "ls '*.txt'", 2, "", &["*.txt"]);
+
+    // Expansion happens before option parsing: a matched name that starts
+    // with `-` needs `--`.
+    expect_rush(&dash, "ls -*.md", 1, "", &[]);
+    expect_rush(&dash, "ls -- -*.md", 0, "-x.md \n", &[]);
+
+    // Missing operands before and after matches are reported after the
+    // listing finishes, and the status says so.
+    expect_rush(
+        &directory,
+        "ls missing *.txt sub gone",
+        2,
+        "c.txt \n\nsub:\n\n",
+        &["missing", "gone"],
     );
 }
