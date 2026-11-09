@@ -15,6 +15,7 @@ The JavaScript engine is upstream code. Only its platform layer,
 | `/devtools/quickjs/lib/libqjs.a` | The engine with the `qjs:std`, `qjs:os` and `qjs:bjson` modules. |
 | `/devtools/quickjs/LICENSE` | QuickJS-NG's license. |
 | `/devtools/tests/quickjs-*` | The smoke test and its fixtures. |
+| `/devtools/www/quickjs.html` | This guide in the image's HTML documentation. |
 
 `libqjs.a` holds only QuickJS's C objects. The normal C toolchain supplies
 mlibc and its runtime shim, so a program links only `libqjs.a` explicitly.
