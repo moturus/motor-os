@@ -196,7 +196,7 @@ fn operand_error_exit(operand: &str) -> ! {
 }
 
 fn print_usage_and_exit(exit_code: i32) -> ! {
-    eprintln!("usage:\n\tls [-lh] [--] [DIR]\n");
+    eprintln!("usage:\n\tls [-alh] [--] [DIR]\n");
     std::process::exit(exit_code);
 }
 
@@ -226,8 +226,9 @@ pub fn do_command(args: &[String]) {
                 match char {
                     b'l' => list_details = true,
                     b'h' => human_friendly = true,
-                    // TODO: add "." and ".." manually.
-                    // b'a' => list_dots = true,
+                    // Motor FS has no hidden entries, so every listing is
+                    // already complete; accepted for ls(1) compatibility.
+                    b'a' => {}
                     _ => {
                         print_usage_and_exit(1);
                     }

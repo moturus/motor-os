@@ -1491,8 +1491,9 @@ check_ls_colors ""
 check_ls_colors "-l"
 
 # Directories sort before files in both output modes, with each group sorted by
-# name. The names deliberately put a file before a directory lexically.
-for option in "" "-l"; do
+# name. The names deliberately put a file before a directory lexically. -a is
+# accepted and changes nothing: Motor FS has no hidden entries.
+for option in "" "-l" "-a" "-la"; do
   sorted_ls="$(vm_ssh_stdout /system/bin/ls $option "$TEST_TMP/sysbox-ls-color")"
   case "$sorted_ls" in
     *"amber-dir"*"z-directory"*"a-file"*"default-file"*"system-only-file"*) ;;
