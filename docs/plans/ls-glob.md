@@ -5,7 +5,7 @@
 Reviewed 2026-11-09; implementation in progress on `dev`.
 
 - Patch 1, preserve operands: done.
-- Patch 2, multiple operands: not started.
+- Patch 2, multiple operands: done.
 - Patch 3, rush-to-wrapper-to-sysbox regressions: not started.
 - Final 3+3 `full-test.sh` gate: not run.
 
@@ -20,6 +20,8 @@ Review notes:
   such file names cannot be fixtures. The regressions instead check that
   operands with surrounding whitespace fail with status 2 rather than being
   trimmed to an existing name or to `.`.
+- `-l` sizes are right-aligned within a group, as ls(1) does; they used to be
+  left-aligned.
 - systest gains a `sysbox-ls` subcommand so each patch can be checked in one
   boot without the whole main sequence.
 
@@ -55,9 +57,9 @@ cargo test --offline --locked --release --test phase3 pathname_expansion -- --ex
 ```
 
 A host invocation also confirmed that unquoted `$@` splits a space-containing
-argument and expands a literal `*.md`, while `"$@"` preserves both. The user's
-exact VM failure has not been reproduced; the multiple-operand rejection is
-established from the current source.
+argument and expands a literal `*.md`, while `"$@"` preserves both. The VM failure
+was reproduced on 2026-11-09 before patch 2: `ls *.md` in a directory with two
+matches printed the usage line and exited 1.
 
 ## Recommendation
 

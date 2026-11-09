@@ -66,6 +66,7 @@ pub fn run_test() {
     );
 
     test_operands_kept_as_typed(&root);
+    test_multiple_operands(&root);
 
     std::fs::remove_dir_all(root).unwrap();
     println!("sysbox_ls::run_test PASS");
@@ -125,4 +126,75 @@ fn test_operands_kept_as_typed(root: &Path) {
     assert_eq!(output.status.code(), Some(2), "ls of \"-\": {output:?}");
     std::fs::write(directory.join("-"), b"dash").unwrap();
     assert_eq!(stdout_of(run(&directory, &["-"])), "- \n");
+}
+
+/// Several operands list as ls(1) does: file operands first, then each
+/// directory under a heading, groups separated by a blank line, with a
+/// failed operand reported on stderr and status 2 after the others.
+fn test_multiple_operands(root: &Path) {
+    let directory = root.join("multi");
+    for sub in ["d1", "d2"] {
+        std::fs::create_dir_all(directory.join(sub)).unwrap();
+    }
+    let sizes = [
+        ("d1/x", 1),
+        ("d1/y", 2),
+        ("d2/z", 3),
+        ("f1", 4),
+        ("f2", 12),
+        ("big", 2048),
+    ];
+    for (name, size) in sizes {
+        std::fs::write(directory.join(name), vec![b'.'; size]).unwrap();
+    }
+
+    // One operand keeps the plain presentation: no heading.
+    assert_eq!(stdout_of(run(&directory, &["d1"])), "x y \n");
+
+    // Files sort by name; directories sort by operand and get headings.
+    assert_eq!(stdout_of(run(&directory, &["f2", "f1"])), "f1 f2 \n");
+    assert_eq!(
+        stdout_of(run(&directory, &["d2", "d1"])),
+        "d1:\nx y \n\nd2:\nz \n"
+    );
+    assert_eq!(
+        stdout_of(run(&directory, &["d1", "f1", "d2", "f2"])),
+        "f1 f2 \n\nd1:\nx y \n\nd2:\nz \n"
+    );
+
+    // Long output aligns sizes within each group: the file group's widths
+    // come from f2's two digits, d1's from its one-digit sizes.
+    let long = stdout_of(run(&directory, &["-l", "d1", "f2", "f1"]));
+    let lines: Vec<&str> = long.lines().collect();
+    assert_eq!(lines.len(), 6, "{long:?}");
+    assert!(lines[0].ends_with("  4 f1"), "{long:?}");
+    assert!(lines[1].ends_with(" 12 f2"), "{long:?}");
+    assert_eq!(lines[2], "", "{long:?}");
+    assert_eq!(lines[3], "d1:", "{long:?}");
+    assert!(lines[4].ends_with(" 1 x"), "{long:?}");
+    assert!(lines[5].ends_with(" 2 y"), "{long:?}");
+    assert!(
+        lines[0].len() == lines[1].len() && lines[4].len() == lines[5].len(),
+        "{long:?}"
+    );
+    // -h applies to every operand.
+    let human = stdout_of(run(&directory, &["-lh", "big", "d2"]));
+    assert!(
+        human.contains(" 2.00K big\n") && human.contains(" 3 z\n"),
+        "{human:?}"
+    );
+
+    // Inaccessible operands are reported and skipped; the rest still list.
+    let output = run(&directory, &["missing", "f1", "d1", "also-missing"]);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "f1 \n\nd1:\nx y \n"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error reading directory 'missing'")
+            && stderr.contains("error reading directory 'also-missing'"),
+        "{stderr:?}"
+    );
 }
