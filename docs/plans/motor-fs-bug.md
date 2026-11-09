@@ -1,12 +1,13 @@
-# Motor FS: writes continue after a failed open
+# Motor FS: a flaky recovery test
 
 Found on 2026-11-08 while validating the QuickJS port. It is not related to
-QuickJS.
+QuickJS. It is a test bug, fixed in `3f06e57c`. It does not affect a live Motor
+OS VM.
 
 ## Symptom
 
 The motor-fs host test `tests::recovery_policy_and_completion`
-(`src/sys/lib/motor-fs/src/tests.rs`, added in `7a711121`) fails at random:
+(`src/sys/lib/motor-fs/src/tests.rs`, added in `7a711121`) failed at random:
 
 ```
 panicked at lib/motor-fs/src/tests.rs:242:17:
@@ -21,71 +22,63 @@ step six times before.
 
 Measured on a 16-core host from `src/sys/lib/motor-fs`:
 
-| Run | Failures |
-| --- | ---: |
-| The test alone | 0 of 150 |
-| The whole motor-fs suite | 16 of 80 |
-| The test alone, with 16 busy loops on the host | 25 of 60 |
+| Run | Before the fix | After the fix |
+| --- | ---: | ---: |
+| The test alone | 0 of 150 | |
+| The whole motor-fs suite | 16 of 80 | 0 of 80 |
+| The test alone, with 16 busy loops on the host | 25 of 60, 17 of 50 | 0 of 100 |
 
-So the trigger is CPU load, not another test's state.
-
-To reproduce:
-
-```sh
-cd src/sys/lib/motor-fs
-for i in $(seq 16); do timeout 300 sh -c 'while :; do :; done' & done
-for i in $(seq 20); do
-  cargo test --quiet --features image-admin --lib \
-    tests::recovery_policy_and_completion -- --exact || echo FAIL
-done
-```
+So the trigger was CPU load, not another test's state.
 
 ## Cause
 
 The test opens the same image four times. Before each open it writes the old
 superblock and root back, so each attempt starts from the same dirty journal.
-The third attempt makes the device's flush fail, so
+The third attempt uses a fake device whose flush fails, so
 `MotorFs::open_with_recovery_policy` returns an error.
 
-That error returns while recovery writes are still queued. `BlockCache` sends
-its writes to a background task, started with `spawn_local` in
-`src/sys/lib/moto-sdk/src/async_fs/block_cache.rs` (about line 551). The task's
-handle is dropped. When the cache is dropped, the task keeps draining the
-writes it already has. On the host each write runs on a tokio blocking thread,
-so under load it can land much later.
+On the host, `AsyncFileBlockDevice` writes through `tokio::fs::File`. Its
+`write_all` returns once tokio has buffered the data; the real write runs later
+on a blocking thread. Only `File::flush()` waits for it, and dropping the file
+does not cancel it.
 
-When a late write lands after the test restored the old superblock, the fourth
-open finds the journal already applied. It does not replay it, and the
-assertion fails.
+The fake device (`FlushErrorBlockDevice::flush`) returned its error without
+calling the inner flush. So the last recovery write was still pending when the
+third open failed. Under load it landed after the test had restored the old
+superblock. The fourth open then found the journal already applied, did not
+replay it, and the assertion failed.
 
-A temporary check in the test confirmed this. After each restore it waited
-briefly and read the restored blocks back. Under load, all 26 failures in 50
-runs came with a changed block before the last open. Runs with no late write
-never failed. The check was removed afterwards.
+A temporary check in the test confirmed the late write. After each restore it
+waited briefly and read the restored blocks back. Under load, all 26 failures
+in 50 runs came with a changed block before the last open. Runs with no late
+write never failed. The check was removed afterwards.
 
-## Impact
+An earlier version of this document blamed the block cache's background
+writer. That was wrong. The block cache handles its messages in order, so every
+write sent before a flush reaches the device before the flush reply. It writes
+nothing when it is dropped.
 
-Any caller that retries an open after a failed recovery can race with writes
-from the failed attempt. Those writes can overwrite what the new attempt reads
-or writes. The test only makes this visible.
+## Fix
 
-A related issue: on a device write error the background task panics
-("Error writing blocks to the device", `block_cache.rs` about line 487). A
-later `flush()` then panics with `RecvError` (about line 374). Both panics show
-up in every run of this test, passing or failing, during the attempt with the
-failing write.
+`3f06e57c` makes the fake device always call the inner flush, then return the
+injected error. That matches a real flush error, which also waits for the
+file's buffered writes first.
 
-## Possible fixes
+## Why a live VM is not affected
 
-- Keep the background task's handle. Have a failed open, or the cache's
-  shutdown, wait for queued writes to finish before it returns.
-- Or, once a write or flush has failed, make the background task drop the
-  writes that are still queued.
-- Return device write errors from the background task instead of panicking.
+- sys-io does not use `tokio::fs`. It writes through `VirtioPartition`
+  (`src/sys/sys-io/src/runtime/fs/devices.rs`).
+- A failed open is fatal for that boot. A failed root open makes `fs::init`
+  return an error. Any other failed mount panics sys-io in `config::load`.
+  Nothing reopens the device in the same boot.
+- On the Linux host, the imager's real flushes go through `File::flush()`,
+  which waits for buffered writes.
 
-The fix belongs to the Motor FS and moto-sdk code, not to the QuickJS work.
+## A related open issue
 
-## Status
-
-Open. While this is open, the QuickJS work keeps the test commented out in its
-working tree only. That change will not be committed.
+On a device write error, the block cache's background writer panics ("Error
+writing blocks to the device", `src/sys/lib/moto-sdk/src/async_fs/block_cache.rs`
+about line 487). A later `flush()` then panics with `RecvError` (about line
+374). Both panics show up in every run of this test, during the attempt with
+the failing write. On a live VM this needs a real device write error. Returning
+the error instead of panicking would be more robust. This is not fixed.
