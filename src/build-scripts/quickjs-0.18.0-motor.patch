@@ -1,0 +1,347 @@
+diff --git a/cutils.h b/cutils.h
+index d441bba..4e8c30d 100644
+--- a/cutils.h
++++ b/cutils.h
+@@ -1711,6 +1711,12 @@ static inline int js_exepath(char *buffer, size_t *size) {
+ 
+     return 0;
+ }
++#elif defined(__motor__)
++#include <moto_rt.h>
++
++static inline int js_exepath(char *buffer, size_t *size) {
++    return moto_rt_exepath((uint8_t *)buffer, size) < 0 ? -1 : 0;
++}
+ #elif defined(__linux__) || defined(__GNU__)
+ static inline int js_exepath(char *buffer, size_t *size) {
+     ssize_t n;
+diff --git a/quickjs-libc.c b/quickjs-libc.c
+index 42d7f03..f3f95aa 100644
+--- a/quickjs-libc.c
++++ b/quickjs-libc.c
+@@ -56,7 +56,9 @@
+ #define getcwd _getcwd
+ #define chdir _chdir
+ #else
++#if !defined(__motor__)
+ #include <sys/ioctl.h>
++#endif
+ #include <poll.h>
+ #if !defined(__wasi__)
+ #include <dlfcn.h>
+@@ -65,6 +67,10 @@
+ #include <sys/wait.h>
+ #include <grp.h>
+ #endif
++#ifdef __motor__
++#include <moto_rt.h>
++#include <spawn.h>
++#endif
+ 
+ #if defined(__COSMOPOLITAN__)
+ #include <cosmo.h>
+@@ -163,6 +169,8 @@ typedef struct {
+ typedef struct JSWaker {
+ #ifdef _WIN32
+     HANDLE handle;
++#elif defined(__motor__)
++    int read_fd;
+ #else
+     int read_fd;
+     int write_fd;
+@@ -689,7 +697,7 @@ static JSModuleDef *js_module_loader_so(JSContext *ctx,
+     }
+     return m;
+ }
+-#elif defined(__wasi__)
++#elif defined(__wasi__) || defined(__motor__)
+ static JSModuleDef *js_module_loader_so(JSContext *ctx,
+                                         const char *module_name)
+ {
+@@ -1721,7 +1729,11 @@ static JSValue js_std_file_putByte(JSContext *ctx, JSValueConst this_val,
+ /* urlGet */
+ #if !defined(__wasi__)
+ 
++#ifdef __motor__
++#define URL_GET_PROGRAM "/system/bin/curl --silent --include --globoff --proto '=http,https' --url"
++#else
+ #define URL_GET_PROGRAM "curl -s -i --"
++#endif
+ #define URL_GET_BUF_SIZE 4096
+ 
+ static int http_get_header_line(FILE *f, char *buf, size_t buf_size,
+@@ -1803,8 +1815,10 @@ static JSValue js_std_urlGet(JSContext *ctx, JSValueConst this_val,
+             dbuf_putstr(&cmd_buf, "'\\''");
+             break;
+         case '[': case ']': case '{': case '}': case '\\':
++#ifndef __motor__
+             /* prevent interpretation by curl as range or set specification */
+             dbuf_putc(&cmd_buf, '\\');
++#endif
+             /* FALLTHROUGH */
+         default:
+             dbuf_putc(&cmd_buf, c);
+@@ -2174,7 +2188,7 @@ static JSValue js_os_ttySetRaw(JSContext *ctx, JSValueConst this_val,
+     }
+     return JS_UNDEFINED;
+ }
+-#elif !defined(__wasi__)
++#elif !defined(__wasi__) && !defined(__motor__)
+ static JSValue js_os_ttyGetWinSize(JSContext *ctx, JSValueConst this_val,
+                                    int argc, JSValueConst *argv)
+ {
+@@ -2376,7 +2390,7 @@ static void os_signal_handler(int sig_num)
+     os_pending_signals |= ((uint64_t)1 << sig_num);
+ }
+ 
+-#if defined(_WIN32)
++#if defined(_WIN32) || defined(__motor__)
+ typedef void (*sighandler_t)(int sig_num);
+ #endif
+ 
+@@ -2643,6 +2657,30 @@ static void js_waker_close(JSWaker *w)
+     w->handle = INVALID_HANDLE_VALUE;
+ }
+ 
++#elif defined(__motor__)
++
++static int js_waker_init(JSWaker *w)
++{
++    w->read_fd = moto_rt_poll_new();
++    return w->read_fd < 0 ? -1 : 0;
++}
++
++static void js_waker_signal(JSWaker *w)
++{
++    moto_rt_poll_wake(w->read_fd);
++}
++
++static void js_waker_clear(JSWaker *w)
++{
++    /* The message queue holds readiness; native notifications are edges. */
++}
++
++static void js_waker_close(JSWaker *w)
++{
++    moto_rt_close(w->read_fd);
++    w->read_fd = -1;
++}
++
+ #else // !_WIN32
+ 
+ static int js_waker_init(JSWaker *w)
+@@ -2760,6 +2798,94 @@ static int handle_posted_message(JSRuntime *rt, JSContext *ctx,
+ #define JS_OS_POLL_WORKERS     (1 << 1)
+ #define JS_OS_POLL_SIGNALS     (1 << 2)
+ 
++#ifdef __motor__
++/* Closing a registry does not deregister it: each source keeps the entry until
++   its next event, so an idle Worker port would gain one per event loop turn. */
++static void js_motor_poll_close(int registry, struct pollfd *fds, int count)
++{
++    for (int i = 0; i < count; i++)
++        moto_rt_poll_del(registry, fds[i].fd);
++    moto_rt_close(registry);
++}
++
++static int js_motor_poll(JSContext *ctx, struct pollfd *fds, int count,
++                         int timeout_ms, int flags)
++{
++    JSThreadState *ts = js_get_thread_state(JS_GetRuntime(ctx));
++    struct list_head *el;
++    moto_poll_event_t event;
++    int registry, ret = 0, error = 0;
++    bool ready = false;
++
++    registry = moto_rt_poll_new();
++    if (registry < 0) {
++        error = registry;
++        goto fail;
++    }
++    for (int i = 0; i < count; i++) {
++        uint64_t interests = 0;
++        if (fds[i].events & POLLIN)
++            interests |= MOTO_POLL_READABLE;
++        if (fds[i].events & POLLOUT)
++            interests |= MOTO_POLL_WRITABLE;
++        error = moto_rt_poll_add(registry, fds[i].fd, i, interests);
++        if (error == -MOTO_E_INVALID_ARGUMENT) {
++            /* Regular files are always ready, as in libc poll(). */
++            fds[i].revents = fds[i].events;
++            ready = true;
++        } else if (error < 0) {
++            goto fail;
++        }
++    }
++
++    /* Register first, then check queues: a wake before registration is not
++       sticky, but its message remains queued. Later wakes reach registry. */
++    if (flags & JS_OS_POLL_WORKERS) {
++        list_for_each(el, &ts->port_list) {
++            JSWorkerMessageHandler *port = list_entry(el, JSWorkerMessageHandler, link);
++            JSWorkerMessagePipe *ps = port->recv_pipe;
++            js_mutex_lock(&ps->mutex);
++            if (!list_empty(&ps->msg_queue)) {
++                for (int i = 0; i < count; i++) {
++                    if (fds[i].fd == ps->waker.read_fd) {
++                        fds[i].revents |= POLLIN;
++                        ready = true;
++                    }
++                }
++            }
++            js_mutex_unlock(&ps->mutex);
++        }
++    }
++
++    uint64_t timeout = ready ? 0 : timeout_ms < 0 ? UINT64_MAX :
++                       (uint64_t)timeout_ms * 1000000;
++    error = moto_rt_poll_wait(registry, timeout, &event, 1);
++    if (error < 0)
++        goto fail;
++    if (error > 0) {
++        assert(event.token < (uint64_t)count);
++        struct pollfd *fd = &fds[event.token];
++        if (event.events & (MOTO_POLL_READABLE | MOTO_POLL_READ_CLOSED))
++            fd->revents |= POLLIN;
++        if (event.events & MOTO_POLL_WRITABLE)
++            fd->revents |= POLLOUT;
++        if (event.events & MOTO_POLL_ERROR)
++            fd->revents |= POLLERR;
++        if (event.events & MOTO_POLL_WRITE_CLOSED)
++            fd->revents |= POLLHUP;
++    }
++    for (int i = 0; i < count; i++)
++        ret += fds[i].revents != 0;
++    js_motor_poll_close(registry, fds, count);
++    return ret;
++ fail:
++    if (registry >= 0)
++        js_motor_poll_close(registry, fds, count);
++    JS_ThrowInternalError(ctx, "Motor poll failed: %d", error);
++    return -1;
++}
++#endif
++
+ #if defined(_WIN32)
+ static int js_os_poll_internal(JSContext *ctx, int timeout_ms, int flags)
+ {
+@@ -2953,7 +3079,11 @@ static int js_os_poll_internal(JSContext *ctx, int timeout_ms, int flags)
+     ret = 0;
+     /* poll() returns the number of ready descriptors, not the array length. */
+     poll_nfds = nfds;
++#ifdef __motor__
++    nfds = js_motor_poll(ctx, pfds, nfds, min_delay, flags);
++#else
+     nfds = poll(pfds, nfds, min_delay);
++#endif
+     if (nfds < 0) {
+         ret = -1;
+         goto done;
+@@ -3525,6 +3655,7 @@ static char **build_envp(JSContext *ctx, JSValue obj)
+ }
+ 
+ /* execvpe is not available on non GNU systems */
++#ifndef __motor__
+ static int my_execvpe(const char *filename, char **argv, char **envp)
+ {
+     char *path, *p, *p_next, *p1;
+@@ -3593,6 +3724,8 @@ static void js_os_exec_once_init(void)
+ 
+ #endif
+ 
++#endif /* !__motor__ */
++
+ /* exec(args[, options]) -> exitcode */
+ static JSValue js_os_exec(JSContext *ctx, JSValueConst this_val,
+                           int argc, JSValueConst *argv)
+@@ -3748,6 +3881,35 @@ static JSValue js_os_exec(JSContext *ctx, JSValueConst this_val,
+ 
+     }
+ 
++#ifdef __motor__
++    if (ngroups != -1 || uid != -1 || gid != -1) {
++        JS_ThrowTypeError(ctx, "Motor OS has no Unix uid, gid or supplementary groups");
++        goto exception;
++    }
++    posix_spawn_file_actions_t actions;
++    ret = posix_spawn_file_actions_init(&actions);
++    if (!ret) {
++        if (cwd)
++            ret = posix_spawn_file_actions_addchdir_np(&actions, cwd);
++        for (int i = 0; i < 3 && !ret; i++) {
++            if (std_fds[i] != i)
++                ret = posix_spawn_file_actions_adddup2(&actions, std_fds[i], i);
++        }
++        if (!ret) {
++            if (use_path)
++                ret = posix_spawnp(&pid, file ? file : exec_argv[0], &actions,
++                                  NULL, (char **)exec_argv, envp);
++            else
++                ret = posix_spawn(&pid, file ? file : exec_argv[0], &actions,
++                                 NULL, (char **)exec_argv, envp);
++        }
++        posix_spawn_file_actions_destroy(&actions);
++    }
++    if (ret) {
++        JS_ThrowTypeError(ctx, "spawn error: %s", strerror(ret));
++        goto exception;
++    }
++#else
+ #if !defined(EMSCRIPTEN) && !defined(__wasi__)
+     // should happen pre-fork because it calls dlsym()
+     // and that's not an async-signal-safe function
+@@ -3802,10 +3964,16 @@ static JSValue js_os_exec(JSContext *ctx, JSValueConst this_val,
+             ret = execve(file, (char **)exec_argv, envp);
+         _exit(127);
+     }
++#endif /* __motor__ */
+     /* parent */
+     if (block_flag) {
+         for(;;) {
+             ret = waitpid(pid, &status, 0);
++            /* Another thread's os.waitpid(-1) can reap this child. */
++            if (ret < 0 && errno != EINTR) {
++                JS_ThrowTypeError(ctx, "waitpid error: %s", strerror(errno));
++                goto exception;
++            }
+             if (ret == pid) {
+                 if (WIFEXITED(status)) {
+                     ret = WEXITSTATUS(status);
+@@ -4399,6 +4567,8 @@ void js_std_set_worker_new_context_func(JSContext *(*func)(JSRuntime *rt))
+ #define OS_PLATFORM "js"
+ #elif defined(__CYGWIN__)
+ #define OS_PLATFORM "cygwin"
++#elif defined(__motor__)
++#define OS_PLATFORM "motor"
+ #elif defined(__linux__)
+ #define OS_PLATFORM "linux"
+ #elif defined(__OpenBSD__)
+@@ -4435,7 +4605,7 @@ static const JSCFunctionListEntry js_os_funcs[] = {
+     JS_CFUNC_MAGIC_DEF("read", 4, js_os_read_write, 0 ),
+     JS_CFUNC_MAGIC_DEF("write", 4, js_os_read_write, 1 ),
+     JS_CFUNC_DEF("isatty", 1, js_os_isatty ),
+-#if !defined(__wasi__)
++#if !defined(__wasi__) && !defined(__motor__)
+     JS_CFUNC_DEF("ttyGetWinSize", 1, js_os_ttyGetWinSize ),
+     JS_CFUNC_DEF("ttySetRaw", 1, js_os_ttySetRaw ),
+ #endif
+@@ -4450,6 +4620,9 @@ static const JSCFunctionListEntry js_os_funcs[] = {
+     OS_FLAG(SIGILL),
+     OS_FLAG(SIGSEGV),
+     OS_FLAG(SIGTERM),
++#ifdef __motor__
++    OS_FLAG(SIGKILL),
++#endif
+ #if !defined(_WIN32) && !defined(__wasi__)
+     OS_FLAG(SIGQUIT),
+     OS_FLAG(SIGPIPE),
+@@ -4685,6 +4858,9 @@ static void js_std_finalize(JSRuntime *rt, void *arg)
+ void js_std_init_handlers(JSRuntime *rt)
+ {
+     JSThreadState *ts;
++#ifdef __motor__
++    moto_rt_exepath_init();
++#endif
+ 
+     ts = js_mallocz_rt(rt, sizeof(*ts));
+     if (!ts) {

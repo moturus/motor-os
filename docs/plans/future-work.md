@@ -8,6 +8,48 @@ per-operation allocation overhead, were reviewed. Historical timings below
 are not new measurements. An unexplained historical failure stays open
 unless the source establishes that its cause was fixed.
 
+## rt.vdso keeps a closed poll registry's registrations (2026-11-02)
+
+Closing a poll `Registry` does not release its registrations. Each source keeps
+the dead entry until its next event. QuickJS hit this: its event loop made a
+new registry on every turn, and an idle Worker port grew by about 500 bytes
+per turn, or 400 KB/s. The QuickJS patch now deletes its registrations before
+it closes the registry. Any other code that closes a registry with quiet
+sources leaks the same way. The fix belongs in `rt.vdso`: release a registry's
+registrations when it closes.
+
+## mlibc is slow with allocations above 32 KiB (2026-11-02)
+
+mlibc's frigg allocator pools requests up to 32 KiB. A larger request maps new
+anonymous memory, and `free` unmaps it. Growing past an allocation's capacity
+maps a new region, copies and unmaps the old one. Measured on Motor OS against
+Linux:
+
+- A loop of 1,000 malloc, touch and free: 0.073 ms for 32,768-byte requests,
+  25.2 ms for 32,769 bytes. Linux takes 0.025 ms and 0.016 ms.
+- Test262 `General_Category_-_Control.js`: the same 1,533 `realloc` calls on
+  both. They take 871 ms on Motor OS and 2.9 ms on Linux, with 783 maps and
+  778 unmaps.
+- The QuickJS Test262 suite takes 212 s on 4 vCPUs, against 35 s on Linux.
+  442 Unicode property-escape tests take 548 of its 575 evaluation
+  worker-seconds.
+
+The fix is large-block reuse and in-place growth in mlibc's allocator. Repeated
+harness file loads are a smaller cost. The diagnostic copies and logs are
+outside the tree, in `../qjs-evidence/build/quickjs-perf/`.
+
+## QuickJS REPL bulk input (2026-11-02)
+
+In the `qjs` REPL, end of input and pasted multiline commands are unreliable.
+The cause has not been investigated. Scripts and `qjs -e` work.
+
+## Block cache writer panics on a device write error (2026-11-08)
+
+On a device write error, moto-sdk's block cache background writer panics
+("Error writing blocks to the device", `async_fs/block_cache.rs`). A later
+`flush()` then panics with `RecvError`. Returning the error would be more
+robust. See [the motor-fs test note](motor-fs-bug.md).
+
 ## wasm 224MB image test ooming
 
 Find what regressed.

@@ -1,3 +1,3 @@
 #!/system/bin/rush
 
-/system/bin/sysbox chmod $@
+/system/bin/sysbox chmod "$@"

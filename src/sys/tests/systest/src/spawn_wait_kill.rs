@@ -173,6 +173,13 @@ pub fn test_exit_releases_memory() {
         // The handle is still held.
         assert_eq!(crate::kernel_metric("pages_user", pid), 0);
         assert_eq!(crate::kernel_metric("active_threads", pid), 0);
+        // A waited process lists as a zombie, if at all, so kill(pid, 0) sees it gone.
+        let mut info = [ProcessInfoV1::default(); 1];
+        let listed = ProcessInfoV1::list(pid, &mut info).unwrap();
+        assert!(
+            listed == 0 || info[0].pid != pid || info[0].active == 0,
+            "waited process {pid} still lists as active (killed: {kill})"
+        );
         assert_eq!(
             unsafe { (in_parent as *const u64).read_volatile() },
             PATTERN

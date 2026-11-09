@@ -174,6 +174,16 @@ case "$(declare -f build_helix)" in
 *'build --target "$TARGET" --release --locked'*'--offline -p helix-term --bin hx'*) ;;
 	*) fail "Helix build is not an explicit fetch followed by an offline locked build" ;;
 esac
+# QuickJS-NG is the pinned upstream tag plus a checked patch on a fresh copy.
+[ -f "$QUICKJS_PATCH" ] || fail "QuickJS patch is missing: $QUICKJS_PATCH"
+case "$(declare -f fetch_quickjs)" in
+	*'"$QUICKJS_REV"'*'status --porcelain'*) ;;
+	*) fail "QuickJS checkout is not checked against its pinned commit and cleanliness" ;;
+esac
+case "$(declare -f build_quickjs)" in
+	*'fetch_quickjs'*'git apply --check "$QUICKJS_PATCH"'*'git apply "$QUICKJS_PATCH"'*) ;;
+	*) fail "QuickJS is not built from the checked tag with its checked patch" ;;
+esac
 # The native toolchain is unpacked from its archive before the external sources
 # are built, so a bad archive fails the build early; the images take both.
 case "$(declare -f main)" in

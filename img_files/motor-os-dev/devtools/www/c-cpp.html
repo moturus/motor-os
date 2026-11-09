@@ -450,8 +450,8 @@ libunwind; the driver does this automatically.</p>
   <tr><td>Files and directories</td><td><code>open</code>, <code>read</code>, <code>write</code>, <code>lseek</code>, <code>stat</code>/<code>fstat</code>, <code>dirent</code>, <code>getcwd</code>/<code>chdir</code>, <code>mkdir</code>, <code>rename</code>, <code>unlink</code>, <code>ftruncate</code>, <code>fsync</code>, temporary files and directories, <code>isatty</code>. Permissions follow the three-role model (see <a href="filesystem.html">Filesystem</a>).</td></tr>
   <tr><td>Threads</td><td>pthreads: threads, mutexes, condition variables, read-write locks, <code>pthread_once</code>, keys with destructors; thread-local storage.</td></tr>
   <tr><td>Networking</td><td>BSD sockets over TCP and UDP, IPv4 and IPv6; <code>getaddrinfo</code> using the shared <code>hosts</code> file and the DNS service on loopback; <code>poll</code> and <code>select</code>, bridged onto the runtime's readiness interface.</td></tr>
-  <tr><td>Processes</td><td><code>posix_spawn</code>, <code>waitpid</code>, <code>system</code> and <code>popen</code> (through <code>/system/bin/sh</code>, which is rush), <code>getenv</code>, <code>getpid</code>, exit codes.</td></tr>
-  <tr><td>Signals</td><td>Synchronous only: <code>signal</code>, <code>sigaction</code>, and <code>sigprocmask</code> record dispositions, <code>raise</code> runs the handler in the calling thread, <code>kill</code> terminates a child. Nothing is delivered asynchronously; Ctrl+C is handled as described under <a href="terminals.html">Terminals</a>.</td></tr>
+  <tr><td>Processes</td><td><code>posix_spawn</code> and <code>posix_spawnp</code>, with file actions for the working directory and for descriptors 0 to 2; <code>waitpid</code> for one child or any child, with <code>WNOHANG</code>; <code>system</code>, and <code>popen</code>/<code>pclose</code> through <code>/system/bin/rush</code>; <code>getenv</code>, <code>getpid</code>, exit codes.</td></tr>
+  <tr><td>Signals</td><td>Synchronous only: <code>signal</code>, <code>sigaction</code>, and <code>sigprocmask</code> record dispositions, <code>raise</code> runs the handler in the calling thread. <code>kill</code> to another process supports signal 0, <code>SIGTERM</code> and <code>SIGKILL</code>, under the usual permission checks; the latter two terminate it. Nothing is delivered asynchronously; Ctrl+C is handled as described under <a href="terminals.html">Terminals</a>.</td></tr>
   <tr><td>Time</td><td><code>clock_gettime</code> with real-time and monotonic clocks, <code>nanosleep</code>, <code>strftime</code>.</td></tr>
   <tr><td>C++</td><td>libc++ with exceptions and RTTI on; <code>&lt;iostream&gt;</code>, containers, <code>&lt;thread&gt;</code>, <code>&lt;filesystem&gt;</code>, <code>&lt;random&gt;</code>, <code>&lt;chrono&gt;</code>, locales, wide characters, aligned <code>new</code>, static constructors and destructors in the right order.</td></tr>
   <tr><td>Motor OS-specific calls</td><td><code>&lt;moto_rt.h&gt;</code> exposes the runtime's C ABI (files, sockets, memory, futexes, arguments and environment, random bytes, logging, terminal status) for programs that need something POSIX does not express.</td></tr>
@@ -524,7 +524,7 @@ and runs the shipped C and C++ samples natively in a VM, including a check that
 the temporary-directory contract holds for both C and <code>std::filesystem</code>.</p>
 <nav class="pager">
 <a class="pager-prev" href="rust.html"><span>Previous</span>Rust on Motor OS</a>
-<a class="pager-next" href="wasm.html"><span>Next</span>WebAssembly</a>
+<a class="pager-next" href="quickjs.html"><span>Next</span>QuickJS: JavaScript</a>
 </nav>
 </article>
 </main>

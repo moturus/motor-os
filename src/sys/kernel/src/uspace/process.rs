@@ -970,6 +970,8 @@ impl Process {
                 self_mut.main_thread = None;
                 self_mut.self_object.take().unwrap()
             };
+            // Before the wake: a waiter may reap and probe the PID at once.
+            self.stats.mark_exited();
             self_obj.mark_done();
             SysObject::wake(&self_obj, false);
             super::oom::on_process_exited(self.kernel_pid());

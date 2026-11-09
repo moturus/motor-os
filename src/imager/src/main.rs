@@ -1100,6 +1100,7 @@ mod tests {
                 "rustc",
                 "helix",
                 "lua",
+                "quickjs",
                 "sed",
                 "rust-analyzer",
                 "javy",
@@ -1107,7 +1108,7 @@ mod tests {
                 "sys-lib-deps"
             ]
         );
-        assert_eq!(config.assembly_required_executables.len(), 19);
+        assert_eq!(config.assembly_required_executables.len(), 21);
         assert!(config
             .assembly_required_executables
             .iter()

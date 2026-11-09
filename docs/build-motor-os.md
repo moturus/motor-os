@@ -6,7 +6,7 @@ external sources and all release images with the Motor OS toolchain that
 `src/build-scripts/`. The toolchain itself is built and released by
 [motor-os-toolchain](https://github.com/moturus/motor-os-toolchain);
 [toolchain.md](toolchain.md) describes how this repository installs and uses
-it. The current toolchain is `x86_64-unknown-motor-1.99.1`: upstream Rust
+it. The current toolchain is `x86_64-unknown-motor-1.99.1-2`: upstream Rust
 1.99.1 with the Motor OS patches. Its compilers use Rust's `dev` channel, so
 rustc and Cargo report `1.99.1-dev`.
 
@@ -28,14 +28,14 @@ toolchain archives downloaded into the development root:
 mkdir motor-dev
 cd motor-dev
 git clone https://github.com/moturus/motor-os.git
-tar -xaf motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux.tar.zst
-motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux/install.sh
-rm -rf motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux
+tar -xaf motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux.tar.zst
+motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux/install.sh
+rm -rf motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux
 cd motor-os
 src/build-motor-os.sh
 ```
 
-The native archive, `motor-toolchain-x86_64-unknown-motor-1.99.1.tar.zst`,
+The native archive, `motor-toolchain-x86_64-unknown-motor-1.99.1-2.tar.zst`,
 stays in the development root, `MOTORH`, which defaults to the parent of the
 Motor OS checkout. Set it before running the script only when the archives
 live elsewhere:
@@ -60,9 +60,9 @@ required VM networking is already configured.
 ## External sources
 
 The external sources are the userspace programs built beside Motor OS:
-ripgrep, Helix, uutils sed, Lua, tar and zstd, Javy/Wasmi, and Wasmtime. They
-are cloned into `external-sources/`, which Git ignores. ripgrep, Helix, sed,
-and motor-os-tar follow one branch of their forks, in
+ripgrep, Helix, uutils sed, Lua, QuickJS-NG, tar and zstd, Javy/Wasmi, and
+Wasmtime. They are cloned into `external-sources/`, which Git ignores.
+ripgrep, Helix, sed, and motor-os-tar follow one branch of their forks, in
 `external-sources/ripgrep`, `external-sources/helix`, `external-sources/sed`,
 and `external-sources/motor-os-tar`. Javy/Wasmi and Wasmtime are built from
 one branch of their forks at the exact revision declared in
@@ -74,7 +74,10 @@ the Motor OS crates `moto-rt` and `moto-sys` from crates.io — is pinned by the
 forks' lockfiles, which Cargo fetches; no fork refers to another checkout,
 and this tree's `src/sys/lib` is not an input of the external sources. Lua is
 a release, and so is the wasi-sdk that javy-smoke's test plugins need; both
-are downloaded into `external-sources/`.
+are downloaded into `external-sources/`. QuickJS-NG is upstream tag
+`v0.18.0`, cloned into `external-sources/quickjs-0.18.0` and checked against
+its commit; the build applies `src/build-scripts/quickjs-0.18.0-motor.patch`
+to a copy of it. See [QuickJS](quickjs.md).
 
 Before building, the script prepares all external sources and checks their
 lockfiles. The shared inventory in `src/build-scripts/external-sources.sh`
@@ -123,7 +126,7 @@ The workflow performs these stages:
 3. Prepare the external sources and check their lockfiles.
 4. Unpack the native toolchain's overlays into the assembly with
    motor-os-tar's `tar`, built for Linux.
-5. Build the external sources into the assembly: Lua, ripgrep,
+5. Build the external sources into the assembly: Lua, QuickJS-NG, ripgrep,
    Helix, sed, tar and zstd, Javy/Wasmi, and Wasmtime, and fetch the
    dependencies of the developer image's library sources. Every run builds
    them all again; their Cargo target directories in the assembly keep that
@@ -137,8 +140,8 @@ The assembly holds what the images take from outside the tree:
 build/assembly/
     build/       the external sources' build trees
     images/      toolchain overlays (libc, llvm, rustc, rust-analyzer),
-                 overlays of the external sources (lua, rg, tar, helix, sed,
-                 javy, wasmtime), and sys-lib-deps
+                 overlays of the external sources (lua, quickjs, rg, tar,
+                 helix, sed, javy, wasmtime), and sys-lib-deps
     tests/       the Javy and Wasmtime test inputs
 ```
 

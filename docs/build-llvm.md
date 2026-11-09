@@ -7,7 +7,7 @@ the toolchain provides for C and C++ on Linux and on Motor OS.
 
 ## Sources
 
-The current toolchain, `x86_64-unknown-motor-1.99.1`, is Rust 1.99.1 on LLVM
+The current toolchain, `x86_64-unknown-motor-1.99.1-2`, is Rust 1.99.1 on LLVM
 23.1.1:
 
 - Motor OS LLVM (branch `motor-os-1.99.1`), at the commit that the Motor OS Rust

@@ -61,9 +61,23 @@ full-test suites:
   with `SIGABRT` semantics (status 134).
 - **Filesystem**: the `stat` family, `dirent`, `getcwd`/`chdir` and relative
   paths, `openat`, `mkdir`/`mkdirat`, `ftruncate`/`fsync`,
-  `access`/`faccessat`, temp files.
-- **Processes**: `posix_spawn`, `waitpid`, `system()`. There is **no
-  `fork()`**.
+  `access`/`faccessat`, temp files. `lseek` on a pipe or other stream fails
+  with `ESPIPE`, so stdio treats child pipes as streams. A file that `open`
+  creates with execute and write bits in its mode becomes executable, and
+  `fchmod` can make a writable file executable.
+- **Processes**: `posix_spawn` and `posix_spawnp`, with file actions for
+  `chdir` (`posix_spawn_file_actions_addchdir_np`), and for `dup2` and `open`
+  on descriptors 0 to 2. `waitpid` for one child or any child, with `WNOHANG`.
+  `kill` with signal 0, `SIGTERM` or `SIGKILL` to another process, under
+  Motor OS permission checks. `popen`/`pclose` and `system()`. All of this
+  runs without `fork()`, which does not exist. Children are tracked in one
+  process-wide table, and each is reaped once. Descriptors above 2 cannot be
+  passed to a child.
+- **Sorting**: `qsort` and `qsort_r` are an iterative heapsort, with constant
+  stack use and O(n log n) comparisons on any input.
+- **Executable path**: `moto_rt_exepath()` in `<moto_rt.h>` returns the
+  absolute path of the running program. Call `moto_rt_exepath_init()` before
+  the first `chdir` if `argv[0]` may be relative.
 - **Threads and TLS**: pthreads (create/join/detach, mutex/cond/rwlock under
   contention, keys with destructors), `_Thread_local` via emulated TLS,
   `__cxa_thread_atexit`.
@@ -72,6 +86,7 @@ full-test suites:
 - **poll/select** over sockets and files, including the blocking-listener
   arming path.
 - **Signals-lite**: `signal`/`sigaction`/`sigprocmask`/`raise`/`kill(self)`.
+  `kill` to another process only probes or terminates it, as above.
   Dispositions are recorded and handlers dispatch synchronously on `raise`;
   Motor OS has no kernel signals, so **nothing is ever delivered
   asynchronously**. (Terminal Ctrl+C is a separate mechanism — see

@@ -677,6 +677,7 @@ out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP $TEST_TMP/sysbox-utility-tests /system/bi
 printf '%s\n' "$out"
 
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
+  vm_ssh /system/bin/rush /devtools/tests/quickjs-smoke.sh || fail "QuickJS smoke failed"
   "$WD/test-rust-analyzer-crates.sh"
   "$WD/test-rust-analyzer-native.sh"
   "$WD/test-rustfmt-native.sh"

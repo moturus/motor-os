@@ -103,9 +103,13 @@ HELIX="$EXTERNAL_SOURCES/helix"
 SED="$EXTERNAL_SOURCES/sed"
 MOTOR_OS_TAR="$EXTERNAL_SOURCES/motor-os-tar"
 
-# External sources. Lua is a release; ripgrep, Helix, sed, and motor-os-tar
-# follow a fork branch.
+# External sources. Lua is a release; QuickJS-NG is an upstream release tag plus
+# a Motor patch; ripgrep, Helix, sed, and motor-os-tar follow a fork branch.
 LUA_VER=5.4.8
+QUICKJS_VER=0.18.0
+QUICKJS_REV=d7215b0ad3fc2c562e8317fd9bca058fd4863804
+QUICKJS_URL=https://github.com/quickjs-ng/quickjs.git
+QUICKJS_PATCH="$SCRIPT_DIR/build-scripts/quickjs-$QUICKJS_VER-motor.patch"
 RIPGREP_BRANCH=master
 HELIX_BRANCH=helix-motor-25.7.1_2026-08-31
 SED_BRANCH=main
@@ -131,6 +135,7 @@ ASSEMBLY_BUILD_ROOT="$ASSEMBLY_ROOT/build"
 RG_IMG="$ASSEMBLY_IMAGE_ROOT/rg"
 HELIX_IMG="$ASSEMBLY_IMAGE_ROOT/helix"
 LUA_IMG="$ASSEMBLY_IMAGE_ROOT/lua"
+QUICKJS_IMG="$ASSEMBLY_IMAGE_ROOT/quickjs"
 SED_IMG="$ASSEMBLY_IMAGE_ROOT/sed"
 TAR_IMG="$ASSEMBLY_IMAGE_ROOT/tar"
 JAVY_IMG="$ASSEMBLY_IMAGE_ROOT/javy"
@@ -138,6 +143,7 @@ WASMTIME_IMG="$ASSEMBLY_IMAGE_ROOT/wasmtime"
 JAVY_TESTS="$ASSEMBLY_ROOT/tests/javy"
 WASMTIME_TESTS="$ASSEMBLY_ROOT/tests/wasmtime"
 LUA_BUILD="$ASSEMBLY_BUILD_ROOT/lua-$LUA_VER"
+QUICKJS_BUILD="$ASSEMBLY_BUILD_ROOT/quickjs"
 RIPGREP_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/ripgrep"
 HELIX_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/helix"
 SED_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/sed"
@@ -222,6 +228,57 @@ build_lua() {
 		"$cc" -O2 -DLUA_USE_POSIX lua.c "$LUA_BUILD/liblua.a" -o "$LUA_BUILD/lua" )
 	mkdir -p "$LUA_IMG/devtools/bin"
 	"$LLVM_TOOLS/llvm-strip" -o "$LUA_IMG/devtools/bin/lua" "$LUA_BUILD/lua"
+}
+
+# --- external source: QuickJS-NG, an upstream tag plus a Motor patch -----------
+# Upstream publishes no source archive, so the tag is cloned and checked
+# against its commit. The checkout stays pristine; the patch goes on a copy.
+fetch_quickjs() {
+	local checkout="$EXTERNAL_SOURCES/quickjs-$QUICKJS_VER"
+	if [ ! -e "$checkout" ]; then
+		log "fetching QuickJS-NG $QUICKJS_VER"
+		mkdir -p "$EXTERNAL_SOURCES"
+		rm -rf "$checkout.part"
+		git -c advice.detachedHead=false clone --quiet --depth 1 --branch "v$QUICKJS_VER" \
+			"$QUICKJS_URL" "$checkout.part"
+		mv "$checkout.part" "$checkout"
+	fi
+	# It sits inside the Motor OS checkout, so it needs a .git of its own.
+	[ -e "$checkout/.git" ] && [ "$(git -C "$checkout" rev-parse HEAD)" = "$QUICKJS_REV" ] ||
+		die "QuickJS checkout is not v$QUICKJS_VER ($QUICKJS_REV): $checkout"
+	[ -z "$(git -C "$checkout" status --porcelain)" ] ||
+		die "QuickJS checkout is dirty: $checkout"
+}
+
+# libqjs.a holds only QuickJS's C objects; the normal C toolchain supplies mlibc.
+build_quickjs() {
+	log "building QuickJS-NG $QUICKJS_VER and staging qjs, qjsc, and libqjs.a in /devtools"
+	fetch_quickjs
+	local source="$QUICKJS_BUILD/src" cc="$SYSROOT/bin/motor-clang" name objects=()
+	rm -rf "$QUICKJS_BUILD"
+	mkdir -p "$source"
+	git -C "$EXTERNAL_SOURCES/quickjs-$QUICKJS_VER" archive HEAD | tar -x -C "$source"
+	# Inside the Motor OS worktree, git would resolve the patch against it and
+	# skip its paths without failing; the ceiling keeps it from finding one.
+	( cd "$source" && export GIT_CEILING_DIRECTORIES="$QUICKJS_BUILD" &&
+		git apply --check "$QUICKJS_PATCH" && git apply "$QUICKJS_PATCH" )
+	for name in dtoa libregexp libunicode quickjs quickjs-libc; do
+		"$cc" -O2 -D_GNU_SOURCE -I"$source" -c "$source/$name.c" -o "$QUICKJS_BUILD/$name.o"
+		objects+=("$QUICKJS_BUILD/$name.o")
+	done
+	"$LLVM_TOOLS/llvm-ar" rcs "$QUICKJS_BUILD/libqjs.a" "${objects[@]}"
+	"$cc" -O2 -I"$source" "$source/qjs.c" "$source/gen/repl.c" "$source/gen/standalone.c" \
+		"$QUICKJS_BUILD/libqjs.a" -o "$QUICKJS_BUILD/qjs"
+	"$cc" -O2 -I"$source" "$source/qjsc.c" "$QUICKJS_BUILD/libqjs.a" -o "$QUICKJS_BUILD/qjsc"
+	mkdir -p "$QUICKJS_IMG/devtools/bin" "$QUICKJS_IMG/devtools/quickjs/include" \
+		"$QUICKJS_IMG/devtools/quickjs/lib"
+	for name in qjs qjsc; do
+		"$LLVM_TOOLS/llvm-strip" -o "$QUICKJS_IMG/devtools/bin/$name" "$QUICKJS_BUILD/$name"
+		"$SCRIPT_DIR/build-scripts/validate-native-elf.sh" "$QUICKJS_IMG/devtools/bin/$name"
+	done
+	cp "$QUICKJS_BUILD/libqjs.a" "$QUICKJS_IMG/devtools/quickjs/lib/"
+	cp "$source/quickjs.h" "$source/quickjs-libc.h" "$QUICKJS_IMG/devtools/quickjs/include/"
+	cp "$source/LICENSE" "$QUICKJS_IMG/devtools/quickjs/"
 }
 
 # --- external source: ripgrep ---------------------------------------------------
@@ -329,6 +386,7 @@ ensure_wasi_sdk() {
 
 build_external_sources() {
 	build_external_source lua "$LUA_IMG" devtools/bin/lua build_lua
+	build_external_source quickjs "$QUICKJS_IMG" devtools/bin/qjs build_quickjs
 	build_external_source ripgrep "$RG_IMG" system/bin/rg build_ripgrep
 	build_external_source helix "$HELIX_IMG" devtools/helix/hx build_helix
 	build_external_source sed "$SED_IMG" devtools/bin/sed build_sed
@@ -520,6 +578,8 @@ main() {
 		"$TAR_IMG/system/bin/zstd"
 		"$HELIX_IMG/devtools/helix/hx"
 		"$SED_IMG/devtools/bin/sed"
+		"$QUICKJS_IMG/devtools/bin/qjs"
+		"$QUICKJS_IMG/devtools/bin/qjsc"
 		"$MOTOR/vm_images/release/motor-os.qcow2"
 		"$MOTOR/vm_images/release/motor-os-dev.qcow2"
 		"$MOTOR/vm_images/release/motor-os-wasm.qcow2"

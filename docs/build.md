@@ -2,7 +2,7 @@
 
 Motor OS is cross-compiled on Linux. The supported build entry point has been
 tested on Ubuntu 24.04 and 26.04. It needs the Motor OS toolchain that
-`rust-toolchain.toml` names, `x86_64-unknown-motor-1.99.1`, as two archives
+`rust-toolchain.toml` names, `x86_64-unknown-motor-1.99.1-2`, as two archives
 from [motor-os-toolchain](https://github.com/moturus/motor-os-toolchain): its
 release, or a build of that repository.
 
@@ -28,10 +28,10 @@ Motor OS toolchain. It writes these files into its parent directory,
 `motor-dev`, where the commands above leave you:
 
 ```text
-motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux.tar.zst
-motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux.tar.zst.sha256
-motor-toolchain-x86_64-unknown-motor-1.99.1.tar.zst
-motor-toolchain-x86_64-unknown-motor-1.99.1.tar.zst.sha256
+motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux.tar.zst
+motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux.tar.zst.sha256
+motor-toolchain-x86_64-unknown-motor-1.99.1-2.tar.zst
+motor-toolchain-x86_64-unknown-motor-1.99.1-2.tar.zst.sha256
 ```
 
 Each toolchain build starts from scratch, replaces archives of the same name,
@@ -58,18 +58,18 @@ If rustup was installed by `--provision`, load it into your current shell with
 verify both archives, install the host toolchain, and build Motor OS:
 
 ```sh
-sha256sum -c motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux.tar.zst.sha256
-sha256sum -c motor-toolchain-x86_64-unknown-motor-1.99.1.tar.zst.sha256
+sha256sum -c motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux.tar.zst.sha256
+sha256sum -c motor-toolchain-x86_64-unknown-motor-1.99.1-2.tar.zst.sha256
 git clone https://github.com/moturus/motor-os.git
-tar -xaf motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux.tar.zst
-motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux/install.sh
-rm -rf motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux
+tar -xaf motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux.tar.zst
+motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux/install.sh
+rm -rf motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux
 cd motor-os
 src/build-motor-os.sh
 ```
 
 `install.sh` installs the Linux-host toolchain and links it into rustup; the
-native archive, `motor-toolchain-x86_64-unknown-motor-1.99.1.tar.zst`, stays
+native archive, `motor-toolchain-x86_64-unknown-motor-1.99.1-2.tar.zst`, stays
 in the development root ([toolchain.md](toolchain.md)). The script installs
 missing host packages and rustup, configures the VM host, builds the external
 sources, and creates the base, standard, developer, and wasm release images.
