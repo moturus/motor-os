@@ -103,10 +103,13 @@ impl AsyncBlockDevice for FlushErrorBlockDevice {
 
     async fn flush(&self) -> Result<()> {
         self.state.flushes.set(self.state.flushes.get() + 1);
+        // Like a real flush error, a failed flush still waits for the file's
+        // buffered writes; otherwise they land after the test resets the image.
+        let result = self.inner.flush().await;
         if self.state.fail_flush.get() {
             Err(ErrorKind::Other.into())
         } else {
-            self.inner.flush().await
+            result
         }
     }
 }
