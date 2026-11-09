@@ -625,6 +625,12 @@ impl KProcessStats {
         );
     }
 
+    /// Lists the process as a zombie. Its exit completes before any waiter
+    /// can observe it, so a reaped child never still lists as active.
+    pub fn mark_exited(&self) {
+        self.active.store(false, Ordering::Relaxed);
+    }
+
     pub fn process_dropped(&self) {
         if self.active_threads() != 0 {
             // This has triggered a couple of times.
