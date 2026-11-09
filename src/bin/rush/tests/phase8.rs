@@ -1016,6 +1016,65 @@ fn ctrl_c_abandons_a_whole_multi_line_command() {
 }
 
 #[test]
+fn ctrl_c_interrupts_read_and_abandons_its_loop_and_list() {
+    let mut pty = Pty::spawn(80, &[]);
+    pty.await_prompt();
+    pty.send(
+        b"foo=kept; trap 'echo INTERRUPTED:$?' INT; echo READING; \
+          for i in 1 2; do read foo; echo READ_FINISHED; done; echo LIST_FINISHED\r",
+    );
+    pty.await_row("READING");
+    // Interrupt a logical line whose first physical line has already ended.
+    pty.send(b"first\\\nsecond");
+    pty.send(b"\x03");
+    let rows = pty.await_row("INTERRUPTED:130");
+    assert!(!rows.iter().any(|r| r == "READ_FINISHED"), "{rows:?}");
+    assert!(!rows.iter().any(|r| r == "LIST_FINISHED"), "{rows:?}");
+    pty.send(b"echo status=$? foo=$foo\r");
+    let rows = pty.await_row("status=130 foo=kept");
+    assert_eq!(rows.iter().filter(|r| *r == "INTERRUPTED:130").count(), 1);
+    pty.send(b"exit 0\r");
+    assert_eq!(pty.wait(), 0);
+}
+
+#[test]
+fn read_terminal_preserves_data_and_supports_basic_editing() {
+    let mut pty = Pty::spawn(80, &[]);
+    pty.await_prompt();
+    pty.send(b"IFS= read -r foo; [ \"$foo\" = \"$(printf '  a\\tb\\\\c  ')\" ]; echo MATCH:$?\r");
+    // Up and Ctrl+R must not insert command history; Tab is data, not completion.
+    pty.send(b"\x1b[A\x12  a\tbX\x7f\\c  \r");
+    pty.await_row("MATCH:0");
+    pty.send(b"read foo; echo empty=$?[$foo]\r\r");
+    pty.await_row("empty=0[]");
+    pty.send(b"read foo; echo edited=[$foo]\rdiscard\x15one two\x17three\r");
+    pty.await_row("edited=[one three]");
+}
+
+#[test]
+fn read_terminal_eof_delivers_partial_input_with_a_failing_status() {
+    let mut pty = Pty::spawn(80, &[]);
+    pty.await_prompt();
+    pty.send(b"read foo; printf '\\neof=%s[%s]\\n' \"$?\" \"$foo\"\r");
+    pty.send(b"first\x04");
+    let rows = pty.screen(80);
+    assert!(!rows.iter().any(|r| r.starts_with("eof=")), "{rows:?}");
+    pty.send(b"tail\x04\x04");
+    pty.await_row("eof=1[firsttail]");
+    pty.send(b"read foo; echo empty_eof=$?[$foo]\r\x04");
+    pty.await_row("empty_eof=1[]");
+}
+
+#[test]
+fn read_terminal_continuations_leave_typeahead_for_the_next_command() {
+    let mut pty = Pty::spawn(80, &[]);
+    pty.await_prompt();
+    pty.send(b"read foo; echo joined=[$foo]\rfirst\\\nsecond\necho after-read\r");
+    let rows = pty.await_row("after-read");
+    assert!(rows.iter().any(|r| r == "joined=[firstsecond]"), "{rows:?}");
+}
+
+#[test]
 fn a_continuation_prompts_with_ps2() {
     let rows = typed(b"echo \"one\rtwo\"\r", 80);
     assert!(rows.iter().any(|r| r == "> two\""), "PS2 shown: {rows:?}");

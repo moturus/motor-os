@@ -536,6 +536,8 @@ struct Painted {
 struct Term {
     input: Stdin,
     history: History,
+    /// Builtin input echoes to the terminal on stderr, independently of stdout.
+    data_input: bool,
 
     /// The screen, as this editor last painted it.
     painted: Option<Painted>,
@@ -561,6 +563,7 @@ impl Term {
         Self {
             input: Stdin::new(),
             history: History::new(),
+            data_input: false,
             painted: None,
             cols: DEFAULT_COLS,
             paint_at_cursor: false,
@@ -570,6 +573,14 @@ impl Term {
     }
 
     fn write(&mut self, bytes: &[u8]) {
+        if self.data_input {
+            let mut stderr = std::io::stderr().lock();
+            if stderr.is_terminal() {
+                let _ = stderr.write_all(bytes);
+                let _ = stderr.flush();
+            }
+            return;
+        }
         let mut stdout = std::io::stdout().lock();
         // Nowhere to report a failed write to but the very stream that failed;
         // the next read will end the session anyway.
@@ -768,6 +779,56 @@ impl Term {
                 Err(_) => return Key::Eof,
             }
         }
+    }
+
+    /// Basic terminal input for `read`: no command history, completion, or
+    /// cursor editing. Ctrl+D delivers buffered text; an empty buffer is EOF.
+    fn read_data(&mut self) -> std::io::Result<Vec<u8>> {
+        enable_raw_mode()?;
+        self.cols = terminal_cols();
+        self.start_line();
+        let mut line = Vec::new();
+        let result = loop {
+            // Expand tabs only for display; the builtin receives literal tabs.
+            let mut shown = Vec::new();
+            let mut width = 0;
+            for &c in &line {
+                if c == '\t' {
+                    let spaces = 8 - width % 8;
+                    shown.extend(std::iter::repeat_n(' ', spaces));
+                    width += spaces;
+                } else {
+                    shown.push(c);
+                    width += char_width(c);
+                }
+            }
+            self.render(&Prompt::new(""), &shown, shown.len());
+            match self.read_key() {
+                Key::Char(c) => line.push(c),
+                Key::Tab => line.push('\t'),
+                Key::Backspace => {
+                    line.pop();
+                }
+                Key::Ctrl('u') => line.clear(),
+                Key::Ctrl('w') => line.truncate(ws_word_start(&line, line.len())),
+                Key::Enter => {
+                    self.write(b"\r\n");
+                    line.push('\n');
+                    break Ok(line.into_iter().collect::<String>().into_bytes());
+                }
+                Key::Ctrl('d') | Key::Eof => {
+                    break Ok(line.into_iter().collect::<String>().into_bytes());
+                }
+                Key::Ctrl('c') => {
+                    self.write(b"^C\r\n");
+                    break Err(std::io::ErrorKind::Interrupted.into());
+                }
+                Key::Resize(_) => {}
+                _ => self.beep(),
+            }
+        };
+        let _ = disable_raw_mode();
+        result
     }
 
     fn readline(&mut self, prompt: &str, continuation: bool, sh: &Shell) -> ReadOutcome {
@@ -1259,6 +1320,40 @@ fn display_name(candidate: &str) -> &str {
 }
 
 static TERM: Mutex<Option<Term>> = Mutex::new(None);
+
+/// Feed terminal lines to the builtin's existing IFS/backslash parser without
+/// blocking on raw stdin, where crossterm's Ctrl+C notifications cannot arrive.
+pub struct ReadStdin {
+    term: Term,
+    pending: std::io::Cursor<Vec<u8>>,
+    eof: bool,
+}
+
+impl ReadStdin {
+    pub fn new() -> Self {
+        let mut term = Term::new(false);
+        term.data_input = true;
+        Self {
+            term,
+            pending: std::io::Cursor::new(Vec::new()),
+            eof: false,
+        }
+    }
+}
+
+impl Read for ReadStdin {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() || self.eof {
+            return Ok(0);
+        }
+        if self.pending.position() as usize == self.pending.get_ref().len() {
+            let line = self.term.read_data()?;
+            self.eof = line.is_empty();
+            self.pending = std::io::Cursor::new(line);
+        }
+        self.pending.read(buf)
+    }
+}
 
 /// Start the line editor, loading `$HISTFILE`.
 ///

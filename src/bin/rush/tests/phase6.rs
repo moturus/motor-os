@@ -773,6 +773,10 @@ fn read_builtin_contract_holds_on_raw_stdin() {
     assert_eq!(run.stdout, "[ab]\nrest\n");
     let run = run_args(&["-c", "read x; echo \"rc=$? [$x]\""], "");
     assert_eq!(run.stdout, "rc=1 []\n");
+    let run = run_args(&["-c", "read x; echo \"rc=$? [$x]\""], "partial");
+    assert_eq!(run.stdout, "rc=1 [partial]\n");
+    let run = run_args(&["-c", "read -r x; printf '%s' \"$x\""], "\x03\n");
+    assert_eq!(run.stdout, "\x03");
 }
 
 #[test]

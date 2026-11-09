@@ -560,6 +560,28 @@ printf 'q' >&"$PTY_IN_FD"
 wait_pty_output "end=quit" "crossterm handler"
 finish_pty 0 "crossterm handler"
 
+echo "-- rush read builtin interruption --"
+start_pty "/system/bin/rush -i -c \"trap 'echo READ_TRAP' INT; echo READ_READY; for i in 1 2; do read foo; echo READ_FINISHED; done; echo LIST_FINISHED\""
+wait_pty_output "READ_READY" "rush read builtin"
+printf '\003' >&"$PTY_IN_FD"
+wait_pty_output "READ_TRAP" "rush interrupted read trap"
+finish_pty 130 "rush read builtin"
+case "$PTY_OUTPUT" in
+  *READ_FINISHED*|*LIST_FINISHED*) fail "rush continued after interrupted read: '$PTY_OUTPUT'" ;;
+esac
+
+start_pty "/system/bin/rush -i -c 'echo READ_DATA_READY; IFS= read -r foo; printf \"READ_DATA=[%s]\\n\" \"\$foo\"'"
+wait_pty_output "READ_DATA_READY" "rush read data"
+printf '  one\tbad\177\\two  \r' >&"$PTY_IN_FD"
+wait_pty_output $'READ_DATA=[  one\tba\\two  ]' "rush read tabs and backspace"
+finish_pty 0 "rush read data"
+
+start_pty "/system/bin/rush -i -c 'echo READ_EOF_READY; read foo; printf \"\\nREAD_EOF=%s:%s\\n\" \"\$?\" \"\$foo\"'"
+wait_pty_output "READ_EOF_READY" "rush read EOF"
+printf 'partial\004\004' >&"$PTY_IN_FD"
+wait_pty_output "READ_EOF=1:partial" "rush read partial EOF"
+finish_pty 0 "rush read EOF"
+
 echo "-- nested rmux, rush, and Default leaf --"
 start_pty "TMPDIR=$RMUX_TMPDIR /user/bin/rmux new -s test-tui-ctrl-c"
 wait_pty_output "motor-os" "nested rmux shell"
@@ -571,6 +593,16 @@ printf '\003echo CTRL_C_NESTED_STATUS=$?\n' >&"$PTY_IN_FD"
 # rmux sends screen diffs. The preceding CTRL_C_DEFAULT_READY line may retain
 # the common CTRL_C_ prefix, so only the unique changed suffix is guaranteed.
 wait_pty_output "NESTED_STATUS=130" "nested rush"
+printf 'foo=kept; printf "BUILTIN_%%s\\n" READY; read foo; printf "READ_%%s\\n" UNEXPECTED\n' >&"$PTY_IN_FD"
+wait_pty_output "BUILTIN_READY" "nested rush read"
+PTY_OUTPUT=""
+printf '\003' >&"$PTY_IN_FD"
+wait_pty_output "^C" "nested rush interrupted read"
+printf 'echo BUILTIN_STATUS=$? FOO=$foo\n' >&"$PTY_IN_FD"
+wait_pty_output "BUILTIN_STATUS=130 FOO=kept" "nested rush read status"
+case "$PTY_OUTPUT" in
+  *READ_UNEXPECTED*) fail "nested rush continued after interrupted read: '$PTY_OUTPUT'" ;;
+esac
 printf 'exit\n' >&"$PTY_IN_FD"
 finish_pty 0 "nested rmux"
 

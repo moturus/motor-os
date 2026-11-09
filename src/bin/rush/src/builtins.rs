@@ -1729,8 +1729,13 @@ fn unalias(args: &[String], io: &mut Io, shell: &mut Shell) -> i32 {
 /// `read [-r] var…` — read one logical line from `input`, split it on `IFS`, and
 /// assign the fields to the variables (the last variable absorbs the remainder).
 /// Without `-r`, backslash escapes the next character and a backslash-newline
-/// continues the line. Returns 1 at end of input with nothing read.
-pub fn read(args: &[String], input: &mut dyn Read, io: &mut Io, shell: &mut Shell) -> i32 {
+/// continues the line. Returns 1 if EOF arrives before a terminating newline.
+pub fn read(
+    args: &[String],
+    input: &mut dyn Read,
+    io: &mut Io,
+    shell: &mut Shell,
+) -> std::io::Result<i32> {
     let mut raw = false;
     let mut vars: Vec<String> = Vec::new();
     for a in args {
@@ -1739,24 +1744,24 @@ pub fn read(args: &[String], input: &mut dyn Read, io: &mut Io, shell: &mut Shel
             "--" => {}
             s if s.starts_with('-') && s.len() > 1 => {
                 io.errln(&format!("rush: read: {s}: invalid option"));
-                return 2;
+                return Ok(2);
             }
             s => vars.push(s.to_string()),
         }
     }
     if vars.is_empty() {
         io.errln("rush: read: arg count");
-        return 2;
+        return Ok(2);
     }
 
-    let (line, got) = match read_logical_line(input, raw) {
+    let (line, got) = match read_logical_line(input, raw)? {
         Some(pair) => pair,
         None => {
             // EOF with no data: clear the variables and fail.
             for v in &vars {
                 let _ = shell.set(v, String::new());
             }
-            return 1;
+            return Ok(1);
         }
     };
 
@@ -1765,7 +1770,7 @@ pub fn read(args: &[String], input: &mut dyn Read, io: &mut Io, shell: &mut Shel
     for (v, f) in vars.iter().zip(fields.iter()) {
         let _ = shell.set(v, f.clone());
     }
-    if got { 0 } else { 1 }
+    Ok(if got { 0 } else { 1 })
 }
 
 /// One character of a `read` line together with whether it was backslash-escaped
@@ -1774,40 +1779,37 @@ type ReadChar = (char, bool);
 
 /// Read one logical line as `(char, escaped)` pairs, handling backslash
 /// continuation and escaping unless `raw`. Returns the characters and whether a
-/// newline actually terminated the line (`false` = trailing data at EOF, still a
-/// successful read).
-fn read_logical_line(input: &mut dyn Read, raw: bool) -> Option<(Vec<ReadChar>, bool)> {
+/// newline actually terminated the line. EOF preserves partial input but gives
+/// `read` a failing status; interruption leaves the variables untouched.
+fn read_logical_line(
+    input: &mut dyn Read,
+    raw: bool,
+) -> std::io::Result<Option<(Vec<ReadChar>, bool)>> {
     let mut line: Vec<ReadChar> = Vec::new();
     let mut byte = [0u8; 1];
     let mut any = false;
     loop {
-        match input.read(&mut byte) {
-            Ok(0) => return if any { Some((line, true)) } else { None },
-            Ok(_) => {}
-            Err(_) => return if any { Some((line, true)) } else { None },
+        if input.read(&mut byte)? == 0 {
+            return Ok(any.then_some((line, false)));
         }
         any = true;
         let c = byte[0] as char;
         if c == '\n' {
-            return Some((line, true));
+            return Ok(Some((line, true)));
         }
         if !raw && c == '\\' {
             // Escape the next byte; a backslash-newline continues the line.
             let mut nb = [0u8; 1];
-            match input.read(&mut nb) {
-                Ok(0) => {
+            match input.read(&mut nb)? {
+                0 => {
                     line.push(('\\', true));
-                    return Some((line, true));
+                    return Ok(Some((line, false)));
                 }
-                Ok(_) => {
+                _ => {
                     let nc = nb[0] as char;
                     if nc != '\n' {
                         line.push((nc, true));
                     }
-                }
-                Err(_) => {
-                    line.push(('\\', true));
-                    return Some((line, true));
                 }
             }
             continue;

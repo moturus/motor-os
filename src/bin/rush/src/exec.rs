@@ -32,7 +32,7 @@
 
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, Write};
+use std::io::{IsTerminal, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -764,9 +764,25 @@ fn exec_builtin(
         Builtin::Read => {
             let mut out = fds[1].out_writer();
             let mut err = fds[2].err_writer();
-            let mut reader = fds[0].reader();
+            // Scripts may read terminal protocol replies as literal bytes.
+            let terminal = shell.is_interactive()
+                && matches!(fds[0], FdSource::Inherit(0))
+                && std::io::stdin().is_terminal();
+            let mut reader: Box<dyn Read> = if terminal {
+                Box::new(crate::term::ReadStdin::new())
+            } else {
+                fds[0].reader()
+            };
             let mut io = builtins::Io::new(&mut out, &mut err);
-            let status = builtins::read(args, &mut *reader, &mut io, shell);
+            let status = match builtins::read(args, &mut *reader, &mut io, shell) {
+                Ok(status) => status,
+                Err(error) if terminal && error.kind() == std::io::ErrorKind::Interrupted => {
+                    crate::sys::note_signal(signal::SIGINT);
+                    shell.set_flow(Flow::Interrupt);
+                    128 + signal::SIGINT
+                }
+                Err(_) => 1,
+            };
             io_status(&mut io, &argv[0], status)
         }
         _ => {
