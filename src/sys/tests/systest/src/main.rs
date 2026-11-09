@@ -1336,6 +1336,10 @@ fn main() {
         sysbox_findmnt::run_test();
         return;
     }
+    if args.len() == 2 && args[1] == "sysbox-ls" {
+        sysbox_ls::run_test();
+        return;
+    }
     if args.len() == 2 && args[1] == "hold-dns-port" {
         dns_service::hold_port();
     }

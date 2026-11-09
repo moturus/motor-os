@@ -1,7 +1,27 @@
 # Fix `ls *.md`
 
-Status: proposed for review. This document records the recommendation; no
-implementation or commits are authorized by the documentation request.
+## Progress
+
+Reviewed 2026-11-09; implementation in progress on `dev`.
+
+- Patch 1, preserve operands: done.
+- Patch 2, multiple operands: not started.
+- Patch 3, rush-to-wrapper-to-sysbox regressions: not started.
+- Final 3+3 `full-test.sh` gate: not run.
+
+Review notes:
+
+- The packaged `ls` wrapper already forwards `"$@"` quoted (commit 4e2aa489),
+  so patch 1 only removes sysbox's argument trimming and skipping.
+- `ls -a` is accepted and ignored since commit b2b6d0b3; the usage line is
+  `ls [-alh] [--] [FILE ...]`.
+- A lone `-` is an operand, as in ls(1), not an empty option group.
+- Motor OS rejects path components with leading or trailing whitespace, so
+  such file names cannot be fixtures. The regressions instead check that
+  operands with surrounding whitespace fail with status 2 rather than being
+  trimmed to an existing name or to `.`.
+- systest gains a `sysbox-ls` subcommand so each patch can be checked in one
+  boot without the whole main sequence.
 
 ## Diagnosis
 
@@ -52,7 +72,7 @@ The wrapper should forward arguments as:
 
 The proposed behavior is:
 
-- Accept `ls [-lh] [--] [FILE ...]`, with `.` as the default only when no
+- Accept `ls [-alh] [--] [FILE ...]`, with `.` as the default only when no
   operands were supplied. Preserve the existing options and `--` delimiter.
 - Preserve every operand exactly, including spaces and wildcard characters.
   An empty operand is an operand error; parse it without indexing an empty

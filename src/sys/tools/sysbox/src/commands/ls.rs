@@ -209,20 +209,17 @@ pub fn do_command(args: &[String]) {
     let mut dir: Option<&str> = None;
     let mut parse_options = true;
 
+    // Operands are taken as typed: trimming or dropping them would rename
+    // files with surrounding spaces and turn an empty operand into `.`.
     for arg in &args[1..] {
-        if arg.trim().is_empty() {
-            continue;
-        }
-
-        let arg = arg.trim();
         if parse_options && arg == "--" {
             parse_options = false;
             continue;
         }
 
-        let bytes = arg.as_bytes();
-        if parse_options && bytes[0] == b'-' {
-            for char in &bytes[1..] {
+        // A lone `-` is an operand, as in ls(1).
+        if parse_options && arg.len() > 1 && arg.starts_with('-') {
+            for char in arg.bytes().skip(1) {
                 match char {
                     b'l' => list_details = true,
                     b'h' => human_friendly = true,
@@ -242,11 +239,7 @@ pub fn do_command(args: &[String]) {
         }
     }
 
-    if dir.is_none() {
-        dir = Some(".");
-    }
-
-    let dir = unsafe { dir.unwrap_unchecked() };
+    let dir = dir.unwrap_or(".");
 
     if list_details {
         list_detailed(dir, list_dots, human_friendly);

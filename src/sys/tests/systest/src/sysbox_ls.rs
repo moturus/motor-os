@@ -65,6 +65,64 @@ pub fn run_test() {
         "ls of a missing path: {output:?}"
     );
 
+    test_operands_kept_as_typed(&root);
+
     std::fs::remove_dir_all(root).unwrap();
     println!("sysbox_ls::run_test PASS");
+}
+
+/// The exact stdout of a successful `ls`, with the status checked.
+#[track_caller]
+fn stdout_of(output: Output) -> String {
+    assert!(output.status.success(), "ls failed: {output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// Operands reach the file system as typed: no trimming, no skipping, and no
+/// wildcard expansion of their own (the shell owns globbing).
+fn test_operands_kept_as_typed(root: &Path) {
+    let names = ["has space.txt", "*.md", "a.md", "trimmed"];
+    let directory = root.join("typed");
+    std::fs::create_dir_all(&directory).unwrap();
+    for name in names {
+        std::fs::write(directory.join(name), name).unwrap();
+    }
+
+    // A file operand lists itself under the name it was given, so a trimmed
+    // or re-expanded operand would print a different name or fail.
+    for name in names {
+        assert_eq!(
+            stdout_of(run(&directory, &[name])),
+            format!("{name} \n"),
+            "ls of {name:?}"
+        );
+        let long = stdout_of(run(&directory, &["-l", name]));
+        assert!(
+            long.ends_with(&format!(" {name}\n")),
+            "ls -l of {name:?}: {long:?}"
+        );
+    }
+
+    // Motor OS paths cannot have surrounding whitespace, so these operands
+    // name nothing: they must fail rather than be trimmed to `trimmed` or `.`.
+    for operand in ["", "  ", " trimmed", "trimmed "] {
+        let output = run(&directory, &[operand]);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "ls of {operand:?}: {output:?}"
+        );
+        assert!(output.stdout.is_empty(), "ls of {operand:?}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains(&format!("error reading directory '{operand}'")),
+            "ls of {operand:?}: {output:?}"
+        );
+    }
+
+    // A lone `-` is an operand, not an empty option group.
+    let output = run(&directory, &["-"]);
+    assert_eq!(output.status.code(), Some(2), "ls of \"-\": {output:?}");
+    std::fs::write(directory.join("-"), b"dash").unwrap();
+    assert_eq!(stdout_of(run(&directory, &["-"])), "- \n");
 }
