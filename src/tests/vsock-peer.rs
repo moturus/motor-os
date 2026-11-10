@@ -504,7 +504,9 @@ fn run() -> io::Result<()> {
             }
             Action::UnixPeerClose { receive } => {
                 send_pattern(&mut data, receive)?;
-                data.shutdown(Shutdown::Write)?;
+                // This case requires full closure; SHUT_WR may preserve the
+                // opposite direction through the VMM's Unix-socket proxy.
+                drop(data);
                 expect_frame(&mut sync, CASE_DONE)?;
             }
             Action::CancelRead { receive } => {
