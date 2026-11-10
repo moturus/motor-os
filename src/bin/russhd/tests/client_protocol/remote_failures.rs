@@ -3,7 +3,7 @@ use super::*;
 use std::net::{TcpListener, TcpStream};
 
 #[test]
-fn remote_setup_failure_warns_or_releases_all_listeners_before_command_start() {
+fn remote_setup_failure_warns_or_skips_command_and_releases_local_listeners() {
     let fixture = Fixture::configured("allow_tcp_forwarding = true");
     let blocked = TcpListener::bind("127.0.0.1:0").unwrap();
     for exit in [false, true] {
@@ -42,7 +42,8 @@ fn remote_setup_failure_warns_or_releases_all_listeners_before_command_start() {
             assert!(errors.contains("remote forward"), "{errors}");
         }
         assert!(TcpStream::connect(local).is_err());
-        assert!(TcpStream::connect(remote).is_err());
+        // Only local listeners are guaranteed gone when the client exits.
+        // remote_relay checks the server's asynchronous listener cleanup.
     }
 }
 
