@@ -398,15 +398,15 @@ a.card h3 { color: var(--accent); }
 <div class="eyebrow">Userspace</div>
 <h1>Commands</h1>
 <p class="lead">Motor OS boots into <a href="rush.html">rush</a>, a POSIX-style shell.
-<code>PATH</code> is <code>/system/bin:/user/bin</code>, plus <code>/devtools/bin</code> on
-the developer image. <code>ls /system/bin</code> and <code>ls /user/bin</code> list what is
+<code>PATH</code> is <code>/user/bin</code>, plus <code>/user/bin/dev</code> and <code>/devtools/bin</code> on
+the developer image. <code>ls /user/bin</code> lists what is
 installed.</p>
 
 <h2>sysbox</h2>
-<p>Most everyday commands are calls into <code>/system/bin/sysbox</code>, which was inspired
+<p>Most everyday commands are calls into <code>/user/bin/sysbox</code>, which was inspired
 by <code>busybox</code> in Linux.
 Motor OS has no symbolic links, so each command is a two-line rush script of the
-same name in <code>/system/bin</code> that forwards to sysbox; <code>sysbox help</code> lists
+same name in <code>/user/bin</code> that forwards to sysbox; <code>sysbox help</code> lists
 them.</p>
 <div class="table-wrap">
 <table>
@@ -419,7 +419,7 @@ them.</p>
   <tr><td><code>uniq [-cdui] [INPUT [OUTPUT]]</code></td><td>Group consecutive equal byte lines, preserving the first spelling; count groups, keep repeated or single groups, or ignore ASCII case. Streams input; sort first to group nonadjacent duplicates.</td></tr>
   <tr><td><code>cut (-b LIST | -c LIST | -f LIST) [-d BYTE] [-s] [--complement] [FILE]...</code></td><td>Select one-based byte positions or ranges; -c counts bytes in the C locale. Overlaps appear once in input order; --complement selects other positions. -f selects fields separated by TAB or -d; -s suppresses undelimited lines.</td></tr>
   <tr><td><code>tr [-dsc] SET1 [SET2]</code></td><td>Stream bytes, translating, deleting or squeezing, optionally complementing the first set. Supports aligned ASCII case-class translation and two-set deletion/squeezing. Supports byte ranges, backslash/octal escapes and C-locale POSIX classes.</td></tr>
-  <tr><td><code>echo [-neE] [ARG]...</code></td><td>Print arguments with optional newline suppression and byte escapes. Select sysbox echo or /system/bin/echo explicitly; Rush keeps its built-in echo.</td></tr>
+  <tr><td><code>echo [-neE] [ARG]...</code></td><td>Print arguments with optional newline suppression and byte escapes. Select sysbox echo or /user/bin/echo explicitly; Rush keeps its built-in echo.</td></tr>
   <tr><td><code>xargs [-0rt] [-d BYTE] [-n COUNT] [-I MARKER] [COMMAND [ARG]...]</code></td><td>Run a command directly with bounded batches of UTF-8 arguments. Default input handles quotes and backslashes; -0/-d are literal, -n limits arguments per batch and -r skips empty input. -I replaces markers using one input record per invocation; -t traces a quoted command display. With no command it runs sysbox echo.</td></tr>
   <tr><td><code>ls</code>, <code>find</code></td><td>List and search directories.</td></tr>
   <tr><td><code>cp</code>, <code>mv</code>, <code>rm</code>, <code>mkdir</code>, <code>rmdir</code></td><td>Copy (preserving permissions), move, and delete files and directories. A denied operation fails with a nonzero status.</td></tr>
@@ -433,7 +433,7 @@ them.</p>
   <tr><td><code>loop</code></td><td>Run a command repeatedly.</td></tr>
 </table>
 </div>
-<p>A few names in <code>/system/bin</code> are scripts without a sysbox applet behind
+<p>A few names in <code>/user/bin</code> are scripts without a sysbox applet behind
 them: <code>uname</code> (prints "Motor OS"),
 <code>sh</code> (forwards to rush, so C library <code>system()</code> and
 <code>popen()</code> work), and <code>exit</code> (so that <code>ssh host exit 5</code>,
@@ -445,7 +445,7 @@ which looks for an executable, works). <code>kill</code>, <code>cd</code>,
 <div class="table-wrap">
 <table>
   <tr><th>Program</th><th>Where</th><th>What it is</th></tr>
-  <tr><td><a href="rush.html">rush</a></td><td><code>/system/bin</code></td><td>The shell, on the console and over SSH.</td></tr>
+  <tr><td><a href="rush.html">rush</a></td><td><code>/user/bin</code></td><td>The shell, on the console and over SSH.</td></tr>
   <tr><td><a href="rmux.html">rmux</a></td><td><code>/user/bin</code></td><td>A tmux-like terminal multiplexer with detachable sessions.</td></tr>
   <tr><td><a href="editors.html">red</a></td><td><code>/user/bin</code></td><td>A vi-like editor with syntax highlighting.</td></tr>
   <tr><td><a href="editors.html">kibim</a></td><td><code>/user/bin</code></td><td>A small kilo-style editor; standard and developer images.</td></tr>
@@ -453,10 +453,10 @@ which looks for an executable, works). <code>kill</code>, <code>cd</code>,
   <tr><td>httpd-axum</td><td><code>/user/bin</code></td><td>The same job on axum, tower-http, and Tokio, with TLS through rustls. Serves this website.</td></tr>
   <tr><td><a href="#ssh-client">ssh, scp, sftp, ssh-keygen, ssh-copy-id</a></td><td><code>/user/bin</code></td><td>SSH shells and commands, SFTP file transfers, key generation and installation; see the client reference below.</td></tr>
   <tr><td>russhd</td><td><code>/system/services</code></td><td>The SSH server; started by sys-init (see <a href="running.html">Running Motor OS</a>).</td></tr>
-  <tr><td>curl</td><td><code>/system/bin</code></td><td>Developer image: a small curl-compatible HTTPS client written in Rust, used by Lorry to fetch crates and by gix for Git transfers.</td></tr>
-  <tr><td>gix</td><td><code>/devtools/bin</code></td><td>Developer image: a small Git client with <code>init</code>, <code>clone</code> and <code>fetch</code> over HTTPS or SSH, <code>status</code>, <code>log</code>, <code>diff</code>, <code>add</code>, <code>unstage</code>, <code>restore</code>, <code>commit</code>, <code>branch</code>, <code>tag</code>, <code>remote</code>, <code>switch</code>, <code>checkout</code>, <code>merge</code>, <code>recover</code>, and <code>push</code> of one branch or tag over SSH. See the <a href="gix.html">gix</a> page.</td></tr>
-  <tr><td>lua</td><td><code>/devtools/bin</code></td><td>Developer image: Lua 5.4, built natively against the C library.</td></tr>
-  <tr><td>sed</td><td><code>/devtools/bin</code></td><td>Developer image: the stream editor, uutils sed (GNU-compatible, in Rust). <code>sed -i</code> edits a file in place: the file keeps its permissions, and so must be writable.</td></tr>
+  <tr><td>curl</td><td><code>/user/bin</code></td><td>Developer image: a small curl-compatible HTTPS client written in Rust, used by Lorry to fetch crates and by gix for Git transfers.</td></tr>
+  <tr><td>gix</td><td><code>/user/bin/dev</code></td><td>Developer image: a small Git client with <code>init</code>, <code>clone</code> and <code>fetch</code> over HTTPS or SSH, <code>status</code>, <code>log</code>, <code>diff</code>, <code>add</code>, <code>unstage</code>, <code>restore</code>, <code>commit</code>, <code>branch</code>, <code>tag</code>, <code>remote</code>, <code>switch</code>, <code>checkout</code>, <code>merge</code>, <code>recover</code>, and <code>push</code> of one branch or tag over SSH. See the <a href="gix.html">gix</a> page.</td></tr>
+  <tr><td>lua</td><td><code>/user/bin/dev</code></td><td>Developer image: Lua 5.4, built natively against the C library.</td></tr>
+  <tr><td>sed</td><td><code>/user/bin/dev</code></td><td>Developer image: the stream editor, uutils sed (GNU-compatible, in Rust). <code>sed -i</code> edits a file in place: the file keeps its permissions, and so must be writable.</td></tr>
 </table>
 </div>
 <p>The developer image adds gix, Lorry, mdbg, the native compilers, and the test
@@ -748,12 +748,12 @@ refuses the whole file.</p>
 and use <code>imager set</code> (see <a href="imager.html#select-a-login-name">imager</a>), which also creates names and
 replaces whole key lists in a stopped image.</p>
 
-<p><code>/system/cfg/sshd.toml</code> holds the service settings and names the two credential
+<p><code>/user/cfg/sshd.toml</code> holds the service settings and names the two credential
 locations, as normalized absolute paths:</p>
 
 <pre><code>version = 2
 listen_on = '0.0.0.0:2222'
-path = '/system/bin:/user/bin'
+path = '/user/bin'
 host_key = '...OpenSSH private key...'
 users_file = '/user/cfg/russhd/users.toml'
 authorized_keys_dir = '/user/cfg/ssh'</code></pre>
@@ -846,10 +846,10 @@ a missing file explicitly selected with <code>-F</code> is an error.</p>
   <tr><th>File</th><th>Used by</th></tr>
   <tr><td><code>/system/cfg/sys-init.cfg</code></td><td>sys-init: the console program and role, strobe, and the services with their capability masks.</td></tr>
   <tr><td><code>/system/cfg/sys-net.toml</code></td><td>sys-io: network devices, addresses, routes, DNS servers, and limits.</td></tr>
-  <tr><td><code>/system/cfg/sshd.toml</code></td><td>russhd: listen address, command path, host key, and where the credentials below are.</td></tr>
+  <tr><td><code>/user/cfg/sshd.toml</code></td><td>russhd: listen address, command path, host key, and where the credentials below are.</td></tr>
   <tr><td><code>/user/cfg/russhd/users.toml</code>, <code>/user/cfg/ssh/authorized_keys.NAME</code></td><td>russhd: login names, password verifiers, and each name's public keys; see <a href="#log-in-to-a-motor-os-server">Log in to a Motor OS server</a>.</td></tr>
   <tr><td><code>/user/cfg/ssh/config</code>, <code>id_ed25519</code>, <code>known_hosts</code></td><td>SSH clients: host configuration, default private identity, and trusted server keys; see <a href="#ssh-client">SSH clients</a>.</td></tr>
-  <tr><td><code>/system/cfg/sys-tty.cfg</code>, <code>/system/cfg/rush.cfg</code></td><td>The console shell's environment and startup file.</td></tr>
+  <tr><td><code>/system/cfg/sys-tty.cfg</code>, <code>/user/cfg/rush.cfg</code></td><td>The console shell's environment and startup file.</td></tr>
   <tr><td><code>/system/cfg/libc/hosts</code></td><td>Local names for the DNS resolver and C library. Without <code>resolv.conf</code>, mlibc uses the DNS service at <code>127.0.0.1:53</code>.</td></tr>
   <tr><td><code>/system/tmp/sys-io/dhcp.toml</code></td><td>sys-io's current DHCP leases and active interface names; read by the Interactive DNS service.</td></tr>
   <tr><td><code>/user/cfg/red.toml</code>, <code>rmux.toml</code>, <code>kibim/</code>, <code>lorry.toml</code></td><td>Per-program settings, all optional.</td></tr>

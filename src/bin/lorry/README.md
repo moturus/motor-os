@@ -179,7 +179,7 @@ registry units do not use incremental compilation.
 Compiled crates.io and Git dependencies, including host procedural-macro
 dynamic libraries, are reused from the
 per-user cache at `$HOME/.cache/lorry` on Linux and the role's
-`/devtools/lorry/<role>/cache` on Motor. Mutable path-dependency units remain in
+`/<role>/dev/lorry/cache` on Motor. Mutable path-dependency units remain in
 `target/lorry/.cache`; root artifacts, tests, and incremental state are always
 project-local. The cache is a performance aid, not a source integrity
 authority: ordinary builds trust complete entries atomically published by
@@ -579,9 +579,11 @@ configuration supplies repository locations, compiler policy, network tools,
 test extraction roots, the global cache location, and approved native tools.
 Linux reads the user Lorry configuration below `$HOME/.config/lorry`. On Motor
 OS each role has its own state: Interactive Lorry reads `/user/cfg/lorry.toml`
-and keeps its repository and cache in `/devtools/lorry/user`; None-role Lorry
-uses `/none/cfg/lorry.toml` and `/devtools/lorry/none`. Lorry refuses to run as
+and keeps its repository and cache in `/user/dev/lorry`; None-role Lorry
+uses `/none/cfg/lorry.toml` and `/none/dev/lorry`. Lorry refuses to run as
 System. Its curl, CA bundle, C and C++ compilers, and archiver are built in.
+The image makes Interactive's repository and cache readable by None. Each
+role still uses its own repository and cache; shared lookup is a later milestone.
 
 A project's own `lorry.toml` cannot grant anything, because a cloned
 repository controls it. It may set only `cargo-compat-version`, the `vendor`

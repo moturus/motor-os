@@ -146,6 +146,6 @@ read any metric from any provider: the kernel is provider 1 and sys-io
 provider 2, the scope is a PID (0 is the aggregate), so `stats get 1::2` is
 the kernel's view of sys-io (its syscalls, waits, wakes and page maps) and
 `stats get 2` sys-io's own filesystem and network counters. For a hung or
-slow process, `/devtools/bin/mdbg print-stacks PID` prints every thread's
+slow process, `/user/bin/dev/mdbg print-stacks PID` prints every thread's
 stack as addresses; `addr2line` against the unstripped binary under
 `build/obj` turns them into symbols (see `docs/tools.md`).

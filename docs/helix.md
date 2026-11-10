@@ -10,7 +10,7 @@ Boot with `vm_images/release/run-dev.sh`, which defaults to 8 GiB of guest
 RAM. In Motor OS, try the packaged example; it needs no downloads:
 
 ```sh
-cd /devtools/src/helix-rust-demo
+cd /none/dev/helix-rust-demo
 hx src/main.rs
 ```
 
@@ -54,16 +54,17 @@ project is not a sandbox boundary.
 
 The packaged configuration is
 [`img_files/motor-os-dev/user/cfg/helix/languages.toml`](../img_files/motor-os-dev/user/cfg/helix/languages.toml),
-installed at `/user/cfg/helix/languages.toml`. The `/devtools/bin/hx`
+installed at `/user/cfg/helix/languages.toml`. The `/user/bin/dev/hx`
 launcher sets `XDG_CONFIG_HOME=/user/cfg` and
-`XDG_CACHE_HOME=/user/tmp/.cache` unless they are already set, so Helix's
-log is `/user/tmp/.cache/helix/helix.log`, and its built-in Git support
+`XDG_CACHE_HOME=$TMPDIR/.cache` unless they are already set. The runtime gives
+Interactive `/user/tmp` and None `/none/tmp`, so each role can write its own
+cache and log. Both may read the shared Helix configuration. Its built-in Git support
 reads `/user/cfg/git/config` besides `~/.gitconfig`. Normal Helix project
 overrides in `.helix/languages.toml` still apply. A custom `XDG_CONFIG_HOME`
 needs the native settings copied into its own `helix/languages.toml`.
 
 Helix starts `/devtools/rust/bin/rust-analyzer` directly over stdio. Its
-environment selects `/devtools/bin/lorry` through `CARGO` and
+environment selects `/user/bin/dev/lorry` through `CARGO` and
 `/devtools/rust/bin/rustfmt` through `RUSTFMT`, and includes `/devtools/bin`
 in `PATH`. Motor OS gives it the role's `TMPDIR`. These belong in the server's
 own environment: `cargo.extraEnv` only affects its children and cannot select
@@ -98,7 +99,7 @@ cargo.features = ["app/selected"]
 cargo.noDefaultFeatures = true
 cargo.targetDir = "target/editor"
 cargo.buildScripts.overrideCommand = [
-  "/devtools/bin/lorry", "check", "--workspace", "--message-format=json",
+  "/user/bin/dev/lorry", "check", "--workspace", "--message-format=json",
   "--all-targets", "--keep-going", "--compile-time-deps",
   "--target", "x86_64-unknown-motor", "--target-dir", "target/editor",
   "--features", "app/selected", "--no-default-features",
@@ -145,11 +146,11 @@ from Helix's own configuration lookup above.
 
 ## Port behavior
 
-Helix is a static PIE at `/devtools/helix/hx`; the developer overlay's
-`/devtools/bin/hx` launcher forwards quoted arguments, including paths with
+Helix is a static PIE at `/user/lib/helix/hx`; the developer overlay's
+`/user/bin/dev/hx` launcher forwards quoted arguments, including paths with
 spaces, and selects the configuration and cache directories above. Running
 the binary directly falls back to `$HOME/.config/helix` and
-`$HOME/.cache/helix`. Its runtime is `/devtools/helix/runtime`.
+`$HOME/.cache/helix`. Its runtime is `/user/lib/helix/runtime`.
 
 Ten tree-sitter grammars are linked into the binary: Rust, TOML, Markdown,
 Markdown inline, C, C++, JSON, YAML, Bash, and Lua. Their generated sources,

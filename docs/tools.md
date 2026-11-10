@@ -101,8 +101,8 @@ This is how `top` looks like:
 Motor OS boots into a unix-like shell [rush](https://github.com/moturus/rush).
 The shell is somewhat barebones now (contributions are welcome!).
 
-- `ls /system/bin` and `ls /user/bin` show the standard commands; the
-  development image also places `/devtools/bin` on `PATH`;
+- `ls /user/bin` shows the standard commands; the development image also
+  places `/user/bin/dev` and the transitional `/devtools/bin` on `PATH`;
 - `free`, `kill`, `ping`, `printenv`, `ps`, `ss`, and `top` are worth mentioning;
 - `mkdir [-p | --parents] [--] DIRECTORY...` creates directories. With `-p`,
   it creates missing parents and accepts directories that already exist;
@@ -140,7 +140,7 @@ The shell is somewhat barebones now (contributions are welcome!).
   the trailing newline; `-e` enables byte escapes and `-E` disables them.
   Escapes include octal/hex bytes and `\c` to stop output. `POSIXLY_CORRECT`
   enables escapes and restricts option parsing. Rush retains its built-in echo;
-  use `sysbox echo` or `/system/bin/echo` to select this implementation;
+  use `sysbox echo` or `/user/bin/echo` to select this implementation;
 - `xargs [-0r] [-d BYTE] [-n COUNT] [-I MARKER] [-t] [--] [COMMAND [ARG]...]` reads UTF-8 arguments and runs the
   command directly. Default input recognizes quotes and backslashes; `-0`
   reads literal NUL-separated arguments. `-d` uses a single-byte or escaped
@@ -183,7 +183,7 @@ The shell is somewhat barebones now (contributions are welcome!).
   diagnostics go to the process's stderr first, including debug records when
   debug logging is configured; for these diagnostics, the kernel log is a
   capability-gated fallback when that write fails;
-- `/devtools/bin/mdbg print-stacks $PID`, where `$PID` can be deduced by running `ps`, will
+- `/user/bin/dev/mdbg print-stacks $PID`, where `$PID` can be deduced by running `ps`, will
   (attempt) to extract stack traces for all threads in the process; the stack traces
   are addresses, so `addr2line` will need to be used with the binary
   (e.g. `$MOTORH/motor-os/build/obj/debug/sys-io/x86_64-unknown-motor/debug/sys-io`);
@@ -194,7 +194,7 @@ The shell is somewhat barebones now (contributions are welcome!).
 
 ## Git on the developer image
 
-The developer image includes `/devtools/bin/gix` for Git repositories:
+The developer image includes `/user/bin/dev/gix` for Git repositories:
 HTTPS/SSH clone and fetch, local inspection and authoring, branch switching,
 merging, and single-ref HTTPS/SSH push. See [gix on Motor OS](gix.md) for
 commands, configuration, recovery and limits.

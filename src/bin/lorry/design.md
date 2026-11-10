@@ -394,7 +394,7 @@ and filenames rather than the output-directory topology.
 `cache.rs` stores only verified library/procedural-macro artifacts and
 build-script results.
 It routes immutable crates.io and Git units to
-`$HOME/.cache/lorry` on Linux or the role's `/devtools/lorry/<role>/cache` on
+`$HOME/.cache/lorry` on Linux or the role's `/<role>/dev/lorry/cache` on
 Motor by default,
 while mutable path units stay in the project's `target/lorry/.cache`.
 `cache.directory` may replace the global root from system or user
@@ -452,7 +452,7 @@ guest-layout assertions.
 The Motor development image supplies an installed curl, CA bundle, native
 tools, a writable user-repository location, and explicit executable-code
 grants. Its only dependency objects and cache entries belong to the library
-sources it stages in `/devtools/src/motor-os/sys/lib`, which the image build
+sources it stages in `/none/dev/motor-os/sys/lib`, which the image build
 vendors and compiles natively. For any other project, a first `vendor`
 operation populates the writable repository and project-local Git trees over
 the network; all compilation commands remain offline. Cargo comparisons and

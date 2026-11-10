@@ -399,33 +399,35 @@ a.card h3 { color: var(--accent); }
 <h1>Developer image</h1>
 <p class="lead"><code>motor-os-dev.qcow2</code> is the standard image plus everything
 needed to build and test programs inside the VM: native C, C++, and Rust compilers, gix,
-Lorry, curl, Lua, sed, mdbg, the test suites, and source snapshots. It is 4 GB and is normally
+Lorry, Lua, sed, mdbg, the test suites, and source snapshots. Its data partition is 16 GiB and it is normally
 started with <code>run-dev.sh</code> (8 vCPUs, 8 GiB).</p>
 
 <h2>Layout</h2>
 <div class="table-wrap">
 <table>
   <tr><th>Path</th><th>Contents</th></tr>
-  <tr><td><code>/devtools/bin</code></td><td><code>cc</code>, <code>c++</code>, <code>rustc</code>, <code>rustfmt</code>, <code>clippy-driver</code> (launcher scripts), <code>gix</code>, <code>lorry</code>, <code>mdbg</code>, <code>lua</code>, <a href="quickjs.html"><code>qjs</code> and <code>qjsc</code></a> (QuickJS-NG), <code>sed</code>, <a href="wasm.html"><code>javy</code>, <code>wasmi</code>, <code>wasmtime</code> and <code>wasmtime-rt</code></a>, and <code>www</code>, the script that serves this website. On <code>PATH</code>.</td></tr>
+  <tr><td><code>/devtools/bin</code></td><td>The 1.99.1-2 compiler launchers: <code>cc</code>, <code>c++</code>, <code>rustc</code>, <code>rustfmt</code>, and <code>clippy-driver</code>. Temporarily on <code>PATH</code> until the next toolchain release.</td></tr>
+  <tr><td><code>/user/bin/dev</code></td><td><code>gix</code>, <code>lorry</code>, <code>mdbg</code>, <code>hx</code>, <code>lua</code>, <a href="quickjs.html"><code>qjs</code> and <code>qjsc</code></a>, <code>sed</code>, <a href="wasm.html"><code>javy</code>, <code>wasmi</code>, <code>wasmtime</code> and <code>wasmtime-rt</code></a>, and <code>www</code>. On <code>PATH</code>.</td></tr>
+  <tr><td><code>/user/lib</code></td><td>Helix's executable and runtime, the documentation site in <code>www/</code>, QuickJS libraries, wasm tool data, and the Linux host imager in <code>imager/</code>. The imager is copied out to a Linux host to run.</td></tr>
   <tr><td><code>/devtools/llvm</code></td><td>The LLVM multicall binary (clang, lld, and the tools), headers, and static libraries: mlibc, libc++, libc++abi, libunwind, compiler-rt, and the C ABI shim over the runtime.</td></tr>
   <tr><td><code>/devtools/rust</code></td><td>Native rustc, rustfmt, clippy-driver, and rust-analyzer with a full <code>x86_64-unknown-motor</code> sysroot and matching <code>rust-src</code>. There is no Cargo on the image; Lorry is the build driver.</td></tr>
-  <tr><td><code>/devtools/src</code></td><td>Writable workspace with sample sources under <code>hello-world/</code> and <a href="wasm.html"><code>wasm/</code></a>, and snapshots of red, lorry, moto-rt, and moto-sys under <code>motor-os/</code>, so that those can be rebuilt natively.</td></tr>
+  <tr><td><code>/none/dev</code></td><td>Writable workspace with sample sources under <code>hello-world/</code> and <a href="wasm.html"><code>wasm/</code></a>, and snapshots of red, lorry, moto-rt, and moto-sys under <code>motor-os/</code>, so that those can be rebuilt natively.</td></tr>
   <tr><td><code>/devtools/tests</code></td><td><code>systest</code>, <code>mio-test</code>, <code>tokio-tests</code>, <code>crossterm-smoke</code>, <code>crossbench</code>, <code>rnetbench</code>, and <code>quickjs-smoke.sh</code> with its fixtures.</td></tr>
-  <tr><td><code>/devtools/lorry</code></td><td>Lorry's dependency repository and compiled-unit cache: <code>user/</code> for Interactive, <code>none/</code> for None.</td></tr>
-  <tr><td><code>/devtools/quickjs</code></td><td>QuickJS-NG's <code>quickjs.h</code> and <code>quickjs-libc.h</code> under <code>include/</code>, and <code>lib/libqjs.a</code> for embedding: <code>cc -I/devtools/quickjs/include prog.c /devtools/quickjs/lib/libqjs.a</code>. <code>qjsc -e</code> turns a script into such a C program.</td></tr>
-  <tr><td><code>/devtools/javy</code></td><td>Javy's default plugin under <code>plugins/</code>, build provenance, and staged-file checksums.</td></tr>
-  <tr><td><code>/devtools/wasmtime</code></td><td>Wasmtime's build provenance and staged-file checksums.</td></tr>
-  <tr><td><code>/system/bin/curl</code></td><td>A curl-compatible HTTPS client, the network tool Lorry uses to fetch crates.</td></tr>
+  <tr><td><code>/user/dev/lorry</code>, <code>/none/dev/lorry</code></td><td>Lorry's dependency repositories and compiled-unit caches for Interactive and None. None may read Interactive's installed state.</td></tr>
+  <tr><td><code>/user/lib/quickjs</code></td><td>QuickJS-NG's <code>quickjs.h</code> and <code>quickjs-libc.h</code> under <code>include/</code>, and <code>lib/libqjs.a</code> for embedding: <code>cc -I/user/lib/quickjs/include prog.c /user/lib/quickjs/lib/libqjs.a</code>. <code>qjsc -e</code> turns a script into such a C program.</td></tr>
+  <tr><td><code>/user/lib/javy</code></td><td>Javy's default plugin under <code>plugins/</code>, build provenance, and staged-file checksums.</td></tr>
+  <tr><td><code>/user/lib/wasmtime</code></td><td>Wasmtime's build provenance and staged-file checksums.</td></tr>
+  <tr><td><code>/user/bin/curl</code></td><td>A curl-compatible HTTPS client, the network tool Lorry uses to fetch crates.</td></tr>
 </table>
 </div>
-<p><code>/devtools</code> belongs to Interactive sessions: they build under
-<code>/devtools/src</code>, keep Lorry's state in <code>/devtools/lorry/user</code>, and can
+<p>Source trees live under <code>/none/dev</code>. Interactive sessions keep
+Lorry's state in <code>/user/dev/lorry</code> and can
 install a newer toolchain with the <code>install.sh</code> of its native archive, which
 replaces <code>/devtools/llvm</code> and <code>/devtools/rust</code>; see
 <a href="toolchain.html">Toolchains</a>.</p>
 
 <h2>Compiling natively</h2>
-<pre><code>cd /devtools/src/hello-world
+<pre><code>cd /none/dev/hello-world
 cc hello.c -o /user/tmp/hello && /user/tmp/hello
 c++ hello.cpp -o /user/tmp/hello-cpp && /user/tmp/hello-cpp
 rustc hello.rs -o /user/tmp/hello-rs && /user/tmp/hello-rs</code></pre>
@@ -498,8 +500,8 @@ image and adds the native-toolchain and Lorry legs. <code>stress-soak.sh</code> 
 VM busy with concurrent looping workloads and collects forensics if something stalls.</p>
 
 <h2>Serving this website</h2>
-<p><code>/devtools/bin/www</code> starts <code>httpd-axum</code> on port 443 with the
-shipped test certificate, serving <code>/devtools/www</code>, the directory these pages
+<p><code>/user/bin/dev/www</code> starts <code>httpd-axum</code> on port 443 with the
+shipped test certificate, serving <code>/user/lib/www</code>, the directory these pages
 live in. Edit the script to serve plain HTTP with <code>httpd</code> instead.</p>
 <nav class="pager">
 <a class="pager-prev" href="editors.html"><span>Previous</span>Editors</a>

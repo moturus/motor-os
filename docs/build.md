@@ -136,16 +136,16 @@ src/build-motor-os.sh --javy-only --wasmtime-only
 make dev.img wasm.img BUILD=release -j"$(nproc)"
 ```
 
-Both images install `/devtools/bin/javy`, `/devtools/bin/wasmi`, the full
-`/devtools/bin/wasmtime` and runtime-only `/devtools/bin/wasmtime-rt`, with Javy's
+Both images install `/user/bin/dev/javy`, `/user/bin/dev/wasmi`, the full
+`/user/bin/dev/wasmtime` and runtime-only `/user/bin/dev/wasmtime-rt`, with Javy's
 default plugin at
-`/devtools/javy/plugins/default.wasm` and build provenance under
-`/devtools/javy` and `/devtools/wasmtime`. See
+`/user/lib/javy/plugins/default.wasm` and build provenance under
+`/user/lib/javy` and `/user/lib/wasmtime`. See
 [WebAssembly on Motor OS](wasm.md) for the installed files and the developer
-image's example under `/devtools/src/wasm`.
+image's example under `/none/dev/wasm`.
 
 The developer image also stages Motor OS library sources in
-`/devtools/src/motor-os/sys/lib` for offline native `lorry test` runs: moto-sdk
+`/none/dev/motor-os/sys/lib` for offline native `lorry test` runs: moto-sdk
 with moto-rt and moto-sys. Their crates.io dependencies are an overlay of the
 assembly too, locked to `src/sys/Cargo.lock`. moto-sdk uses tokio only on
 Unix, and Motor OS never builds it, but Cargo.lock covers every target. So the
@@ -170,14 +170,14 @@ toolchain.
 On Motor OS, compile into a writable directory and execute with explicit masks:
 
 ```sh
-MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -o /none/tmp/hello.wasm
-MOTOR_OS_CAPS=0 /devtools/bin/wasmi /none/tmp/hello.wasm
-MOTOR_OS_CAPS=0 /devtools/bin/wasmtime run /none/tmp/hello.wasm
+MOTOR_OS_CAPS=0x200 /user/bin/dev/javy build hello.js -o /none/tmp/hello.wasm
+MOTOR_OS_CAPS=0 /user/bin/dev/wasmi /none/tmp/hello.wasm
+MOTOR_OS_CAPS=0 /user/bin/dev/wasmtime run /none/tmp/hello.wasm
 ```
 
 Javy and Wasmtime follow published `moturus` branches and record resolved
 revisions, the toolchain, native library content, and input digests in
-`/devtools/javy/sources.txt` and `/devtools/wasmtime/sources.txt`. Their test
+`/user/lib/javy/sources.txt` and `/user/lib/wasmtime/sources.txt`. Their test
 inputs are staged outside the images, in the assembly's `tests/javy` and
 `tests/wasmtime`, and uploaded by the tests; the Wasmtime fixtures and two
 custom Javy plugins are built with a pinned upstream Rust that has the

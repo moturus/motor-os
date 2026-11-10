@@ -525,7 +525,7 @@ workflow.</p>
 
 <h2 id="change-guest-permissions">Change guest permissions</h2>
 
-<pre><code>imager chmod rw-r----- image.img /system/cfg/sshd.toml
+<pre><code>imager chmod rwxrw---- image.img /user/cfg/sshd.toml
 imager chmod r-xr-xr-x image.qcow2 /user/bin/program</code></pre>
 
 <p><code>chmod</code> changes the permissions of one existing file or directory. It is not
@@ -645,10 +645,11 @@ file write. Allow space beside the image for a copy and, with qcow2, its raw int
 
 <p>The image must be a regular file, not a symlink. Destination files other than a login name's key
 file must already exist, and their contents and each input artifact are limited to 1 MiB. Artifact
-input files must be nonempty regular files. Secret destinations (<code>sshd.toml</code> and
-<code>ssl-key.pem</code>) must have permissions no broader than <code>rw-r-----</code>; use
-<code>chmod</code> to correct a permissive image before installing secrets. All command arguments
-must be UTF-8.</p>
+input files must be nonempty regular files. The Interactive-owned <code>sshd.toml</code>
+must have permissions no broader than <code>rwxrw----</code>, and None must not be able
+to replace its ancestors up to <code>/user</code>. The System-owned
+<code>ssl-key.pem</code> remains limited to <code>rw-r-----</code>. Use <code>chmod</code>
+to correct a permissive image before installing secrets. All command arguments must be UTF-8.</p>
 
 <p>Login credentials live in <code>/user/cfg/russhd/users.toml</code> and
 <code>/user/cfg/ssh/authorized_keys.NAME</code> (see
@@ -658,7 +659,7 @@ the same. It refuses them, before changing anything, unless each is a regular fi
 neither write it nor replace any directory up to <code>/user</code>, and None cannot read
 <code>users.toml</code>. A file that an update only consults keeps its mode.</p>
 
-<p>SSH edits require version 2 <code>/system/cfg/sshd.toml</code> with the standard
+<p>SSH edits require version 2 <code>/user/cfg/sshd.toml</code> with the standard
 <code>users_file</code> and <code>authorized_keys_dir</code> values and no user credentials, and a
 <code>users.toml</code> in the shipped layout, with bare <code>[users.NAME]</code> tables. Credential
 paths read from inside an image are never followed. Unsupported layouts, such as inline tables or

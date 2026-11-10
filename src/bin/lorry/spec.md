@@ -288,7 +288,7 @@ root compilation, freshness validation, and artifact publication.
   the next command waits for surviving children before changing the tree.
 - `cache clean` requires no current package and removes exactly
   the configured global cache directory. Its default is `$HOME/.cache/lorry`
-  on Linux and `/devtools/lorry/<role>/cache` on Motor. An absent cache is success. A
+  on Linux and `/<role>/dev/lorry/cache` on Motor. An absent cache is success. A
   cache root that is a file or symbolic link is rejected rather than traversed
   or removed.
 - `new PATH` creates Cargo's default edition-2024 binary package template.
@@ -1165,14 +1165,14 @@ errors. Paths are absolute and are canonicalized before use.
 
 Motor has one configuration directory per process role: `/user/cfg` for
 Interactive and `/none/cfg` for None, written `<role cfg>` below. Each role also
-has its own state directory, `/devtools/lorry/user` or `/devtools/lorry/none`,
-written `/devtools/lorry/<role>`. Lorry refuses to run as System. Motor merges:
+has its own state directory, `/user/dev/lorry` or `/none/dev/lorry`,
+written `/<role>/dev/lorry`. Lorry refuses to run as System. Motor merges:
 
 1. `<role cfg>/lorry.toml`;
 2. the workspace root's own `lorry.toml`.
 
 On Motor, Lorry's paths and native tools are built in: curl
-`/system/bin/curl` with CA bundle `/system/cfg/ssl/ca-certificates.crt`, and
+`/user/bin/curl` with CA bundle `/system/cfg/ssl/ca-certificates.crt`, and
 for `x86_64-unknown-motor` the C compiler `/devtools/bin/cc` and C++ compiler
 `/devtools/bin/c++` (both with `--target=x86_64-unknown-motor`; the C++
 standard library is `c++`) and the archiver `/devtools/llvm/bin/llvm ar`.
@@ -1214,7 +1214,7 @@ tools, admission rules/limits, and system constraints.
 
 `cache.directory` is an absolute normalized path owned by system or user
 configuration. It defaults to
-`$HOME/.cache/lorry` on Linux and `/devtools/lorry/<role>/cache` on Motor. It must not
+`$HOME/.cache/lorry` on Linux and `/<role>/dev/lorry/cache` on Motor. It must not
 be a filesystem root or overlap a dependency repository. Lorry creates it on
 the first build that needs cache storage.
 
@@ -1222,7 +1222,7 @@ Repository roles are layer-owned:
 
 - `repositories.system` is trusted/base-owned and read-only to Lorry;
 - `repositories.user` is user/base-owned and writable; on Motor it defaults to
-  `/devtools/lorry/<role>/vendor`;
+  `/<role>/dev/lorry/vendor`;
 - `repositories.local` belongs to one workspace's table and is writable.
 
 Canonical repository paths must be distinct and non-nesting. Lookup order is
@@ -1390,12 +1390,12 @@ special files, traversal, malformed metadata, duplicates, and limit evasion.
 
 Lorry invokes a curl-compatible executable directly without a shell, adapter,
 or private helper protocol. Linux requires upstream curl 7.63.0 or newer;
-Motor uses `/system/bin/curl` by default. Motor's default CA bundle is
+Motor uses `/user/bin/curl` by default. Motor's default CA bundle is
 `/system/cfg/ssl/ca-certificates.crt`. Absolute `[network]` overrides are allowed
 subject to system policy.
 
 `[network].curl`, when present, is an absolute executable. Otherwise Linux
-resolves `curl` once through the invoking `PATH`, while Motor uses `/system/bin/curl`.
+resolves `curl` once through the invoking `PATH`, while Motor uses `/user/bin/curl`.
 Lorry converts the selection to an absolute path before clearing the child
 environment. On Linux, curl may use its compiled-in system trust configuration
 unless `[network].ca-bundle` is set. Motor always supplies its default or
@@ -1819,7 +1819,7 @@ Lorry stores verified library and procedural-macro outputs plus build-script
 Immutable crates.io and Git units are stored in the
 per-user cache below
 `$HOME/.cache/lorry/v1/units/sha256/` on Linux and
-`/devtools/lorry/<role>/cache/v1/units/sha256/` on Motor, unless `cache.directory`
+`/<role>/dev/lorry/cache/v1/units/sha256/` on Motor, unless `cache.directory`
 selects another root. Mutable path-package units, including selected package
 libraries, are stored in the project below `target/lorry/.cache/v1/units/sha256/`.
 Selected binaries, tests, and incremental state are not unit-cache entries.
@@ -1993,9 +1993,9 @@ Lorry's executable does not bootstrap an OS image. Motor's development image
 installs both roles' configurations with the default policy and limits, and
 exact executable-code grants for Lorry's own dependencies in the Interactive
 one. It installs a writable repository per role under
-`/devtools/lorry/<role>/vendor`. The only dependency objects and cache entries
+`/<role>/dev/lorry/vendor`. The only dependency objects and cache entries
 are the Interactive role's, for the Motor OS library sources the image stages
-in `/devtools/src/motor-os/sys/lib`; the image build vendors and compiles that
+in `/none/dev/motor-os/sys/lib`; the image build vendors and compiles that
 workspace with the image's own Lorry. Any other fresh project must run
 networked `vendor` before its offline build. Imager inputs, debug/release image
 selection, VM launch, and layout validation remain outside this product

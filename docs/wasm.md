@@ -13,15 +13,15 @@ linking a compiler.
 
 | Path | Contents |
 | --- | --- |
-| `/devtools/bin/javy` | JavaScript-to-WebAssembly compiler. |
-| `/devtools/bin/wasmi` | WebAssembly interpreter and command runner. |
-| `/devtools/javy/plugins/default.wasm` | Default QuickJS plugin for explicit plugin selection and dynamic modules; also embedded in Javy. |
-| `/devtools/javy/sources.txt`, `SHA256SUMS` | Build provenance, source revisions, and staged-file checksums. |
-| `/devtools/bin/wasmtime` | Native Wasmtime `run`, `serve` and `compile` commands with Cranelift. |
-| `/devtools/bin/wasmtime-rt` | Runtime-only Wasmtime: precompiled native execution with WASI. |
-| `/devtools/wasmtime/sources.txt`, `SHA256SUMS` | Wasmtime build provenance and checksums. |
-| `/devtools/src/wasm/` | `hello.js` and a README with compile/run instructions. |
-| `/devtools/www/wasm.html` | This guide in the image's HTML documentation. |
+| `/user/bin/dev/javy` | JavaScript-to-WebAssembly compiler. |
+| `/user/bin/dev/wasmi` | WebAssembly interpreter and command runner. |
+| `/user/lib/javy/plugins/default.wasm` | Default QuickJS plugin for explicit plugin selection and dynamic modules; also embedded in Javy. |
+| `/user/lib/javy/sources.txt`, `SHA256SUMS` | Build provenance, source revisions, and staged-file checksums. |
+| `/user/bin/dev/wasmtime` | Native Wasmtime `run`, `serve` and `compile` commands with Cranelift. |
+| `/user/bin/dev/wasmtime-rt` | Runtime-only Wasmtime: precompiled native execution with WASI. |
+| `/user/lib/wasmtime/sources.txt`, `SHA256SUMS` | Wasmtime build provenance and checksums. |
+| `/none/dev/wasm/` | `hello.js` and a README with compile/run instructions. |
+| `/user/lib/www/wasm.html` | This guide in the image's HTML documentation. |
 
 The smaller `wasm.img` also includes the four tools and their data
 directories. The test inputs (the TypeScript workload, the Linux identity
@@ -127,18 +127,18 @@ What differs is forced by the platform:
 In the developer VM's shell:
 
 ```sh
-cd /devtools/src/wasm
-/devtools/bin/javy build hello.js -o "$TMPDIR/hello.wasm"
-/devtools/bin/wasmi "$TMPDIR/hello.wasm"
+cd /none/dev/wasm
+/user/bin/dev/javy build hello.js -o "$TMPDIR/hello.wasm"
+/user/bin/dev/wasmi "$TMPDIR/hello.wasm"
 ```
 
 The same Wasm can run directly with Wasmtime, or be compiled once and loaded
 by either Wasmtime CLI:
 
 ```sh
-/devtools/bin/wasmtime run "$TMPDIR/hello.wasm"
-/devtools/bin/wasmtime compile "$TMPDIR/hello.wasm" -o "$TMPDIR/hello.cwasm"
-/devtools/bin/wasmtime-rt run --allow-precompiled "$TMPDIR/hello.cwasm"
+/user/bin/dev/wasmtime run "$TMPDIR/hello.wasm"
+/user/bin/dev/wasmtime compile "$TMPDIR/hello.wasm" -o "$TMPDIR/hello.cwasm"
+/user/bin/dev/wasmtime-rt run --allow-precompiled "$TMPDIR/hello.cwasm"
 ```
 
 `wasmtime serve handler.wasm` likewise compiles a WASI HTTP component and

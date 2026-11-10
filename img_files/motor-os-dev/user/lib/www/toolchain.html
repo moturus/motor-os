@@ -414,8 +414,8 @@ mlibc, packaged by
   <tr><td>LLVM</td><td><a href="https://github.com/moturus/llvm-project">moturus/llvm-project</a>, LLVM 23</td><td>A Motor OS target in Clang: the driver knows the link line, the defaults (emulated TLS, static PIE, lld, compiler-rt, libc++), and the sysroot layout. Built twice: for the Linux host, and natively for Motor OS.</td></tr>
   <tr><td>mlibc</td><td><a href="https://github.com/moturus/mlibc">moturus/mlibc</a></td><td>The Motor OS sysdeps and a build configuration that reads its runtime files from <code>/system/cfg/libc</code>. The fork also owns <code>sysdeps/motor/moto-rt-cabi</code>, a C ABI over the published Motor OS runtime crates (see <a href="c-cpp.html">C/C++ on Motor OS</a>).</td></tr>
   <tr><td>Small crate forks</td><td><code>moturus/libc</code>, <code>moturus/stacker</code>, <code>moturus/rust_libloading</code>, <code>moturus/rust-ctrlc</code></td><td>Patched into the Rust fork's own dependency graph; Cargo fetches them, nothing is cloned by hand.</td></tr>
-  <tr><td>Lua, ripgrep, Helix, sed</td><td>Lua 5.4.8 from lua.org, unmodified; <code>moturus/ripgrep</code>; <code>moturus/helix</code>; <code>moturus/sed</code> (uutils sed)</td><td>External sources, not parts of the toolchain: built with the finished toolchain on every run of the build. Lua was the first real C program and ripgrep the first large Rust program; they ship as <code>/devtools/bin/lua</code>, <code>/system/bin/rg</code>, <code>/devtools/helix/hx</code>, and <code>/devtools/bin/sed</code>.</td></tr>
-  <tr><td>tar, zstd, Javy/Wasmi, Wasmtime</td><td><code>moturus/motor-os-tar</code>, <code>moturus/javy</code>, <code>moturus/wasmtime</code></td><td>External sources too. The archive tools ship in <code>/system/bin</code>; the WebAssembly tools ship in the developer and wasm images. Both builders use motor-os-tar's Linux <code>tar</code> for packaging or extraction.</td></tr>
+  <tr><td>Lua, ripgrep, Helix, sed</td><td>Lua 5.4.8 from lua.org, unmodified; <code>moturus/ripgrep</code>; <code>moturus/helix</code>; <code>moturus/sed</code> (uutils sed)</td><td>External sources, not parts of the toolchain: built with the finished toolchain on every run of the build. Lua was the first real C program and ripgrep the first large Rust program; they ship as <code>/user/bin/dev/lua</code>, <code>/user/bin/rg</code>, <code>/user/lib/helix/hx</code>, and <code>/user/bin/dev/sed</code>.</td></tr>
+  <tr><td>tar, zstd, Javy/Wasmi, Wasmtime</td><td><code>moturus/motor-os-tar</code>, <code>moturus/javy</code>, <code>moturus/wasmtime</code></td><td>External sources too. The archive tools ship in <code>/user/bin</code>; the WebAssembly tools ship in the developer and wasm images. Both builders use motor-os-tar's Linux <code>tar</code> for packaging or extraction.</td></tr>
 </table>
 </div>
 
@@ -516,7 +516,7 @@ prebuilt crates: <code>std</code>, <code>core</code>, <code>alloc</code>,
 <code>moto_rt</code>, and their dependencies, each as an <code>.rlib</code> with its
 metadata. <code>/devtools/bin/rustc</code>, the command on <code>PATH</code>, is a two-line
 script that runs it.</p>
-<pre><code>rustc -O /devtools/src/hello-world/hello.rs -o /user/tmp/hello &amp;&amp; /user/tmp/hello</code></pre>
+<pre><code>rustc -O /none/dev/hello-world/hello.rs -o /user/tmp/hello &amp;&amp; /user/tmp/hello</code></pre>
 <p>No linker option is needed: rustc's default linker driver is <code>cc</code>, which on
 the image is <code>/devtools/bin/cc</code>, the native Clang, which links with lld. There is
 no Cargo or rustdoc on the image. Packages with dependencies are built with Lorry,
@@ -567,9 +567,9 @@ lorry build --release
 lorry run</code></pre>
 
 <h3>Also on the image</h3>
-<p><code>/devtools/bin/lua</code> (Lua 5.4.8), <code>/devtools/bin/sed</code> (uutils sed), <code>/system/bin/curl</code> (the HTTPS
-client Lorry fetches with), <code>/devtools/bin/mdbg</code>, the test suites under
-<code>/devtools/tests</code>, and source snapshots under <code>/devtools/src</code>; see
+<p><code>/user/bin/dev/lua</code> (Lua 5.4.8), <code>/user/bin/dev/sed</code> (uutils sed), <code>/user/bin/curl</code> (the HTTPS
+client Lorry fetches with), <code>/user/bin/dev/mdbg</code>, the test suites under
+<code>/devtools/tests</code>, and source snapshots under <code>/none/dev</code>; see
 <a href="devtools.html">Developer image</a>.</p>
 
 <h3>Installing a native toolchain update</h3>

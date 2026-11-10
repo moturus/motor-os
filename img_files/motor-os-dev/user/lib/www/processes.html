@@ -487,7 +487,7 @@ cannot pass on a capability it does not hold, and SFTP needs filesystem authorit
 authentication boundary protects that authority; a future change may keep the network
 front end at None and hand each authenticated session to an Interactive worker.</p>
 <p>An SFTP upload can edit an existing writable file under a protected parent,
-such as <code>/devtools/bin/www</code>, while keeping its installed mode. Two
+such as <code>/user/bin/dev/www</code>, while keeping its installed mode. Two
 uploads are refused there instead: one whose mode would take read access away
 from a lower role that can currently read the file, and a <code>put -p</code>
 or <code>scp -p</code> that asks for its mode to be installed. A separate SFTP
@@ -498,7 +498,7 @@ chmod request still requires write access to the parent.</p>
   <li><code>ps</code> marks each process's role: <code>*</code> System, <code>+</code>
   Interactive, blank for None.</li>
   <li>Interactive can install programs and edit configuration under <code>/user</code>,
-  and edit sources under <code>/devtools/src</code> on the developer image, but cannot
+  and edit sources under <code>/none/dev</code> on the developer image, but cannot
   replace anything in <code>/system</code>.</li>
   <li>None can read and run public installed content and write only to
   <code>/none/cfg</code> and <code>/none/tmp</code>; it cannot even list

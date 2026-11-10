@@ -541,10 +541,10 @@ operational failures exit 101; an interrupted run exits 130.</p>
   <tr><th>On Motor OS</th><th>Purpose</th></tr>
   <tr><td><code>/user/cfg/lorry.toml</code></td><td>Your Lorry configuration: the Cargo compatibility version (1.99), policy limits, and the reviewed grants for build scripts and procedural macros. Rules for one workspace go in its <code>[workspaces."/path"]</code> table. The curl program, CA bundle, and native C and C++ tools are built in.</td></tr>
   <tr><td><code>/user/cfg/lorry-workspaces/</code></td><td>Lorry's record of your decisions for each workspace: <code>vendor --accept-all</code>, the review you approved, and the build-time code and repository Cargo files you approved. Delete a file to forget them.</td></tr>
-  <tr><td><code>/devtools/lorry/user/vendor</code></td><td>The user repository: content-addressed, immutable objects under <code>objects/crates-io/sha256/</code>, a <code>.staging</code> area, and a <code>repository.toml</code>. Ships empty.</td></tr>
-  <tr><td><code>/devtools/lorry/user/cache</code></td><td>Compiled dependency units shared between projects, read-only views of dependency sources, and saved answers from rustc.</td></tr>
+  <tr><td><code>/user/dev/lorry/vendor</code></td><td>The user repository: content-addressed, immutable objects under <code>objects/crates-io/sha256/</code>, a <code>.staging</code> area, and a <code>repository.toml</code>. Ships empty.</td></tr>
+  <tr><td><code>/user/dev/lorry/cache</code></td><td>Compiled dependency units shared between projects, read-only views of dependency sources, and saved answers from rustc.</td></tr>
   <tr><td><code>/user/cfg/lorry-redirect-sites.toml</code></td><td>The list of sites whose HTTP redirects have been allowed or denied.</td></tr>
-  <tr><td><code>/none/cfg</code>, <code>/devtools/lorry/none</code></td><td>The same files for Lorry running as None, which cannot read Interactive's. Lorry refuses to run as System.</td></tr>
+  <tr><td><code>/none/cfg</code>, <code>/none/dev/lorry</code></td><td>The same files for Lorry running as None, with its own configuration. Interactive's repository and cache are readable by None. Lorry refuses to run as System.</td></tr>
   <tr><td><code>PROJECT/.lorry/dependencies-v2.toml</code></td><td>The project's admission record: which packages, at which checksums, were reviewed for which host and target pairs. Committed with the project, never edited by hand.</td></tr>
   <tr><td><code>PROJECT/.lorry/vendor/git/</code></td><td>Verified snapshots of the project's Git dependencies.</td></tr>
   <tr><td><code>PROJECT/target/lorry/</code></td><td>Build output, in Cargo-shaped <code>debug</code> and <code>release</code> directories, plus incremental state for workspace members and path dependencies.</td></tr>
@@ -585,7 +585,7 @@ an editor; building needs a review.</p>
   <li>Sources are the crates.io sparse index, the only supported registry, and Git over
   smart HTTP. Git is handled by an embedded client, never a <code>git</code> executable:
   anonymous HTTPS, shallow, with credentials, proxies, hooks, and filters disabled.</li>
-  <li>The configured curl (<code>/system/bin/curl</code> on Motor OS, Motor OS's own
+  <li>The configured curl (<code>/user/bin/curl</code> on Motor OS, Motor OS's own
   curl-compatible client) is run directly, never through a shell, restricted to HTTPS,
   without following redirects, and with proxy and credential settings stripped from the
   environment. A redirect is followed only for a site you have allowed in the redirect
@@ -693,9 +693,9 @@ remaining differences from Cargo that may change.</p>
 <h2>Self-hosting</h2>
 <p>Lorry builds Motor OS programs on Motor OS. The developer-image test vendors and
 builds red and then Lorry itself natively in a VM, from the source snapshots
-under <code>/devtools/src</code>, and checks that the freshly linked build scripts carry
+under <code>/none/dev</code>, and checks that the freshly linked build scripts carry
 the expected permissions. It also runs <code>lorry test</code> offline in
-<code>/devtools/src/motor-os/sys/lib</code>, where the image build has already admitted
+<code>/none/dev/motor-os/sys/lib</code>, where the image build has already admitted
 the Motor OS libraries staged there and compiled their dependencies. Lorry's own suite
 checks that Lorry built natively on Motor OS is byte-identical to Lorry cross-built on
 Linux. Replacing the repository's Cargo-driven

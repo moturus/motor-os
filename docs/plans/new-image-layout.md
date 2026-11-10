@@ -1,11 +1,15 @@
 # Developing Motor OS on Motor OS: image layout, Lorry as None, native tests
 
-Status: milestone 1 implemented; milestones 2-5 ready, updated 2026-11-10;
+Status: milestones 1-2 implemented; milestones 3-5 ready, updated 2026-11-10;
 milestone 6 remains conditional. v1 is commit e7d46767, v2 is 3035a48a,
 v3 is 29779e3f, v4 is 98fe39e0.
 Milestone 1 is implemented: kernel command-line access, the System-console
 boot option, network-device omission, and launcher and guest coverage.
-Milestones 2-6 have not been implemented by this work.
+Milestone 2 moves user commands, development tools, configuration, and sources
+to their new paths, and the imager rejects None-writable entries under
+`/system` and `/user`. The 1.99.1-2 compiler trees and test fixtures remain
+under `/devtools`; only the compatibility rush and sh copies remain under
+`/system/bin`. Milestones 3-6 have not been implemented by this work.
 
 ## The workflow this serves
 
@@ -85,7 +89,7 @@ Milestones 2-6 have not been implemented by this work.
 
 ## Where things stand
 
-**Layout.** `/system/bin` holds rush, sysbox, `sh`, 38 Rush wrappers over
+**Layout at v1.** `/system/bin` holds rush, sysbox, `sh`, 38 Rush wrappers over
 sysbox, and `curl`, `rg`, `tar`, `zstd`, `wg`, and `wg-tool`. The v1 inventory
 counted 707 `/system/bin` references in 160 files, 47 of them
 `#!/system/bin/rush` lines, plus russhd's `SHELL` constant, `sys-tty.cfg`,
@@ -135,7 +139,7 @@ and Git are cached there; path dependencies and the workspace's own crates
 build into `target/lorry` only. Repositories are looked up as `local`, then
 `user`, then `system`; `system` is read-only, has no Motor default, and
 nothing ships one. On Motor each role has its own `user` repository and
-cache under `/devtools/lorry/<role>/{vendor,cache}` (`config.rs`,
+cache under `/<role>/dev/lorry/{vendor,cache}` (`config.rs`,
 `role.rs`). The developer image preseeds the Interactive role's repository
 with the `sys/lib` dependencies (`build-motor-os.sh`, `fetch_sys_lib_deps`),
 and `prepare-dev-image.sh` fills its cache at image build.
@@ -288,7 +292,7 @@ None and one from an Interactive shell is Interactive. That is how step 5 of
 the workflow chooses.
 
 **Two repositories, two caches on Motor.** Each role keeps a repository and
-a cache, as under `/devtools/lorry/<role>` today, at new paths and under
+a cache, as under `/<role>/dev/lorry` today, at new paths and under
 Lorry's own names:
 
 | Name | Repository | Cache | Repository written by | Cache written by | Read by |
@@ -897,13 +901,22 @@ Where the old paths are today:
    and the default `PATH` `/system/bin:/user/bin`. It is linked into the
    compilers, so they are rebuilt too.
 4. The second default `PATH`, `/system/bin:/user/bin:/devtools/bin`, is
-   compiled into both `rustc` and `llvm` next to Motor runtime strings. It
-   is not in the main repo, so it comes from mlibc's Motor code or the Rust
-   fork's std; 2e finds it. `rustc` holds no other `/devtools` path.
+   compiled into both `rustc` and `llvm` next to Motor runtime strings.
+   Milestone 2e located it in mlibc's Motor runtime code, as detailed below.
+   `rustc` holds no other `/devtools` path.
 
-The sources of the three forks are still unread. These are expected to be
-mechanical path changes, and milestones 2e and 4a size them. The result is
-the toolchain release 1.99.1-3, in both archives.
+Milestone 2e audited the installed Rust library sources, the toolchain scripts,
+and mlibc at `2b86b98c4fa26de6c6961f4f357f1a3daf8f277d`. The longer default
+PATH is in mlibc's `sysdeps/motor/moto-rt-cabi/src/processes.rs`, not Rust std.
+Other shell references are in `sysdeps/motor/generic/process.cpp` (`popen`),
+`options/ansi/generic/stdlib.cpp` (`system`), `options/posix/generic/wordexp.cpp`,
+`options/posix/generic/unistd.cpp`, and `options/glibc/include/paths.h`.
+The installed Rust Motor process and environment implementations delegate to
+moto-rt and contain no old shell paths. The LLVM fork is still unread.
+No code outside the main Motor OS repository changes in milestone 2: the
+compatibility rush and sh copies keep the 1.99.1-2 launchers and libc working.
+Their removal still requires the milestone 4 toolchain rebuild and release
+1.99.1-3 in both archives.
 
 Milestone 4c checks the result. After `install.sh` runs, the guest has no
 `/devtools` and no `/system/bin`. No entry of either archive lies under
@@ -982,6 +995,26 @@ root check waits until milestone 5d removes the last legacy paths and images.
   development-tool paths until milestone 4.
 - 2f. The imager's rejection of None `w` under `/system` and `/user`.
   Validate installed modes as well; the exact root check comes in 5d.
+
+Milestone 2 validation used release images on Cloud Hypervisor. The release
+build, external-tool rebuilds, build-script contracts, affected host tests,
+and imager checks passed (54 unit tests, 16 integration tests, and Clippy with
+warnings denied). The standard-image SSH credential gate also passed.
+`full-test-dev.sh --release --vmm chv` completed its `full-test.sh` and
+httpd-axum phases; the remaining developer phases were resumed separately
+after correcting migration failures. Native source builds and system-library
+tests, native toolchain installation, the complete Lorry suite (927 seconds),
+and both regular and service-mode WebAssembly runs passed. QuickJS Test262
+matched its existing Linux baseline in 312 seconds: 40/82220 errors,
+4802 excluded, and 5736 skipped, with exit status 0. No debug developer-image
+run was added.
+
+The corrected migration failures covered the new SSH configuration permission
+ceiling, rust-analyzer's process allowlist for the old compiler launchers,
+libc test expectations for the retained 1.99.1-2 paths, and the installation
+test's write-denial probe. The probe sends bytes: opening a readable file
+for append alone need not check write access. Compiler/libc compatibility
+assertions stay on the old paths until milestone 4 rebuilds the toolchain.
 
 **Milestone 3: Lorry.** (Explicit Lorry work.) Lorry's existing suite,
 `tests/test-all.sh`, gates these steps; milestone 5 replaces it.

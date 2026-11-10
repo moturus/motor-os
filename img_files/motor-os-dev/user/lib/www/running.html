@@ -415,7 +415,7 @@ This page describes what is in the images and how to start and reach a VM.</p>
   <tr><td><code>motor-os-dev.qcow2</code></td><td>qcow2, 4 GB</td>
     <td>The developer image: the standard image plus the native LLVM and rustc toolchains,
     Lorry, curl, Lua, mdbg, the test suites, source snapshots, and this website
-    under <code>/devtools/www</code>. See <a href="devtools.html">Developer image</a>.</td></tr>
+    under <code>/user/lib/www</code>. See <a href="devtools.html">Developer image</a>.</td></tr>
 </table>
 </div>
 <p>The dedicated System-console and vsock test images are created in temporary directories
@@ -489,7 +489,7 @@ such as red and rmux ask that terminal for its size; see
 
 <h2>Connecting over SSH</h2>
 <p><code>russhd</code>, the SSH server, is started by sys-init on every image and
-listens on port 2222 in the shipped configuration (<code>/system/cfg/sshd.toml</code>).
+listens on port 2222 in the shipped configuration (<code>/user/cfg/sshd.toml</code>).
 It supports password and public-key authentication, interactive shells with a pty,
 command execution without one (<code>ssh host command</code>), and the SFTP subsystem, so
 <code>scp</code> and <code>sftp</code> work for copying files in and out.</p>

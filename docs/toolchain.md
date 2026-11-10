@@ -143,7 +143,13 @@ under `/system/cfg/libc`. The developer image takes all four overlays:
 | `/devtools/rust/lib/rustlib/x86_64-unknown-motor/lib/` | complete Motor OS Rust libraries, including `.rlib` and `.rmeta` files and linker support |
 | `/devtools/rust/lib/rustlib/src/rust/library/` | matching `rust-src` for rust-analyzer |
 | `/devtools/bin/` | Rush launchers: cc, c++, rustc, rustfmt, clippy-driver |
-| `/devtools/src/hello-world/` | C, C++, and Rust examples |
+| `/none/dev/hello-world/` | C, C++, and Rust examples |
+
+The image builder moves the 1.99.1-2 archive's example sources from
+`/devtools/src` to `/none/dev`. Installing that unchanged archive directly
+still writes its examples to `/devtools/src/hello-world`. Compiler trees and
+launchers stay at their original paths until release 1.99.1-3; the images keep
+`/system/bin/rush` and `/system/bin/sh` for the old launchers and libc.
 
 There is no native Cargo, rustdoc, separate proc-macro server, or shared
 `librustc_driver`; Lorry is the native build driver. The host cross wrappers,

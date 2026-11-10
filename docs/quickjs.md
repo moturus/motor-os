@@ -9,13 +9,13 @@ The JavaScript engine is upstream code. Only its platform layer,
 
 | Path | Contents |
 | --- | --- |
-| `/devtools/bin/qjs` | The interpreter and REPL. It also creates standalone executables. |
-| `/devtools/bin/qjsc` | The compiler: JavaScript to C source or to bytecode. |
-| `/devtools/quickjs/include/` | `quickjs.h` and `quickjs-libc.h`. |
-| `/devtools/quickjs/lib/libqjs.a` | The engine with the `qjs:std`, `qjs:os` and `qjs:bjson` modules. |
-| `/devtools/quickjs/LICENSE` | QuickJS-NG's license. |
+| `/user/bin/dev/qjs` | The interpreter and REPL. It also creates standalone executables. |
+| `/user/bin/dev/qjsc` | The compiler: JavaScript to C source or to bytecode. |
+| `/user/lib/quickjs/include/` | `quickjs.h` and `quickjs-libc.h`. |
+| `/user/lib/quickjs/lib/libqjs.a` | The engine with the `qjs:std`, `qjs:os` and `qjs:bjson` modules. |
+| `/user/lib/quickjs/LICENSE` | QuickJS-NG's license. |
 | `/devtools/tests/quickjs-*` | The smoke test and its fixtures. |
-| `/devtools/www/quickjs.html` | This guide in the image's HTML documentation. |
+| `/user/lib/www/quickjs.html` | This guide in the image's HTML documentation. |
 
 `libqjs.a` holds only QuickJS's C objects. The normal C toolchain supplies
 mlibc and its runtime shim, so a program links only `libqjs.a` explicitly.
@@ -27,7 +27,7 @@ Run a script, or compile it to a native program:
 ```sh
 qjs hello.js
 qjsc -e -o hello.c hello.js
-cc -I/devtools/quickjs/include hello.c /devtools/quickjs/lib/libqjs.a -o hello
+cc -I/user/lib/quickjs/include hello.c /user/lib/quickjs/lib/libqjs.a -o hello
 ./hello
 ```
 
@@ -52,8 +52,8 @@ Processes use mlibc's native spawn, because Motor OS has no `fork`.
 - `os.kill` supports signal 0, `SIGTERM` and `SIGKILL`, with Motor's
   permission checks. `SIGTERM` always terminates. Other signals to another
   process return `-ENOSYS`. There are no process groups.
-- `std.popen` runs `/system/bin/rush -c` and returns a normal stream.
-- `std.urlGet` runs `/system/bin/curl` with long options. HTTP is tested over
+- `std.popen` runs `/user/bin/rush -c` and returns a normal stream.
+- `std.urlGet` runs `/user/bin/curl` with long options. HTTP is tested over
   loopback. HTTPS uses curl's normal certificate checks, but has not been
   tested end to end.
 - Workers use pthreads. They wait through the runtime's poll and wake calls

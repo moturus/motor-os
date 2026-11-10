@@ -116,12 +116,12 @@ change, so they are regression guards only. The real gate should be in the VM.
 ```sh
 test_rush_dev_null() {
   local out
-  out="$(vm_ssh_stdout "/system/bin/rush -c '
+  out="$(vm_ssh_stdout "/user/bin/rush -c '
     echo hidden >/dev/null
     echo hidden >/dev/null 2>&1
     echo hidden 2>/dev/null >/dev/null
-    /system/bin/ls /nonexistent-rush-devnull 2>/dev/null
-    /system/bin/ls / >/dev/null
+    /user/bin/ls /nonexistent-rush-devnull 2>/dev/null
+    /user/bin/ls / >/dev/null
     cat </dev/null
     { echo hidden; } >/dev/null
     echo hidden >&-; echo closed=\$?

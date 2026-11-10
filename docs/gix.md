@@ -1,7 +1,7 @@
 # gix: Git on Motor OS
 
 The developer image comes with `gix`, a small Git client, at
-`/devtools/bin/gix`. It works with normal Git repositories: a worktree with a
+`/user/bin/dev/gix`. It works with normal Git repositories: a worktree with a
 `.git` directory, full history and SHA-1 object names. Gix reads and writes
 the same files as Git does, so you can copy a repository between Motor OS and
 a machine that has Git and keep working on either side. Just let gix finish
@@ -142,7 +142,7 @@ Gix never runs other programs on a repository's behalf. Hooks, credential
 helpers, external filters, diff and merge drivers and signing programs are
 all ignored. If a repository cannot be handled without one of them, for
 example a file that needs an external filter, the command stops with an error
-instead of guessing. The only programs gix starts are `/system/bin/curl` for
+instead of guessing. The only programs gix starts are `/user/bin/curl` for
 HTTPS and `/user/bin/ssh` for SSH, and their paths cannot be configured.
 
 ## Remotes

@@ -660,7 +660,7 @@ fails against a server with that check removed.
 
 ### 4.3 What runs in a pane: `sh`
 
-A pane runs **`sh`**, not `rush` and not `/system/bin/rush`. On Linux that is dash; on
+A pane runs **`sh`**, not `rush` and not `/user/bin/rush`. On Linux that is dash; on
 Motor OS it is rush. rmux spawns the bare name and neither knows nor cares which,
 which is what keeps `pane.rs` free of `cfg`.
 
@@ -668,37 +668,37 @@ This works because Motor already resolves both halves in the **runtime's** spawn
 path, before rmux or rush is involved:
 
 - **PATH lookup** — `rt.vdso/src/rt_process.rs` stats `<dir>/<exe>` across `PATH`,
-  so a bare `sh` finds `/system/bin/sh` exactly as `/devtools/bin/cc` is found today.
+  so a bare `sh` finds `/user/bin/sh` exactly as `/devtools/bin/cc` is found today.
 - **Shebang** — `rt_process.rs:170` matches `SCRIPT_MAGIC = *b"#!/"` and
   `run_script` (`:178`) reads the interpreter line, opens it, and `run_elf`s it
   with the script as an argument.
 
-And `/system/bin/sh` exists in the base image
-(`img_files/motor-os-base/system/bin/sh`), saying
+And `/user/bin/sh` exists in the base image
+(`img_files/motor-os-base/user/bin/sh`), saying
 so itself:
 
 ```sh
-#!/system/bin/rush
+#!/user/bin/rush
 
-# /system/bin/sh: the POSIX shell. Motor OS has no symlinks, so this forwards every
+# /user/bin/sh: the POSIX shell. Motor OS has no symlinks, so this forwards every
 # argument to rush -- `sh -c '...'` (what libc's system()/popen() emit), `sh
 # script args`, and a bare interactive `sh` all work.
-exec /system/bin/rush "$@"
+exec /user/bin/rush "$@"
 ```
 
-So `Command::new("sh")` from rmux resolves `/system/bin/sh`, the runtime reads `#!/system/bin/rush`,
+So `Command::new("sh")` from rmux resolves `/user/bin/sh`, the runtime reads `#!/user/bin/rush`,
 and rush starts. Nothing to build, and no rmux-side shebang handling.
 
 Three limits of Motor's shebang implementation, worth knowing before writing a
 config that trips them (`rt_process.rs:178-205`):
 
 - The magic is `#!/` — the interpreter must be an **absolute path**, so
-  `#! /system/bin/rush` and `#!/usr/bin/env rush` do not work.
+  `#! /user/bin/rush` and `#!/usr/bin/env rush` do not work.
 - The interpreter line is taken whole and `trim()`ed into one filename, so
-  **arguments in a shebang are not supported**: `#!/system/bin/rush -x` would try to open
-  a file literally named `/system/bin/rush -x`.
+  **arguments in a shebang are not supported**: `#!/user/bin/rush -x` would try to open
+  a file literally named `/user/bin/rush -x`.
 - `run_script` calls `run_elf`, so an interpreter that is itself a script fails.
-  One level only — which `/system/bin/sh` → `/system/bin/rush` (ELF) satisfies.
+  One level only — which `/user/bin/sh` → `/user/bin/rush` (ELF) satisfies.
 
 `default-shell` in `rmux.toml` (§2.2) overrides the choice; `$SHELL` is *not*
 consulted, because sys-tty's `env_clear()` (`sys-tty/src/main.rs:88`) means it is
@@ -1346,8 +1346,8 @@ the bytes cross it and whatever is at the far end of rmux's *own* console
 answers, or nothing does and rush falls back to its 80-column default. Both are
 wrong once there is more than one pane, which is M3's job. Exiting the pane
 returns to the outer shell. The §4.3 spawn chain is confirmed in the kernel log
-exactly as predicted: `spawn /user/bin/rmux` → `spawn sh` → PATH finds `/system/bin/sh` →
-its `#!/system/bin/rush` shebang → `spawn /system/bin/rush`, with no shebang handling in rmux.
+exactly as predicted: `spawn /user/bin/rmux` → `spawn sh` → PATH finds `/user/bin/sh` →
+its `#!/user/bin/rush` shebang → `spawn /user/bin/rush`, with no shebang handling in rmux.
 
 Bytes cross in both directions **unexamined**, which is §8.1's rule rather than
 an M1 shortcut. Nothing re-encodes Enter yet (§3.4 — unnecessary while

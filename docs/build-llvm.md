@@ -74,10 +74,10 @@ The development image contains:
 Examples inside the development VM:
 
 ```sh
-cc /devtools/src/hello-world/hello.c -o /user/tmp/hello
+cc /none/dev/hello-world/hello.c -o /user/tmp/hello
 /user/tmp/hello
 
-c++ /devtools/src/hello-world/hello.cpp -o /user/tmp/hello-cxx
+c++ /none/dev/hello-world/hello.cpp -o /user/tmp/hello-cxx
 /user/tmp/hello-cxx
 
 /devtools/llvm/bin/llvm clang --version

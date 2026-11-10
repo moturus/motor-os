@@ -410,11 +410,11 @@ native engine.</p>
 <div class="table-wrap">
 <table class="plain">
   <tr><th>Path</th><th>Contents</th></tr>
-  <tr><td><code>/devtools/bin/qjs</code></td><td>The interpreter and REPL. It also creates standalone executables.</td></tr>
-  <tr><td><code>/devtools/bin/qjsc</code></td><td>The compiler: JavaScript to C source or to bytecode.</td></tr>
-  <tr><td><code>/devtools/quickjs/include/</code></td><td><code>quickjs.h</code> and <code>quickjs-libc.h</code>.</td></tr>
-  <tr><td><code>/devtools/quickjs/lib/libqjs.a</code></td><td>The engine with the <code>qjs:std</code>, <code>qjs:os</code> and <code>qjs:bjson</code> modules.</td></tr>
-  <tr><td><code>/devtools/quickjs/LICENSE</code></td><td>QuickJS-NG's license.</td></tr>
+  <tr><td><code>/user/bin/dev/qjs</code></td><td>The interpreter and REPL. It also creates standalone executables.</td></tr>
+  <tr><td><code>/user/bin/dev/qjsc</code></td><td>The compiler: JavaScript to C source or to bytecode.</td></tr>
+  <tr><td><code>/user/lib/quickjs/include/</code></td><td><code>quickjs.h</code> and <code>quickjs-libc.h</code>.</td></tr>
+  <tr><td><code>/user/lib/quickjs/lib/libqjs.a</code></td><td>The engine with the <code>qjs:std</code>, <code>qjs:os</code> and <code>qjs:bjson</code> modules.</td></tr>
+  <tr><td><code>/user/lib/quickjs/LICENSE</code></td><td>QuickJS-NG's license.</td></tr>
   <tr><td><code>/devtools/tests/quickjs-*</code></td><td>The smoke test and its fixtures.</td></tr>
 </table>
 </div>
@@ -430,7 +430,7 @@ input, use a script file or <code>qjs -e</code>; see the limits below.</p>
 <p><code>qjsc -e</code> turns a script into a C program. The normal C compiler builds it
 with <code>libqjs.a</code>:</p>
 <pre><code>qjsc -e -o hello.c hello.js
-cc -I/devtools/quickjs/include hello.c /devtools/quickjs/lib/libqjs.a -o hello
+cc -I/user/lib/quickjs/include hello.c /user/lib/quickjs/lib/libqjs.a -o hello
 ./hello</code></pre>
 <p>Add <code>-m</code> to compile an ES module. <code>qjs</code> can also append bytecode
 to a copy of itself, with no C compiler involved:</p>
@@ -456,9 +456,9 @@ toolchain supplies mlibc and the rest, as described under
   <li><code>os.kill</code> supports signal 0, <code>SIGTERM</code> and <code>SIGKILL</code>,
   with the usual permission checks. <code>SIGTERM</code> always terminates. Other signals
   to another process return <code>-ENOSYS</code>. There are no process groups.</li>
-  <li><code>std.popen</code> runs <code>/system/bin/rush -c</code> and returns a normal
+  <li><code>std.popen</code> runs <code>/user/bin/rush -c</code> and returns a normal
   stream.</li>
-  <li><code>std.urlGet</code> runs <code>/system/bin/curl</code>. HTTP is tested. HTTPS
+  <li><code>std.urlGet</code> runs <code>/user/bin/curl</code>. HTTP is tested. HTTPS
   uses curl's normal certificate checks, but has not been tested end to end.</li>
   <li>Workers use threads. They wait through the runtime's poll and wake calls instead
   of pipes.</li>

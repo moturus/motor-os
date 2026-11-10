@@ -457,7 +457,7 @@ and write counts and latencies, readahead, device I/O, channels).</p>
 
 <h2>Stack traces from a running process</h2>
 <p>There is no source-level debugger. <code>mdbg print-stacks PID</code> (on the developer
-image, under <code>/devtools/bin</code>) pauses the process through the kernel's debug
+image, under <code>/user/bin/dev</code>) pauses the process through the kernel's debug
 interface, walks each thread's stack, and prints raw addresses, marking frames that are
 inside the runtime. Symbolize them on the host with <code>addr2line</code> against the
 unstripped binary from the build tree, for example

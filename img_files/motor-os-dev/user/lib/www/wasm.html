@@ -410,15 +410,15 @@ compatible precompiled artifacts without linking a compiler.</p>
 <div class="table-wrap">
 <table>
   <tr><th>Path</th><th>Contents</th></tr>
-  <tr><td><code>/devtools/bin/javy</code></td><td>JavaScript-to-WebAssembly compiler.</td></tr>
-  <tr><td><code>/devtools/bin/wasmi</code></td><td>WebAssembly interpreter and command runner.</td></tr>
-  <tr><td><code>/devtools/javy/plugins/default.wasm</code></td><td>Default QuickJS plugin for explicit plugin selection and dynamic modules; also embedded in Javy.</td></tr>
-  <tr><td><code>/devtools/javy/sources.txt</code>, <code>SHA256SUMS</code></td><td>Build provenance, source revisions, and staged-file checksums.</td></tr>
-  <tr><td><code>/devtools/bin/wasmtime</code></td><td>Native Wasmtime <code>run</code>, <code>serve</code> and <code>compile</code> commands with Cranelift.</td></tr>
-  <tr><td><code>/devtools/bin/wasmtime-rt</code></td><td>Runtime-only Wasmtime: precompiled native execution with WASI.</td></tr>
-  <tr><td><code>/devtools/wasmtime/sources.txt</code>, <code>SHA256SUMS</code></td><td>Wasmtime build provenance and checksums.</td></tr>
-  <tr><td><code>/devtools/src/wasm/</code></td><td><code>hello.js</code> and a README with compile/run instructions.</td></tr>
-  <tr><td><code>/devtools/www/wasm.html</code></td><td>This guide.</td></tr>
+  <tr><td><code>/user/bin/dev/javy</code></td><td>JavaScript-to-WebAssembly compiler.</td></tr>
+  <tr><td><code>/user/bin/dev/wasmi</code></td><td>WebAssembly interpreter and command runner.</td></tr>
+  <tr><td><code>/user/lib/javy/plugins/default.wasm</code></td><td>Default QuickJS plugin for explicit plugin selection and dynamic modules; also embedded in Javy.</td></tr>
+  <tr><td><code>/user/lib/javy/sources.txt</code>, <code>SHA256SUMS</code></td><td>Build provenance, source revisions, and staged-file checksums.</td></tr>
+  <tr><td><code>/user/bin/dev/wasmtime</code></td><td>Native Wasmtime <code>run</code>, <code>serve</code> and <code>compile</code> commands with Cranelift.</td></tr>
+  <tr><td><code>/user/bin/dev/wasmtime-rt</code></td><td>Runtime-only Wasmtime: precompiled native execution with WASI.</td></tr>
+  <tr><td><code>/user/lib/wasmtime/sources.txt</code>, <code>SHA256SUMS</code></td><td>Wasmtime build provenance and checksums.</td></tr>
+  <tr><td><code>/none/dev/wasm/</code></td><td><code>hello.js</code> and a README with compile/run instructions.</td></tr>
+  <tr><td><code>/user/lib/www/wasm.html</code></td><td>This guide.</td></tr>
 </table>
 </div>
 <p><code>make dev.img BUILD=release</code> produces <code>motor-os-dev.qcow2</code>.
@@ -525,14 +525,14 @@ are all upstream's. What differs is forced by the platform:</p>
 
 <h2>Run the example</h2>
 <p>In the developer VM's shell:</p>
-<pre><code>cd /devtools/src/wasm
-/devtools/bin/javy build hello.js -o "$TMPDIR/hello.wasm"
-/devtools/bin/wasmi "$TMPDIR/hello.wasm"</code></pre>
+<pre><code>cd /none/dev/wasm
+/user/bin/dev/javy build hello.js -o "$TMPDIR/hello.wasm"
+/user/bin/dev/wasmi "$TMPDIR/hello.wasm"</code></pre>
 <p>The same Wasm can run directly with Wasmtime, or be compiled once and loaded
 by either Wasmtime CLI:</p>
-<pre><code>/devtools/bin/wasmtime run "$TMPDIR/hello.wasm"
-/devtools/bin/wasmtime compile "$TMPDIR/hello.wasm" -o "$TMPDIR/hello.cwasm"
-/devtools/bin/wasmtime-rt run --allow-precompiled "$TMPDIR/hello.cwasm"</code></pre>
+<pre><code>/user/bin/dev/wasmtime run "$TMPDIR/hello.wasm"
+/user/bin/dev/wasmtime compile "$TMPDIR/hello.wasm" -o "$TMPDIR/hello.cwasm"
+/user/bin/dev/wasmtime-rt run --allow-precompiled "$TMPDIR/hello.cwasm"</code></pre>
 <p><code>wasmtime serve handler.wasm</code> likewise compiles a WASI HTTP component
 and serves it directly. There is no packaging step or separate runtime
 executable to generate.</p>

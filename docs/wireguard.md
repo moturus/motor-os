@@ -2,7 +2,7 @@
 
 ## Using WireGuard
 
-The standard image includes `/system/bin/wg-tool` and `/system/bin/wg`.
+The standard image includes `/user/bin/wg-tool` and `/user/bin/wg`.
 Run the tool in an Interactive session. Each daemon provides one tunnel
 device; activation is explicit, and the image contains no keys or configs.
 
@@ -292,8 +292,8 @@ released.
   workspace owns its crypto dependencies and C/assembly build requirements;
   they stay outside the core workspace.
 * Configs with inline keys default to `/user/cfg/wireguard/`; explicit paths
-  elsewhere are supported. The binaries ship as `/system/bin/wg` and
-  `/system/bin/wg-tool`.
+  elsewhere are supported. The binaries ship as `/user/bin/wg` and
+  `/user/bin/wg-tool`.
 * `wg` is started by the user; starting it at boot is out of scope.
 * The boringtun fork supplies the clock fallback and verified-packet entry
   point described below; its protocol and crypto implementation are unchanged.
@@ -796,7 +796,7 @@ The existing statistics protocol remains separate.
 
 ### Managed startup
 
-`up` resolves the config path and launches `/system/bin/wg` with null standard
+`up` resolves the config path and launches `/user/bin/wg` with null standard
 streams, an explicit detached request, and the reduced capability mask
 described above. The daemon reads its own config; argv, environment variables
 and startup IPC contain no keys or TOML. The launcher first creates a private

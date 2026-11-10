@@ -126,15 +126,15 @@ bounded protocol and stderr evidence.
 
 The developer image packages `/devtools/rust/bin/rust-analyzer` and matching
 sources below `/devtools/rust/lib/rustlib/src/rust/library`. The standard
-image contains neither. The native server uses `/devtools/bin/lorry`, not
+image contains neither. The native server uses `/user/bin/dev/lorry`, not
 Cargo; it does not replace the Linux-host component above.
 
 Launch the binary directly over stdio, with an absolute project working
 directory and this environment:
 
 ```text
-CARGO=/devtools/bin/lorry
-PATH=/devtools/bin:/system/bin
+CARGO=/user/bin/dev/lorry
+PATH=/user/bin:/user/bin/dev:/devtools/bin
 RUSTFMT=/devtools/rust/bin/rustfmt
 ```
 
@@ -256,7 +256,7 @@ packaged native server configuration automatically. Try the dependency-free
 example, which requires no downloads:
 
 ```sh
-cd /devtools/src/helix-rust-demo
+cd /none/dev/helix-rust-demo
 hx src/main.rs
 ```
 
@@ -308,7 +308,7 @@ Inside the development VM:
 
 ```sh
 /devtools/bin/rustc --version
-/devtools/bin/rustc /devtools/src/hello-world/hello.rs -o /user/tmp/hello
+/devtools/bin/rustc /none/dev/hello-world/hello.rs -o /user/tmp/hello
 /user/tmp/hello
 ```
 

@@ -33,12 +33,12 @@ Either shell works for every step, including pasting the files.
 In the VM:
 
 ```sh
-cd /devtools/src
+cd /none/dev
 lorry new hello
 cd hello
 ```
 
-`/devtools/src` is the developer image's writable workspace. `lorry new`
+`/none/dev` is the developer image's writable workspace. `lorry new`
 writes `Cargo.toml`, `Cargo.lock`, and `src/main.rs`.
 
 ## The program

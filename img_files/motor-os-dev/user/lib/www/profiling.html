@@ -530,7 +530,7 @@ and <code>sys_cpu_wakes</code>; read them before and after a run and take the di
 any provider: the kernel is provider 1 and sys-io provider 2, the scope is a PID (0 is the
 aggregate), so <code>stats get 1::2</code> is the kernel's view of sys-io (its syscalls, waits,
 wakes and page maps) and <code>stats get 2</code> sys-io's own filesystem and network counters.
-For a hung or slow process, <code>/devtools/bin/mdbg print-stacks PID</code> prints every
+For a hung or slow process, <code>/user/bin/dev/mdbg print-stacks PID</code> prints every
 thread's stack as addresses; <code>addr2line</code> against the unstripped binary under
 <code>build/obj</code> turns them into symbols (see
 <a href="diagnostics.html">Logs and diagnostics</a>).</p>

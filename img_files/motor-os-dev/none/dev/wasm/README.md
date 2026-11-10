@@ -8,18 +8,18 @@ needed.
 Run these commands in the VM's shell:
 
 ```sh
-cd /devtools/src/wasm
-/devtools/bin/javy build hello.js -o "$TMPDIR/hello.wasm"
-/devtools/bin/wasmi "$TMPDIR/hello.wasm"
+cd /none/dev/wasm
+/user/bin/dev/javy build hello.js -o "$TMPDIR/hello.wasm"
+/user/bin/dev/wasmi "$TMPDIR/hello.wasm"
 ```
 
 The same module runs natively with Wasmtime, or can be compiled once and
 loaded by either Wasmtime CLI:
 
 ```sh
-/devtools/bin/wasmtime run "$TMPDIR/hello.wasm"
-/devtools/bin/wasmtime compile "$TMPDIR/hello.wasm" -o "$TMPDIR/hello.cwasm"
-/devtools/bin/wasmtime-rt run --allow-precompiled "$TMPDIR/hello.cwasm"
+/user/bin/dev/wasmtime run "$TMPDIR/hello.wasm"
+/user/bin/dev/wasmtime compile "$TMPDIR/hello.wasm" -o "$TMPDIR/hello.cwasm"
+/user/bin/dev/wasmtime-rt run --allow-precompiled "$TMPDIR/hello.cwasm"
 ```
 
 Expected output of each run:
@@ -37,4 +37,4 @@ execution, and `/none/tmp/hello.wasm` and `/none/tmp/hello.cwasm` for the output
 paths. Javy embeds the default QuickJS plugin, so no plugin argument is needed.
 
 Edit `hello.js` and repeat the commands to compile and run your changes.
-See `/devtools/www/wasm.html` for the installed tools and support files.
+See `/user/lib/www/wasm.html` for the installed tools and support files.
