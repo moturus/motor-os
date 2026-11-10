@@ -13,6 +13,7 @@ mod sched_fairness;
 mod alloc_bench;
 mod block_mounts;
 mod boot_identity;
+mod boot_options;
 mod closerace;
 mod command_output;
 mod ctrl_c;
@@ -1495,6 +1496,7 @@ fn main() {
         return;
     }
     if args.len() == 2 && args[1] == "system-caps-tests" {
+        boot_options::cmdline(None);
         spawn_wait_kill::test_system_parent_cannot_grant_unheld();
         fs_permissions::test_write_capability(moto_sys::caps::CAP_SYS);
         // Nothing listens: an admitted client would see a refusal instead.
@@ -1513,6 +1515,22 @@ fn main() {
     }
     if args.len() == 2 && args[1] == "capability-policy-tests" {
         test_caps();
+        return;
+    }
+    if args.len() == 3 && args[1] == "boot-console" {
+        boot_options::console(args[2].parse::<bool>().unwrap());
+        return;
+    }
+    if args.len() == 3 && args[1] == "boot-cmdline" {
+        boot_options::cmdline(Some(args[2].as_bytes()));
+        return;
+    }
+    if args.len() == 2 && args[1] == "boot-cmdline-denied" {
+        boot_options::cmdline_denied(moto_sys::caps::ProcessRole::None);
+        return;
+    }
+    if args.len() == 2 && args[1] == "boot-no-network" {
+        boot_options::no_network();
         return;
     }
     if args.len() >= 2 && args[1] == "close-race-child" {

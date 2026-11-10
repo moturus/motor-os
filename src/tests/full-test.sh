@@ -342,9 +342,17 @@ cargo test --locked --offline "${profile_args[@]}" \
   --no-default-features --features "$NETSTACK_FEATURES,proto-ipv6-slaac" \
   --lib iface::
 
-# The test-only image changes only sys-init.cfg, through a later static overlay,
-# and proves the opt-in System serial session without changing standard-image
-# role expectations.
+# Boot options on each available VMM, including standard-image console roles
+# and a boot without a network device. Missing VMMs use the boot-check skips.
+if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != 1 ]; then
+  for boot_vmm in qemu chv fc; do
+    case " ${SKIPPED_BOOT_VMMS[*]} " in *" $boot_vmm "*) continue ;; esac
+    "$WD/test-boot-options.sh" "${profile_args[@]}" --vmm "$boot_vmm"
+  done
+fi
+
+# Exercise the System console on the standard image with the boot option.
+# QEMU keeps the configured-System fixture, since disk boot has no command line.
 if [ "$BUILD" = "release" ]; then
   "$WD/test-system-tty.sh" --release --vmm "$VMM"
 else

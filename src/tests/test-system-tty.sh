@@ -84,10 +84,23 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-select_test_vm "$SCRATCH" "$BUILD" system-console "$VMM"
+runner_args=()
+if [ "$VMM" = qemu ]; then
+  # Disk boot cannot supply options; keep the configured-System fixture.
+  select_test_vm "$SCRATCH" "$BUILD" system-console "$VMM"
+  make -C "$ROOT_DIR" "$TEST_VM_IMG_TARGET" systest wg-self-test BUILD="$BUILD" \
+    TEST_IMAGE_ROOT="$SCRATCH" -j"$(nproc)"
+else
+  select_test_vm "$ROOT_DIR" "$BUILD" standard "$VMM"
+  make -C "$ROOT_DIR" "$TEST_VM_IMG_TARGET" systest wg-self-test BUILD="$BUILD" -j"$(nproc)"
+  mkdir -p "$SCRATCH/vm_images/$BUILD"
+  cp --reflink=auto --sparse=always "$TEST_VM_IMG_DIR/$TEST_VM_IMAGE" "$SCRATCH/vm_images/$BUILD/"
+  cp "$TEST_VM_IMG_DIR/kloader" "$TEST_VM_IMG_DIR/initrd" "$ROOT_DIR/src/vm_scripts/"*.sh \
+    "$SCRATCH/vm_images/$BUILD/"
+  select_test_vm "$SCRATCH" "$BUILD" standard "$VMM"
+  runner_args=(--system-tty)
+fi
 export MOTO_IMAGE="$TEST_VM_IMAGE"
-make -C "$ROOT_DIR" "$TEST_VM_IMG_TARGET" systest wg-self-test BUILD="$BUILD" \
-  TEST_IMAGE_ROOT="$SCRATCH" -j"$(nproc)"
 
 CHECK_STDERR="$SCRATCH/check-console-stderr"
 rustc --edition=2024 -D warnings "$WD/check-console-stderr.rs" -o "$CHECK_STDERR"
@@ -136,7 +149,7 @@ has_system_process() {
 mkfifo "$SCRATCH/console-in"
 exec 3<> "$SCRATCH/console-in"
 start_serial_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$CONSOLE_LOG" \
-  "$SCRATCH/console-in"
+  "$SCRATCH/console-in" "${runner_args[@]}"
 
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
   motor@192.168.4.2 /system/bin/rush -c true >/dev/null; do
@@ -185,7 +198,7 @@ system_caps_output="$(vm_ssh /system/bin/cat /user/tmp/system-caps.log)"
 # Debug runtimes log to stderr, so it is kept apart from the verdict.
 [ "$system_caps_status" = "0" ] ||
   fail "System capability tests exited $system_caps_status: '$system_caps_output' $(vm_ssh /system/bin/cat /user/tmp/system-caps.err)"
-[ "$system_caps_output" = $'spawn_wait_kill::test_system_parent_cannot_grant_unheld PASS\nfs_permissions::test_write_capability(System) PASS\nnet_caps::check_denied(System) PASS' ] ||
+[ "$system_caps_output" = $'kernel command-line query PASS\nspawn_wait_kill::test_system_parent_cannot_grant_unheld PASS\nfs_permissions::test_write_capability(System) PASS\nnet_caps::check_denied(System) PASS' ] ||
   fail "System capability tests did not finish: '$system_caps_output'"
 printf '%s\n' "$system_caps_output"
 
