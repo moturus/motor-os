@@ -26,6 +26,41 @@ and several useful scripts:
   ([fs-permissions.md](fs-permissions.md)); a read-only root disk needs a
   read-only root configured in the image.
 
+`--system-tty` on `run-chv.sh` and `run-fc.sh` selects a System serial
+console for that boot, overriding the console role in `sys-init.cfg`.
+The launcher appends the bare `system-tty` kernel option and preserves
+existing boot arguments. Other service roles and the console's remaining
+capabilities stay the same. Without the option, the configured console role
+applies. `run-qemu.sh` and `run-qemu-echr.sh` refuse it because disk boot has
+no kernel command line.
+
+All three launchers accept `--no-network` to omit the network device;
+`run-qemu-echr.sh` forwards it too. The serial console remains available,
+and guest loopback follows the image's networking configuration. Put these
+launcher options before `--` or any VMM-specific arguments. For example:
+
+```sh
+./run-chv.sh --system-tty --no-network
+MOTO_IMAGE=motor-os.img ./run-fc.sh --system-tty
+./run-qemu-echr.sh --no-network
+```
+
+The kernel retains the original command-line bytes and exposes them through
+`SysRay::OP_QUERY_CMDLINE` only to System processes. `SysRay::query_cmdline`
+copies into a caller buffer and returns `(written, total)`, excluding the
+terminating NUL. sys-init queries the kernel directly and accepts `system-tty`
+only as a complete ASCII-whitespace-separated token. Empty or absent command
+lines select no options; `system-tty=1` and `no-system-tty` do not select a
+System console. Command lines must terminate within 4096 bytes of mapped boot
+RAM, including the NUL; an invalid address or missing terminator fails boot.
+
+`src/tests/test-boot-options.sh [--release] [--vmm qemu|chv|fc]` checks the
+standard image's console capabilities and boots without a network device.
+`full-test.sh` calls it for every available VMM. Guest tests check the query's
+bytes and access control. Kernel command-line reader self-tests run inside
+debug Motor OS boots; sys-init's parser has host unit tests, and
+`test-vm-image-format.sh` checks host argument construction and QEMU's refusal.
+
 For host-side image creation, data filesystems, guest files, permission
 changes, resizing, and SSH/TLS credential replacement, see the [imager command reference](imager.md).
 

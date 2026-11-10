@@ -1,9 +1,11 @@
 # Developing Motor OS on Motor OS: image layout, Lorry as None, native tests
 
-Status: ready for implementation of milestones 1-5, updated 2026-11-10;
+Status: milestone 1 implemented; milestones 2-5 ready, updated 2026-11-10;
 milestone 6 remains conditional. v1 is commit e7d46767, v2 is 3035a48a,
 v3 is 29779e3f, v4 is 98fe39e0.
-No implementation code has changed.
+Milestone 1 is implemented: kernel command-line access, the System-console
+boot option, network-device omission, and launcher and guest coverage.
+Milestones 2-6 have not been implemented by this work.
 
 ## The workflow this serves
 
@@ -217,7 +219,7 @@ builds run clang and must read it.
 
 ### Kernel command line and `system-tty`
 
-The first milestone adds kernel command-line parsing. The first boot option
+The first milestone adds access to the kernel command line. The first boot option
 is the bare token `system-tty`. When present, sys-init starts sys-tty with
 `CAP_SYS`, overriding the console role in `sys-init.cfg` for that boot.
 Without it, the configured console role applies as today. Other service
@@ -234,18 +236,19 @@ QEMU boots from the disk, and that path has no kernel command line.
 Both supported VMMs start `kloader` through PVH, and the loader already
 hands the PVH start information, with its command-line pointer, to the
 kernel. The disk-boot loader (`x64.boot`) keeps supplying a zero
-command-line pointer, which the kernel reads as no options; `x64.boot` does
+command-line pointer, which the kernel exposes as empty; `x64.boot` does
 not change.
 
 All three launchers also accept `--no-network`, which starts the VM without
 its network device; `run-qemu-echr.sh` forwards it.
 
-The kernel reads the command line with bounded length and validated boot
-memory access, and recognizes `system-tty` as a complete whitespace-separated
-token. Missing or empty command lines mean no options; unrelated tokens
-do not enable the System console. The parsed flag is carried in startup
-data to sys-io, which passes it to sys-init. sys-init uses it when choosing
-sys-tty's role before spawning the process. Parsing belongs in the kernel.
+The kernel retains the original command-line bytes with bounded length and
+validated boot memory access. `SysRay::OP_QUERY_CMDLINE` serves those bytes
+only to System processes. sys-init queries the kernel directly and recognizes
+`system-tty` as a complete ASCII-whitespace-separated token when choosing
+sys-tty's role. Missing or empty command lines mean no options; unrelated
+tokens do not enable the System console. The kernel does not parse options,
+and this path needs neither shared-page fields nor sys-io forwarding.
 The no-IP test does not depend on `--no-network`; its image copy has
 networking configured off ("Two images").
 
@@ -549,7 +552,7 @@ the shipped file grows little. The raw standard image that Firecracker needs
 tests run on QEMU and Cloud Hypervisor only, as the developer-image suite
 does today. The base image stays at 64 MiB. sys-init starts
 the same services, and partition size adds no boot work. Milestone 1 adds
-the bounded command-line parsing and delivery of the parsed boot options.
+the bounded command-line copy, sys-init's query, and its boot-option parsing.
 
 ### The toolchain archive
 
@@ -919,16 +922,17 @@ times each, runs once
 at the end of milestone 5 and again after milestone 6. Doc-only changes go
 in their own patches.
 
-**Milestone 1: kernel command-line parsing.** Implement and test this before
+**Milestone 1: kernel command-line access.** Implement and test this before
 the image-layout migration. The first option is `system-tty`.
 
 - 1a. Read the kernel command line from the PVH start information that
-  Cloud Hypervisor and Firecracker supply. Parse it in the kernel with
-  bounded reads and exact token matching. Disk boot keeps its zero
-  command-line pointer, which means no options.
-- 1b. Carry the parsed `system-tty` flag from the kernel through sys-io to
-  sys-init. When set, sys-init gives sys-tty `CAP_SYS`; otherwise it uses
-  the role from `sys-init.cfg`.
+  Cloud Hypervisor and Firecracker supply. Retain its bytes in the kernel
+  with bounded reads. Disk boot keeps its zero command-line pointer, which
+  means an empty command line.
+- 1b. Expose the original bytes through `SysRay::OP_QUERY_CMDLINE`, restricted
+  to System processes. sys-init queries the kernel directly and matches the
+  exact `system-tty` token. When present, sys-init gives sys-tty `CAP_SYS`;
+  otherwise it uses the role from `sys-init.cfg`.
 - 1c. Add `--system-tty` to `vm-options.sh`, `run-chv.sh`, and `run-fc.sh`,
   passing the bare `system-tty` token in the kernel command line;
   `run-qemu.sh` and `run-qemu-echr.sh` refuse it. Add `--no-network` to all
@@ -939,8 +943,9 @@ the image-layout migration. The first option is `system-tty`.
   Hypervisor and Firecracker, QEMU's refusal of it, and a `--no-network`
   boot on each VMM. Check sys-tty's capabilities and its console shell's
   role on the standard image. Cover empty command lines and tokens that
-  resemble but do not equal `system-tty`. Kernel parsing tests run inside
-  Motor OS; the host checks launcher argument construction.
+  resemble but do not equal `system-tty`. Kernel reader and syscall tests run
+  inside Motor OS, including denial to Interactive and None processes; the
+  host checks sys-init's parser and launcher argument construction.
 
 **Milestone 2: layout.** The developer image keeps being built through
 milestones 2-4 so moved tools can be tested natively before the new archive
@@ -1084,7 +1089,7 @@ Both roles read the shared preference from `/user/cfg/lorry.toml`, with
 directory traversal and file permissions set accordingly. Preference with
 fallback is sufficient; no strict source policy is planned. Installation
 uses copying and the existing permission commands. Kernel command-line
-parsing is milestone 1: the launchers' `--system-tty` parameter supplies
+access is milestone 1: the launchers' `--system-tty` parameter supplies
 the `system-tty` boot option, which makes sys-tty run with `CAP_SYS`.
 This resolves the System-console choice. The patch and test-gate policy is
 the one stated in Steps. The v2 review decided: `/system/bin/rush` and
