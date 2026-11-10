@@ -362,13 +362,15 @@ Runner sources live in `src/vm_scripts/`; copies in `vm_images/` are generated.
 | Image/phase | QEMU / Cloud Hypervisor | Firecracker |
 | --- | --- | --- |
 | Standard suite / vsock peer tests | `main.img` → `motor-os.qcow2`. | Opt-in `raw.img` → `motor-os.img`, with standard-image contents. |
-| System console | Raw `motor-os-system-tty.img`. | Same. |
+| System console (`test-system-tty.sh`) | QEMU: raw `motor-os-system-tty.img`. Cloud Hypervisor: a copy of `motor-os.qcow2`, booted with `--system-tty`. | A copy of `motor-os.img`, booted with `--system-tty`. |
+| OOM abort (`test-oom-abort.sh`) | Raw `motor-os-system-tty.img`. | Same. |
 | Developer image | `dev.img` → `motor-os-dev.qcow2`. | Unsupported. |
 | Non-selected VMM boot check | Main qcow2 image. | `base.img` → `motor-os-base.img`. |
 | IP-disabled vsock discovery | Isolated raw `motor-os-vsock-test.img`, with and without the device. | Same. |
 
 The System-console and IP-disabled discovery images are built in temporary
-directories owned by their test scripts, outside `vm_images/`. Each script
+directories owned by their test scripts, outside `vm_images/`, and the
+standard-image copies are made there too. Each script
 removes its image and boot artifacts after VM teardown, including on failure
 or interruption. Full-suite preparation compiles their binaries without
 creating test images.

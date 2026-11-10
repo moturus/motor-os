@@ -560,10 +560,14 @@ Console arbitration:
 - `test-system-tty.sh` checks short error bursts and one larger than 16 KiB
   against a unique next-prompt marker. A blocking stdin handshake separates
   command echo from the checked output. The checked text must otherwise be
-  exact, except for whole log records on lines of their own: the image logs to
-  the console, and sys-tty may fit a record between any two chunks, moving to
-  a fresh line first. The host checker also tests fixed transcripts with early
-  prompts, missing lines, unexpected prefixes, and records in each position;
+  exact, except for whole log records on lines of their own: sys-tty may fit
+  a record between any two chunks, moving to a fresh line first. Which records
+  can appear depends on the VMM. On QEMU the test boots its own image, which
+  logs to the console, so any record can. On Cloud Hypervisor and Firecracker
+  it boots the standard image with `--system-tty`, which logs to strobe, so
+  only WARN and ERROR records can. The host checker also tests fixed
+  transcripts with early prompts, missing lines, unexpected prefixes, and
+  records in each position;
 - sanitizer cases cover every `ESC` position and all 32 UTF-8 C1 controls.
   The console copy contains the exact diagnostic literal and no unsafe control
   introducer, while the file copy remains byte-for-byte identical.

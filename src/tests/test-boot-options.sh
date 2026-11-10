@@ -1,9 +1,17 @@
 #!/bin/bash
-set -euo pipefail
-
-if [ "${TEST_BOOT_OPTIONS_TIMED:-0}" != 1 ]; then
-  exec timeout 180s env TEST_BOOT_OPTIONS_TIMED=1 "$0" "$@"
+if [ "${TEST_BOOT_OPTIONS_TIMEOUT_ACTIVE:-0}" != 1 ]; then
+  export TEST_BOOT_OPTIONS_TIMEOUT_ACTIVE=1
+  # See full-test.sh for why job control keeps timeout's process group safe.
+  set -m
+  timeout 180s "$0" "$@" < /dev/null
+  status=$?
+  set +m
+  if [ "$status" -eq 124 ]; then
+    echo "test-boot-options: timed out after 180 seconds" >&2
+  fi
+  exit "$status"
 fi
+set -euo pipefail
 WD="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$WD/../.." && pwd)"
 BUILD=debug
@@ -21,12 +29,17 @@ done
 . "$WD/vm-console-filter.sh"
 select_test_vm "$ROOT_DIR" "$BUILD" standard "$VMM"
 test_vm_configure_ssh
-make -C "$ROOT_DIR" "$TEST_VM_IMG_TARGET" systest BUILD="$BUILD" -j"$(nproc)"
+# full-test.sh sets this once it has built this image and systest itself.
+if [ "${FULL_TEST_IMAGE_PREBUILT:-0}" != 1 ]; then
+  make -C "$ROOT_DIR" "$TEST_VM_IMG_TARGET" systest BUILD="$BUILD" -j"$(nproc)"
+fi
 
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
-mkdir -p "$ROOT_DIR/build/test-boot-options"
-LOG_DIR="$(mktemp -d "$ROOT_DIR/build/test-boot-options/$BUILD-$VMM.XXXXXX")"
+# One log directory per profile and VMM; each run replaces the previous one.
+LOG_DIR="$ROOT_DIR/build/test-boot-options/$BUILD-$VMM"
+rm -rf "$LOG_DIR"
+mkdir -p "$LOG_DIR"
 cp "$ROOT_DIR/src/vm_scripts/"*.sh "$SCRATCH/"
 cp "$TEST_VM_IMG_DIR/kloader" "$TEST_VM_IMG_DIR/initrd" "$SCRATCH/"
 cp --reflink=auto --sparse=always "$TEST_VM_IMG_DIR/$TEST_VM_IMAGE" "$SCRATCH/"

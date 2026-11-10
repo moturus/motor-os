@@ -342,22 +342,28 @@ cargo test --locked --offline "${profile_args[@]}" \
   --no-default-features --features "$NETSTACK_FEATURES,proto-ipv6-slaac" \
   --lib iface::
 
+# Prints 1 when this suite built the standard image the given VMM boots, so a
+# test that copies that image need not build it again; otherwise prints 0.
+# A subshell, so the suite's own image selection stays as it is.
+standard_image_prebuilt() (
+  select_test_vm "$ROOT_DIR" "$BUILD" standard "$1" || exit
+  case " ${IMAGE_TARGETS[*]} " in *" $TEST_VM_IMG_TARGET "*) echo 1 ;; *) echo 0 ;; esac
+)
+
 # Boot options on each available VMM, including standard-image console roles
 # and a boot without a network device. Missing VMMs use the boot-check skips.
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != 1 ]; then
   for boot_vmm in qemu chv fc; do
     case " ${SKIPPED_BOOT_VMMS[*]} " in *" $boot_vmm "*) continue ;; esac
-    "$WD/test-boot-options.sh" "${profile_args[@]}" --vmm "$boot_vmm"
+    FULL_TEST_IMAGE_PREBUILT="$(standard_image_prebuilt "$boot_vmm")" \
+      "$WD/test-boot-options.sh" "${profile_args[@]}" --vmm "$boot_vmm"
   done
 fi
 
 # Exercise the System console on the standard image with the boot option.
 # QEMU keeps the configured-System fixture, since disk boot has no command line.
-if [ "$BUILD" = "release" ]; then
-  "$WD/test-system-tty.sh" --release --vmm "$VMM"
-else
-  "$WD/test-system-tty.sh" --vmm "$VMM"
-fi
+FULL_TEST_IMAGE_PREBUILT="$(standard_image_prebuilt "$VMM")" \
+  "$WD/test-system-tty.sh" "${profile_args[@]}" --vmm "$VMM"
 
 # The terminal acceptance suite (docs/tui.md) boots its own VM: the sys-tty
 # console check needs the serial console's stdin, which this script never

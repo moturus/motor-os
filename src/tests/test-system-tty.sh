@@ -92,7 +92,10 @@ if [ "$VMM" = qemu ]; then
     TEST_IMAGE_ROOT="$SCRATCH" -j"$(nproc)"
 else
   select_test_vm "$ROOT_DIR" "$BUILD" standard "$VMM"
-  make -C "$ROOT_DIR" "$TEST_VM_IMG_TARGET" systest wg-self-test BUILD="$BUILD" -j"$(nproc)"
+  # full-test.sh sets this once it has built this image and both binaries itself.
+  if [ "${FULL_TEST_IMAGE_PREBUILT:-0}" != 1 ]; then
+    make -C "$ROOT_DIR" "$TEST_VM_IMG_TARGET" systest wg-self-test BUILD="$BUILD" -j"$(nproc)"
+  fi
   mkdir -p "$SCRATCH/vm_images/$BUILD"
   cp --reflink=auto --sparse=always "$TEST_VM_IMG_DIR/$TEST_VM_IMAGE" "$SCRATCH/vm_images/$BUILD/"
   cp "$TEST_VM_IMG_DIR/kloader" "$TEST_VM_IMG_DIR/initrd" "$ROOT_DIR/src/vm_scripts/"*.sh \
