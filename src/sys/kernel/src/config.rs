@@ -23,8 +23,8 @@ pub fn num_cpus() -> uCpus {
 // for this use case.
 pub const MAX_URL_SIZE: u64 = 256;
 
-#[derive(Debug)]
 pub struct KernelConfig {
+    pub cmdline: crate::util::StaticRef<alloc::vec::Vec<u8>>,
     pub custom_irqs: u8,
 
     pub allow_user_logging: bool,
@@ -48,6 +48,7 @@ impl KernelConfig {
 
     const fn new() -> Self {
         Self {
+            cmdline: crate::util::StaticRef::default_const(),
             custom_irqs: 16,
             allow_user_logging: false,
             log_level: log::LevelFilter::Info,

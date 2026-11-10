@@ -26,6 +26,11 @@ impl SysRay {
     /// in userspace; tools learn it from the describe op.
     pub const OP_QUERY_STATS: u8 = 5;
 
+    /// Read the original kernel command line. Requires `CAP_SYS`.
+    pub const OP_QUERY_CMDLINE: u8 = 6;
+    /// Maximum command-line length, excluding the terminating NUL.
+    pub const MAX_CMDLINE_LEN: usize = 4095;
+
     pub const F_QUERY_STATUS: u32 = 1;
     pub const F_QUERY_LIST: u32 = 2;
     pub const F_QUERY_LIST_CHILDREN: u32 = 3;
@@ -59,6 +64,27 @@ impl SysRay {
 
     /// Used internally by the kernel and sys-tty.
     pub const CONSOLE_SHARED_BUF_SZ: usize = crate::kernel_log::KERNEL_LOG_RING_SIZE;
+
+    /// Read the original kernel command-line bytes, excluding the terminating
+    /// NUL. Requires `CAP_SYS`. Returns `(written, total)`; a short buffer gets
+    /// the prefix, and an empty buffer queries the length without copying.
+    #[cfg(feature = "userspace")]
+    pub fn query_cmdline(buf: &mut [u8]) -> Result<(usize, usize), ErrorCode> {
+        let result = do_syscall(
+            pack_nr_ver(SYS_RAY, Self::OP_QUERY_CMDLINE, 0, 0),
+            buf.as_mut_ptr() as usize as u64,
+            buf.len() as u64,
+            0,
+            0,
+            0,
+            0,
+        );
+        if result.is_ok() {
+            Ok((result.data[0] as usize, result.data[1] as usize))
+        } else {
+            Err(result.error_code())
+        }
+    }
 
     #[cfg(feature = "userspace")]
     pub fn process_status(handle: SysHandle) -> Result<Option<u64>, ErrorCode> {

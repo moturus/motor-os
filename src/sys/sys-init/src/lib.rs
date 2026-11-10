@@ -5,6 +5,18 @@ pub enum TtyRole {
     None,
 }
 
+/// The bare `system-tty` boot option overrides the configured console role.
+pub fn tty_role_for_cmdline(configured: TtyRole, cmdline: &[u8]) -> TtyRole {
+    if cmdline
+        .split(|byte| matches!(byte, b' ' | b'\t'..=b'\r'))
+        .any(|token| token == b"system-tty")
+    {
+        TtyRole::System
+    } else {
+        configured
+    }
+}
+
 /// Parses the text after `tty:` as an optional role and a bare program path.
 pub fn process_tty_line(value: &str) -> Result<(TtyRole, String), String> {
     let (role, command) = match value.split_once(':') {
@@ -43,6 +55,28 @@ pub fn process_service_line(cap_cmd: &str) -> Result<(u64, String), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boot_option_requires_an_exact_token() {
+        for configured in [TtyRole::System, TtyRole::Interactive, TtyRole::None] {
+            for cmdline in [
+                &b""[..],
+                b" \t\r\n",
+                b"console=ttyS0 system-tty=1 no-system-tty system-tty-extra",
+                b"--system-tty SYSTEM-TTY system-ttys",
+                b"\xffsystem-tty system-tty\xff",
+            ] {
+                assert_eq!(tty_role_for_cmdline(configured, cmdline), configured);
+            }
+            for cmdline in [
+                &b"system-tty"[..],
+                b"\tother\n system-tty\r\x0b\x0cnext",
+                b"system-tty system-tty",
+            ] {
+                assert_eq!(tty_role_for_cmdline(configured, cmdline), TtyRole::System);
+            }
+        }
+    }
 
     #[test]
     fn zero_is_an_explicit_service_mask() {

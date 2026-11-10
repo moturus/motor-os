@@ -199,6 +199,31 @@ fn sys_query_stats_values(thread: &super::process::Thread, args: &SyscallArgs) -
     ResultBuilder::ok_2(n as u64, total as u64)
 }
 
+fn sys_query_cmdline(thread: &super::process::Thread, args: &SyscallArgs) -> SyscallResult {
+    if thread.owner().capabilities() & moto_sys::caps::CAP_SYS == 0 {
+        return ResultBuilder::result(moto_rt::E_NOT_ALLOWED);
+    }
+    if args.version > 0 {
+        return ResultBuilder::version_too_high();
+    }
+    if args.flags != 0 || args.args[2..].iter().any(|arg| *arg != 0) {
+        return ResultBuilder::invalid_argument();
+    }
+
+    let cmdline = &crate::config::get().cmdline;
+    let written = cmdline.len().min(args.args[1] as usize);
+    if written != 0 {
+        if let Err(err) = thread
+            .owner()
+            .address_space()
+            .copy_to_user(&cmdline[..written], args.args[0])
+        {
+            return err.into_syscall_result(thread.owner().address_space());
+        }
+    }
+    ResultBuilder::ok_2(written as u64, cmdline.len() as u64)
+}
+
 fn sys_log(
     curr_thread: &super::process::Thread,
     flags: u32,
@@ -239,6 +264,8 @@ fn sys_log(
 pub(super) fn sys_ray_impl(thread: &super::process::Thread, args: &SyscallArgs) -> SyscallResult {
     match args.operation {
         SysRay::OP_DBG => super::sys_ray_dbg::sys_ray_dbg_impl(thread, args),
+
+        SysRay::OP_QUERY_CMDLINE => sys_query_cmdline(thread, args),
 
         SysRay::OP_QUERY_PROCESS => match args.flags {
             SysRay::F_QUERY_STATUS => sys_query_process_status(thread, args),
