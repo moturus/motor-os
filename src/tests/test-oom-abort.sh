@@ -59,6 +59,11 @@ select_test_vm "$SCRATCH" "$BUILD" system-console "$VMM"
 export MOTO_IMAGE="$TEST_VM_IMAGE"
 make -C "$ROOT_DIR" "$TEST_VM_IMG_TARGET" systest BUILD="$BUILD" \
   TEST_IMAGE_ROOT="$SCRATCH" -j"$(nproc)"
+# Raw OOM reports bypass sys-tty's writer. Keep routine debug logs in the
+# standard file sink so the console-flood fixture cannot interleave with them.
+"$ROOT_DIR/build/obj/$BUILD/imager/$BUILD/imager" put --mode r--r--r-- \
+  "$TEST_VM_IMG_DIR/$TEST_VM_IMAGE" \
+  "$ROOT_DIR/img_files/motor-os-base/system/cfg/sys-tty.cfg" /system/cfg/sys-tty.cfg
 mkfifo "$SCRATCH/console-in"
 exec 3<> "$SCRATCH/console-in"
 start_serial_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$CONSOLE_LOG" \
