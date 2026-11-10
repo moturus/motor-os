@@ -6,6 +6,10 @@ MEMORY_MIB="${MOTO_MEMORY_MIB:-1024}"
 . "$WD/vm-options.sh"
 vm_parse_options "$@"
 shift "$VM_ARGS_SHIFT"
+if [ "$VM_SYSTEM_TTY" = 1 ]; then
+  echo "run-qemu: --system-tty is unsupported: disk boot has no kernel command line" >&2
+  exit 2
+fi
 
 # Every standard harness uses the same tap, guest address, MAC, and SSH port.
 # Without host-side exclusion, SSH can reach another run's already-booted guest
@@ -51,6 +55,11 @@ if [ "${MOTO_QEMU_USER_NET:-0}" = "1" ]; then
   NETDEV="user,net=192.168.4.0/24,host=192.168.4.1,dhcpstart=192.168.4.2,hostfwd=tcp:127.0.0.1:10023-192.168.4.2:2222,id=nic0"
 else
   NETDEV="tap,ifname=moto-tap,script=no,downscript=no,id=nic0"
+fi
+NETWORK=(-nic none)
+if [ "$VM_NO_NETWORK" != 1 ]; then
+  NETWORK=(-netdev "$NETDEV"
+    -device virtio-net-pci,disable-legacy=on,mac=a4:a1:c2:00:00:01,netdev=nic0)
 fi
 
 # Guest RAM backing. MOTO_SHARED_MEM=1 uses a shareable memfd for vhost-user
@@ -112,8 +121,7 @@ exec $TASKSET qemu-system-x86_64 -m "${MEMORY_MIB}M" $MEMORY_BACKEND $MACHINE_ME
   -device virtio-blk-pci,drive=drive0,id=virtblk0,num-queues=1,disable-legacy=on \
   -drive file="$WD/$IMAGE",if=none,id=drive0,format="$IMAGE_FORMAT$ROOT_DISK_MODE" \
   "${EXTRA_DISKS[@]}" \
-  -netdev "$NETDEV" \
-  -device virtio-net-pci,disable-legacy=on,mac=a4:a1:c2:00:00:01,netdev=nic0 \
+  "${NETWORK[@]}" \
   -no-reboot -nographic "$@"
 
 #  -netdev tap,ifname=moto-tap-2,script=no,downscript=no,id=nic1 \

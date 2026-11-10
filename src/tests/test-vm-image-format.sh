@@ -302,6 +302,72 @@ grep -Fq "expected qemu or chv" "$ERROR_LOG" ||
   assert_arg 'memory-backend-memfd,id=mem0,size=2048M,share=on'
   assert_arg -monitor
   assert_arg 'unix:monitor path,server'
+
+  for runner in qemu qemu-echr chv fc; do
+    run_options
+    case "$runner" in
+      chv) assert_arg --net; assert_no_arg --cmdline ;;
+      fc)
+        grep -Fq '"host_dev_name": "moto-tap"' "$TEST_ROOT/fc/fc-config.json" ||
+          fail 'Firecracker lost its default network device'
+        default_boot_args="$(sed -n 's/.*"boot_args": "\(.*\)"/\1/p' "$TEST_ROOT/fc/fc-config.json")"
+        ;;
+      *) assert_arg -netdev ;;
+    esac
+    run_options --no-network
+    assert_no_arg --no-network
+    case "$runner" in
+      chv) assert_no_arg --net ;;
+      fc)
+        if grep -Fq '"iface_id"' "$TEST_ROOT/fc/fc-config.json"; then
+          fail 'Firecracker still has a network device'
+        fi
+        ;;
+      *)
+        assert_no_arg -netdev
+        assert_no_arg virtio-net-pci,disable-legacy=on,mac=a4:a1:c2:00:00:01,netdev=nic0
+        assert_arg -nic
+        assert_arg none
+        ;;
+    esac
+    case "$runner" in
+      qemu*)
+        rm -f "$ARG_LOG"
+        if run_options --system-tty; then fail "$runner accepted --system-tty"; fi
+        grep -Fq 'disk boot has no kernel command line' "$ERROR_LOG" ||
+          fail "$runner did not explain --system-tty refusal"
+        [ ! -e "$ARG_LOG" ] || fail "$runner launched with --system-tty"
+        ;;
+      *)
+        run_options --system-tty --no-network
+        assert_no_arg --system-tty
+        assert_no_arg --no-network
+        if [ "$runner" = chv ]; then
+          assert_arg --cmdline
+          assert_arg system-tty
+          assert_no_arg --net
+          for cmdline in '' 'console=ttyS0 test="two words" system-tty=0'; do
+            run_options --system-tty -- --cmdline "$cmdline" --serial null
+            assert_arg "${cmdline:+$cmdline }system-tty"
+            assert_arg --serial
+            assert_arg null
+            run_options --system-tty -- "--cmdline=$cmdline"
+            assert_arg "${cmdline:+$cmdline }system-tty"
+          done
+          run_options -- --cmdline 'no-system-tty system-tty-extra'
+          assert_arg 'no-system-tty system-tty-extra'
+          assert_no_arg system-tty
+          if run_options --system-tty -- --cmdline; then fail 'missing command line accepted'; fi
+        else
+          grep -Fq "\"boot_args\": \"$default_boot_args system-tty\"" "$TEST_ROOT/fc/fc-config.json" ||
+            fail 'Firecracker did not preserve its boot arguments with system-tty'
+          if grep -Fq '"iface_id"' "$TEST_ROOT/fc/fc-config.json"; then
+            fail 'Firecracker system-tty boot still has a network device'
+          fi
+        fi
+        ;;
+    esac
+  done
 )
 
 for runner in qemu chv fc; do
