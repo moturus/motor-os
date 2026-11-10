@@ -652,7 +652,7 @@ fn copy_ceiling_test() {
     std::fs::create_dir_all(&root).unwrap();
     let source = root.join("executable");
     let destination = root.join("plain");
-    let script = b"#!/system/bin/rush\nexit 0\n";
+    let script = b"#!/user/bin/rush\nexit 0\n";
     std::fs::write(&source, script).unwrap();
     std::fs::write(&destination, b"before copy").unwrap();
     moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
@@ -689,7 +689,7 @@ fn copy_ceiling_test() {
     // A None copy would make the None byte `Rx`, which Interactive's `Rw`
     // cannot hold.
     let before = std::fs::metadata(&destination).unwrap();
-    let output = std::process::Command::new("/system/bin/sysbox")
+    let output = std::process::Command::new("/user/bin/sysbox")
         .args([
             "cp",
             source.to_str().unwrap(),
@@ -1565,7 +1565,7 @@ pub fn service_progress_test() {
         let mut completed = 0;
         while !stop_hot.load(Ordering::Acquire) {
             assert_eq!(
-                std::fs::metadata("/system/bin/.systest-missing-progress")
+                std::fs::metadata("/user/bin/.systest-missing-progress")
                     .unwrap_err()
                     .kind(),
                 std::io::ErrorKind::NotFound,
@@ -1587,7 +1587,7 @@ pub fn service_progress_test() {
         for _ in 0..ROUNDS {
             let client = moto_sdk::io::fs::FsClient::connect().unwrap();
             moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
-                client.stat("/system/bin").await.unwrap();
+                client.stat("/user/bin").await.unwrap();
             });
             newcomer_rounds.fetch_add(1, Ordering::Relaxed);
         }

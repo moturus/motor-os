@@ -11,8 +11,8 @@ mod http;
 mod p3;
 mod roles;
 
-const RUNTIME: &str = "/devtools/bin/wasmtime-rt";
-const COMPILER: &str = "/devtools/bin/wasmtime";
+const RUNTIME: &str = "/user/bin/dev/wasmtime-rt";
+const COMPILER: &str = "/user/bin/dev/wasmtime";
 /// Precompiled fixtures that test-wasm.sh uploads; they are not part of the images.
 const FIXTURES: &str = "/none/wasm-tests/wasmtime-tests";
 /// Upstream p2 socket programs carrying Motor's accepted socket semantics.
@@ -300,7 +300,7 @@ pub fn run() -> Result<()> {
         )?;
         return result;
     }
-    let mut suite = Suite::new("wasmtime-smoke", "/devtools/wasmtime/sources.txt")?;
+    let mut suite = Suite::new("wasmtime-smoke", "/user/lib/wasmtime/sources.txt")?;
     match args.as_slice() {
         [] => run_suite(&mut suite)?,
         [arg] if arg == "--services" => http::services()?,

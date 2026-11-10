@@ -56,31 +56,31 @@ pub fn parse(input: &str) -> Result<Config<'_>, String> {
 
 pub fn run_self_tests() {
     assert_eq!(
-        parse("ENV=/system/cfg/rush.cfg /system/bin/rush -i"),
+        parse("ENV=/user/cfg/rush.cfg /user/bin/rush -i"),
         Ok(Config {
             kernel_log: KernelLogMode::Console,
-            command: "ENV=/system/cfg/rush.cfg /system/bin/rush -i",
+            command: "ENV=/user/cfg/rush.cfg /user/bin/rush -i",
         })
     );
     assert_eq!(
-        parse("\n # comment\n kernel-log: strobe\n\n /system/bin/rush -i\n"),
+        parse("\n # comment\n kernel-log: strobe\n\n /user/bin/rush -i\n"),
         Ok(Config {
             kernel_log: KernelLogMode::Strobe,
-            command: "/system/bin/rush -i",
+            command: "/user/bin/rush -i",
         })
     );
     assert_eq!(
-        parse("kernel-log:console\n/system/bin/rush"),
+        parse("kernel-log:console\n/user/bin/rush"),
         Ok(Config {
             kernel_log: KernelLogMode::Console,
-            command: "/system/bin/rush",
+            command: "/user/bin/rush",
         })
     );
     assert_eq!(
-        parse("URL=tcp://example /system/bin/rush"),
+        parse("URL=tcp://example /user/bin/rush"),
         Ok(Config {
             kernel_log: KernelLogMode::Console,
-            command: "URL=tcp://example /system/bin/rush",
+            command: "URL=tcp://example /user/bin/rush",
         })
     );
 
@@ -88,11 +88,11 @@ pub fn run_self_tests() {
         "",
         "# no command",
         "kernel-log:strobe",
-        "kernel-log:file\n/system/bin/rush",
-        "kernel-log:console\nkernel-log:strobe\n/system/bin/rush",
-        "unknown:value\n/system/bin/rush",
-        "/system/bin/rush\n/system/bin/other",
-        "/system/bin/rush\nkernel-log:console",
+        "kernel-log:file\n/user/bin/rush",
+        "kernel-log:console\nkernel-log:strobe\n/user/bin/rush",
+        "unknown:value\n/user/bin/rush",
+        "/user/bin/rush\n/user/bin/other",
+        "/user/bin/rush\nkernel-log:console",
     ] {
         assert!(parse(invalid).is_err(), "accepted {invalid:?}");
     }

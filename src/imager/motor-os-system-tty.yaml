@@ -1,13 +1,14 @@
 permission_policy: "motor-os-permissions.yaml"
 input_files:
   - "/system/services/russhd"
-  - "/system/bin/wg"
-  - "/system/bin/wg-tool"
+  - "/user/bin/wg"
+  - "/user/bin/wg-tool"
   - "/system/services/strobe"
   - "/system/services/sys-init"
   - "/system/services/sys-tty"
+  - "/user/bin/rush"
   - "/system/bin/rush"
-  - "/system/bin/sysbox"
+  - "/user/bin/sysbox"
   - "/user/bin/red"
   - "/user/bin/rmux"
 directories:
@@ -24,6 +25,7 @@ directories:
   - "/user/tmp"
   - "/none"
   - "/none/cfg"
+  - "/none/dev"
   - "/none/tmp"
 static_dirs:
   - "img_files/motor-os-base"

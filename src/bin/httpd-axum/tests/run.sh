@@ -80,7 +80,7 @@ export MOTO_CHV_RUNTIME_DIR="$temporary/chv"
 start_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$temporary/console.log" \
   "${runner_args[@]}"
 guest="/user/tmp/httpd-component-$(date +%s)-$$"
-vm_ssh /system/bin/mkdir "$guest"
+vm_ssh /user/bin/mkdir "$guest"
 upload() {
   local name="$1" executable="$2"
   printf 'put "%s" "%s/%s"\nchmod 755 "%s/%s"\n' \
@@ -100,10 +100,10 @@ while IFS=$'\t' read -r name executable; do
   if [ "$name" != httpd-axum ]; then
     upload "$name" "$executable"
     vm_ssh "TMPDIR=$guest HTTPD_AXUM_BIN=$guest/httpd-axum $guest/$name" < /dev/null
-    vm_ssh /system/bin/rm "$guest/$name" < /dev/null
+    vm_ssh /user/bin/rm "$guest/$name" < /dev/null
     ran=$((ran + 1))
   fi
 done < "$temporary/executables.tsv"
 [ "$ran" = "$expected" ] || fail "ran $ran of $expected test targets"
-vm_ssh /system/bin/rm -r "$guest"
+vm_ssh /user/bin/rm -r "$guest"
 echo "httpd-axum Motor component tests PASS ($BUILD, $ran test targets)"

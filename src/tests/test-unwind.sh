@@ -76,7 +76,7 @@ run_guest() {
   printf 'put "%s" "%s"\nchmod 755 "%s"\n' "$binary" "$guest" "$guest" |
     sftp "${ssh_options[@]}" -P 2222 -b - motor@192.168.4.2
   ssh "${ssh_options[@]}" -p 2222 motor@192.168.4.2 "$guest" "$command" || status="$?"
-  ssh "${ssh_options[@]}" -p 2222 motor@192.168.4.2 /system/bin/rm "$guest"
+  ssh "${ssh_options[@]}" -p 2222 motor@192.168.4.2 /user/bin/rm "$guest"
   if [ "$status" -eq 0 ]; then
     echo "test-unwind: $label PASS"
   else
@@ -112,8 +112,8 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = 1 ]; then
     sftp "${ssh_options[@]}" -P 2222 -b - motor@192.168.4.2
   "$ROOT_DIR/src/build-scripts/validate-native-elf.sh" "$downloaded" "$downloaded"
   ssh "${ssh_options[@]}" -p 2222 motor@192.168.4.2 "$guest_binary" suite
-  ssh "${ssh_options[@]}" -p 2222 motor@192.168.4.2 /system/bin/rm "$guest_source"
-  ssh "${ssh_options[@]}" -p 2222 motor@192.168.4.2 /system/bin/rm "$guest_binary"
+  ssh "${ssh_options[@]}" -p 2222 motor@192.168.4.2 /user/bin/rm "$guest_source"
+  ssh "${ssh_options[@]}" -p 2222 motor@192.168.4.2 /user/bin/rm "$guest_binary"
   echo 'test-unwind: native compilation PASS'
 fi
 [ "$failures" -eq 0 ] || exit 1

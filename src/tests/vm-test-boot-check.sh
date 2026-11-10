@@ -101,7 +101,7 @@ run_test_vm_boot_check() (
   test_vm_configure_ssh
   start_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$console_log" \
     "${runner_args[@]}"
-  vm_ssh /system/bin/rush -c true
+  vm_ssh /user/bin/rush -c true
   kill -0 "$VMM_PID" 2>/dev/null ||
     fail "owned VMM exited after the SSH command"
   stop_test_vm_owned "$vmm" "$TEST_VM_LABEL" || fail "owned VMM teardown failed"

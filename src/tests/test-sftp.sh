@@ -31,7 +31,7 @@ NONE_TEST_TMP="${MOTOR_NONE_TEST_TMP:-/none/tmp}"
 # Default the key to the one next to this script so it works from src/tests/
 # regardless of the current working directory.
 KEY="${RUSSHD_KEY:-$WD/test.key}"
-REMOTE_DIR="${RUSSHD_REMOTE_DIR:-/system/bin}"
+REMOTE_DIR="${RUSSHD_REMOTE_DIR:-/user/bin}"
 REMOTE_FILE="${RUSSHD_REMOTE_FILE:-/system/logs/sys-init.log}"
 REMOTE_UPLOAD_FILE="${RUSSHD_REMOTE_UPLOAD_FILE:-$TEST_TMP/russhd-sftp-upload-test.bin}"
 # Permission fixtures sit where None could read them but for their own modes.
@@ -74,7 +74,7 @@ run_ssh() {
 # session or shell would pass a plain "did not succeed" check.
 none_read_denied() {
     local output status=0
-    output="$(run_ssh "MOTOR_OS_CAPS=0x304 /system/bin/sysbox cat $1" 2>&1)" || status=$?
+    output="$(run_ssh "MOTOR_OS_CAPS=0x304 /user/bin/sysbox cat $1" 2>&1)" || status=$?
     [ "$status" -eq 1 ] && printf '%s\n' "$output" | grep -q "cat: error reading file"
 }
 
@@ -85,13 +85,13 @@ cleanup() {
     fi
     remove_permission_fixtures
     for mode_parent in "$MODE_ROOT/mode-9" "$MODE_ROOT/mode-10"; do
-        run_ssh /system/bin/sysbox chmod rwxrwxr-x "$mode_parent" >/dev/null 2>&1 || true
+        run_ssh /user/bin/sysbox chmod rwxrwxr-x "$mode_parent" >/dev/null 2>&1 || true
     done
-    run_ssh /system/bin/rm -r "$MODE_ROOT" >/dev/null 2>&1 || true
-    run_ssh /system/bin/sysbox chmod rwxrwxr-x "$PROTECTED_PARENT" >/dev/null 2>&1 || true
-    run_ssh /system/bin/rm -r "$PROTECTED_PARENT" >/dev/null 2>&1 || true
-    run_ssh /system/bin/rm "$PUBLIC_FILE" >/dev/null 2>&1 || true
-    run_ssh /system/bin/rm -r "$REMOTE_PHASE0_ROOT" >/dev/null 2>&1 || true
+    run_ssh /user/bin/rm -r "$MODE_ROOT" >/dev/null 2>&1 || true
+    run_ssh /user/bin/sysbox chmod rwxrwxr-x "$PROTECTED_PARENT" >/dev/null 2>&1 || true
+    run_ssh /user/bin/rm -r "$PROTECTED_PARENT" >/dev/null 2>&1 || true
+    run_ssh /user/bin/rm "$PUBLIC_FILE" >/dev/null 2>&1 || true
+    run_ssh /user/bin/rm -r "$REMOTE_PHASE0_ROOT" >/dev/null 2>&1 || true
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -133,7 +133,7 @@ echo "== russhd SFTP test against $USER@$HOST:$PORT =="
 # the usual OpenSSH creation hints exercised below. This uses only Rust std.
 (cd "$WD" && rustc --edition=2024 sftp-permissions.rs -o "$WORK/sftp-permissions") ||
     fail "SFTP permission probe compilation failed"
-run_ssh /system/bin/mkdir "$MODE_ROOT" || fail "SFTP mode fixture creation failed"
+run_ssh /user/bin/mkdir "$MODE_ROOT" || fail "SFTP mode fixture creation failed"
 "$WORK/sftp-permissions" "$KEY" "$USER" "$HOST" "$PORT" "$MODE_ROOT" ||
     fail "SFTP permission requests failed"
 
@@ -201,7 +201,7 @@ readonly_permission_roundtrip="$WORK/readonly-permission-roundtrip.bin"
 remote_plain_permission_file="$REMOTE_PRIVATE_FILE.plain"
 remote_exec_permission_file="$REMOTE_PRIVATE_FILE.exec"
 remote_readonly_permission_file="$REMOTE_PRIVATE_FILE.readonly"
-printf '#!/system/bin/rush\nexit 0\n' >"$permission_source"
+printf '#!/user/bin/rush\nexit 0\n' >"$permission_source"
 chmod 600 "$permission_source"
 
 echo "-- setting and reading back SFTP permissions --"
@@ -239,7 +239,7 @@ readonly_mode="$(stat -c %a "$readonly_permission_roundtrip")"
 [ "$readonly_mode" = 400 ] ||
     fail "read-only permission round-trip returned mode $readonly_mode"
 
-permission_listing="$(run_ssh /system/bin/ls -l "$NONE_TEST_TMP")"
+permission_listing="$(run_ssh /user/bin/ls -l "$NONE_TEST_TMP")"
 plain_motor_mode="$(printf '%s\n' "$permission_listing" | awk -v name="$(basename "$remote_plain_permission_file")" '$NF == name { print $1; exit }')"
 exec_motor_mode="$(printf '%s\n' "$permission_listing" | awk -v name="$(basename "$remote_exec_permission_file")" '$NF == name { print $1; exit }')"
 readonly_motor_mode="$(printf '%s\n' "$permission_listing" | awk -v name="$(basename "$remote_readonly_permission_file")" '$NF == name { print $1; exit }')"
@@ -250,8 +250,8 @@ readonly_motor_mode="$(printf '%s\n' "$permission_listing" | awk -v name="$(base
 [ "$readonly_motor_mode" = -rwxr----- ] ||
     fail "read-only upload has Motor mode $readonly_motor_mode"
 # Positive control: a None-role child reads a public file beside the uploads.
-run_ssh "/system/bin/rush -c 'echo public > $REMOTE_PRIVATE_FILE.public'"
-[ "$(run_ssh "MOTOR_OS_CAPS=0x304 /system/bin/sysbox cat $REMOTE_PRIVATE_FILE.public")" = public ] ||
+run_ssh "/user/bin/rush -c 'echo public > $REMOTE_PRIVATE_FILE.public'"
+[ "$(run_ssh "MOTOR_OS_CAPS=0x304 /user/bin/sysbox cat $REMOTE_PRIVATE_FILE.public")" = public ] ||
     fail "None-role child could not read a public file beside the SFTP uploads"
 none_read_denied "$remote_plain_permission_file" ||
     fail "None-role child read a private SFTP upload"
@@ -271,7 +271,7 @@ abandoned_pid=$!
 ABANDONED_PID="$abandoned_pid"
 abandoned_created=0
 for _ in $(seq 1 50); do
-    if run_ssh /system/bin/ls "$remote_abandoned_file" >/dev/null 2>&1; then
+    if run_ssh /user/bin/ls "$remote_abandoned_file" >/dev/null 2>&1; then
         abandoned_created=1
         break
     fi
@@ -291,7 +291,7 @@ fi
 kill "$abandoned_pid"
 wait "$abandoned_pid" 2>/dev/null || true
 ABANDONED_PID=""
-abandoned_motor_mode="$(run_ssh /system/bin/ls -l "$NONE_TEST_TMP" | awk -v name="$(basename "$remote_abandoned_file")" '$NF == name { print $1; exit }')"
+abandoned_motor_mode="$(run_ssh /user/bin/ls -l "$NONE_TEST_TMP" | awk -v name="$(basename "$remote_abandoned_file")" '$NF == name { print $1; exit }')"
 [ "$abandoned_motor_mode" = -rwxrw---- ] ||
     fail "abandoned upload has Motor mode $abandoned_motor_mode"
 none_read_denied "$remote_abandoned_file" ||
@@ -324,15 +324,15 @@ echo "  ok: upload truncated and replaced the existing remote file"
 protected_file="$PROTECTED_PARENT/existing"
 protected_roundtrip="$WORK/protected-roundtrip.bin"
 echo "-- overwriting an executable under a protected parent --"
-run_ssh /system/bin/mkdir "$PROTECTED_PARENT" || fail "protected SFTP directory creation failed"
+run_ssh /user/bin/mkdir "$PROTECTED_PARENT" || fail "protected SFTP directory creation failed"
 run_sftp <<EOF || { cat "$WORK/err" >&2; fail "protected SFTP fixture upload failed"; }
 put $upload_source $protected_file
 EOF
-run_ssh /system/bin/sysbox chmod rwxr-xr-x "$protected_file" ||
+run_ssh /user/bin/sysbox chmod rwxr-xr-x "$protected_file" ||
     fail "protected SFTP fixture executable setup failed"
-run_ssh /system/bin/sysbox chmod rwxrwxr-x "$protected_file" ||
+run_ssh /user/bin/sysbox chmod rwxrwxr-x "$protected_file" ||
     fail "protected SFTP fixture mode setup failed"
-run_ssh /system/bin/sysbox chmod rwxr-xr-x "$PROTECTED_PARENT" ||
+run_ssh /user/bin/sysbox chmod rwxr-xr-x "$PROTECTED_PARENT" ||
     fail "protected SFTP parent mode setup failed"
 run_sftp <<EOF || { cat "$WORK/err" >&2; fail "protected-parent SFTP overwrite failed"; }
 put $overwrite_source $protected_file
@@ -340,7 +340,7 @@ get $protected_file $protected_roundtrip
 EOF
 cmp -s "$overwrite_source" "$protected_roundtrip" ||
     fail "protected-parent SFTP overwrite differed"
-protected_mode="$(run_ssh /system/bin/ls -l "$PROTECTED_PARENT" | awk '$NF == "existing" { print $1; exit }')"
+protected_mode="$(run_ssh /user/bin/ls -l "$PROTECTED_PARENT" | awk '$NF == "existing" { print $1; exit }')"
 [ "$protected_mode" = -rwxrwxr-x ] ||
     fail "protected-parent SFTP overwrite changed mode to $protected_mode"
 private_source="$WORK/private-source.bin"
@@ -372,9 +372,9 @@ get $protected_file $protected_roundtrip.after
 EOF
 cmp -s "$overwrite_source" "$protected_roundtrip.after" ||
     fail "rejected private or preserve-mode upload changed the protected file"
-run_ssh /system/bin/sysbox chmod rwxrwxr-x "$PROTECTED_PARENT" ||
+run_ssh /user/bin/sysbox chmod rwxrwxr-x "$PROTECTED_PARENT" ||
     fail "protected SFTP parent mode restoration failed"
-run_ssh /system/bin/rm -r "$PROTECTED_PARENT" || fail "protected SFTP fixture cleanup failed"
+run_ssh /user/bin/rm -r "$PROTECTED_PARENT" || fail "protected SFTP fixture cleanup failed"
 echo "  ok: protected-parent upload preserved the executable mode"
 
 # A private executable uploaded over a public file in a writable directory:
@@ -382,13 +382,13 @@ echo "  ok: protected-parent upload preserved the executable mode"
 # byte keeps its installed mode, so the in-place write still succeeds.
 exec_source="$WORK/exec-source.bin"
 exec_roundtrip="$WORK/exec-roundtrip.bin"
-printf '#!/system/bin/rush\nexit 0\n' >"$exec_source"
+printf '#!/user/bin/rush\nexit 0\n' >"$exec_source"
 chmod 700 "$exec_source"
 echo "-- uploading a private executable over a public file --"
 run_sftp <<EOF || { cat "$WORK/err" >&2; fail "public fixture upload failed"; }
 put $overwrite_source $PUBLIC_FILE
 EOF
-run_ssh /system/bin/sysbox chmod rwxrw-r-- "$PUBLIC_FILE" ||
+run_ssh /user/bin/sysbox chmod rwxrw-r-- "$PUBLIC_FILE" ||
     fail "public fixture mode setup failed"
 run_sftp <<EOF || { cat "$WORK/err" >&2; fail "private upload over a public file failed"; }
 put $exec_source $PUBLIC_FILE
@@ -396,14 +396,14 @@ get $PUBLIC_FILE $exec_roundtrip
 EOF
 cmp -s "$exec_source" "$exec_roundtrip" ||
     fail "private upload over a public file differed"
-public_mode="$(run_ssh /system/bin/ls -l "$TEST_TMP" | awk -v name="$(basename "$PUBLIC_FILE")" '$NF == name { print $1; exit }')"
+public_mode="$(run_ssh /user/bin/ls -l "$TEST_TMP" | awk -v name="$(basename "$PUBLIC_FILE")" '$NF == name { print $1; exit }')"
 [ "$public_mode" = -rwxrw---- ] ||
     fail "private upload over a public file left mode $public_mode"
 # put -p installs the local mode at close, after the contents.
 run_sftp <<EOF || { cat "$WORK/err" >&2; fail "put -p over the hidden file failed"; }
 put -p $exec_source $PUBLIC_FILE
 EOF
-public_mode="$(run_ssh /system/bin/ls -l "$TEST_TMP" | awk -v name="$(basename "$PUBLIC_FILE")" '$NF == name { print $1; exit }')"
+public_mode="$(run_ssh /user/bin/ls -l "$TEST_TMP" | awk -v name="$(basename "$PUBLIC_FILE")" '$NF == name { print $1; exit }')"
 [ "$public_mode" = -rwxr-x--- ] ||
     fail "put -p over the hidden file left mode $public_mode"
 run_ssh "$PUBLIC_FILE" || fail "the uploaded executable did not run"
@@ -418,8 +418,8 @@ mkdir -p "$scp_tree/nested"
 printf 'top-level scp file\n' >"$scp_tree/top"
 printf 'nested scp file\n' >"$scp_tree/nested/file"
 
-run_ssh /system/bin/mkdir "$REMOTE_PHASE0_PARENT" >/dev/null 2>&1 || true
-run_ssh /system/bin/mkdir "$REMOTE_PHASE0_ROOT" ||
+run_ssh /user/bin/mkdir "$REMOTE_PHASE0_PARENT" >/dev/null 2>&1 || true
+run_ssh /user/bin/mkdir "$REMOTE_PHASE0_ROOT" ||
     fail "could not create the fixture run root"
 
 echo "-- recursively copying a directory with scp --"
@@ -461,7 +461,7 @@ remote_outside="$REMOTE_PHASE0_ROOT/outside-sentinel"
 remote_operations="$REMOTE_PHASE0_ROOT/operations"
 
 echo "-- staging a nested source fixture under $REMOTE_PHASE0_ROOT --"
-run_ssh /system/bin/mkdir "$remote_source" ||
+run_ssh /user/bin/mkdir "$remote_source" ||
     fail "could not create the fixture source root"
 
 run_sftp <<EOF || { cat "$WORK/err" >&2; fail "recursive SFTP upload failed"; }
@@ -469,14 +469,14 @@ put -pR $source_tree/. $remote_source
 put $WORK/outside-sentinel $remote_outside
 EOF
 
-run_ssh /system/bin/cp -r "$remote_source" "$remote_copy" ||
+run_ssh /user/bin/cp -r "$remote_source" "$remote_copy" ||
     fail "guest 'cp -r' rejected the representative source tree"
 
-if run_ssh /system/bin/cp -r "$remote_source" "$remote_source/inside-source"; then
+if run_ssh /user/bin/cp -r "$remote_source" "$remote_source/inside-source"; then
     fail "guest 'cp -r' accepted a destination inside its source"
 fi
 
-if run_ssh /system/bin/rm "$remote_copy"; then
+if run_ssh /user/bin/rm "$remote_copy"; then
     fail "guest 'rm' removed a directory without -r"
 fi
 
@@ -500,7 +500,7 @@ exec_copy_mode="$(stat -c %a "$WORK/copied-main.rs")"
 [ "$exec_copy_mode" = 500 ] ||
     fail "cp -r changed an executable file to mode $exec_copy_mode"
 
-run_ssh /system/bin/rm -r "$remote_copy" ||
+run_ssh /user/bin/rm -r "$remote_copy" ||
     fail "guest 'rm -r' could not remove the selected copied tree"
 
 if run_sftp <<EOF
@@ -552,7 +552,7 @@ rmdir $remote_operations/dir-target
 EOF
 cmp -s "$WORK/rename-source" "$WORK/replaced-roundtrip" ||
     fail "posix-rename did not replace the existing destination"
-if run_ssh /system/bin/ls "$remote_operations/rename-source" >/dev/null 2>&1; then
+if run_ssh /user/bin/ls "$remote_operations/rename-source" >/dev/null 2>&1; then
     fail "posix-rename left its source path reachable"
 fi
 run_sftp <<EOF || { cat "$WORK/err" >&2; fail "SFTP rename cleanup failed"; }

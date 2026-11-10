@@ -17,7 +17,7 @@ test_stdio_errors() {
       -i "$WD/test.key" motor@192.168.4.2 || status=$?
   if [ "$status" -eq 0 ]; then
     vm_ssh "TMPDIR=$TEST_TMP $guest" || status=$?
-    vm_ssh "/system/bin/rm $guest" || status=$?
+    vm_ssh "/user/bin/rm $guest" || status=$?
   fi
   if [ -n "$temporary" ]; then rm -rf "$temporary"; fi
   return "$status"

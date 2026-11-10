@@ -11,8 +11,8 @@ function rejected(fn) {
 check(os.getpid() > 0);
 check(os.exec(['qjs', '--std', '-e', 'std.exit(7)']) === 7);
 check(os.exec(['unused', '--std', '-e', 'std.exit(3)'],
-              {file: '/devtools/bin/qjs', usePath: false}) === 3);
-check(os.exec(['/devtools/bin/qjs', '--std', '-e',
+              {file: '/user/bin/dev/qjs', usePath: false}) === 3);
+check(os.exec(['/user/bin/dev/qjs', '--std', '-e',
                'std.exit(std.getenv("QJS_CHILD") === "motor" ? 0 : 1)'],
               {env: {QJS_CHILD: 'motor'}}) === 0);
 const pid = os.exec(['qjs', '--std', '-e', 'std.exit(9)'], {block: false});
@@ -80,5 +80,5 @@ check(os.pipe() === null);
 check(os.dup(1) === -38 && os.dup2(1, 2) === -38); // ENOSYS
 check(os.symlink('quickjs-no-target', 'quickjs-no-link') < 0);
 check(os.readlink('quickjs-no-link')[1] !== 0);
-check(os.lstat('/devtools/bin/qjs')[1] === 0);
+check(os.lstat('/user/bin/dev/qjs')[1] === 0);
 print('quickjs processes: PASS');

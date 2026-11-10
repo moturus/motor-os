@@ -58,15 +58,15 @@ done
 cleanup() {
   # sysbox rm takes exactly one operand, so remove the fixtures one by one
   # inside a single guest shell.
-  "${HOST_SSH[@]}" "/system/bin/rush -c ' \
-    /system/bin/rm $GUEST_KEY; /system/bin/rm $GUEST_KEY.pub; \
-    /system/bin/rm $GUEST_KNOWN; /system/bin/rm $SOURCE; \
-    /system/bin/rm $UPLOAD; /system/bin/rm $DOWNLOAD; \
-    /system/bin/rm $SFTP_DOWNLOAD; /system/bin/rm $GENERATED; \
-    /system/bin/rm $GENERATED.pub; /system/bin/rm $RENAME_SOURCE; \
-    /system/bin/rm $RENAME_TARGET; /system/bin/rm -r $TREE_SOURCE; \
-    /system/bin/rm -r $TREE_UPLOAD_PARENT; \
-    /system/bin/rm -r $TREE_DOWNLOAD_PARENT'" \
+  "${HOST_SSH[@]}" "/user/bin/rush -c ' \
+    /user/bin/rm $GUEST_KEY; /user/bin/rm $GUEST_KEY.pub; \
+    /user/bin/rm $GUEST_KNOWN; /user/bin/rm $SOURCE; \
+    /user/bin/rm $UPLOAD; /user/bin/rm $DOWNLOAD; \
+    /user/bin/rm $SFTP_DOWNLOAD; /user/bin/rm $GENERATED; \
+    /user/bin/rm $GENERATED.pub; /user/bin/rm $RENAME_SOURCE; \
+    /user/bin/rm $RENAME_TARGET; /user/bin/rm -r $TREE_SOURCE; \
+    /user/bin/rm -r $TREE_UPLOAD_PARENT; \
+    /user/bin/rm -r $TREE_DOWNLOAD_PARENT'" \
     >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -75,18 +75,18 @@ printf 'put %s %s\nchmod 600 %s\n' "$KEY" "$GUEST_KEY" "$GUEST_KEY" |
   "${HOST_SFTP[@]}" >/dev/null || fail "could not stage the loopback identity"
 
 out="$(printf 'loopback stdin\n' | "${HOST_SSH[@]}" \
-  "/user/bin/ssh $GUEST_CONNECTION motor@127.0.0.1 /system/bin/cat")" ||
+  "/user/bin/ssh $GUEST_CONNECTION motor@127.0.0.1 /user/bin/cat")" ||
   fail "scripted loopback ssh failed"
 [ "$out" = "loopback stdin" ] || fail "scripted ssh returned '$out'"
 
 expected="$(printf 'loopback\r\n\r\npayload\r\nend')"
 out="$(printf '%s' "$expected" | "${HOST_SSH[@]}" \
-  "/user/bin/ssh $GUEST_CONNECTION motor@127.0.0.1 /system/bin/cat")" ||
+  "/user/bin/ssh $GUEST_CONNECTION motor@127.0.0.1 /user/bin/cat")" ||
   fail "scripted loopback ssh with CRLF data failed"
 [ "$out" = "$expected" ] || fail "ssh changed CRLF bytes in piped stdin"
 
 if "${HOST_SSH[@]}" \
-  "/user/bin/ssh $GUEST_CONNECTION motor@127.0.0.1 '/system/bin/rush -c \"exit 7\"'"; then
+  "/user/bin/ssh $GUEST_CONNECTION motor@127.0.0.1 '/user/bin/rush -c \"exit 7\"'"; then
   fail "ssh lost the remote nonzero status"
 else
   status=$?
@@ -103,58 +103,58 @@ if ! printf 'exit\n' | ssh -tt -F /dev/null -p "$PORT" -i "$KEY" \
   fail "interactive 'ssh -p 2222 motor@127.0.0.1' failed"
 fi
 
-"${HOST_SSH[@]}" "/system/bin/rush -c 'echo loopback-copy > $SOURCE'"
+"${HOST_SSH[@]}" "/user/bin/rush -c 'echo loopback-copy > $SOURCE'"
 "${HOST_SSH[@]}" \
   "/user/bin/scp $GUEST_SCP_CONNECTION $SOURCE motor@127.0.0.1:$UPLOAD" ||
   fail "loopback scp upload failed"
 "${HOST_SSH[@]}" \
   "/user/bin/scp $GUEST_SCP_CONNECTION motor@127.0.0.1:$UPLOAD $DOWNLOAD" ||
   fail "loopback scp download failed"
-out="$("${HOST_SSH[@]}" "/system/bin/cat $DOWNLOAD")"
+out="$("${HOST_SSH[@]}" "/user/bin/cat $DOWNLOAD")"
 [ "$out" = "loopback-copy" ] || fail "scp round trip returned '$out'"
 
-"${HOST_SSH[@]}" "/system/bin/rush -c 'echo source > $RENAME_SOURCE; echo target > $RENAME_TARGET'"
+"${HOST_SSH[@]}" "/user/bin/rush -c 'echo source > $RENAME_SOURCE; echo target > $RENAME_TARGET'"
 if printf 'rename -l %s %s\n' "$RENAME_SOURCE" "$RENAME_TARGET" |
   "${HOST_SSH[@]}" "/user/bin/sftp $GUEST_SFTP_CONNECTION motor@127.0.0.1" >/dev/null 2>&1; then
   fail "plain SFTP rename replaced an existing destination"
 fi
-out="$("${HOST_SSH[@]}" "/system/bin/cat $RENAME_SOURCE")"
+out="$("${HOST_SSH[@]}" "/user/bin/cat $RENAME_SOURCE")"
 [ "$out" = "source" ] || fail "failed plain rename changed its source"
-out="$("${HOST_SSH[@]}" "/system/bin/cat $RENAME_TARGET")"
+out="$("${HOST_SSH[@]}" "/user/bin/cat $RENAME_TARGET")"
 [ "$out" = "target" ] || fail "failed plain rename changed its destination"
 printf 'rename %s %s\n' "$RENAME_SOURCE" "$RENAME_TARGET" |
   "${HOST_SSH[@]}" "/user/bin/sftp $GUEST_SFTP_CONNECTION motor@127.0.0.1" >/dev/null 2>&1 ||
   fail "replacing rename through the sftp applet failed"
-out="$("${HOST_SSH[@]}" "/system/bin/cat $RENAME_TARGET")"
+out="$("${HOST_SSH[@]}" "/user/bin/cat $RENAME_TARGET")"
 [ "$out" = "source" ] || fail "sftp applet rename did not replace the destination"
-if "${HOST_SSH[@]}" "/system/bin/ls $RENAME_SOURCE" >/dev/null 2>&1; then
+if "${HOST_SSH[@]}" "/user/bin/ls $RENAME_SOURCE" >/dev/null 2>&1; then
   fail "sftp applet rename left its source reachable"
 fi
 
-"${HOST_SSH[@]}" "/system/bin/rush -c ' \
-  /system/bin/mkdir $TREE_SOURCE && /system/bin/mkdir $TREE_SOURCE/nested && \
-  /system/bin/mkdir $TREE_SOURCE/empty && /system/bin/mkdir $TREE_UPLOAD_PARENT && \
-  /system/bin/mkdir $TREE_DOWNLOAD_PARENT'" ||
+"${HOST_SSH[@]}" "/user/bin/rush -c ' \
+  /user/bin/mkdir $TREE_SOURCE && /user/bin/mkdir $TREE_SOURCE/nested && \
+  /user/bin/mkdir $TREE_SOURCE/empty && /user/bin/mkdir $TREE_UPLOAD_PARENT && \
+  /user/bin/mkdir $TREE_DOWNLOAD_PARENT'" ||
   fail "could not create the recursive-transfer fixtures"
-"${HOST_SSH[@]}" "/system/bin/rush -c 'echo recursive-upload > $TREE_SOURCE/nested/file'"
+"${HOST_SSH[@]}" "/user/bin/rush -c 'echo recursive-upload > $TREE_SOURCE/nested/file'"
 "${HOST_SSH[@]}" \
   "/user/bin/scp -r $GUEST_SCP_CONNECTION $TREE_SOURCE motor@127.0.0.1:$TREE_UPLOAD_PARENT" ||
   fail "loopback recursive upload failed"
-"${HOST_SSH[@]}" "/system/bin/rush -c 'echo stale > $TREE_UPLOAD_PARENT/ssh-client-tree-source/nested/file'"
+"${HOST_SSH[@]}" "/user/bin/rush -c 'echo stale > $TREE_UPLOAD_PARENT/ssh-client-tree-source/nested/file'"
 "${HOST_SSH[@]}" \
   "/user/bin/scp -r $GUEST_SCP_CONNECTION $TREE_SOURCE motor@127.0.0.1:$TREE_UPLOAD_PARENT" ||
   fail "loopback recursive re-upload failed"
-out="$("${HOST_SSH[@]}" "/system/bin/cat $TREE_UPLOAD_PARENT/ssh-client-tree-source/nested/file")"
+out="$("${HOST_SSH[@]}" "/user/bin/cat $TREE_UPLOAD_PARENT/ssh-client-tree-source/nested/file")"
 [ "$out" = "recursive-upload" ] || fail "recursive re-upload did not replace an existing file"
 
 "${HOST_SSH[@]}" \
   "/user/bin/scp -r $GUEST_SCP_CONNECTION motor@127.0.0.1:$TREE_UPLOAD_PARENT/ssh-client-tree-source $TREE_DOWNLOAD_PARENT" ||
   fail "loopback recursive download failed"
-"${HOST_SSH[@]}" "/system/bin/rush -c 'echo recursive-download > $TREE_UPLOAD_PARENT/ssh-client-tree-source/nested/file'"
+"${HOST_SSH[@]}" "/user/bin/rush -c 'echo recursive-download > $TREE_UPLOAD_PARENT/ssh-client-tree-source/nested/file'"
 "${HOST_SSH[@]}" \
   "/user/bin/scp -r $GUEST_SCP_CONNECTION motor@127.0.0.1:$TREE_UPLOAD_PARENT/ssh-client-tree-source $TREE_DOWNLOAD_PARENT" ||
   fail "loopback recursive re-download failed"
-out="$("${HOST_SSH[@]}" "/system/bin/cat $TREE_DOWNLOAD_PARENT/ssh-client-tree-source/nested/file")"
+out="$("${HOST_SSH[@]}" "/user/bin/cat $TREE_DOWNLOAD_PARENT/ssh-client-tree-source/nested/file")"
 [ "$out" = "recursive-download" ] || fail "recursive re-download did not replace an existing file"
 "${HOST_SSH[@]}" "[ -d $TREE_UPLOAD_PARENT/ssh-client-tree-source/empty ]" ||
   fail "recursive re-upload did not preserve an empty directory"
@@ -164,12 +164,12 @@ out="$("${HOST_SSH[@]}" "/system/bin/cat $TREE_DOWNLOAD_PARENT/ssh-client-tree-s
 printf 'pwd\nls %s\nget %s %s\n' "$TEST_TMP" "$UPLOAD" "$SFTP_DOWNLOAD" |
   "${HOST_SSH[@]}" "/user/bin/sftp $GUEST_SFTP_CONNECTION motor@127.0.0.1" \
     >/dev/null || fail "loopback batch sftp failed"
-out="$("${HOST_SSH[@]}" "/system/bin/cat $SFTP_DOWNLOAD")"
+out="$("${HOST_SSH[@]}" "/user/bin/cat $SFTP_DOWNLOAD")"
 [ "$out" = "loopback-copy" ] || fail "sftp download returned '$out'"
 
 "${HOST_SSH[@]}" "/user/bin/ssh-keygen -q -t ed25519 -N '' -f $GENERATED" ||
   fail "ssh-keygen failed"
-public="$("${HOST_SSH[@]}" "/system/bin/cat $GENERATED.pub")"
+public="$("${HOST_SSH[@]}" "/user/bin/cat $GENERATED.pub")"
 derived="$("${HOST_SSH[@]}" "/user/bin/ssh-keygen -y -f $GENERATED")"
 [ "$public" = "$derived" ] || fail "ssh-keygen -y did not reproduce the public key"
 

@@ -13,7 +13,7 @@ fn spawn(path: &str) -> (LocalServer, Child, ipc::Handle) {
     let deadline = ipc::deadline();
     let url = format!("wg-startup-test-{}", sys::current_pid());
     let server = LocalServer::new(&url, ChannelSize::Small, 1, 1).unwrap();
-    let child = Command::new("/system/bin/wg")
+    let child = Command::new("/user/bin/wg")
         .args([
             "--managed",
             &url,

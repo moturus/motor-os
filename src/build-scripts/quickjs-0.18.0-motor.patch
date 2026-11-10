@@ -63,7 +63,7 @@ index 42d7f03..f3f95aa 100644
  #if !defined(__wasi__)
  
 +#ifdef __motor__
-+#define URL_GET_PROGRAM "/system/bin/curl --silent --include --globoff --proto '=http,https' --url"
++#define URL_GET_PROGRAM "/user/bin/curl --silent --include --globoff --proto '=http,https' --url"
 +#else
  #define URL_GET_PROGRAM "curl -s -i --"
 +#endif

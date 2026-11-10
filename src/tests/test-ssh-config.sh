@@ -29,8 +29,8 @@ cleanup() {
   if [ -n "$loopback_log_pid" ]; then wait "$loopback_log_pid" || status=1; fi
   if [ -n "$sockets" ]; then rm -rf "$sockets" || status=1; fi
   if [ "$staged" -eq 1 ]; then
-    "${SSH[@]}" "/system/bin/rm $config" || status=1
-    "${SSH[@]}" "/system/bin/rm -r $guest" || status=1
+    "${SSH[@]}" "/user/bin/rm $config" || status=1
+    "${SSH[@]}" "/user/bin/rm -r $guest" || status=1
   fi
   if [ "$status" -eq 0 ]; then rm -rf "$fixture"; fi
   exit "$status"
@@ -249,7 +249,7 @@ exec {remote_output}>&-
 echo '-- Motor gateway remote forwarding with an allocated port --'
 # A separate guest daemon exercises wildcard port allocation without changing
 # the shipped loopback policy. Its terminal provides the readiness event.
-"${SSH[@]}" /system/bin/cat /system/cfg/sshd.toml |
+"${SSH[@]}" /user/bin/cat /user/cfg/sshd.toml |
   sed -e "s/^listen_on = .*/listen_on = '0.0.0.0:34310'/" \
     -e 's/^gateway_ports = .*/gateway_ports = true/' > "$fixture/gateway.toml"
 grep -qx 'gateway_ports = true' "$fixture/gateway.toml" || fail "gateway fixture was not enabled"
@@ -327,7 +327,7 @@ IFS= read -r -t 5 out <&"$remote_output" || fail "Motor remote-forward session d
 # The host listener reaches the guest's SSH server through the Motor client.
 out="$(ssh -F /dev/null -p 34311 -i "$WD/test.key" -o IdentitiesOnly=yes \
   -o UserKnownHostsFile="$fixture/client-remote-known" -o StrictHostKeyChecking=accept-new \
-  -o BatchMode=yes -o LogLevel=ERROR motor@127.0.0.1 /system/bin/echo motor-client-remote-ok)"
+  -o BatchMode=yes -o LogLevel=ERROR motor@127.0.0.1 /user/bin/echo motor-client-remote-ok)"
 [ "$out" = motor-client-remote-ok ] || fail "Motor remote forward returned '$out'"
 printf 'client-remote-still-alive\n' >&"$remote_input"
 IFS= read -r -t 5 out <&"$remote_output" || fail "remote-forward EOF stopped the session"

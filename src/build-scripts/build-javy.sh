@@ -101,7 +101,7 @@ build_javy_test_plugins() {
 }
 
 build_javy() {
-	local inputs="$ASSEMBLY_BUILD_ROOT/javy-inputs" data="$JAVY_IMG/devtools/javy" manifest
+	local inputs="$ASSEMBLY_BUILD_ROOT/javy-inputs" data="$JAVY_IMG/user/lib/javy" manifest
 	manifest="$(javy_source_manifest)"
 	mkdir -p "$inputs"
 	javy_download https://github.com/bytecodealliance/javy/releases/download/v9.1.0/plugin.wasm.gz \
@@ -122,16 +122,16 @@ build_javy() {
 			./motor-build.sh
 	)
 	rm -rf "$JAVY_TESTS"
-	mkdir -p "$JAVY_IMG/devtools/bin" "$data/plugins" "$JAVY_TESTS"
+	mkdir -p "$JAVY_IMG/user/bin/dev" "$data/plugins" "$JAVY_TESTS"
 	local tool
 	for tool in javy wasmi; do
 		install -m 755 "$ASSEMBLY_BUILD_ROOT/javy/x86_64-unknown-motor/release/$tool" \
-			"$JAVY_IMG/devtools/bin/$tool"
+			"$JAVY_IMG/user/bin/dev/$tool"
 	done
 	install -m 644 "$inputs/plugin.wasm" "$data/plugins/default.wasm"
 	printf '%s\n' "$manifest" > "$data/sources.txt"
-	(cd "$JAVY_IMG" && sha256sum devtools/bin/{javy,wasmi} devtools/javy/plugins/default.wasm \
-		devtools/javy/sources.txt > "$data/SHA256SUMS")
+	(cd "$JAVY_IMG" && sha256sum user/bin/dev/{javy,wasmi} user/lib/javy/plugins/default.wasm \
+		user/lib/javy/sources.txt > "$data/SHA256SUMS")
 	# Test inputs stay out of the images; test-wasm.sh uploads them.
 	local ts="$JAVY_TESTS/typescript-workload.js"
 	tar -xOf "$inputs/typescript.tgz" package/lib/typescript.js > "$ts"

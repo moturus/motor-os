@@ -114,7 +114,7 @@ pub fn batches(root: &Path) {
     {
         use std::io::Write;
         use std::process::{Command, Stdio};
-        let mut child = Command::new("/system/bin/xargs")
+        let mut child = Command::new("/user/bin/xargs")
             .args(["-n2"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

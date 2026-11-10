@@ -103,7 +103,7 @@ impl Suite {
     fn spawn(&self, label: &str, command: &str, piped: bool, terminal: bool) -> Result<Job> {
         let stdout_path = self.root.join(format!("{label}.stdout"));
         let stderr_path = self.root.join(format!("{label}.stderr"));
-        let mut rush = Command::new("/system/bin/rush");
+        let mut rush = Command::new("/user/bin/rush");
         preserve_system_role(&mut rush);
         rush.args(["-c", command])
             .current_dir(&self.root)
@@ -293,7 +293,7 @@ pub fn used_memory() -> Result<u64> {
 /// Directories are created readable but not writable for lower roles.
 fn create_writable_dir(dir: &Path) -> Result<()> {
     fs::create_dir(dir)?;
-    let mut chmod = Command::new("/system/bin/chmod");
+    let mut chmod = Command::new("/user/bin/chmod");
     preserve_system_role(&mut chmod);
     if !chmod.arg("rwxrwxrwx").arg(dir).status()?.success() {
         return Err(format!("could not make {dir:?} writable to role None").into());

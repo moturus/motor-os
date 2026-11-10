@@ -175,6 +175,7 @@ pub(crate) fn mkdir(args: &[String]) -> io::Result<()> {
         Some(mode) => checked_mode(ImageEntryKind::Directory, mode)?,
         None => policy()?.directory_permissions(Path::new(path)),
     };
+    permissions::validate_path_mode(Path::new(path), mode).map_err(invalid)?;
     staged_update(Path::new(image), |raw| {
         with_fs(raw, async |fs| {
             let parent = parent_dir(fs, parent).await?;
@@ -206,6 +207,7 @@ pub(crate) fn put(args: &[String]) -> io::Result<()> {
         Some(mode) => checked_mode(ImageEntryKind::File(class), mode)?,
         None => policy()?.file_permissions(Path::new(path), class),
     };
+    permissions::validate_path_mode(Path::new(path), mode).map_err(invalid)?;
     staged_update(Path::new(image), |raw| {
         with_fs(raw, async |fs| {
             parent_dir(fs, parent).await?;
@@ -221,6 +223,39 @@ mod tests {
     use std::io::{Seek, SeekFrom, Write};
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+
+    #[test]
+    fn offline_edits_cannot_grant_none_write_in_protected_trees() {
+        let temporary = TempDir::new();
+        let image = temporary.path("image.raw");
+        mkfs(&strings(&["--size", "1M", &image])).unwrap();
+        let source = temporary.path("data");
+        fs::write(&source, b"data").unwrap();
+        for tree in ["/system", "/user"] {
+            mkdir(&strings(&[&image, tree])).unwrap();
+            let original = fs::read(&image).unwrap();
+            let path = format!("{tree}/new");
+            assert!(mkdir(&strings(&["--mode", "rwxrwxrwx", &image, &path])).is_err());
+            assert!(put(&strings(&["--mode", "rw-rw-rw-", &image, &source, &path])).is_err());
+            assert!(chmod::chmod_image(
+                Path::new(&image),
+                Path::new(tree),
+                RolePermissions::all(AccessPermissions::Rwx)
+            )
+            .is_err());
+            assert_eq!(fs::read(&image).unwrap(), original);
+        }
+        // A None workspace still accepts the same modes.
+        mkdir(&strings(&["--mode", "rwxrwxrwx", &image, "/none"])).unwrap();
+        put(&strings(&[
+            "--mode",
+            "rw-rw-rw-",
+            &image,
+            &source,
+            "/none/data",
+        ]))
+        .unwrap();
+    }
 
     struct TempDir(PathBuf);
 
@@ -382,7 +417,7 @@ mod tests {
         assert!(put(&strings(&[&image, &dir.path(""), "/user/x"])).is_err());
 
         // A script stays a script; an executable mode on a regular file is refused.
-        fs::write(&source, b"#!/system/bin/rush\n").unwrap();
+        fs::write(&source, b"#!/user/bin/rush\n").unwrap();
         fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
         put(&strings(&[&image, &source, "/user/script"])).unwrap();
         assert_eq!(entry(&image, "/user/script").unwrap().1, mode("rwxrwxr-x"));

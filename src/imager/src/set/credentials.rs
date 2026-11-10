@@ -5,7 +5,7 @@ use std::io::{self, Read};
 use std::path::Path;
 
 pub(super) const MAX_ARTIFACT_SIZE: usize = 1024 * 1024;
-pub(super) const SSH_CONFIG: &str = "/system/cfg/sshd.toml";
+pub(super) const SSH_CONFIG: &str = "/user/cfg/sshd.toml";
 pub(super) const USERS_FILE: &str = "/user/cfg/russhd/users.toml";
 pub(super) const KEYS_DIR: &str = "/user/cfg/ssh";
 pub(super) const TLS_CERT: &str = "/system/cfg/ssl/ssl-cert.pem";

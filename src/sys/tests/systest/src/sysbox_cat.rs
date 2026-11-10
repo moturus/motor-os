@@ -2,7 +2,7 @@
 
 use std::process::{Command, Output};
 
-const SYSBOX: &str = "/system/bin/sysbox";
+const SYSBOX: &str = "/user/bin/sysbox";
 
 fn run(args: &[&str]) -> Output {
     Command::new(SYSBOX).arg("cat").args(args).output().unwrap()

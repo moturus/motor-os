@@ -14,7 +14,7 @@ for crate in moto-rt moto-sys moto-sdk; do
 	[ -f "$work/lib/$crate/Cargo.toml" ] || fail "the workspace lacks $crate"
 done
 # The manifest and the tokio placeholder are the image's static files.
-static="$ROOT_DIR/img_files/motor-os-dev/devtools/src/motor-os/sys/lib"
+static="$ROOT_DIR/img_files/motor-os-dev/none/dev/motor-os/sys/lib"
 while read -r file; do
 	cmp -s "$static/$file" "$work/lib/$file" || fail "$file is not the image's"
 done < <(cd "$static" && find . -type f)

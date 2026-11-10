@@ -78,20 +78,21 @@ sftp_options=(-F /dev/null -o IdentitiesOnly=yes -o BatchMode=yes
 guest=/user/tmp/native-toolchain-install
 package="$guest/motor-toolchain-$toolchain"
 started="$SECONDS"
-vm_ssh "/system/bin/mkdir $guest"
+vm_ssh "/user/bin/mkdir $guest"
 printf 'put "%s" "%s/archive.tar.zst"\n' "$archive" "$guest" |
   sftp "${sftp_options[@]}" -b - motor@192.168.4.2 > /dev/null
-vm_ssh "/system/bin/tar -x -f $guest/archive.tar.zst -C $guest"
+vm_ssh "/user/bin/tar -x -f $guest/archive.tar.zst -C $guest"
 
 # Replace an existing installation and remove files absent from the payload.
-vm_ssh "/system/bin/rush -c 'echo stale > /devtools/llvm/stale-install && echo stale > /devtools/rust/stale-install'"
+vm_ssh "/user/bin/rush -c 'echo stale > /devtools/llvm/stale-install && echo stale > /devtools/rust/stale-install'"
 vm_ssh "$package/install.sh"
-if ! vm_ssh "/system/bin/rush -c '[ ! -e /devtools/llvm/stale-install ] && [ ! -e /devtools/rust/stale-install ]'"; then
+if ! vm_ssh "/user/bin/rush -c '[ ! -e /devtools/llvm/stale-install ] && [ ! -e /devtools/rust/stale-install ]'"; then
   fail "install.sh left stale files in the toolchain directories"
 fi
-vm_ssh "/system/bin/rm -r $guest"
+vm_ssh "/user/bin/rm -r $guest"
 echo "test-native-toolchain-install: installed $toolchain in $((SECONDS - started)) s"
 
+# This test still installs the unmodified 1.99.1-2 archive until milestone 4.
 src=/devtools/src/hello-world
 out=/user/tmp/native-toolchain-hello
 vm_ssh "/devtools/bin/cc $src/hello.c -o $out-c"

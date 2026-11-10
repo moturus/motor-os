@@ -155,7 +155,7 @@ start_serial_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$CONSOLE_LOG" \
   "$SCRATCH/console-in" "${runner_args[@]}"
 
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-  motor@192.168.4.2 /system/bin/rush -c true >/dev/null; do
+  motor@192.168.4.2 /user/bin/rush -c true >/dev/null; do
   if ! serial_test_vm_alive; then
     cat "$CONSOLE_LOG" >&2
     fail "$TEST_VM_LABEL exited before SSH became ready"
@@ -164,19 +164,19 @@ until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
 done
 
 run_console /user/tmp/system-tty-ps-done \
-  '/system/bin/sysbox ps > /user/tmp/system-tty-ps'
+  '/user/bin/sysbox ps > /user/tmp/system-tty-ps'
 run_console /user/tmp/system-tty-shim-done \
   'echo shim > /user/tmp/system-tty-shim; chmod r-xr-xr-- /user/tmp/system-tty-shim'
 run_console /user/tmp/system-tty-direct-done \
-  'echo direct > /user/tmp/system-tty-direct; /system/bin/sysbox chmod r-xr--r-- /user/tmp/system-tty-direct'
+  'echo direct > /user/tmp/system-tty-direct; /user/bin/sysbox chmod r-xr--r-- /user/tmp/system-tty-direct'
 run_console /user/tmp/system-tty-defaults-done \
-  'echo default > /user/tmp/system-tty-default-file; /system/bin/mkdir /user/tmp/system-tty-default-dir'
+  'echo default > /user/tmp/system-tty-default-file; /user/bin/mkdir /user/tmp/system-tty-default-dir'
 run_console /user/tmp/system-tty-script-v1-done \
-  "echo '#!/system/bin/rush' > /user/tmp/system-tty-script; echo 'echo V1 > /user/tmp/system-tty-script-v1' >> /user/tmp/system-tty-script; chmod r-xr--r-- /user/tmp/system-tty-script; /user/tmp/system-tty-script"
+  "echo '#!/user/bin/rush' > /user/tmp/system-tty-script; echo 'echo V1 > /user/tmp/system-tty-script-v1' >> /user/tmp/system-tty-script; chmod r-xr--r-- /user/tmp/system-tty-script; /user/tmp/system-tty-script"
 run_console /user/tmp/system-tty-script-edit-done \
-  "echo 'echo EDITED > /user/tmp/system-tty-edit-succeeded' >> /user/tmp/system-tty-script; chmod rw-r--r-- /user/tmp/system-tty-script; /user/tmp/system-tty-script; /system/bin/rm /user/tmp/system-tty-script"
+  "echo 'echo EDITED > /user/tmp/system-tty-edit-succeeded' >> /user/tmp/system-tty-script; chmod rw-r--r-- /user/tmp/system-tty-script; /user/tmp/system-tty-script; /user/bin/rm /user/tmp/system-tty-script"
 run_console /user/tmp/system-tty-script-done \
-  "echo '#!/system/bin/rush' > /user/tmp/system-tty-script; echo 'echo V2 > /user/tmp/system-tty-script-v2' >> /user/tmp/system-tty-script; chmod r-xr--r-- /user/tmp/system-tty-script; /user/tmp/system-tty-script"
+  "echo '#!/user/bin/rush' > /user/tmp/system-tty-script; echo 'echo V2 > /user/tmp/system-tty-script-v2' >> /user/tmp/system-tty-script; chmod r-xr--r-- /user/tmp/system-tty-script; /user/tmp/system-tty-script"
 
 # The ordinary SSH shell cannot grant System authority.
 # The binary goes in /none/tmp so that its None-role children can run it.
@@ -196,11 +196,11 @@ test "$(ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 'cat /user/tmp/findmnt.status'
 # writes, and the System process itself is refused network access.
 run_console /user/tmp/system-caps-done \
   'MOTOR_OS_CAPS=0x20d /none/tmp/capability-systest system-caps-tests > /user/tmp/system-caps.log 2> /user/tmp/system-caps.err; echo $? > /user/tmp/system-caps.status'
-system_caps_status="$(vm_ssh /system/bin/cat /user/tmp/system-caps.status)"
-system_caps_output="$(vm_ssh /system/bin/cat /user/tmp/system-caps.log)"
+system_caps_status="$(vm_ssh /user/bin/cat /user/tmp/system-caps.status)"
+system_caps_output="$(vm_ssh /user/bin/cat /user/tmp/system-caps.log)"
 # Debug runtimes log to stderr, so it is kept apart from the verdict.
 [ "$system_caps_status" = "0" ] ||
-  fail "System capability tests exited $system_caps_status: '$system_caps_output' $(vm_ssh /system/bin/cat /user/tmp/system-caps.err)"
+  fail "System capability tests exited $system_caps_status: '$system_caps_output' $(vm_ssh /user/bin/cat /user/tmp/system-caps.err)"
 [ "$system_caps_output" = $'kernel command-line query PASS\nspawn_wait_kill::test_system_parent_cannot_grant_unheld PASS\nfs_permissions::test_write_capability(System) PASS\nnet_caps::check_denied(System) PASS' ] ||
   fail "System capability tests did not finish: '$system_caps_output'"
 printf '%s\n' "$system_caps_output"
@@ -232,10 +232,10 @@ scp -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
   motor@192.168.4.2:/none/tmp/wg-role-self-test
 run_console /user/tmp/wg-role-done \
   'MOTOR_OS_CAPS=0x365 /none/tmp/wg-role-self-test system > /user/tmp/wg-role.log 2> /user/tmp/wg-role.err; echo $? > /user/tmp/wg-role.status'
-wg_role_status="$(vm_ssh /system/bin/cat /user/tmp/wg-role.status)"
-wg_role_output="$(vm_ssh /system/bin/cat /user/tmp/wg-role.log)"
+wg_role_status="$(vm_ssh /user/bin/cat /user/tmp/wg-role.status)"
+wg_role_output="$(vm_ssh /user/bin/cat /user/tmp/wg-role.log)"
 [ "$wg_role_status" = 0 ] ||
-  fail "WireGuard role tests exited $wg_role_status: '$wg_role_output' $(vm_ssh /system/bin/cat /user/tmp/wg-role.err)"
+  fail "WireGuard role tests exited $wg_role_status: '$wg_role_output' $(vm_ssh /user/bin/cat /user/tmp/wg-role.err)"
 [ "$wg_role_output" = 'wg-tool System role and permission preservation PASS' ] ||
   fail "WireGuard role tests did not finish: '$wg_role_output'"
 printf '%s\n' "$wg_role_output"
@@ -243,8 +243,8 @@ printf '%s\n' "$wg_role_output"
 # An exported mask wins over Rush's ordinary System grant, even when it omits
 # CAP_NET; without one, the grant keeps the console's own bits.
 run_console /user/tmp/rush-caps-done \
-  '/system/bin/rush -c "export MOTOR_OS_CAPS=0x205; /none/tmp/capability-systest print-caps exported > /user/tmp/rush-caps.log"; /none/tmp/capability-systest print-caps ordinary >> /user/tmp/rush-caps.log'
-rush_caps="$(vm_ssh /system/bin/cat /user/tmp/rush-caps.log)"
+  '/user/bin/rush -c "export MOTOR_OS_CAPS=0x205; /none/tmp/capability-systest print-caps exported > /user/tmp/rush-caps.log"; /none/tmp/capability-systest print-caps ordinary >> /user/tmp/rush-caps.log'
+rush_caps="$(vm_ssh /user/bin/cat /user/tmp/rush-caps.log)"
 [ "$rush_caps" = $'exported=0x205\nordinary=0x38d' ] ||
   fail "System Rush capability precedence: '$rush_caps'"
 printf 'System Rush capability precedence: %s\n' "${rush_caps//$'\n'/ }"
@@ -281,13 +281,13 @@ for burst in $(seq 1 11); do
 done
 run_console /user/tmp/stderr-burst-restore-prompt 'PS1="$tty_saved_ps1"'
 
-ps_output="$(vm_ssh /system/bin/cat /user/tmp/system-tty-ps)"
-listing="$(vm_ssh /system/bin/ls -l /user/tmp)"
+ps_output="$(vm_ssh /user/bin/cat /user/tmp/system-tty-ps)"
+listing="$(vm_ssh /user/bin/ls -l /user/tmp)"
 printf '%s\n' "$ps_output" | has_system_process /system/services/sys-tty ||
   fail "sys-tty is not System: '$ps_output'"
-printf '%s\n' "$ps_output" | has_system_process /system/bin/rush ||
+printf '%s\n' "$ps_output" | has_system_process /user/bin/rush ||
   fail "the console shell is not System: '$ps_output'"
-printf '%s\n' "$ps_output" | has_system_process /system/bin/sysbox ||
+printf '%s\n' "$ps_output" | has_system_process /user/bin/sysbox ||
   fail "an ordinary external command did not retain System: '$ps_output'"
 
 # Only a System parent may grant CAP_IO_MANAGER. The ordinary SSH shell
@@ -301,8 +301,8 @@ scp -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
 vm_ssh 'echo -n > /user/tmp/mmio-validation.log'
 run_console /user/tmp/mmio-validation-done \
   'MOTOR_OS_CAPS=0x24e /none/tmp/mmio-systest mmio-validation-tests > /user/tmp/mmio-validation.log 2>&1; echo $? > /user/tmp/mmio-validation.status'
-mmio_status="$(vm_ssh /system/bin/cat /user/tmp/mmio-validation.status)"
-mmio_output="$(vm_ssh /system/bin/cat /user/tmp/mmio-validation.log)"
+mmio_status="$(vm_ssh /user/bin/cat /user/tmp/mmio-validation.status)"
+mmio_output="$(vm_ssh /user/bin/cat /user/tmp/mmio-validation.log)"
 [ "$mmio_status" = "0" ] || fail "MMIO validation exited $mmio_status: '$mmio_output'"
 [ "$mmio_output" = "mmio::validation_tests PASS" ] ||
   fail "MMIO validation did not finish: '$mmio_output'"
@@ -312,8 +312,8 @@ for mmio_case in mmio-unmap-suite mmio-unmap-fault; do
   vm_ssh "echo -n > /user/tmp/$mmio_case.log"
   run_console "/user/tmp/$mmio_case-done" \
     "MOTOR_OS_CAPS=0x24e /none/tmp/mmio-systest $mmio_case > /user/tmp/$mmio_case.log 2>&1; echo \$? > /user/tmp/$mmio_case.status"
-  mmio_status="$(vm_ssh /system/bin/cat /user/tmp/$mmio_case.status)"
-  mmio_output="$(vm_ssh /system/bin/cat /user/tmp/$mmio_case.log)"
+  mmio_status="$(vm_ssh /user/bin/cat /user/tmp/$mmio_case.status)"
+  mmio_output="$(vm_ssh /user/bin/cat /user/tmp/$mmio_case.log)"
   if [ "$mmio_case" = mmio-unmap-suite ]; then
     [ "$mmio_status" = 0 ] && [ "$mmio_output" = 'mmio::ownership_tests PASS' ] ||
       fail "MMIO ownership: status=$mmio_status output='$mmio_output'"
@@ -353,7 +353,7 @@ printf '%s\n' "$listing" |
 printf '/user/bin/rmux new -s system-role\r' >&3
 rmux_ok=0
 for _ in $(seq 1 40); do
-  rmux_ps="$(ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 /system/bin/sysbox ps)"
+  rmux_ps="$(ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 /user/bin/sysbox ps)"
   rmux_count="$(printf '%s\n' "$rmux_ps" |
     awk '
       {

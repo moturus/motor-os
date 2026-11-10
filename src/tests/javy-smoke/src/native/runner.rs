@@ -2,7 +2,7 @@
 
 use super::{Result, Suite, fs};
 
-const WASMI: &str = "MOTOR_OS_CAPS=0 /devtools/bin/wasmi";
+const WASMI: &str = "MOTOR_OS_CAPS=0 /user/bin/dev/wasmi";
 
 fn expect_stdout(label: &str, stdout: &str, expected: &str) -> Result<()> {
     if stdout != expected {

@@ -28,7 +28,7 @@ remove_ssh_client_host_identity() {
   if [ "$SSH_CLIENT_HOST_IDENTITY_INSTALLED" -eq 1 ]; then
     for guest_file in "$SSH_CLIENT_HOST_GUEST_KEY" \
       "$SSH_CLIENT_HOST_GUEST_KEY.pub" "$SSH_CLIENT_HOST_GUEST_KNOWN"; do
-      vm_ssh "/system/bin/rm $guest_file" >/dev/null || status=1
+      vm_ssh "/user/bin/rm $guest_file" >/dev/null || status=1
     done
     [ "$status" -ne 0 ] || SSH_CLIENT_HOST_IDENTITY_INSTALLED=0
   fi
@@ -65,7 +65,7 @@ prepare_ssh_client_host() {
   SSH_CLIENT_HOST_IDENTITY_INSTALLED=1
   for guest_file in "$SSH_CLIENT_HOST_GUEST_KEY" \
     "$SSH_CLIENT_HOST_GUEST_KEY.pub" "$SSH_CLIENT_HOST_GUEST_KNOWN"; do
-    vm_ssh "/system/bin/rm $guest_file" >/dev/null 2>&1 || true
+    vm_ssh "/user/bin/rm $guest_file" >/dev/null 2>&1 || true
   done
   printf 'put %s %s\nchmod 600 %s\nput %s %s\nchmod 644 %s\n' \
     "$host_key" "$SSH_CLIENT_HOST_GUEST_KEY" "$SSH_CLIENT_HOST_GUEST_KEY" \
@@ -83,7 +83,7 @@ trust_ssh_client_host() {
   output="$(vm_ssh "/user/bin/ssh -F /dev/null -p $port -o BatchMode=yes -o StrictHostKeyChecking=yes motor@$host /bin/echo matching-ok")" ||
     fail "Motor client rejected its recorded host key"
   [ "$output" = matching-ok ] || fail "matching-host command returned '$output'"
-  known="$(vm_ssh /system/bin/cat "$SSH_CLIENT_HOST_GUEST_KNOWN")"
+  known="$(vm_ssh /user/bin/cat "$SSH_CLIENT_HOST_GUEST_KNOWN")"
   [ "$known" = "[$host]:$port $SSH_CLIENT_HOST_PUBLIC_KEY" ] ||
     fail "known_hosts contains an unexpected record: '$known'"
 }
@@ -182,9 +182,9 @@ test_ssh_client_host() {
   prepare_ssh_client_host "$first_key"
   public_key="$SSH_CLIENT_HOST_PUBLIC_KEY"
   for guest_file in "$guest_wrong" "$guest_executable"; do
-    vm_ssh "/system/bin/rm $guest_file" >/dev/null 2>&1 || true
+    vm_ssh "/user/bin/rm $guest_file" >/dev/null 2>&1 || true
   done
-  vm_ssh "/system/bin/rm -r $guest_transfer_root" >/dev/null 2>&1 || true
+  vm_ssh "/user/bin/rm -r $guest_transfer_root" >/dev/null 2>&1 || true
   printf 'put %s %s\nchmod 600 %s\n' "$second_key" "$guest_wrong" "$guest_wrong" |
     sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
       -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
@@ -193,7 +193,7 @@ test_ssh_client_host() {
   start_ssh_client_host "$first_key" 0
   port="$SSH_CLIENT_HOST_PORT"
   trust_ssh_client_host "$port"
-  known="$(vm_ssh /system/bin/cat "$guest_known")"
+  known="$(vm_ssh /user/bin/cat "$guest_known")"
 
   local host_executable="$SSH_CLIENT_HOST_ROOT/executable"
   local returned_executable="$SSH_CLIENT_HOST_ROOT/returned-executable"
@@ -220,14 +220,14 @@ test_ssh_client_host() {
   local guest_download_parent="$guest_transfer_root/download"
   mkdir -p "$host_source_tree/nested" "$host_source_tree/empty" "$host_upload_parent"
   printf 'first recursive payload\n' > "$host_source_tree/nested/file"
-  vm_ssh "/system/bin/rush -c '/system/bin/mkdir $guest_transfer_root && /system/bin/mkdir $guest_download_parent'" ||
+  vm_ssh "/user/bin/rush -c '/user/bin/mkdir $guest_transfer_root && /user/bin/mkdir $guest_download_parent'" ||
     fail "could not create the guest recursive-transfer directories"
   vm_ssh "$native_scp -r motor@$host:$host_source_tree $guest_download_parent" ||
     fail "Motor client could not download a Unix directory"
   printf 'updated recursive payload\n' > "$host_source_tree/nested/file"
   vm_ssh "$native_scp -r motor@$host:$host_source_tree $guest_download_parent" ||
     fail "Motor client could not download into an existing directory"
-  [ "$(vm_ssh /system/bin/cat "$guest_download_parent/source-tree/nested/file")" = \
+  [ "$(vm_ssh /user/bin/cat "$guest_download_parent/source-tree/nested/file")" = \
       "updated recursive payload" ] ||
     fail "recursive re-download did not replace an existing local file"
 
@@ -251,8 +251,8 @@ test_ssh_client_host() {
   # a stderr debug record can split the password-ok line being asserted.
   # The wrapper also gives the client's runtime inherited, pipe-relayed stderr.
   output="$(printf 'vroomvroom\n' | ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-    "/system/bin/rush -c '$password_command' 2>$password_stderr" 2>&1)" || password_status=$?
-  vm_ssh "/system/bin/cat $password_stderr" >&2 || fail "could not read password-auth diagnostics"
+    "/user/bin/rush -c '$password_command' 2>$password_stderr" 2>&1)" || password_status=$?
+  vm_ssh "/user/bin/cat $password_stderr" >&2 || fail "could not read password-auth diagnostics"
   [ "$password_status" -eq 0 ] || fail "Motor client password fallback failed: $password_status"
   printf '%s\n' "$output" | tr -d '\r' | grep -qx password-ok ||
     fail "password-auth command returned '$output'"
@@ -266,12 +266,12 @@ test_ssh_client_host() {
   # between the password prompt and forwarded terminal input.
   output="$(printf 'yes\r\nvroomvroom\r\nfirst\r\nsecond\r\n' |
     ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-      "/system/bin/rush -c '$password_command' 2>$password_stderr" 2>&1)" || password_status=$?
-  vm_ssh "/system/bin/cat $password_stderr" >&2 || fail "could not read CRLF-auth diagnostics"
+      "/user/bin/rush -c '$password_command' 2>$password_stderr" 2>&1)" || password_status=$?
+  vm_ssh "/user/bin/cat $password_stderr" >&2 || fail "could not read CRLF-auth diagnostics"
   [ "$password_status" -eq 0 ] || fail "CRLF host-key/password prompts failed: $password_status"
   printf '%s\n' "$output" | tr -d '\r' | grep -qx ' 66 69 72 73 74 0d 73 65 63 6f 6e 64 0d' ||
     fail "terminal Enter was not forwarded once: '$output'"
-  vm_ssh "/system/bin/rm $prompt_known" || fail "could not remove prompt known-hosts fixture"
+  vm_ssh "/user/bin/rm $prompt_known" || fail "could not remove prompt known-hosts fixture"
 
   MOTOR_SSH_TARGET_PORT="$port" MOTOR_SSH_BUILD="$BUILD" bash "$WD/test-ssh-config.sh"
 
@@ -296,16 +296,16 @@ test_ssh_client_host() {
     local status=$?
     [ "$status" -eq 255 ] || fail "changed host key returned status $status"
   fi
-  [ "$(vm_ssh /system/bin/cat "$guest_known")" = "$known" ] ||
+  [ "$(vm_ssh /user/bin/cat "$guest_known")" = "$known" ] ||
     fail "changed host key modified known_hosts"
 
   stop_ssh_client_host
   remove_ssh_client_host_identity || fail "failed to remove the guest SSH identity fixture"
   for guest_file in "$guest_wrong" "$guest_executable"; do
-    vm_ssh "/system/bin/rm $guest_file" >/dev/null ||
+    vm_ssh "/user/bin/rm $guest_file" >/dev/null ||
       fail "failed to remove guest SSH fixture $guest_file"
   done
-  vm_ssh "/system/bin/rm -r $guest_transfer_root" >/dev/null ||
+  vm_ssh "/user/bin/rm -r $guest_transfer_root" >/dev/null ||
     fail "failed to remove the guest recursive-transfer fixture"
   cleanup_ssh_client_host
   echo "-- Motor SSH client private-network compatibility PASS"

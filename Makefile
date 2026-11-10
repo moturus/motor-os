@@ -59,8 +59,8 @@ core: kernel vdso
 sys-base: strobe sys-io sys-init sys-tty
 sys: sys-base dns-resolver
 user-base: sysbox rush red rmux russhd
-user: user-base kibim httpd httpd-axum ssh wg
-user-dev: user curl gix lorry mdbg rnetbench crossbench \
+user: user-base kibim httpd httpd-axum ssh wg curl
+user-dev: user gix lorry mdbg rnetbench crossbench \
 	systest mio-test tokio-tests crossterm-smoke wg-self-test
 
 .PHONY: all images boot core sys-base sys user-base user user-dev
@@ -345,6 +345,7 @@ dev.img: boot core sys user-dev
 	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.img" \
 		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.qcow2" && \
 	cd src/imager && ( flock 9 && $(BUILD_IMAGER) && \
+		install -m 755 $(IMAGER_INSTALL_STRIP) "$(IMAGER_BIN)" "$(BIN_DIR)/imager" && \
 		MOTOR_ASSEMBLY_IMAGE_ROOT="$(ASSEMBLY_IMAGE_ROOT)" \
 		"$(IMAGER_BIN)" "$(ROOT_DIR)" $(IMG_CMD) motor-os-dev.yaml ) 9>"$(IMAGER_LOCK)"
 	$(INSTALL_VM_SCRIPTS)

@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 fn run(root: &Path, arguments: &[&str]) -> Output {
-    Command::new("/system/bin/sysbox")
+    Command::new("/user/bin/sysbox")
         .arg("mkdir")
         .args(arguments)
         .current_dir(root)
@@ -93,7 +93,7 @@ pub fn run_test() {
     assert!(help.status.success(), "{help:?}");
     assert!(help.stdout.starts_with(b"usage: mkdir"), "{help:?}");
 
-    let shim = Command::new("/system/bin/mkdir")
+    let shim = Command::new("/user/bin/mkdir")
         .args(["-p", "shim with space/literal*", "shim second"])
         .current_dir(&root)
         .stdin(Stdio::null())

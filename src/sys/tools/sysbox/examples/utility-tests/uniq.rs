@@ -75,7 +75,7 @@ pub fn run_test(root: &Path) {
         b"",
         b"uniq: error reading 'standard input': Is a directory\n",
     );
-    let wrapper = Command::new("/system/bin/uniq")
+    let wrapper = Command::new("/user/bin/uniq")
         .arg("one *")
         .current_dir(root)
         .stdin(Stdio::null())

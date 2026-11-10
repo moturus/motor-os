@@ -1,0 +1,31 @@
+# Note: this is a test sshd.toml file.
+#
+# It contains a test host key. Login names, password verifiers and public keys
+# are in the two credential locations below.
+# Remove and/or regenerate all secrets for production deployment.
+
+# ------------------------ SSHD CONFIGURATION ------------------------
+
+version = 2
+listen_on = '0.0.0.0:2222'
+path = "/user/bin:/user/bin/dev:/devtools/bin"
+allow_tcp_forwarding = true
+gateway_ports = false
+
+# the default/test host key
+
+host_key = """-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACCOL5sIfuwv5TaS4iNec2TlPJ5fow/1nEQQVIy+eLk90wAAAIjvOC/D7zgv
+wwAAAAtzc2gtZWQyNTUxOQAAACCOL5sIfuwv5TaS4iNec2TlPJ5fow/1nEQQVIy+eLk90w
+AAAEAIyXvYqbau3uMgFiaVFLN+W1NGPW6XNXNfGKiRpyUXW44vmwh+7C/lNpLiI15zZOU8
+nl+jD/WcRBBUjL54uT3TAAAAAAECAwQF
+-----END OPENSSH PRIVATE KEY-----"""
+
+# the public key of the host key above:
+# ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII4vmwh+7C/lNpLiI15zZOU8nl+jD/WcRBBUjL54uT3T
+
+# ------------------------------ CREDENTIALS ---------------------------
+
+users_file = '/user/cfg/russhd/users.toml'
+authorized_keys_dir = '/user/cfg/ssh'

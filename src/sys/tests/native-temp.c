@@ -21,6 +21,7 @@ static void check_tmp(const char *expected) {
 
 int main(void) {
 	assert(strcmp(P_tmpdir, "/user/tmp") == 0);
+	/* The 1.99.1-2 libc keeps its legacy paths until the milestone 4 rebuild. */
 	assert(strcmp(_PATH_DEFPATH, "/system/bin:/user/bin") == 0);
 	assert(strcmp(_PATH_STDPATH, "/system/bin:/user/bin") == 0);
 	assert(strcmp(_PATH_BSHELL, "/system/bin/sh") == 0);

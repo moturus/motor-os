@@ -107,7 +107,7 @@ pub fn run(evidence: &Path, sampler_binary: &Path) -> io::Result<()> {
         "check": {"targets": ["x86_64-unknown-motor"]}, "procMacro": {"enable": false},
         "files": {"watcher": "client"}
     });
-    let command = remote.ssh(&format!("CARGO=/devtools/bin/lorry PATH=/devtools/bin:/system/bin RA_LOG=project_model=debug,rust_analyzer::flycheck=debug {SERVER}"))?;
+    let command = remote.ssh(&format!("CARGO=/user/bin/dev/lorry PATH=/user/bin:/user/bin/dev:/devtools/bin RA_LOG=project_model=debug,rust_analyzer::flycheck=debug {SERVER}"))?;
     let start = Instant::now();
     let mut case = SemanticCase::start_command(
         command,
@@ -293,7 +293,7 @@ impl UserGrants {
         remote.upload(batch)?;
         let saved = staging.join("user-config.orig");
         remote.run(&format!(
-            "/system/bin/cp /user/cfg/lorry.toml {}",
+            "/user/bin/cp /user/cfg/lorry.toml {}",
             saved.display()
         ))?;
         let guard = Self {
@@ -301,7 +301,7 @@ impl UserGrants {
             saved,
         };
         remote.run(&format!(
-            "/system/bin/cat {} {} > /user/cfg/lorry.toml",
+            "/user/bin/cat {} {} > /user/cfg/lorry.toml",
             guard.saved.display(),
             staged.display()
         ))?;
@@ -317,7 +317,7 @@ impl Drop for UserGrants {
             deadline: Instant::now() + Duration::from_secs(10),
         };
         if let Err(error) = remote.run(&format!(
-            "/system/bin/cat {} > /user/cfg/lorry.toml",
+            "/user/bin/cat {} > /user/cfg/lorry.toml",
             self.saved.display()
         )) {
             eprintln!("cannot restore the guest's /user/cfg/lorry.toml: {error}");

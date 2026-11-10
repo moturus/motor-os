@@ -33,14 +33,14 @@ test_wireguard_case() (
       wait "$wg_pid" 2>/dev/null || true
     fi
     if [ "$role" = managed ] && [ -n "$guest_pid" ]; then
-      vm_ssh "/system/bin/wg-tool down $name" || true
+      vm_ssh "/user/bin/wg-tool down $name" || true
     fi
     if [ -n "$peer_pid" ]; then
       kill "$peer_pid" 2>/dev/null || true
       wait "$peer_pid" 2>/dev/null || true
     fi
     if [ "$uploaded" = 1 ]; then
-      vm_ssh "/system/bin/rm $config" || true
+      vm_ssh "/user/bin/rm $config" || true
     fi
     rm -rf "$work"
     exit "$status"
@@ -55,7 +55,7 @@ test_wireguard_case() (
     if [ "$role" = managed ]; then
       local created
       created="$(printf '%s\n' "$name" "$config" 51820 '10.250.20.2/24, fd50:20::2/64' \
-        '192.168.4.2, 2001:db8::2' yes | vm_ssh '/system/bin/wg-tool new')"
+        '192.168.4.2, 2001:db8::2' yes | vm_ssh '/user/bin/wg-tool new')"
       uploaded=1
       printf '%s\n' "$created"
       printf '%s\n' "$created" | awk '/^Public key: / {print $3}' > "$work/guest.pub"
@@ -83,9 +83,9 @@ test_wireguard_case() (
   local guest_command="$TEST_BIN/systest ip-device-plain $guest_endpoint $endpoint"
   if [ "$role" = managed ]; then
     printf '%s\n' 'hermetic host' "$(cat "$work/host.pub")" "$endpoint" \
-      '10.250.20.0/24, fd50:20::/64' 0 '' yes | vm_ssh "/system/bin/wg-tool add-peer $config"
+      '10.250.20.0/24, fd50:20::/64' 0 '' yes | vm_ssh "/user/bin/wg-tool add-peer $config"
   elif [ "$role" != plain ]; then
-    guest_command="/system/bin/wg $config"
+    guest_command="/user/bin/wg $config"
     cat > "$work/config.toml" <<EOF
 name = "$name"
 private_key = "$(cat "$work/guest.key")"
@@ -99,7 +99,7 @@ EOF
     if [ "$role" = guest ]; then
       printf 'endpoint = "%s"\n' "$endpoint" >> "$work/config.toml"
     fi
-    vm_ssh "/system/bin/rush -c 'if [ ! -d /user/cfg/wireguard ]; then mkdir /user/cfg/wireguard; chmod rwxrwx--- /user/cfg/wireguard; fi'"
+    vm_ssh "/user/bin/rush -c 'if [ ! -d /user/cfg/wireguard ]; then mkdir /user/cfg/wireguard; chmod rwxrwx--- /user/cfg/wireguard; fi'"
     printf 'put %s %s\nchmod 660 %s\n' "$work/config.toml" "$config" "$config" > "$work/upload"
     uploaded=1
     sftp -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
@@ -116,12 +116,12 @@ EOF
   exec {wg_in}<>"$work/wg.in"
   start_wireguard() {
     if [ "$role" = managed ]; then
-      line="$(vm_ssh "/system/bin/wg-tool up $config")"
+      line="$(vm_ssh "/user/bin/wg-tool up $config")"
       printf '%s\n' "$line"
       [[ "$line" =~ pid=([0-9]+) ]] || fail 'wg-tool up omitted its process id'
       guest_pid="${BASH_REMATCH[1]}"
       # The launcher and its SSH session have both exited before any traffic.
-      vm_ssh '/system/bin/wg-tool status'
+      vm_ssh '/user/bin/wg-tool status'
       return
     fi
     ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 "$guest_command" \
@@ -140,7 +140,7 @@ EOF
   }
   stop_wireguard() {
     if [ "$role" = managed ]; then
-      vm_ssh "/system/bin/wg-tool down $name"
+      vm_ssh "/user/bin/wg-tool down $name"
       guest_pid=""
       vm_ssh "$TEST_BIN/systest wireguard-cleanup"
       return
@@ -173,7 +173,7 @@ EOF
     [ "$line" = 'PADDING ON' ] || fail "unexpected peer response: $line"
   fi
   for inner in 10.250.20.1 fd50:20::1; do
-    vm_ssh "/system/bin/ping -c 1 $inner"
+    vm_ssh "/user/bin/ping -c 1 $inner"
   done
   vm_ssh "$TEST_BIN/systest wireguard-client 10.250.20.1 10.250.20.2"
   if [ "$1" = ipv6 ] && [ "$role" != plain ] && [ "${WG_BENCHMARK:-0}" != 1 ]; then
@@ -187,12 +187,12 @@ EOF
   if [ "${WG_BENCHMARK:-0}" = 1 ]; then
     vm_ssh "$TEST_BIN/systest wireguard-measure $guest_pid 10.250.20.1:40000"
     if [ "$role" != plain ]; then
-      provider_id="$(vm_ssh '/system/bin/sysbox stats providers' |
+      provider_id="$(vm_ssh '/user/bin/sysbox stats providers' |
         awk -v name="wg:$guest_pid" '$2 == name {print $1}')"
       [ -n "$provider_id" ] || fail "WireGuard statistics provider is missing"
-      vm_ssh "/system/bin/sysbox stats get $provider_id"
+      vm_ssh "/user/bin/sysbox stats get $provider_id"
     fi
-    vm_ssh '/system/bin/sysbox stats get 2'
+    vm_ssh '/user/bin/sysbox stats get 2'
     printf 'stats\n' >&"$peer_in"
     IFS= read -r -t 5 line <&"$peer_out" || fail "peer did not report benchmark counters"
     case "$line" in STATS\ *) printf 'host peer %s\n' "$line" ;; *) fail "unexpected peer counters: $line" ;; esac
@@ -224,7 +224,7 @@ EOF
       # after them.
       vm_ssh "$TEST_BIN/systest wireguard-await-tick $guest_pid"
       local live_status
-      live_status="$(vm_ssh '/system/bin/wg-tool status')"
+      live_status="$(vm_ssh '/user/bin/wg-tool status')"
       printf '%s\n' "$live_status"
       [[ "$live_status" == *"endpoint: $learned_endpoint"* ]] || fail 'status did not report the authenticated roaming endpoint'
       [[ "$live_status" != *'handshake: none'* ]] || fail 'status omitted the active session'

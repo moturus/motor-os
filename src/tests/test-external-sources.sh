@@ -138,12 +138,12 @@ chmod +x "$LLVM_TOOLS/llvm-strip"
 saved_validator="$(declare -f validate_helix_elf)"
 validate_helix_elf() { :; }
 stage_helix
-[ -x "$HELIX_IMG/devtools/helix/hx" ] || fail "staged hx is not executable"
+[ -x "$HELIX_IMG/user/lib/helix/hx" ] || fail "staged hx is not executable"
 for component in queries themes tutor; do
-	[ -e "$HELIX_IMG/devtools/helix/runtime/$component" ] ||
+	[ -e "$HELIX_IMG/user/lib/helix/runtime/$component" ] ||
 		fail "runtime component was not staged: $component"
 done
-[ ! -e "$HELIX_IMG/devtools/helix/runtime/grammars" ] ||
+[ ! -e "$HELIX_IMG/user/lib/helix/runtime/grammars" ] ||
 	fail "grammar sources were staged"
 
 eval "$saved_validator"
@@ -211,8 +211,8 @@ case "$(declare -f select_external_sources)" in
 esac
 case "$(declare -f build_sed)" in
 	*'CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1'*'build --target "$TARGET" --release --locked'*\
-*'"$SED_IMG/devtools/bin/sed"'*) ;;
-	*) fail "sed is not a single-codegen-unit locked release build staged as /devtools/bin/sed" ;;
+*'"$SED_IMG/user/bin/dev/sed"'*) ;;
+	*) fail "sed is not a single-codegen-unit locked release build staged as /user/bin/dev/sed" ;;
 esac
 case "$(declare -f select_external_sources)" in
 	*'"motor-os-tar:$MOTOR_OS_TAR_BRANCH"'*) ;;
@@ -220,8 +220,8 @@ case "$(declare -f select_external_sources)" in
 esac
 case "$(declare -f build_tar)" in
 	*'build --target "$TARGET" --release --locked'*'for tool in tar zstd'*\
-*'"$TAR_IMG/system/bin/$tool"'*) ;;
-	*) fail "tar and zstd are not locked release builds staged in /system/bin" ;;
+*'"$TAR_IMG/user/bin/$tool"'*) ;;
+	*) fail "tar and zstd are not locked release builds staged in /user/bin" ;;
 esac
 
 # Every run builds each external source into an empty overlay, and a build

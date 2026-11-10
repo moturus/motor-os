@@ -10,8 +10,8 @@ prepare_wasm_service_images() {
   cat >> "$overlay/system/cfg/sys-init.cfg" <<'EOF'
 
 # Test-only Wasmtime services: decimal 256 is CAP_NET, without CAP_LOG.
-svc:256:/devtools/bin/wasmtime-rt serve --allow-precompiled -S cli --addr 127.0.0.1:18180 --shutdown-addr 127.0.0.1:18181 --max-concurrent-requests 2 /none/wasm-services/p2_cli_serve_hello_world.cwasm
-svc:256:/devtools/bin/wasmtime-rt serve --allow-precompiled -W component-model-async -S p3,cli --addr 127.0.0.1:18182 --shutdown-addr 127.0.0.1:18183 --max-concurrent-requests 2 /none/wasm-services/p3_cli_serve_hello_world.cwasm
+svc:256:/user/bin/dev/wasmtime-rt serve --allow-precompiled -S cli --addr 127.0.0.1:18180 --shutdown-addr 127.0.0.1:18181 --max-concurrent-requests 2 /none/wasm-services/p2_cli_serve_hello_world.cwasm
+svc:256:/user/bin/dev/wasmtime-rt serve --allow-precompiled -W component-model-async -S p3,cli --addr 127.0.0.1:18182 --shutdown-addr 127.0.0.1:18183 --max-concurrent-requests 2 /none/wasm-services/p3_cli_serve_hello_world.cwasm
 
 # System launcher: SYS | SPAWN | LOG | INTERACTIVE | NET | FS_WRITE (0x34d).
 svc:845:/none/wasm-services/wasmtime-smoke --roles

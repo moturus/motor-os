@@ -2,8 +2,8 @@ use moto_sdk::io::fs::{AccessPermissions, EntryKind, FsClient, RolePermissions};
 use std::path::Path;
 use std::process::{Command, Output};
 
-const SYSBOX: &str = "/system/bin/sysbox";
-const CHMOD: &str = "/system/bin/chmod";
+const SYSBOX: &str = "/user/bin/sysbox";
+const CHMOD: &str = "/user/bin/chmod";
 
 fn run_sysbox(args: &[&str]) -> Output {
     Command::new(SYSBOX)

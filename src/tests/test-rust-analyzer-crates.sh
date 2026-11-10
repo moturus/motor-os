@@ -17,7 +17,7 @@ if [ "${1:-}" = --run-motor ]; then
 		sftp "${SSH_OPTIONS[@]}" -P 2222 -b - motor@192.168.4.2
 	status=0
 	ssh "${SSH_OPTIONS[@]}" -p 2222 motor@192.168.4.2 "$guest" "$@" || status=$?
-	ssh "${SSH_OPTIONS[@]}" -p 2222 motor@192.168.4.2 /system/bin/rm "$guest"
+	ssh "${SSH_OPTIONS[@]}" -p 2222 motor@192.168.4.2 /user/bin/rm "$guest"
 	exit "$status"
 fi
 [ "$#" = 0 ] || { echo "usage: $0 [--run-motor BINARY ARGS...]" >&2; exit 2; }

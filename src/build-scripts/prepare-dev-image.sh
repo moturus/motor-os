@@ -3,7 +3,7 @@
 # prepare-dev-image.sh -- the last step of `make dev.img`.
 #
 # The developer image stages Motor OS library sources in
-# /devtools/src/motor-os/sys/lib for native `lorry test` runs. Lorry admits a
+# /none/dev/motor-os/sys/lib for native `lorry test` runs. Lorry admits a
 # workspace and compiles its dependencies for Motor OS only on Motor OS, so the
 # image build boots the new image once to do both, and the native test step
 # needs neither. It leaves on the image the workspace's Cargo.lock, its
@@ -53,7 +53,7 @@ export MOTO_IMAGE="$TEST_VM_IMAGE"
 # compile and the test in test-dev-sources.sh both use four jobs. The VM size
 # changes only how long this takes.
 export MOTO_SMP=4 MOTO_MEMORY_MIB=4096
-STAGED=/devtools/src/motor-os/sys/lib
+STAGED=/none/dev/motor-os/sys/lib
 work="$(mktemp -d "$ROOT_DIR/build/prepare-dev-image.XXXXXX")"
 VMM_PID=""
 
@@ -106,13 +106,13 @@ shut_down_vm() {
 test_vm_configure_ssh
 # The console goes to its log only; failures print it.
 start_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$work/console.log" > /dev/null
-vm_ssh "/system/bin/rush -c 'cat > $STAGED/Cargo.lock'" < "$work/lib/Cargo.lock" ||
+vm_ssh "/user/bin/rush -c 'cat > $STAGED/Cargo.lock'" < "$work/lib/Cargo.lock" ||
   fail "cannot install $STAGED/Cargo.lock"
-vm_ssh "cd $STAGED && /devtools/bin/lorry -q vendor --locked --offline --accept-all" ||
+vm_ssh "cd $STAGED && /user/bin/dev/lorry -q vendor --locked --offline --accept-all" ||
   fail "cannot admit $STAGED offline; if its dependencies changed, run" \
     "src/build-motor-os.sh --sys-lib-deps-only and build the image again"
-vm_ssh "cd $STAGED && /devtools/bin/lorry -q test --no-run -j 4" > /dev/null ||
+vm_ssh "cd $STAGED && /user/bin/dev/lorry -q test --no-run -j 4" > /dev/null ||
   fail "cannot compile the tests of $STAGED"
-vm_ssh "/system/bin/rm -r $STAGED/target" || fail "cannot remove $STAGED/target"
+vm_ssh "/user/bin/rm -r $STAGED/target" || fail "cannot remove $STAGED/target"
 shut_down_vm
 echo "prepare-dev-image: admitted $STAGED and compiled its dependencies in ${SECONDS}s"

@@ -69,8 +69,8 @@ fn default_config() {
 #[test]
 fn shipped_configs_parse() {
     for text in [
-        include_str!("../../../../img_files/motor-os-base/system/cfg/sshd.toml"),
-        include_str!("../../../../img_files/motor-os-dev/system/cfg/sshd.toml"),
+        include_str!("../../../../img_files/motor-os-base/user/cfg/sshd.toml"),
+        include_str!("../../../../img_files/motor-os-dev/user/cfg/sshd.toml"),
     ] {
         assert!(!read("shipped", text).unwrap().gateway_ports());
     }

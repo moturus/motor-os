@@ -69,7 +69,7 @@ exec 3<> "$SCRATCH/console-in"
 start_serial_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$CONSOLE_LOG" \
   "$SCRATCH/console-in"
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-  motor@192.168.4.2 /system/bin/rush -c true >/dev/null 2>&1; do
+  motor@192.168.4.2 /user/bin/rush -c true >/dev/null 2>&1; do
   serial_test_vm_alive || fail "guest exited before SSH was ready"
   sleep 1
 done

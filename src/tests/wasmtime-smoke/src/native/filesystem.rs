@@ -147,7 +147,7 @@ fn cli(suite: &mut Suite) -> Result<()> {
     suite.command(
         "p2_cli_file_append-seed",
         &format!(
-            "MOTOR_OS_CAPS=0x200 /system/bin/rush -c \"printf 'Twas brillig, and the slithy toves.\\n' > {}/bar.txt\"",
+            "MOTOR_OS_CAPS=0x200 /user/bin/rush -c \"printf 'Twas brillig, and the slithy toves.\\n' > {}/bar.txt\"",
             append.display()
         ),
         0,

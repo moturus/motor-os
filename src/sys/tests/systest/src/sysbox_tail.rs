@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-const SYSBOX: &str = "/system/bin/sysbox";
+const SYSBOX: &str = "/user/bin/sysbox";
 
 fn numbered(lines: std::ops::RangeInclusive<usize>) -> String {
     lines.map(|n| format!("{n}\n")).collect()
@@ -259,10 +259,10 @@ fn test_errors(root: &Path) {
     println!("sysbox_tail::test_errors PASS");
 }
 
-/// `/system/bin/tail` is the name people type: a rush shim over `sysbox
+/// `/user/bin/tail` is the name people type: a rush shim over `sysbox
 /// tail`, which has to keep an argument with a space in it whole.
 fn test_bin_shim(root: &Path) {
-    let output = Command::new("/system/bin/tail")
+    let output = Command::new("/user/bin/tail")
         .args(["-n", "1", "three", "with space"])
         .current_dir(root)
         .stdin(Stdio::null())

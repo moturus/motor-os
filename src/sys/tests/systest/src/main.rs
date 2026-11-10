@@ -1100,7 +1100,7 @@ fn test_caps() {
         .find(|process| {
             process.active != 0
                 && process.parent_pid == sys_tty.pid
-                && process.debug_name().starts_with("/system/bin/rush")
+                && process.debug_name().starts_with("/user/bin/rush")
         })
         .expect("missing console rush");
     assert_eq!(ProcessRole::Interactive, role_for(console_shell.pid));
@@ -1113,7 +1113,7 @@ fn test_caps() {
         .iter()
         .find(|process| process.pid == this_process.parent_pid)
         .expect("missing sibling shell");
-    assert!(parent_shell.debug_name().starts_with("/system/bin/rush"));
+    assert!(parent_shell.debug_name().starts_with("/user/bin/rush"));
     assert!(russhd.pid == parent_shell.parent_pid || sys_tty.pid == parent_shell.parent_pid);
     assert_eq!(ProcessRole::Interactive, role_for(parent_shell.pid));
 

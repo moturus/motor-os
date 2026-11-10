@@ -1263,7 +1263,7 @@ fn run_shell_script(
     let mut file = open_shell_script(program)?;
     // A capability mask needs a real child: environment changes
     // cannot reduce this process's immutable capabilities. Run Rush directly,
-    // since the native loader cannot use the /system/bin/sh script as an ELF
+    // since the native loader cannot use the /user/bin/sh script as an ELF
     // interpreter.
     #[cfg(not(unix))]
     if jobs::has_explicit_env(
@@ -1274,7 +1274,7 @@ fn run_shell_script(
         child_args.push(program.to_string());
         child_args.extend_from_slice(args);
         return Some(spawn_child(
-            "/system/bin/rush",
+            "/user/bin/rush",
             program,
             &child_args,
             env,

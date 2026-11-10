@@ -1,0 +1,2 @@
+#!/user/bin/rush
+/user/bin/sysbox tr "$@"

@@ -81,7 +81,7 @@ helix_sftp_batch() {
 
 helix_assert_file() {
   local guest="$1" expected="$2" evidence_name="$3"
-  vm_ssh "/system/bin/sysbox cat '$guest'" > "$HELIX_LSP_EVIDENCE/$evidence_name.rs"
+  vm_ssh "/user/bin/sysbox cat '$guest'" > "$HELIX_LSP_EVIDENCE/$evidence_name.rs"
   cmp "$expected" "$HELIX_LSP_EVIDENCE/$evidence_name.rs" ||
     fail "Helix file differs after $evidence_name; evidence=$HELIX_LSP_EVIDENCE"
 }
@@ -130,10 +130,10 @@ vm_ssh "[ ! -e '$helix_workspace/Cargo.lock' ] && [ ! -e '$helix_workspace/membe
 # during workspace loading previously cancelled Salsa work and killed the server.
 helix_lsp_log="$GUEST_HELIX_ROOT/open.log"
 helix_log_start=1
-shipped_format=/devtools/src/helix-rust-demo/src/rustfmt-test.rs
+shipped_format=/none/dev/helix-rust-demo/src/rustfmt-test.rs
 printf 'put "%s" "%s"\n' "$rustfmt_fixtures/in-place.in.rs" "$shipped_format" |
   helix_sftp_batch
-start_pty "cd /devtools/src/helix-rust-demo && hx -v --log $helix_lsp_log"
+start_pty "cd /none/dev/helix-rust-demo && hx -v --log $helix_lsp_log"
 wait_pty_output "[scratch]" "empty Helix startup"
 PTY_OUTPUT=""
 printf ':o src/main.rs\r' >&"$PTY_IN_FD"
@@ -173,11 +173,11 @@ printf ':q!\r' >&"$PTY_IN_FD"
 finish_pty 0 "shipped project navigation"
 helix_log_wait '"method":"shutdown"' "shipped server shutdown"
 cp "$HELIX_LSP_EVIDENCE/helix.log" "$HELIX_LSP_EVIDENCE/shipped-project.log"
-vm_ssh "/system/bin/rm '$shipped_format'"
+vm_ssh "/user/bin/rm '$shipped_format'"
 
 helix_lsp_log="$GUEST_HELIX_ROOT/lsp.log"
 helix_log_start=1
-vm_ssh "/system/bin/sysbox cp -r /devtools/src/helix-rust-demo '$helix_project'"
+vm_ssh "/user/bin/sysbox cp -r /none/dev/helix-rust-demo '$helix_project'"
 helix_format_file="$helix_project/src/format.rs"
 helix_width_dir="$helix_project/src/width-case"
 helix_width_file="$helix_width_dir/input.rs"
@@ -323,8 +323,8 @@ printf ':w\r' >&"$PTY_IN_FD"
 helix_log_wait "$helix_check_end" "fixed check completion"
 helix_log_wait 'publishDiagnostics".*"uri":"[^"]*/src/main.rs".*"diagnostics":\[\]' "diagnostic clearing"
 helix_save_screen fixed
-vm_ssh "/system/bin/sysbox cat '$helix_project/src/main.rs'" > "$HELIX_LSP_EVIDENCE/main.rs"
-cmp "$ROOT_DIR/img_files/motor-os-dev/devtools/src/helix-rust-demo/src/main.rs" \
+vm_ssh "/user/bin/sysbox cat '$helix_project/src/main.rs'" > "$HELIX_LSP_EVIDENCE/main.rs"
+cmp "$ROOT_DIR/img_files/motor-os-dev/none/dev/helix-rust-demo/src/main.rs" \
   "$HELIX_LSP_EVIDENCE/main.rs" || fail "Helix completion/fix changed unexpected source bytes"
 
 printf '8G/rt_version\r' >&"$PTY_IN_FD"

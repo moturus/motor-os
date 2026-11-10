@@ -38,7 +38,7 @@ cleanup() {
   fi
   rm -rf "$temporary"
   if [ "$guest_created" -eq 1 ]; then
-    vm_ssh /system/bin/rm -r "$guest_root" || status=1
+    vm_ssh /user/bin/rm -r "$guest_root" || status=1
   fi
   exit "$status"
 }
@@ -1008,13 +1008,13 @@ gix_binary="${executables[1]}"
 guest_root="/user/tmp/gix-test-$$"
 guest_gix="$guest_root/gix"
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = 1 ]; then
-  guest_gix=/devtools/bin/gix
+  guest_gix=/user/bin/dev/gix
 fi
-vm_ssh /system/bin/mkdir "$guest_root"
+vm_ssh /user/bin/mkdir "$guest_root"
 guest_created=1
-vm_ssh /system/bin/mkdir "$guest_root/fixture"
-vm_ssh /system/bin/mkdir "$guest_root/home"
-vm_ssh /system/bin/mkdir "$guest_root/xdg"
+vm_ssh /user/bin/mkdir "$guest_root/fixture"
+vm_ssh /user/bin/mkdir "$guest_root/home"
+vm_ssh /user/bin/mkdir "$guest_root/xdg"
 sftp_command=(
   sftp -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes
   -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts"
@@ -1477,7 +1477,7 @@ remove_ssh_client_host_identity || fail "failed to remove the gix SSH identity f
 cleanup_ssh_client_host
 
 prepare_policy_fixture
-vm_ssh /system/bin/mkdir "$guest_root/fixture/.git/refs/replace"
+vm_ssh /user/bin/mkdir "$guest_root/fixture/.git/refs/replace"
 {
   printf 'put "%s" "%s"\n' "$fixture/.git/config" "$guest_root/fixture/.git/config"
   printf 'put "%s" "%s"\n' \
@@ -1488,7 +1488,7 @@ vm_ssh \
   "HOME=$guest_root/home XDG_CONFIG_HOME=$guest_root/xdg $guest_gix -r $guest_root/fixture -c core.abbrev=12 log" \
   > "$temporary/guest.log"
 verify_log "$temporary/guest.log"
-vm_ssh /system/bin/mv "$guest_root/fixture/.git" "$guest_root/output/worktree/.git"
+vm_ssh /user/bin/mv "$guest_root/fixture/.git" "$guest_root/output/worktree/.git"
 printf 'UTF8\n' > "$temporary/native-edit"
 printf 'put "%s" "%s"\n' \
   "$temporary/native-edit" "$guest_root/output/worktree/café" | "${sftp_command[@]}"

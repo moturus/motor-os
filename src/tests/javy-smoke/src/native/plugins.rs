@@ -3,7 +3,7 @@
 
 use super::{JavyTools, Result, Suite, TEST_INPUTS, fs};
 
-const JAVY: &str = "MOTOR_OS_CAPS=0x200 /devtools/bin/javy";
+const JAVY: &str = "MOTOR_OS_CAPS=0x200 /user/bin/dev/javy";
 
 /// Initializes `plugin-{name}.wasm` deterministically into `{output}.wasm`.
 fn initialize(suite: &mut Suite, name: &str, output: &str) -> Result<()> {
@@ -41,7 +41,7 @@ pub(super) fn run(suite: &mut Suite, repeat: bool) -> Result<()> {
     initialize_checked(suite, "p1", repeat)?;
     let (stdout, _) = suite.command(
         "p1-schema",
-        "MOTOR_OS_CAPS=0 /devtools/bin/javy build hello.js -J help -C plugin=p1.wasm",
+        "MOTOR_OS_CAPS=0 /user/bin/dev/javy build hello.js -J help -C plugin=p1.wasm",
         0,
     )?;
     if !stdout.contains("-J  event-loop") {

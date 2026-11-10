@@ -8,7 +8,7 @@ pub(super) fn validate(stderr: &str, roots: &[&Path]) -> io::Result<()> {
         if line.contains(" ERROR ")
             || (line.contains(" WARN ")
                 && !(line.contains("Failed to parse `")
-                    && line.contains("/devtools/bin/lorry")
+                    && line.contains("/user/bin/dev/lorry")
                     && line.contains("as a semver version")))
         {
             return Err(io::Error::other(format!(
@@ -63,6 +63,6 @@ mod tests {
         ] {
             assert!(validate(&bad, &[first, second]).is_err());
         }
-        validate(&format!("{input}\n WARN Failed to parse `/devtools/bin/lorry --version` output as a semver version"), &[first, second]).unwrap();
+        validate(&format!("{input}\n WARN Failed to parse `/user/bin/dev/lorry --version` output as a semver version"), &[first, second]).unwrap();
     }
 }

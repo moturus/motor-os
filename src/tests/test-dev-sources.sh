@@ -64,7 +64,7 @@ export MOTO_CHV_RUNTIME_DIR="$VM_RUNTIME_DIR/chv"
 DEV_TMP=/user/tmp/dev-sources
 NATIVE_FIXTURE_DIR="$DEV_TMP/native-tests"
 NATIVE_FIXTURES=(native-fstat.c native-temp.c native-temp.cpp)
-SYS_LIB=/devtools/src/motor-os/sys/lib
+SYS_LIB=/none/dev/motor-os/sys/lib
 SYS_LIB_CRATES=(moto-rt moto-sys moto-sdk)
 # moto-sdk's files with #[test] functions, each with the module path libtest
 # reports for its tests.
@@ -123,7 +123,7 @@ expect_guest_mode() {
   local description="$4"
   local listing
 
-  listing="$(vm_ssh "/system/bin/ls -l $directory")" ||
+  listing="$(vm_ssh "/user/bin/ls -l $directory")" ||
     fail "cannot inspect $description"
   if ! printf '%s\n' "$listing" | awk -v name="$name" -v expected="$expected" '
     $NF == name { found = 1; if ($1 != expected) exit 1 }
@@ -140,12 +140,12 @@ expect_nested_guest_mode() {
   local description="$4"
   local paths path directory listing
 
-  paths="$(vm_ssh "/system/bin/find $root -type f -name $name")" ||
+  paths="$(vm_ssh "/user/bin/find $root -type f -name $name")" ||
     fail "cannot find $description"
   [ -n "$paths" ] || fail "no $description was produced"
   while IFS= read -r path; do
     directory="${path%/*}"
-    listing="$(vm_ssh "/system/bin/ls -l $directory")" ||
+    listing="$(vm_ssh "/user/bin/ls -l $directory")" ||
       fail "cannot inspect $description at $path"
     if printf '%s\n' "$listing" |
       awk -v name="$name" -v expected="$expected" '$NF == name && $1 == expected { found = 1 } END { exit !found }'; then
@@ -157,7 +157,7 @@ expect_nested_guest_mode() {
 
 count_guest_files() {
   local listing
-  listing="$(vm_ssh "/system/bin/find $1 -type f")" || fail "cannot list $1"
+  listing="$(vm_ssh "/user/bin/find $1 -type f")" || fail "cannot list $1"
   awk 'NF { files++ } END { print files + 0 }' <<< "$listing"
 }
 
@@ -232,14 +232,14 @@ start_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$CONSOLE_LOG" \
 
 echo "-- Developer source trees --"
 for package in red lorry; do
-  vm_ssh "[ -f /devtools/src/motor-os/bin/$package/Cargo.toml ]" ||
-    fail "developer image is missing /devtools/src/motor-os/bin/$package/Cargo.toml"
-  vm_ssh "[ ! -d /devtools/src/motor-os/bin/$package/target ]" ||
-    fail "developer image contains /devtools/src/motor-os/bin/$package/target"
-  vm_ssh "[ ! -d /devtools/src/motor-os/bin/$package/.lorry/vendor ]" ||
+  vm_ssh "[ -f /none/dev/motor-os/bin/$package/Cargo.toml ]" ||
+    fail "developer image is missing /none/dev/motor-os/bin/$package/Cargo.toml"
+  vm_ssh "[ ! -d /none/dev/motor-os/bin/$package/target ]" ||
+    fail "developer image contains /none/dev/motor-os/bin/$package/target"
+  vm_ssh "[ ! -d /none/dev/motor-os/bin/$package/.lorry/vendor ]" ||
     fail "developer image contains materialized dependencies for $package"
 done
-vm_ssh "[ ! -e /devtools/src/motor-os/bin/curl ]" ||
+vm_ssh "[ ! -e /none/dev/motor-os/bin/curl ]" ||
   fail "developer image exposes curl as a Motor-native source project"
 # make dev.img admitted the staged library sources, compiled their
 # dependencies, and removed the build tree
@@ -253,32 +253,31 @@ for file in Cargo.toml Cargo.lock .lorry/dependencies-v2.toml; do
 done
 vm_ssh "[ ! -e $SYS_LIB/target ]" || fail "developer image contains $SYS_LIB/target"
 for source in "${NATIVE_FIXTURES[@]}"; do
-  vm_ssh "[ ! -e /devtools/src/$source ]" ||
-    fail "developer image contains test-only source /devtools/src/$source"
+  vm_ssh "[ ! -e /none/dev/$source ]" ||
+    fail "developer image contains test-only source /none/dev/$source"
 done
 for role in user none; do
-  vm_ssh "[ -f /devtools/lorry/$role/vendor/repository.toml ]" ||
+  vm_ssh "[ -f /$role/dev/lorry/vendor/repository.toml ]" ||
     fail "developer image is missing the writable $role Lorry repository"
-  vm_ssh "[ -d /devtools/lorry/$role/cache ]" ||
+  vm_ssh "[ -d /$role/dev/lorry/cache ]" ||
     fail "developer image is missing the $role Lorry cache directory"
 done
 # Only the Interactive role holds the library sources' dependencies.
-vm_ssh "[ -z \"\$(/system/bin/find /devtools/lorry/none/vendor/objects -type f)\" ]" ||
+vm_ssh "[ -z \"\$(/user/bin/find /none/dev/lorry/vendor/objects -type f)\" ]" ||
   fail "developer image contains preinstalled none Lorry dependency objects"
-user_objects="$(count_guest_files /devtools/lorry/user/vendor/objects)"
-user_cache_files="$(count_guest_files /devtools/lorry/user/cache)"
+user_objects="$(count_guest_files /user/dev/lorry/vendor/objects)"
+user_cache_files="$(count_guest_files /user/dev/lorry/cache)"
 [ "$user_objects" -gt 0 ] || fail "developer image lacks the dependencies of $SYS_LIB"
 [ "$user_cache_files" -gt 0 ] ||
   fail "developer image lacks the compiled dependencies of $SYS_LIB"
 vm_ssh "[ ! -e /user/cfg/lorry ]" ||
   fail "developer image still contains the old Lorry state directory"
-vm_ssh "[ -f /devtools/lorry/readme.txt ]" ||
-  fail "developer image is missing /devtools/lorry/readme.txt"
-expect_guest_mode /devtools lorry drwxrwxr-x "Lorry state directory"
-expect_guest_mode /devtools/lorry user drwxrwx--- "Interactive Lorry state"
-expect_guest_mode /devtools/lorry none drwxrwxrwx "None Lorry state"
-expect_guest_mode /devtools/lorry/user vendor drwxrwx--- "Interactive Lorry repository"
-expect_guest_mode /devtools/lorry/user cache drwxrwx--- "Interactive Lorry cache"
+vm_ssh "[ -f /user/dev/lorry/readme.txt ]" ||
+  fail "developer image is missing /user/dev/lorry/readme.txt"
+expect_guest_mode /user/dev lorry drwxrwxr-x "Interactive Lorry state"
+expect_guest_mode /none/dev lorry drwxrwxrwx "None Lorry state"
+expect_guest_mode /user/dev/lorry vendor drwxrwxr-x "Interactive Lorry repository"
+expect_guest_mode /user/dev/lorry cache drwxrwxr-x "Interactive Lorry cache"
 vm_ssh "[ -r /system/cfg/ssl/ca-certificates.crt ]" ||
   fail "developer image is missing the public CA trust bundle"
 for config in /user/cfg/lorry.toml /none/cfg/lorry.toml; do
@@ -291,9 +290,9 @@ case "$cc_version" in
   *"clang version"*) ;;
   *) fail "native cc --version returned unexpected output: $cc_version" ;;
 esac
-vm_ssh "[ ! -e $DEV_TMP ] || /system/bin/rm -r $DEV_TMP" ||
+vm_ssh "[ ! -e $DEV_TMP ] || /user/bin/rm -r $DEV_TMP" ||
   fail "cannot clear $DEV_TMP"
-vm_ssh "/system/bin/mkdir $DEV_TMP && /system/bin/mkdir $NATIVE_FIXTURE_DIR" ||
+vm_ssh "/user/bin/mkdir $DEV_TMP && /user/bin/mkdir $NATIVE_FIXTURE_DIR" ||
   fail "cannot create the native-fixture upload directory"
 for source in "${NATIVE_FIXTURES[@]}"; do
   [ -f "$ROOT_DIR/src/sys/tests/$source" ] ||
@@ -303,13 +302,13 @@ for source in "${NATIVE_FIXTURES[@]}"; do
     fail "cannot upload src/sys/tests/$source"
 done
 vm_ssh "/devtools/bin/cc $NATIVE_FIXTURE_DIR/native-fstat.c -o $DEV_TMP/native-fstat"
-vm_ssh "/devtools/bin/cc /devtools/src/hello-world/hello.c -o $DEV_TMP/hello-c"
+vm_ssh "/devtools/bin/cc /none/dev/hello-world/hello.c -o $DEV_TMP/hello-c"
 expect_guest_mode $DEV_TMP native-fstat -rwxr-xr-- "freshly linked native-fstat"
 expect_guest_mode $DEV_TMP hello-c -rwxr-xr-- "freshly linked hello-c"
 vm_ssh $DEV_TMP/hello-c
-vm_ssh "/devtools/bin/c++ /devtools/src/hello-world/hello.cpp -o $DEV_TMP/hello-cpp"
+vm_ssh "/devtools/bin/c++ /none/dev/hello-world/hello.cpp -o $DEV_TMP/hello-cpp"
 vm_ssh $DEV_TMP/hello-cpp
-vm_ssh "/devtools/bin/rustc /devtools/src/hello-world/hello.rs -o $DEV_TMP/hello-rust"
+vm_ssh "/devtools/bin/rustc /none/dev/hello-world/hello.rs -o $DEV_TMP/hello-rust"
 vm_ssh $DEV_TMP/hello-rust
 [ "$(vm_ssh $DEV_TMP/native-fstat)" = "native-fstat PASS" ] ||
   fail "native non-PTY fstat fixture failed"
@@ -333,12 +332,12 @@ vm_ssh "/devtools/bin/cc $NATIVE_FIXTURE_DIR/native-temp.c -o $DEV_TMP/native-te
 vm_ssh "/devtools/bin/c++ $NATIVE_FIXTURE_DIR/native-temp.cpp -o $DEV_TMP/native-temp-cpp"
 [ "$(vm_ssh $DEV_TMP/native-temp-cpp)" = "native-temp-cpp PASS" ] ||
   fail "native libc++ temporary-directory contract failed"
-vm_ssh "/system/bin/rm -r $NATIVE_FIXTURE_DIR"
+vm_ssh "/user/bin/rm -r $NATIVE_FIXTURE_DIR"
 
 rust_temp='use std::env; fn main() { println!("{}", env::temp_dir().display()); }'
-printf '%s\n' "$rust_temp" | vm_ssh "/system/bin/rush -c 'cat >$DEV_TMP/temp-contract.rs'"
+printf '%s\n' "$rust_temp" | vm_ssh "/user/bin/rush -c 'cat >$DEV_TMP/temp-contract.rs'"
 vm_ssh "/devtools/bin/rustc $DEV_TMP/temp-contract.rs -o $DEV_TMP/temp-contract"
-[ "$(vm_ssh "/system/bin/rush -c 'unset TMPDIR; $DEV_TMP/temp-contract'")" = /user/tmp ] ||
+[ "$(vm_ssh "/user/bin/rush -c 'unset TMPDIR; $DEV_TMP/temp-contract'")" = /user/tmp ] ||
   fail "Rust std did not use the Motor temp fallback"
 [ "$(vm_ssh "TMPDIR=/none/tmp $DEV_TMP/temp-contract")" = /none/tmp ] ||
   fail "Rust std ignored explicit TMPDIR"
@@ -346,26 +345,26 @@ vm_ssh "/devtools/bin/rustc $DEV_TMP/temp-contract.rs -o $DEV_TMP/temp-contract"
 # Build trees are scratch. Remove each one after its boundary check so later
 # independent builds retain enough room for their own outputs.
 for package in red; do
-  vm_ssh "cd /devtools/src/motor-os/bin/$package && $LORRY_VENDOR_ENV /devtools/bin/lorry vendor --accept-all" ||
-    fail "developer image cannot vendor /devtools/src/motor-os/bin/$package"
-  vm_ssh "cd /devtools/src/motor-os/bin/$package && /devtools/bin/lorry build" ||
-    fail "developer image cannot natively build /devtools/src/$package"
-  expect_nested_guest_mode "/devtools/src/motor-os/bin/$package/target/lorry/debug/build" \
+  vm_ssh "cd /none/dev/motor-os/bin/$package && $LORRY_VENDOR_ENV /user/bin/dev/lorry vendor --accept-all" ||
+    fail "developer image cannot vendor /none/dev/motor-os/bin/$package"
+  vm_ssh "cd /none/dev/motor-os/bin/$package && /user/bin/dev/lorry build" ||
+    fail "developer image cannot natively build /none/dev/$package"
+  expect_nested_guest_mode "/none/dev/motor-os/bin/$package/target/lorry/debug/build" \
     build-script-build -rwxr-xr-- "Cargo-uplifted $package build scripts"
-  vm_ssh "/system/bin/rm -r /devtools/src/motor-os/bin/$package/target"
+  vm_ssh "/user/bin/rm -r /none/dev/motor-os/bin/$package/target"
 done
-[ "$(count_guest_files /devtools/lorry/user/vendor/objects)" -gt "$user_objects" ] ||
-  fail "Lorry did not populate /devtools/lorry/user/vendor"
-[ "$(count_guest_files /devtools/lorry/user/cache)" -gt "$user_cache_files" ] ||
-  fail "Lorry did not populate /devtools/lorry/user/cache"
+[ "$(count_guest_files /user/dev/lorry/vendor/objects)" -gt "$user_objects" ] ||
+  fail "Lorry did not populate /user/dev/lorry/vendor"
+[ "$(count_guest_files /user/dev/lorry/cache)" -gt "$user_cache_files" ] ||
+  fail "Lorry did not populate /user/dev/lorry/cache"
 vm_ssh "[ ! -e /user/cfg/lorry ]" ||
   fail "Lorry recreated its old state directory"
-vm_ssh "cd /devtools/src/motor-os/bin/lorry && $LORRY_VENDOR_ENV /devtools/bin/lorry vendor --accept-all" ||
-  fail "developer image cannot vendor /devtools/src/motor-os/bin/lorry"
-vm_ssh "cd /devtools/src/motor-os/bin/lorry && /devtools/bin/lorry build" ||
-  fail "developer image cannot natively build /devtools/src/lorry"
-vm_ssh "/system/bin/cp /devtools/src/motor-os/bin/lorry/target/lorry/debug/lorry $DEV_TMP/native-lorry"
-vm_ssh "/system/bin/rm -r /devtools/src/motor-os/bin/lorry/target"
+vm_ssh "cd /none/dev/motor-os/bin/lorry && $LORRY_VENDOR_ENV /user/bin/dev/lorry vendor --accept-all" ||
+  fail "developer image cannot vendor /none/dev/motor-os/bin/lorry"
+vm_ssh "cd /none/dev/motor-os/bin/lorry && /user/bin/dev/lorry build" ||
+  fail "developer image cannot natively build /none/dev/lorry"
+vm_ssh "/user/bin/cp /none/dev/motor-os/bin/lorry/target/lorry/debug/lorry $DEV_TMP/native-lorry"
+vm_ssh "/user/bin/rm -r /none/dev/motor-os/bin/lorry/target"
 
 # The library sources' tests, offline: the image carries the admitted
 # workspace and its compiled dependencies, made with the same four jobs.
@@ -373,13 +372,13 @@ echo "-- Native tests of $SYS_LIB --"
 native_progress="$VM_RUNTIME_DIR/native-tests.err"
 native_results="$VM_RUNTIME_DIR/native-tests.out"
 native_status=0
-vm_ssh "cd $SYS_LIB && /devtools/bin/lorry test -j 4" \
+vm_ssh "cd $SYS_LIB && /user/bin/dev/lorry test -j 4" \
   > "$native_results" 2> "$native_progress" || native_status=$?
 cat "$native_progress" "$native_results"
 [ "$native_status" -eq 0 ] ||
   fail "native lorry test in $SYS_LIB failed with status $native_status"
 check_native_tests "$native_progress" "$native_results"
-vm_ssh "/system/bin/rm -r $SYS_LIB/target"
+vm_ssh "/user/bin/rm -r $SYS_LIB/target"
 
 kill -0 "$VMM_PID" 2>/dev/null ||
   fail "owned $TEST_VM_LABEL exited before final teardown"

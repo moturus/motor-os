@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-const SYSBOX: &str = "/system/bin/sysbox";
+const SYSBOX: &str = "/user/bin/sysbox";
 
 fn build_files(root: &Path) {
     let _ = std::fs::remove_dir_all(root);
@@ -521,10 +521,10 @@ fn test_errors(root: &Path) {
     println!("sysbox_diff::test_errors PASS");
 }
 
-/// `/system/bin/diff` is the name people type: a rush shim over `sysbox
+/// `/user/bin/diff` is the name people type: a rush shim over `sysbox
 /// diff`, which has to keep an argument with a space in it whole.
 fn test_bin_shim(root: &Path) {
-    let output = Command::new("/system/bin/diff")
+    let output = Command::new("/user/bin/diff")
         .args(["f1", "with space"])
         .current_dir(root)
         .stdin(Stdio::null())

@@ -92,7 +92,7 @@ impl Fixture {
         let config = std::fs::read_to_string(source)
             .unwrap()
             .replace("0.0.0.0:2222", "127.0.0.1:0")
-            .replace("/system/bin:/user/bin", "/bin:/usr/bin")
+            .replace("/user/bin", "/bin:/usr/bin")
             .replace(
                 "/user/cfg/russhd/users.toml",
                 root.join("users.toml").to_str().unwrap(),

@@ -8,7 +8,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const SYSBOX: &str = "/system/bin/sysbox";
+const SYSBOX: &str = "/user/bin/sysbox";
 
 const THREE: &str = "hello world\nsecond line here\nthird\n";
 
@@ -318,10 +318,10 @@ fn test_large_input(root: &Path) {
     println!("sysbox_wc::test_large_input PASS");
 }
 
-/// `/system/bin/wc` is the name people type: a rush shim over `sysbox wc`, and what
+/// `/user/bin/wc` is the name people type: a rush shim over `sysbox wc`, and what
 /// it prints has to be what the command itself prints.
 fn test_bin_shim(root: &Path) {
-    let shim = Command::new("/system/bin/wc")
+    let shim = Command::new("/user/bin/wc")
         .arg("three.txt")
         .current_dir(root)
         .stdin(Stdio::null())
@@ -330,7 +330,7 @@ fn test_bin_shim(root: &Path) {
 
     assert!(
         shim.status.success(),
-        "/system/bin/wc failed: {}",
+        "/user/bin/wc failed: {}",
         String::from_utf8_lossy(&shim.stderr)
     );
     assert_eq!(

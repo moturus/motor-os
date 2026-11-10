@@ -5,7 +5,7 @@ use wasm_smoke_suite::used_memory;
 
 use super::{Result, Suite, fs};
 
-const WASMI: &str = "MOTOR_OS_CAPS=0 /devtools/bin/wasmi";
+const WASMI: &str = "MOTOR_OS_CAPS=0 /user/bin/dev/wasmi";
 /// Bounds the used-memory drift across repeated runs; the faulted pages
 /// alone are several times larger.
 const CLEANUP_SLACK: u64 = 8 << 20;

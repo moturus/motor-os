@@ -27,7 +27,7 @@ cleanup() {
   local status=$? path
   rm -rf "$temporary"
   for path in ${guest_user_paths[@]+"${guest_user_paths[@]}"}; do
-    remote "/system/bin/rm -r '$path'" || status=1
+    remote "/user/bin/rm -r '$path'" || status=1
   done
   exit "$status"
 }
@@ -69,7 +69,7 @@ user_home_toml=/user/rustfmt.toml
   printf 'put "%s" "%s"\n' "$FIXTURES/parser-error.rs" "$guest_root/parser-error.rs"
 } | sftp_batch
 for path in "$user_home_toml" "$user_config_dir"; do
-  if remote "/system/bin/ls '$path'" > /dev/null 2>&1; then
+  if remote "/user/bin/ls '$path'" > /dev/null 2>&1; then
     fail "$path already exists on the guest"
   fi
 done
@@ -104,7 +104,7 @@ remote "/devtools/bin/rustfmt --edition 2024 '$user_case_dir/config-dir.rs'"
 download "$user_case_dir/config-dir.rs" "$temporary/config-dir-width.rs"
 cmp "$FIXTURES/width.expected.rs" "$temporary/config-dir-width.rs" ||
   fail '/user/cfg/rustfmt/rustfmt.toml was not honored'
-remote "/system/bin/rm -r '$user_config_dir'"
+remote "/user/bin/rm -r '$user_config_dir'"
 guest_user_paths=()
 
 printf 'put "%s" "%s"\n' "$FIXTURES/width.toml" "$user_home_toml" | sftp_batch
@@ -113,7 +113,7 @@ remote "/devtools/bin/rustfmt --edition 2024 '$user_case_dir/home.rs'"
 download "$user_case_dir/home.rs" "$temporary/home-width.rs"
 cmp "$FIXTURES/width.expected.rs" "$temporary/home-width.rs" ||
   fail '/user/rustfmt.toml was not honored'
-remote "/system/bin/rm '$user_home_toml'"
+remote "/user/bin/rm '$user_home_toml'"
 guest_user_paths=()
 
 remote "HOME='$env_case_dir/home' XDG_CONFIG_HOME='$env_case_dir/xdg' /devtools/rust/bin/rustfmt --edition 2024 '$env_case_dir/input.rs'"
@@ -155,5 +155,5 @@ for kind in lexer parser; do
 done
 
 elapsed_ms="$((($(date +%s%N) - started_ns) / 1000000))"
-remote "/system/bin/rm -r '$guest_root'"
+remote "/user/bin/rm -r '$guest_root'"
 echo "test-rustfmt-native PASS; elapsed_ms=$elapsed_ms"

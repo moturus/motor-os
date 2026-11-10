@@ -4,9 +4,9 @@
 command = "/devtools/rust/bin/rust-analyzer"
 
 [language-server.rust-analyzer.environment]
-CARGO = "/devtools/bin/lorry"
+CARGO = "/user/bin/dev/lorry"
 RUSTFMT = "/devtools/rust/bin/rustfmt"
-PATH = "/devtools/bin:/system/bin:/user/bin"
+PATH = "/user/bin:/user/bin/dev:/devtools/bin"
 # The background server must not take the editor's session terminal stream.
 MOTURUS_STDIO_NO_TERMINAL = "true"
 
@@ -19,7 +19,7 @@ cargo.buildScripts.enable = true
 cargo.buildScripts.useRustcWrapper = false
 # Overrides run literally; project feature/target changes need a complete override.
 cargo.buildScripts.overrideCommand = [
-  "/devtools/bin/lorry", "check", "--workspace", "--message-format=json",
+  "/user/bin/dev/lorry", "check", "--workspace", "--message-format=json",
   "--all-targets", "--keep-going", "--compile-time-deps",
   "--target", "x86_64-unknown-motor", "--target-dir", "target/rust-analyzer",
 ]

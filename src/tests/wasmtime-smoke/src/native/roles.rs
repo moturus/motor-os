@@ -30,7 +30,7 @@ pub(super) fn run() -> Result<()> {
     }
     let mut suite = Suite::new_in(
         "wasm-roles",
-        "/devtools/wasmtime/sources.txt",
+        "/user/lib/wasmtime/sources.txt",
         Path::new(DIRECTORY),
         open_log()?,
     )?;
@@ -73,7 +73,7 @@ pub(super) fn run() -> Result<()> {
         ] {
             suite.command(
                 &format!("{name}-{label}"),
-                &format!("MOTOR_OS_CAPS={:#x} /devtools/bin/{command}", caps | 0x200),
+                &format!("MOTOR_OS_CAPS={:#x} /user/bin/dev/{command}", caps | 0x200),
                 0,
             )?;
         }
@@ -99,7 +99,7 @@ pub(super) fn run() -> Result<()> {
         ] {
             let (out, err) = suite.command(
                 &format!("{name}-{label}"),
-                &format!("MOTOR_OS_CAPS={caps:#x} /devtools/bin/{command}"),
+                &format!("MOTOR_OS_CAPS={caps:#x} /user/bin/dev/{command}"),
                 0,
             )?;
             expect(label, &out, "roles\n")?;

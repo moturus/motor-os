@@ -154,7 +154,7 @@ fn abandoned_staging_count(root: &Path) -> Result<usize, String> {
 }
 
 fn process_alive(pid: u32) -> Result<bool, String> {
-    Command::new("/system/bin/rush")
+    Command::new("/user/bin/rush")
         .args(["-c", &format!("kill -0 {pid}")])
         .stdout(Stdio::null())
         .stderr(Stdio::null())

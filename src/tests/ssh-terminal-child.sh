@@ -1,4 +1,4 @@
-#!/system/bin/rush
+#!/user/bin/rush
 
 echo STREAM_READY
 read -r value

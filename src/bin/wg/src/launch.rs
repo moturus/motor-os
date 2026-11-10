@@ -113,7 +113,7 @@ pub fn up(path: &str) -> std::result::Result<(u64, Interface), String> {
     let mut server = LocalServer::new(&url, ChannelSize::Small, 1, 1)
         .map_err(|_| "cannot create startup endpoint")?;
     let alarm = ipc::alarm(deadline)?;
-    let mut child = Command::new("/system/bin/wg")
+    let mut child = Command::new("/user/bin/wg")
         .args([
             "--managed",
             &url,

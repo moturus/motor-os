@@ -118,14 +118,14 @@ build_wasmtime() {
 		CARGO_NET_OFFLINE=true MOTOR_BUILD_DIR="$ASSEMBLY_BUILD_ROOT/wasmtime" \
 			MOTOR_SYSROOT="$SYSROOT" JOBS="$(wasm_build_jobs)" ./motor-build.sh all
 	)
-	local data="$WASMTIME_IMG/devtools/wasmtime"
-	mkdir -p "$WASMTIME_IMG/devtools/bin" "$data"
+	local data="$WASMTIME_IMG/user/lib/wasmtime"
+	mkdir -p "$WASMTIME_IMG/user/bin/dev" "$data"
 	install -m 755 "$ASSEMBLY_BUILD_ROOT/wasmtime/full/x86_64-unknown-motor/release/wasmtime" \
-		"$WASMTIME_IMG/devtools/bin/wasmtime"
+		"$WASMTIME_IMG/user/bin/dev/wasmtime"
 	install -m 755 "$ASSEMBLY_BUILD_ROOT/wasmtime/runtime/x86_64-unknown-motor/release/wasmtime-rt" \
-		"$WASMTIME_IMG/devtools/bin/wasmtime-rt"
+		"$WASMTIME_IMG/user/bin/dev/wasmtime-rt"
 	printf '%s\n' "$manifest" > "$data/sources.txt"
-	(cd "$WASMTIME_IMG" && sha256sum devtools/bin/wasmtime devtools/bin/wasmtime-rt devtools/wasmtime/sources.txt \
+	(cd "$WASMTIME_IMG" && sha256sum user/bin/dev/wasmtime user/bin/dev/wasmtime-rt user/lib/wasmtime/sources.txt \
 		> "$data/SHA256SUMS")
 	# Test fixtures stay out of the images; test-wasm.sh uploads them.
 	rm -rf "$WASMTIME_TESTS"

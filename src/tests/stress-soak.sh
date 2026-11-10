@@ -165,18 +165,18 @@ capture_forensics() {
     echo "================================================================"
     echo "--- host: qemu alive? ---"; pgrep -af 'qemu-system-x86_6[4]|[r]un-qemu.sh' 2>&1
     echo "--- per-workload stat files ---"; for s in "$OUT"/*.stat; do [ -f "$s" ] && { echo "  $(basename "$s"): $(cat "$s")"; }; done
-    echo "--- ssh: /system/bin/ps ---"; VSSH_TMO=25 vssh_n /system/bin/ps 2>&1
-    echo "--- ssh: stats get 1 (kernel), pass 1 ---"; VSSH_TMO=25 vssh_n /system/bin/stats get 1 2>&1
-    echo "--- ssh: stats get 2 (net), pass 1 ---";    VSSH_TMO=25 vssh_n /system/bin/stats get 2 2>&1
+    echo "--- ssh: /user/bin/ps ---"; VSSH_TMO=25 vssh_n /user/bin/ps 2>&1
+    echo "--- ssh: stats get 1 (kernel), pass 1 ---"; VSSH_TMO=25 vssh_n /user/bin/stats get 1 2>&1
+    echo "--- ssh: stats get 2 (net), pass 1 ---";    VSSH_TMO=25 vssh_n /user/bin/stats get 2 2>&1
     sleep 3
-    echo "--- ssh: stats get 1 (kernel), pass 2 (3s later; counters moving?) ---"; VSSH_TMO=25 vssh_n /system/bin/stats get 1 2>&1
-    echo "--- ssh: stats get 2 (net), pass 2 ---";    VSSH_TMO=25 vssh_n /system/bin/stats get 2 2>&1
+    echo "--- ssh: stats get 1 (kernel), pass 2 (3s later; counters moving?) ---"; VSSH_TMO=25 vssh_n /user/bin/stats get 1 2>&1
+    echo "--- ssh: stats get 2 (net), pass 2 ---";    VSSH_TMO=25 vssh_n /user/bin/stats get 2 2>&1
     echo "--- mdbg print-stacks for every listed pid ---"
     local pids
-    pids="$(VSSH_TMO=25 vssh_n /system/bin/ps 2>/dev/null | awk 'NR>1{gsub(/[+*?]/,"",$1); if($1 ~ /^[0-9]+$/) print $1}')"
+    pids="$(VSSH_TMO=25 vssh_n /user/bin/ps 2>/dev/null | awk 'NR>1{gsub(/[+*?]/,"",$1); if($1 ~ /^[0-9]+$/) print $1}')"
     for p in $pids; do
       echo "### print-stacks pid $p ###"
-      VSSH_TMO=30 vssh_n /devtools/bin/mdbg print-stacks "$p" 2>&1
+      VSSH_TMO=30 vssh_n /user/bin/dev/mdbg print-stacks "$p" 2>&1
     done
     echo "--- qemu monitor: info cpus (pass 1) ---"; mon_cmd "info cpus"
     echo "--- qemu monitor: info registers -a (pass 1) ---"; mon_cmd "info registers -a"
@@ -256,7 +256,7 @@ for _ in $(seq 1 40); do
     exit 1
   fi
   if run_timeout 12 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=8 -o ConnectionAttempts=1 \
-       motor@"$VM_IP" /system/bin/rush -c true >/dev/null 2>&1; then up=1; break; fi
+       motor@"$VM_IP" /user/bin/rush -c true >/dev/null 2>&1; then up=1; break; fi
   sleep 3
 done
 [ "$up" = 1 ] || { STOP_REASON="BOOT-FAILED: VM never reachable over ssh"; log "$STOP_REASON"; exit 1; }
@@ -291,7 +291,7 @@ ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 || EXTERNAL_ICMP=0
 gate_ping_external() {
   local host="$1" output rc=0
   output="$(run_timeout 30 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=10 \
-    motor@"$VM_IP" /system/bin/ping -c 1 "$host" 2>&1)" || rc=$?
+    motor@"$VM_IP" /user/bin/ping -c 1 "$host" 2>&1)" || rc=$?
   printf '%s\n' "$output" | tee -a "$GATE_LOG"
   [ "$rc" -eq 0 ] && return
   if [ "$EXTERNAL_ICMP" = 0 ]; then
@@ -308,7 +308,7 @@ gate_ping_external() {
 gate_expect_ping_error() {
   local host="$1" expected="$2" output rc=0
   output="$(run_timeout 30 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=10 \
-    motor@"$VM_IP" /system/bin/ping -c 1 "$host" 2>&1)" || rc=$?
+    motor@"$VM_IP" /user/bin/ping -c 1 "$host" 2>&1)" || rc=$?
   printf '%s\n' "$output" | tee -a "$GATE_LOG"
   [ "$rc" -ne 0 ] || gate_fail "ping unexpectedly resolved '$host'"
   case "$output" in
@@ -322,7 +322,7 @@ gate_wait_for_ping_error() {
   for _ in $(seq 1 20); do
     rc=0
     output="$(run_timeout 30 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=10 \
-      motor@"$VM_IP" /system/bin/ping -c 1 "$host" 2>&1)" || rc=$?
+      motor@"$VM_IP" /user/bin/ping -c 1 "$host" 2>&1)" || rc=$?
     [ "$rc" -ne 0 ] || gate_fail "ping unexpectedly resolved '$host'"
     case "$output" in
       *"$expected"*)
@@ -341,7 +341,7 @@ gate_udp_socket_count() {
   GATE_UDP_SOCKET_COUNT=""
   for _ in $(seq 1 20); do
     count=""
-    if output="$(vssh_n /system/bin/stats get 2 2>&1)"; then
+    if output="$(vssh_n /user/bin/stats get 2 2>&1)"; then
       count="$(printf '%s\n' "$output" |
         awk '$2 == "net.udp_sockets" { print $3 }')"
       [ "$count" = 1 ] && { GATE_UDP_SOCKET_COUNT=1; return; }
@@ -365,8 +365,8 @@ gate_rmux_copy_keys() {
 }
 
 log "running mandatory VM-side full-test gate"
-gate_ssh 30 "ping 127.0.0.1" /system/bin/ping -c 1 127.0.0.1
-gate_ssh 30 "ping localhost" /system/bin/ping -c 1 localhost
+gate_ssh 30 "ping 127.0.0.1" /user/bin/ping -c 1 127.0.0.1
+gate_ssh 30 "ping localhost" /user/bin/ping -c 1 localhost
 gate_ssh 60 "DNS resolver self-test" /system/services/dns-resolver --self-test
 gate_ping_external google.com
 gate_expect_ping_error does-not-exist.motor.invalid NotFound
@@ -374,11 +374,11 @@ gate_udp_socket_count
 [ "$GATE_UDP_SOCKET_COUNT" = 1 ] ||
   gate_fail "DNS tests left $GATE_UDP_SOCKET_COUNT UDP socket(s), expected one DNS listener"
 
-resolver_pid="$(vssh_n /system/bin/ps |
+resolver_pid="$(vssh_n /user/bin/ps |
   awk '$NF == "/system/services/dns-resolver" { gsub(/[+*?]/, "", $1); print $1; exit }')"
 [ -n "$resolver_pid" ] || gate_fail "could not find dns-resolver"
-gate_ssh 30 "stop DNS resolver" "/system/bin/rush -c 'kill $resolver_pid'"
-gate_ssh 30 "numeric ping without DNS" /system/bin/ping -c 1 127.0.0.1
+gate_ssh 30 "stop DNS resolver" "/user/bin/rush -c 'kill $resolver_pid'"
+gate_ssh 30 "numeric ping without DNS" /user/bin/ping -c 1 127.0.0.1
 gate_wait_for_ping_error google.com NotConnected
 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
   MOTOR_OS_CAPS=0x148 /system/services/dns-resolver \
@@ -407,9 +407,9 @@ gate_rc=${PIPESTATUS[0]}
   gate_fail "systest did not finish with 'systest: ALL PASS'"
 
 out="$(printf 'relay-smoke\n' |
-  vssh "/system/bin/rush -c 'read X && echo GOT=\$X'")"
+  vssh "/user/bin/rush -c 'read X && echo GOT=\$X'")"
 [ "$out" = "GOT=relay-smoke" ] || gate_fail "stdin relay smoke: got '$out'"
-out="$(vssh_n "/system/bin/rush -c 'echo tail-smoke'")"
+out="$(vssh_n "/user/bin/rush -c 'echo tail-smoke'")"
 [ "$out" = tail-smoke ] || gate_fail "relay tail smoke: got '$out'"
 
 # Only stdout is the screen: debug builds log to stderr, and a log line can
@@ -456,7 +456,7 @@ log "binaries: httpd=$HTTPD httpd-axum=$HTTPD_AXUM"
 # knows; the bytes behind the .png name are random.
 FETCH_URLPATH="/soak-asset.png"
 head -c 108776 /dev/urandom > "$OUT/soak-asset.png"
-vssh_n "/system/bin/rush -c '[ -d $SERVE_DIR ] || /system/bin/mkdir $SERVE_DIR'" >/dev/null 2>&1 ||
+vssh_n "/user/bin/rush -c '[ -d $SERVE_DIR ] || /user/bin/mkdir $SERVE_DIR'" >/dev/null 2>&1 ||
   gate_fail "could not create $SERVE_DIR"
 printf 'put %s %s%s\n' "$OUT/soak-asset.png" "$SERVE_DIR" "$FETCH_URLPATH" |
   sftp -b - -F /dev/null -P "$SSH_PORT" -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
@@ -619,11 +619,11 @@ w_fs_sftp() {
 # create/remove in the same directory can fail (motor-fs rejects it).
 w_fs_write() {
   local n=0 f=0 rc a b dir=/user/tmp/strw
-  vssh_n "/system/bin/rush -c '[ -d $dir ] || /system/bin/mkdir $dir'" >>"$OUT/fs-write.log" 2>&1
+  vssh_n "/user/bin/rush -c '[ -d $dir ] || /user/bin/mkdir $dir'" >>"$OUT/fs-write.log" 2>&1
   while :; do
     n=$((n+1)); a="$dir/strw-a.$((n%6)).bin"; b="$dir/strw-b.$((n%6)).bin"
     run_timeout 45 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
-      "/system/bin/sh -c '/system/bin/sysbox cp $SERVE_DIR$FETCH_URLPATH $a && /system/bin/sysbox cp $a $b && /system/bin/sysbox rm $a && /system/bin/sysbox rm $b'" \
+      "/user/bin/sh -c '/user/bin/sysbox cp $SERVE_DIR$FETCH_URLPATH $a && /user/bin/sysbox cp $a $b && /user/bin/sysbox rm $a && /user/bin/sysbox rm $b'" \
       >>"$OUT/fs-write.log" 2>&1; rc=$?
     echo "iter=$n rc=$rc" >>"$OUT/fs-write.log"
     [ "$rc" -ne 0 ] && f=$((f+1)); write_stat fs-write "$n" "$f" "$rc" "cp-churn"; pace "$rc"; done
@@ -797,7 +797,7 @@ tui_rmux_once() { # tmpdir
 # it gets its own directory for the same reason fs-write does.
 w_tui_rmux() {
   local n=0 f=0 rc out dir=/user/tmp/strm
-  vssh_n "/system/bin/rush -c '[ -d $dir ] || /system/bin/mkdir $dir'" >>"$OUT/tui-rmux.log" 2>&1
+  vssh_n "/user/bin/rush -c '[ -d $dir ] || /user/bin/mkdir $dir'" >>"$OUT/tui-rmux.log" 2>&1
   while :; do
     n=$((n+1))
     tui_rmux_once "$dir"; out="$TUI_RMUX_OUT"; rc="$TUI_RMUX_RC"
@@ -863,7 +863,7 @@ while :; do
       capture_forensics "$STOP_REASON"; break 2
     fi
   done
-  if VSSH_TMO=15 vssh_n /system/bin/rush -c true >/dev/null 2>&1; then
+  if VSSH_TMO=15 vssh_n /user/bin/rush -c true >/dev/null 2>&1; then
     consec_liveness_fail=0
   else
     consec_liveness_fail=$((consec_liveness_fail+1))
@@ -940,12 +940,12 @@ while :; do
     # diagnostic evidence (metadata growth can legitimately pin blocks).
     {
       echo "=== uptime=${up}s $(date +%H:%M:%S)"
-      VSSH_TMO=25 vssh_n /system/bin/stats get 1 2>&1 |
+      VSSH_TMO=25 vssh_n /user/bin/stats get 1 2>&1 |
         grep -aE 'mem\.(blocks_|pages_reserved|pages_free_low|block_|used_pages|phys_small_pages_low_water)' || true
     } >> "$OUT/blocks.log"
     {
       echo "=== uptime=${up}s $(date +%H:%M:%S)"
-      VSSH_TMO=25 vssh_n /system/bin/stats get 2 2>&1 |
+      VSSH_TMO=25 vssh_n /user/bin/stats get 2 2>&1 |
         grep -aE 'pager\.|spawn\.' || true
     } >> "$OUT/pager.log"
   fi

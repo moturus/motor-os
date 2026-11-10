@@ -2,7 +2,7 @@
 # Native Lorry builds of real Motor OS projects in the release developer image:
 # red, rush and russhd from this checkout, and Helix from its managed
 # fork checkout (external-sources/helix, as in src/build-motor-os.sh). Each project is
-# vendored online in the guest, then built with /devtools/bin/lorry: a debug
+# vendored online in the guest, then built with /user/bin/dev/lorry: a debug
 # build, or a release build with --release. Every project is attempted; the
 # run fails if any of them failed.
 set -euo pipefail
@@ -111,15 +111,15 @@ for entry in "${PROJECTS[@]}"; do
     path="$REMOTE_ROOT/$directory"
     start="$SECONDS"
     result=PASS
-    if ! guest "$name-vendor" "cd $path && /devtools/bin/lorry vendor --accept-all"; then
+    if ! guest "$name-vendor" "cd $path && /user/bin/dev/lorry vendor --accept-all"; then
         result="FAIL (vendor)"
-    elif ! guest "$name-build" "cd $path && /devtools/bin/lorry build$BUILD_ARGUMENTS"; then
+    elif ! guest "$name-build" "cd $path && /user/bin/dev/lorry build$BUILD_ARGUMENTS"; then
         result="FAIL (build)"
     elif ! guest "$name-check" "[ -f $path/target/lorry/$PROFILE/$executable ]"; then
         result="FAIL (no $executable)"
     fi
     # Later projects need the space.
-    guest "$name-clean" "[ ! -d $path/target ] || /system/bin/rm -r $path/target" ||
+    guest "$name-clean" "[ ! -d $path/target ] || /user/bin/rm -r $path/target" ||
         fail "cannot remove the $name build tree"
     echo "$name: $result $((SECONDS - start))s" | tee -a "$EVIDENCE_DIR/summary.txt"
     [ "$result" = PASS ] || failed+=("$name")

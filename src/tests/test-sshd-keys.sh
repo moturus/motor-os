@@ -143,11 +143,11 @@ admin() {
   ssh "${SSH_OPTIONS[@]}" -S "$ADMIN" -o ControlMaster=no "motor@$HOST" "$@"
 }
 
-put() { admin "/system/bin/cat > $1"; }
-get() { admin "/system/bin/cat $1"; }
+put() { admin "/user/bin/cat > $1"; }
+get() { admin "/user/bin/cat $1"; }
 mode_of() {
   local entry
-  entry="$(admin "/system/bin/ls -l ${1%/*}" | grep -E " ${1##*/}\$")" || fail "$1 is missing"
+  entry="$(admin "/user/bin/ls -l ${1%/*}" | grep -E " ${1##*/}\$")" || fail "$1 is missing"
   printf '%s\n' "${entry%% *}"
 }
 
@@ -157,20 +157,20 @@ expect_mode() {
   [ "$mode" = "$2" ] || fail "$1 has mode '$mode', want '$2'"
 }
 
-chmod_guest() { admin "/system/bin/chmod $1 $2"; }
+chmod_guest() { admin "/user/bin/chmod $1 $2"; }
 
 # ---- what a login sees -------------------------------------------------------
 
 key_attempt() {
   ssh "${USER_OPTIONS[@]}" -o BatchMode=yes -o PreferredAuthentications=publickey \
-    -i "$2" "$1@$HOST" "${3:-/system/bin/rush -c true}" 2>"$FIXTURE/last.err"
+    -i "$2" "$1@$HOST" "${3:-/user/bin/rush -c true}" 2>"$FIXTURE/last.err"
 }
 
 password_attempt() {
   SSHD_KEYS_PASSWORD="$2" SSH_ASKPASS="$FIXTURE/askpass" SSH_ASKPASS_REQUIRE=force \
     ssh "${USER_OPTIONS[@]}" -o BatchMode=no -o PreferredAuthentications=password \
     -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 \
-    "$1@$HOST" /system/bin/rush -c true 2>"$FIXTURE/last.err"
+    "$1@$HOST" /user/bin/rush -c true 2>"$FIXTURE/last.err"
 }
 
 # Only a refusal counts: a dead VM must not read as a passing negative check.
@@ -222,7 +222,7 @@ record() {
 install_registry() {
   put "$USERS.new" < "$1"
   chmod_guest rwxrw---- "$USERS.new"
-  admin "/system/bin/mv $USERS.new $USERS"
+  admin "/user/bin/mv $USERS.new $USERS"
 }
 
 cat > "$FIXTURE/askpass" <<'SH'
@@ -250,7 +250,7 @@ fi
 
 start_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$CONSOLE_LOG"
 open_admin
-admin "/system/bin/mkdir $GUEST_TMP"
+admin "/user/bin/mkdir $GUEST_TMP"
 
 echo "-- images ship the credential layout --"
 expect_mode "$USERS" -rwxrw----
@@ -258,8 +258,8 @@ expect_mode "$KEYS/authorized_keys.motor" -rwxrw----
 expect_mode "$KEYS/authorized_keys.alice" -rwxrw----
 expect_mode /user/cfg/ssh drwxrwx---
 expect_mode /user/cfg/russhd drwxrwx---
-expect_mode /system/cfg/sshd.toml -rw-r-----
-if get /system/cfg/sshd.toml | grep -Eq '^\[users|^authorized_key[ =]|^password_hash|^salt'; then
+expect_mode /user/cfg/sshd.toml -rwxrw----
+if get /user/cfg/sshd.toml | grep -Eq '^\[users|^authorized_key[ =]|^password_hash|^salt'; then
   fail "the service configuration still holds user credentials"
 fi
 
@@ -268,10 +268,10 @@ fi
 echo "-- two names, two keys each --"
 # The form for clients without ssh-copy-id -t: it appends, and needs nothing else.
 ssh "${USER_OPTIONS[@]}" -o BatchMode=yes -i "$FIXTURE/alice-1" "alice@$HOST" \
-  "/system/bin/cat >> $KEYS/authorized_keys.alice" < "$FIXTURE/alice-2.pub" ||
+  "/user/bin/cat >> $KEYS/authorized_keys.alice" < "$FIXTURE/alice-2.pub" ||
   fail "cat >> did not install a key"
 ssh "${USER_OPTIONS[@]}" -o BatchMode=yes -i "$FIXTURE/bob-1" "bob@$HOST" \
-  "/system/bin/cat >> $KEYS/authorized_keys.bob" < "$FIXTURE/bob-2.pub" ||
+  "/user/bin/cat >> $KEYS/authorized_keys.bob" < "$FIXTURE/bob-2.pub" ||
   fail "cat >> did not install a key for the second name"
 expect_mode "$KEYS/authorized_keys.bob" -rwxrw----
 for key in alice-1 alice-2; do key_works alice "$key"; done
@@ -285,8 +285,8 @@ expect_methods alice bob nobody
 
 echo "-- a key listed for two names --"
 { public shared; } | put "$GUEST_TMP/shared"
-admin "/system/bin/rush -c '/system/bin/cat $GUEST_TMP/shared >> $KEYS/authorized_keys.alice'"
-admin "/system/bin/rush -c '/system/bin/cat $GUEST_TMP/shared >> $KEYS/authorized_keys.bob'"
+admin "/user/bin/rush -c '/user/bin/cat $GUEST_TMP/shared >> $KEYS/authorized_keys.alice'"
+admin "/user/bin/rush -c '/user/bin/cat $GUEST_TMP/shared >> $KEYS/authorized_keys.bob'"
 key_works alice shared
 key_works bob shared
 { public alice-1; public alice-2; } | put "$KEYS/authorized_keys.alice"
@@ -323,7 +323,7 @@ ssh "${USER_OPTIONS[@]}" -o BatchMode=yes -i "$FIXTURE/carol" -M -S "$CAROL_SESS
 install_registry "$FIXTURE/users.1"
 key_denied carol carol
 password_denied carol carol-password
-[ "$(ssh "${USER_OPTIONS[@]}" -S "$CAROL_SESSION" -o ControlMaster=no "carol@$HOST" /system/bin/echo still-here)" = still-here ] ||
+[ "$(ssh "${USER_OPTIONS[@]}" -S "$CAROL_SESSION" -o ControlMaster=no "carol@$HOST" /user/bin/echo still-here)" = still-here ] ||
   fail "removing a name ended its established session"
 ssh "${USER_OPTIONS[@]}" -S "$CAROL_SESSION" -O exit "carol@$HOST" >/dev/null 2>&1 || true
 
@@ -353,7 +353,7 @@ install_registry "$FIXTURE/users.bad"
 key_denied alice alice-1
 password_denied alice changed-password
 expect_methods alice nobody
-admin "/system/bin/rm $USERS"
+admin "/user/bin/rm $USERS"
 key_denied bob bob-1
 install_registry "$FIXTURE/users.1"
 key_works alice alice-1
@@ -367,7 +367,7 @@ snapshot() {
     printf '%s: %s\n' "$name" "$(mode_of "$name")"
     get "$name"
   done
-  admin "/system/bin/ls -l /user/cfg/ssh" | grep -v "authorized_keys\.$SELECTED\$"
+  admin "/user/bin/ls -l /user/cfg/ssh" | grep -v "authorized_keys\.$SELECTED\$"
 }
 
 motor_copy_id() {
@@ -426,7 +426,7 @@ expect_lines "$KEYS/authorized_keys.bob" "$(public motor-client)" "$(public inst
 
 # The name's own file need not exist, or may be empty, and a missing final
 # newline or a comment is no reason to lose anything.
-admin "/system/bin/rm $KEYS/authorized_keys.alice"
+admin "/user/bin/rm $KEYS/authorized_keys.alice"
 motor_copy_id bob motor-client installed-1 "$KEYS/authorized_keys.alice" >/dev/null ||
   fail "Motor ssh-copy-id -t failed on a missing file"
 expect_lines "$KEYS/authorized_keys.alice" "$(public installed-1)"
@@ -476,7 +476,7 @@ expect_lines "$KEYS/authorized_keys.alice" "$(public alice-1)" "$(public install
 
 for state in missing empty comment; do
   case "$state" in
-    missing) admin "/system/bin/rm $KEYS/authorized_keys.alice" ;;
+    missing) admin "/user/bin/rm $KEYS/authorized_keys.alice" ;;
     empty) : | put "$KEYS/authorized_keys.alice" ;;
     comment) printf '# keep this\n%s' "$(public alice-1)" | put "$KEYS/authorized_keys.alice" ;;
   esac
@@ -516,7 +516,7 @@ if ssh-copy-id -s -n -t "$KEYS/authorized_keys.dana" -i "$FIXTURE/bootstrap.pub"
   fail "the duplicate probe did not see the installed key"
 fi
 install_registry "$FIXTURE/users.1"
-admin "/system/bin/rm $KEYS/authorized_keys.dana"
+admin "/user/bin/rm $KEYS/authorized_keys.dana"
 
 echo "-- other installer forms fail and install nothing --"
 SELECTED=none
@@ -583,14 +583,14 @@ chmod_guest rwxrwx--- /user/cfg/russhd
 
 chmod_guest rwxrwxrwx /user/cfg
 password_denied alice changed-password
-chmod_guest rwxrwx--- /user/cfg
+chmod_guest rwxrwxr-x /user/cfg
 key_works alice alice-1
 
-admin "/system/bin/rm $key_list"
-admin "/system/bin/mkdir $key_list"
+admin "/user/bin/rm $key_list"
+admin "/user/bin/mkdir $key_list"
 key_denied alice alice-1
 password_works alice changed-password
-admin "/system/bin/rmdir $key_list" 2>/dev/null || admin "/system/bin/rm -r $key_list"
+admin "/user/bin/rmdir $key_list" 2>/dev/null || admin "/user/bin/rm -r $key_list"
 public alice-1 | put "$key_list"
 key_works alice alice-1
 
@@ -641,7 +641,7 @@ second_daemon() {
 
 # One step at a time: russhd refuses overlapping channels on a connection.
 guest_config() {
-  get /system/cfg/sshd.toml > "$FIXTURE/sshd.toml"
+  get /user/cfg/sshd.toml > "$FIXTURE/sshd.toml"
   sed -e "s/0\.0\.0\.0:2222/0.0.0.0:$1/" -e "s#^users_file = .*#users_file = '$2'#" \
     -e "s#^authorized_keys_dir = .*#authorized_keys_dir = '$3'#" "$FIXTURE/sshd.toml" |
     put "$4"
@@ -649,7 +649,7 @@ guest_config() {
 
 echo "-- a location outside /user is checked through the root --"
 none_dir=/none/tmp/sshd-keys
-admin "/system/bin/mkdir $none_dir"
+admin "/user/bin/mkdir $none_dir"
 put "$none_dir/users.toml" < "$FIXTURE/users.1"
 public alice-1 | put "$none_dir/authorized_keys.alice"
 guest_config 2223 "$none_dir/users.toml" "$none_dir" "$GUEST_TMP/outside.toml"
@@ -669,7 +669,7 @@ key_list_now="$(get "$key_list")"
 guest_config 2224 "$USERS" "$KEYS" "$GUEST_TMP/restarted.toml"
 second_daemon 2224 "$GUEST_TMP/restarted.toml"
 ssh "${DAEMON_OPTIONS[@]}" -o BatchMode=yes -i "$FIXTURE/alice-1" "alice@$HOST" \
-  /system/bin/rush -c true 2>"$FIXTURE/last.err" || fail "a new daemon refused alice: $(cat "$FIXTURE/last.err")"
+  /user/bin/rush -c true 2>"$FIXTURE/last.err" || fail "a new daemon refused alice: $(cat "$FIXTURE/last.err")"
 if ssh "${DAEMON_OPTIONS[@]}" -o BatchMode=yes -o PreferredAuthentications=publickey \
   -i "$FIXTURE/alice-2" "alice@$HOST" true 2>"$FIXTURE/last.err"; then
   fail "a new daemon accepted a removed key"
@@ -678,7 +678,7 @@ fi
 # ---- ordinary use under a second name ----------------------------------------
 
 echo "-- ssh, scp and sftp under another name --"
-[ "$(key_attempt alice "$FIXTURE/alice-1" '/system/bin/echo as-alice')" = as-alice ] ||
+[ "$(key_attempt alice "$FIXTURE/alice-1" '/user/bin/echo as-alice')" = as-alice ] ||
   fail "ssh as alice returned the wrong output"
 printf 'payload\n' > "$FIXTURE/payload"
 scp -F /dev/null -P 2222 -q -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \

@@ -1843,7 +1843,7 @@ mod tests {
             .unwrap(),
         };
         let environment = BTreeMap::from([
-            ("CARGO".to_owned(), OsString::from("/devtools/bin/lorry")),
+            ("CARGO".to_owned(), OsString::from("/user/bin/dev/lorry")),
             ("OUT_DIR".to_owned(), out_dir.into_os_string()),
             (
                 "LD_LIBRARY_PATH".to_owned(),

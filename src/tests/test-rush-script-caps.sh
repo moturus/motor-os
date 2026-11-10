@@ -5,9 +5,9 @@ test_rush_script_caps() {
   # A None-role script must be able to read itself.
   local dir="$NONE_TEST_TMP/rush-script-caps-$interpreter"
   local test_case prefix suffix out status expected body parent_pid script_pid
-  vm_ssh "/system/bin/mkdir $dir"
+  vm_ssh "/user/bin/mkdir $dir"
   {
-    printf '#!/system/bin/%s\n' "$interpreter"
+    printf '#!/user/bin/%s\n' "$interpreter"
     cat <<'SCRIPT'
 echo script=$$
 echo mask=${MOTOR_OS_CAPS-unset}
@@ -17,8 +17,8 @@ if echo changed > "$1"; then echo write=allowed; else echo write=denied; fi
 echo spawn=$?
 exit 7
 SCRIPT
-  } | vm_ssh "/system/bin/rush -c 'cat >$dir/script'"
-  vm_ssh "/system/bin/chmod rwxr-xr-x $dir/script"
+  } | vm_ssh "/user/bin/rush -c 'cat >$dir/script'"
+  vm_ssh "/user/bin/chmod rwxr-xr-x $dir/script"
 
   for test_case in default assigned exported override zero invalid-assigned invalid-exported empty \
     command exec function function-raise; do
@@ -40,7 +40,7 @@ SCRIPT
     esac
     # The parent has Interactive, spawn, network and FS-write authority.
     # The restricted script must not regain the latter two by unsetting its mask.
-    if out="$(vm_ssh "MOTOR_OS_CAPS=0x344 /system/bin/rush -c 'echo parent=\$\$; $prefix $dir/script $dir/$test_case $TEST_BIN/systest$suffix'")"; then
+    if out="$(vm_ssh "MOTOR_OS_CAPS=0x344 /user/bin/rush -c 'echo parent=\$\$; $prefix $dir/script $dir/$test_case $TEST_BIN/systest$suffix'")"; then
       status=0
     else
       status=$?
@@ -77,12 +77,12 @@ SCRIPT
     esac
     [ "$body" = "$expected" ] || fail "Rush script capabilities ($test_case): '$out'"
     if [ "$test_case" = default ]; then
-      [ "$(vm_ssh /system/bin/cat "$dir/$test_case")" = changed ] || fail "unrestricted script did not write"
+      [ "$(vm_ssh /user/bin/cat "$dir/$test_case")" = changed ] || fail "unrestricted script did not write"
     else
       vm_ssh "[ ! -e $dir/$test_case ]" || fail "restricted script created $dir/$test_case"
     fi
   done
-  vm_ssh "/system/bin/rm -r $dir"
+  vm_ssh "/user/bin/rm -r $dir"
   echo "Rush script capabilities ($interpreter) PASS"
 }
 
@@ -90,7 +90,7 @@ SCRIPT
 test_rush_inproc_caps() {
   local dir="$TEST_TMP/rush-inproc-caps"
   local mode kind prefix setup definitions invocation expected out
-  vm_ssh "/system/bin/mkdir $dir"
+  vm_ssh "/user/bin/mkdir $dir"
   {
     cat <<'SCRIPT'
 dir=$1
@@ -106,7 +106,7 @@ check() {
   expected_status=$2
   expected_output=$3
   expected_error=$4
-  actual_output=$(MOTOR_OS_CAPS=0x344 /system/bin/rush -c "$5" 2>"$dir/error")
+  actual_output=$(MOTOR_OS_CAPS=0x344 /user/bin/rush -c "$5" 2>"$dir/error")
   actual_status=$?
   actual_error=$(cat "$dir/error")
   if [ "$actual_status" != "$expected_status" ] || [ "$actual_output" != "$expected_output" ]; then
@@ -150,7 +150,7 @@ SCRIPT
           nested-command) invocation="$prefix command command eval f > $dir/redirect" ;;
           inspect) invocation="$prefix command -v f > $dir/redirect" ;;
           exec) invocation="$prefix exec > $dir/redirect" ;;
-          pipeline) invocation="$prefix f > $dir/redirect | /system/bin/rush -c :" ;;
+          pipeline) invocation="$prefix f > $dir/redirect | /user/bin/rush -c :" ;;
           background)
             invocation="$prefix f > $dir/redirect &"
             if [ "$mode" = assigned ]; then invocation+=" wait %1"; else expected=0; fi
@@ -161,7 +161,7 @@ SCRIPT
           subshell) invocation="(f) > $dir/redirect" ;;
           shadow-command)
             definitions="command() { f; };"
-            invocation="$prefix command /system/bin/sh > $dir/redirect"
+            invocation="$prefix command /user/bin/sh > $dir/redirect"
             ;;
           exit|return|break|continue|wait) invocation="$prefix $kind" ;;
           unset) invocation="$prefix unset MOTOR_OS_CAPS" ;;
@@ -199,14 +199,14 @@ for mask in 0x44 0x244; do
   error="rush:"
   if [ "$mask" = 0x244 ]; then status=0; piped=b; substituted=hi; error=""; fi
   check "pipeline/$mask" "$status" "$piped" "$error" \
-    "MOTOR_OS_CAPS=$mask /system/bin/sh -c 'printf \"a\\nb\\n\" | /system/bin/rg \"^b$\"'"
+    "MOTOR_OS_CAPS=$mask /user/bin/sh -c 'printf \"a\\nb\\n\" | /user/bin/rg \"^b$\"'"
   check "substitution/$mask" "$status" "" "$error" \
-    "MOTOR_OS_CAPS=$mask /system/bin/sh -c 'x=\$(printf hi)'"
+    "MOTOR_OS_CAPS=$mask /user/bin/sh -c 'x=\$(printf hi)'"
   check "substitution-errexit/$mask" "$status" "$substituted" "$error" \
-    "MOTOR_OS_CAPS=$mask /system/bin/sh -c 'set -e; x=\$(printf hi); echo \"\$x\"'"
+    "MOTOR_OS_CAPS=$mask /user/bin/sh -c 'set -e; x=\$(printf hi); echo \"\$x\"'"
 done
 cat >"$dir/inside" <<'BODY'
-#!/system/bin/sh
+#!/user/bin/sh
 f() { "$1" print-caps inside; }
 unset MOTOR_OS_CAPS
 eval 'f "$1"'
@@ -215,13 +215,13 @@ echo upward=$?
 BODY
 chmod rwxr-xr-x "$dir/inside" || exit 1
 check reduced-sh 0 "inside=0x44
-upward=126" "permission denied" "MOTOR_OS_CAPS=0x44 /system/bin/sh $dir/inside $probe"
+upward=126" "permission denied" "MOTOR_OS_CAPS=0x44 /user/bin/sh $dir/inside $probe"
 check script-diagnostic 126 "" "rush: $dir/inside:" "MOTOR_OS_CAPS=zz $dir/inside $probe"
 echo "Rush in-process capabilities PASS ($count cases)"
 SCRIPT
-  } | vm_ssh "/system/bin/rush -c 'cat >$dir/checks'"
-  out="$(vm_ssh "/system/bin/rush $dir/checks $dir $TEST_BIN/systest")" || fail "$out"
+  } | vm_ssh "/user/bin/rush -c 'cat >$dir/checks'"
+  out="$(vm_ssh "/user/bin/rush $dir/checks $dir $TEST_BIN/systest")" || fail "$out"
   [[ "$out" =~ ^Rush\ in-process\ capabilities\ PASS\ \([0-9]+\ cases\)$ ]] || fail "$out"
-  vm_ssh "/system/bin/rm -r $dir"
+  vm_ssh "/user/bin/rm -r $dir"
   echo "$out"
 }

@@ -8,7 +8,7 @@ mod identity;
 mod plugins;
 mod runner;
 
-const PLUGIN: &str = "/devtools/javy/plugins/default.wasm";
+const PLUGIN: &str = "/user/lib/javy/plugins/default.wasm";
 /// Test inputs that test-wasm.sh uploads; they are not part of the images.
 const TEST_INPUTS: &str = "/none/wasm-tests/javy-tests";
 
@@ -22,7 +22,7 @@ impl JavyTools for Suite {
     fn compile(&mut self, label: &str, input: &str, output: &str, flags: &str) -> Result<()> {
         self.command(
             label,
-            &format!("MOTOR_OS_CAPS=0x200 /devtools/bin/javy build {input} -o {output} {flags}"),
+            &format!("MOTOR_OS_CAPS=0x200 /user/bin/dev/javy build {input} -o {output} {flags}"),
             0,
         )?;
         Ok(())
@@ -31,7 +31,7 @@ impl JavyTools for Suite {
     fn execute(&mut self, label: &str, module: &str, flags: &str, expected: &str) -> Result<()> {
         let (stdout, stderr) = self.command(
             label,
-            &format!("MOTOR_OS_CAPS=0 /devtools/bin/wasmi {module} {flags}"),
+            &format!("MOTOR_OS_CAPS=0 /user/bin/dev/wasmi {module} {flags}"),
             0,
         )?;
         if stdout != expected || !stderr.is_empty() {
@@ -49,16 +49,16 @@ pub struct Once {
 }
 
 pub fn run(once: Once) -> Result<()> {
-    let mut suite = Suite::new("javy-smoke", "/devtools/javy/sources.txt")?;
+    let mut suite = Suite::new("javy-smoke", "/user/lib/javy/sources.txt")?;
     let (version, _) = suite.command(
         "javy-version",
-        "MOTOR_OS_CAPS=0 /devtools/bin/javy --version",
+        "MOTOR_OS_CAPS=0 /user/bin/dev/javy --version",
         0,
     )?;
     assert_eq!(version.trim(), "javy 9.1.0");
     suite.command(
         "wasmi-version",
-        "MOTOR_OS_CAPS=0 /devtools/bin/wasmi --version",
+        "MOTOR_OS_CAPS=0 /user/bin/dev/wasmi --version",
         0,
     )?;
     fs::write(
@@ -67,12 +67,12 @@ pub fn run(once: Once) -> Result<()> {
     )?;
     suite.command(
         "hello-inherited-role",
-        "/devtools/bin/javy build hello.js -o hello.wasm -C deterministic",
+        "/user/bin/dev/javy build hello.js -o hello.wasm -C deterministic",
         0,
     )?;
     let (stdout, stderr) = suite.command(
         "hello-inherited-role-execute",
-        "/devtools/bin/wasmi hello.wasm",
+        "/user/bin/dev/wasmi hello.wasm",
         0,
     )?;
     assert_eq!(stdout, "hello from Motor 42\n");
@@ -96,7 +96,7 @@ pub fn run(once: Once) -> Result<()> {
     }
     suite.command(
         "emit-plugin",
-        "MOTOR_OS_CAPS=0x200 /devtools/bin/javy emit-plugin -o emitted.wasm",
+        "MOTOR_OS_CAPS=0x200 /user/bin/dev/javy emit-plugin -o emitted.wasm",
         0,
     )?;
     suite.same_bytes("emitted.wasm", PLUGIN)?;
@@ -114,7 +114,7 @@ pub fn run(once: Once) -> Result<()> {
     )?;
     suite.command(
         "missing-dynamic-plugin",
-        "MOTOR_OS_CAPS=0 /devtools/bin/wasmi dynamic.wasm",
+        "MOTOR_OS_CAPS=0 /user/bin/dev/wasmi dynamic.wasm",
         1,
     )?;
     behavior::run(&mut suite)?;
@@ -143,7 +143,7 @@ pub fn run(once: Once) -> Result<()> {
     ] {
         suite.command(
             name,
-            &format!("MOTOR_OS_CAPS=0 /devtools/bin/wasmi runner.wasm --invoke {name} --fuel 1000"),
+            &format!("MOTOR_OS_CAPS=0 /user/bin/dev/wasmi runner.wasm --invoke {name} --fuel 1000"),
             code,
         )?;
     }
@@ -152,13 +152,13 @@ pub fn run(once: Once) -> Result<()> {
     fs::write(suite.root.join("invalid.js"), "function { invalid")?;
     suite.command(
         "syntax-error",
-        "MOTOR_OS_CAPS=0x200 /devtools/bin/javy build invalid.js -o invalid.wasm",
+        "MOTOR_OS_CAPS=0x200 /user/bin/dev/javy build invalid.js -o invalid.wasm",
         1,
     )?;
     assert!(!suite.root.join("invalid.wasm").exists());
     suite.command(
         "direct-output-denial",
-        "MOTOR_OS_CAPS=0 /devtools/bin/javy emit-plugin -o denied.wasm",
+        "MOTOR_OS_CAPS=0 /user/bin/dev/javy emit-plugin -o denied.wasm",
         1,
     )?;
     assert!(!suite.root.join("denied.wasm").exists());

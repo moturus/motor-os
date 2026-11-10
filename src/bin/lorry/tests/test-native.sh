@@ -270,7 +270,7 @@ install_remote_policy() {
     upload_file "$WORK/user-config.orig" "$REMOTE_ROOT/user-config.orig"
     upload_file "$WORK/user-config.test" "$REMOTE_ROOT/user-config.test"
     REMOTE_POLICY=1
-    remote_command "/system/bin/cat $REMOTE_ROOT/user-config.test > /user/cfg/lorry.toml"
+    remote_command "/user/bin/cat $REMOTE_ROOT/user-config.test > /user/cfg/lorry.toml"
 }
 
 write_host_config() {
@@ -371,7 +371,7 @@ normalize_equivalence_output() {
         line="${line//"$WORK/native-equivalence-target"/<target>}"
         line="${line//"$REMOTE_ROOT/native-equivalence-target"/<target>}"
         line="${line//"$WORK/host-home/.cache/lorry"/<cache>}"
-        line="${line//\/devtools\/lorry\/user\/cache/<cache>}"
+        line="${line//\/user\/dev\/lorry\/cache/<cache>}"
         line="${line//"$HOST_TOOLCHAIN_SYSROOT"/<sysroot>}"
         line="${line//\/devtools\/rust/<sysroot>}"
         printf '%s\n' "$line" >>"$output"
@@ -545,7 +545,7 @@ start_vm() {
         # A VM leaked by an earlier run keeps answering on the tap, and every
         # ssh below would reach it rather than the guest this run starts --
         # testing an unknown image and reporting the result as this run's.
-        if timeout 2 "${SSH[@]}" /system/bin/rush -c true >/dev/null 2>&1; then
+        if timeout 2 "${SSH[@]}" /user/bin/rush -c true >/dev/null 2>&1; then
             fail "a VM is already answering on the tap; stop it before running"
         fi
         # LORRY_NATIVE_QEMU_ARGS: optional extra qemu arguments (a monitor
@@ -558,7 +558,7 @@ start_vm() {
         VM_STARTED=1
     fi
     local deadline=$((SECONDS + 10))
-    until timeout 2 "${SSH[@]}" /system/bin/rush -c true >/dev/null 2>&1; do
+    until timeout 2 "${SSH[@]}" /user/bin/rush -c true >/dev/null 2>&1; do
         [ "$SECONDS" -lt "$deadline" ] || fail "Motor VM was not ready in 10 seconds"
         [ "$VM_STARTED" -eq 0 ] || kill -0 "$VM_PID" 2>/dev/null ||
             fail "Motor VM exited before SSH became ready"
@@ -573,14 +573,14 @@ run_native() {
     local clippy_fixture="$REMOTE_ROOT/clippy-native-fixture"
     local destination="$REMOTE_ROOT/lorry-first"
 
-    remote_command "[ -d $REMOTE_TEST_TMP ] || /system/bin/mkdir $REMOTE_TEST_TMP"
-    remote_command "[ -d $REMOTE_BASE ] || /system/bin/mkdir $REMOTE_BASE"
-    remote_command "[ -d $REMOTE_ROOT ] || /system/bin/mkdir $REMOTE_ROOT"
+    remote_command "[ -d $REMOTE_TEST_TMP ] || /user/bin/mkdir $REMOTE_TEST_TMP"
+    remote_command "[ -d $REMOTE_BASE ] || /user/bin/mkdir $REMOTE_BASE"
+    remote_command "[ -d $REMOTE_ROOT ] || /user/bin/mkdir $REMOTE_ROOT"
     REMOTE_CREATED=1
     install_remote_policy
     if [ "$WARM" -eq 1 ]; then
         for executable in lorry-cross lorry-native cancel-probe recovery-probe; do
-            remote_command "[ ! -f $REMOTE_ROOT/$executable ] || /system/bin/rm $REMOTE_ROOT/$executable"
+            remote_command "[ ! -f $REMOTE_ROOT/$executable ] || /user/bin/rm $REMOTE_ROOT/$executable"
         done
     fi
     upload_file "$WORK/lorry-cross" "$REMOTE_ROOT/lorry-cross"
@@ -590,33 +590,33 @@ run_native() {
     upload_file "$WORK/editor-config.json" "$REMOTE_ROOT/editor-config.json"
 
     remote_command "$REMOTE_ROOT/lorry-cross --version"
-    remote_command "[ -d $destination ] || /system/bin/mkdir $destination"
+    remote_command "[ -d $destination ] || /user/bin/mkdir $destination"
     if [ "$WARM" -eq 1 ]; then
-        remote_command "[ ! -d $destination/src/bin/lorry/src ] || /system/bin/rm -r $destination/src/bin/lorry/src"
-        remote_command "[ ! -d $destination/src/bin/lorry/.lorry ] || /system/bin/rm -r $destination/src/bin/lorry/.lorry"
-        remote_command "[ ! -d $destination/src/sys/lib/moto-rt/src ] || /system/bin/rm -r $destination/src/sys/lib/moto-rt/src"
+        remote_command "[ ! -d $destination/src/bin/lorry/src ] || /user/bin/rm -r $destination/src/bin/lorry/src"
+        remote_command "[ ! -d $destination/src/bin/lorry/.lorry ] || /user/bin/rm -r $destination/src/bin/lorry/.lorry"
+        remote_command "[ ! -d $destination/src/sys/lib/moto-rt/src ] || /user/bin/rm -r $destination/src/sys/lib/moto-rt/src"
     fi
     upload_tree "$WORK/guest-source" "$destination"
-    remote_command "[ -d $fixture ] || /system/bin/mkdir $fixture"
+    remote_command "[ -d $fixture ] || /user/bin/mkdir $fixture"
     if [ "$WARM" -eq 1 ]; then
         for path in .lorry src tests fixture-generated-dependency \
             fixture-motor-target-dependency; do
-            remote_command "[ ! -d $fixture/$path ] || /system/bin/rm -r $fixture/$path"
+            remote_command "[ ! -d $fixture/$path ] || /user/bin/rm -r $fixture/$path"
         done
     fi
     upload_tree "$WORK/native-fixture" "$fixture"
     fixture_approval "$fixture" >"$WORK/fixture-approval.toml"
     upload_file "$WORK/fixture-approval.toml" "$REMOTE_ROOT/fixture-approval.toml"
-    remote_command "[ -d /user/cfg/lorry-workspaces ] || /system/bin/mkdir /user/cfg/lorry-workspaces"
-    remote_command "/system/bin/cat $REMOTE_ROOT/fixture-approval.toml > /user/cfg/lorry-workspaces/$(decisions_name "$fixture").toml"
+    remote_command "[ -d /user/cfg/lorry-workspaces ] || /user/bin/mkdir /user/cfg/lorry-workspaces"
+    remote_command "/user/bin/cat $REMOTE_ROOT/fixture-approval.toml > /user/cfg/lorry-workspaces/$(decisions_name "$fixture").toml"
     if [ "$WARM" -eq 1 ]; then
-        remote_command "[ ! -d $REMOTE_ROOT/workspace-fixture ] || /system/bin/rm -r $REMOTE_ROOT/workspace-fixture"
+        remote_command "[ ! -d $REMOTE_ROOT/workspace-fixture ] || /user/bin/rm -r $REMOTE_ROOT/workspace-fixture"
     fi
-    remote_command "[ -d $REMOTE_ROOT/workspace-fixture ] || /system/bin/mkdir $REMOTE_ROOT/workspace-fixture"
+    remote_command "[ -d $REMOTE_ROOT/workspace-fixture ] || /user/bin/mkdir $REMOTE_ROOT/workspace-fixture"
     upload_tree "$WORK/workspace-fixture" "$REMOTE_ROOT/workspace-fixture"
-    remote_command "[ -d $proc_macro_fixture ] || /system/bin/mkdir $proc_macro_fixture"
+    remote_command "[ -d $proc_macro_fixture ] || /user/bin/mkdir $proc_macro_fixture"
     upload_tree "$WORK/proc-macro-fixture" "$proc_macro_fixture"
-    remote_command "[ -d $clippy_fixture ] || /system/bin/mkdir $clippy_fixture"
+    remote_command "[ -d $clippy_fixture ] || /user/bin/mkdir $clippy_fixture"
     upload_tree "$WORK/clippy-native-fixture" "$clippy_fixture"
 
     if [ "$WARM" -eq 1 ] && [ "$CROSS_CHANGED" -eq 1 ]; then
@@ -626,7 +626,7 @@ run_native() {
     remote_command "cd $first && $REMOTE_ROOT/lorry-cross vendor --accept-all"
     remote_command "cd $first && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-cross build --release"
     remote_command "$first/target/lorry/release/lorry --version"
-    remote_command "/system/bin/cp $first/target/lorry/release/lorry $REMOTE_ROOT/lorry-native"
+    remote_command "/user/bin/cp $first/target/lorry/release/lorry $REMOTE_ROOT/lorry-native"
     download_file "$first/target/lorry/release/lorry" "$WORK/lorry-native"
     cmp "$WORK/lorry-cross" "$WORK/lorry-native" ||
         fail "Linux-to-Motor and Motor-native Lorry executables differ"
@@ -688,8 +688,8 @@ PY
     download_file /user/cfg/helix/languages.toml "$WORK/native-editor-config.toml"
     cmp "$ROOT_DIR/img_files/motor-os-dev/user/cfg/helix/languages.toml" "$WORK/native-editor-config.toml" ||
         fail "native editor configuration differs from the tested shipped configuration"
-    remote_command "[ ! -d $REMOTE_ROOT/editor-evidence ] || /system/bin/rm -r $REMOTE_ROOT/editor-evidence"
-    remote_command "/system/bin/mkdir $REMOTE_ROOT/editor-evidence && $REMOTE_ROOT/editor-workspace $REMOTE_ROOT/lorry-native $REMOTE_ROOT $REMOTE_ROOT/editor-evidence $REMOTE_ROOT/editor-config.json"
+    remote_command "[ ! -d $REMOTE_ROOT/editor-evidence ] || /user/bin/rm -r $REMOTE_ROOT/editor-evidence"
+    remote_command "/user/bin/mkdir $REMOTE_ROOT/editor-evidence && $REMOTE_ROOT/editor-workspace $REMOTE_ROOT/lorry-native $REMOTE_ROOT $REMOTE_ROOT/editor-evidence $REMOTE_ROOT/editor-config.json"
     remote_command "cd $fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native build --release"
     remote_command "cd $fixture && $REMOTE_ROOT/lorry-native run --release -- first 'two words'"
     # The committed record already reviews the whole workspace; an offline
@@ -718,7 +718,7 @@ PY
     if grep -F "internal compiler error" "$NATIVE_LOG" >/dev/null; then
         fail "native proc-macro failure became an internal compiler error"
     fi
-    remote_command "/system/bin/cp $fixture/src/main.rs $fixture/main.rs.copy && /system/bin/cp $fixture/main.rs.copy $fixture/src/main.rs && /system/bin/rm $fixture/main.rs.copy"
+    remote_command "/user/bin/cp $fixture/src/main.rs $fixture/main.rs.copy && /user/bin/cp $fixture/main.rs.copy $fixture/src/main.rs && /user/bin/rm $fixture/main.rs.copy"
     remote_command "cd $fixture && ${JOBS_PREFIX}$REMOTE_ROOT/lorry-native -v build"
     local incremental="$fixture/target/lorry/.incremental/$MOTOR_TARGET"
     local incremental_lines="$WORK/motor-incremental-lines"
@@ -732,8 +732,8 @@ PY
 }
 
 # Lorry as None keeps its own state: configuration and decisions in /none/cfg,
-# cache in /devtools/lorry/none, scratch in /none/tmp. None cannot reach
-# Interactive's /user/cfg at all. The fixture has no dependencies, so this
+# cache in /none/dev/lorry, scratch in /none/tmp. None cannot reach
+# Interactive's private configuration. The fixture has no dependencies, so this
 # needs no network; the build's rustc answers are what land in the cache.
 run_none_role() {
     local root="$NONE_REMOTE_ROOT"
@@ -745,33 +745,34 @@ run_none_role() {
         >"$WORK/none-fixture/Cargo.toml"
     printf '%s\n' 'fn main() {' '    println!("none-role ok");' '}' \
         >"$WORK/none-fixture/src/main.rs"
-    remote_command "[ ! -e $root ] || /system/bin/rm -r $root"
+    remote_command "[ ! -e $root ] || /user/bin/rm -r $root"
     # None creates the directories it writes in; Interactive's would be
     # read-only to it. Plain puts: `put -p` would also copy the host's mode
     # onto them.
-    remote_command "$none /system/bin/mkdir $root && $none /system/bin/mkdir $root/fixture && $none /system/bin/mkdir $root/fixture/src"
+    remote_command "$none /user/bin/mkdir $root && $none /user/bin/mkdir $root/fixture && $none /user/bin/mkdir $root/fixture/src"
     NONE_CREATED=1
     printf 'put %s %s\nput %s %s\n' \
         "$WORK/none-fixture/Cargo.toml" "$root/fixture/Cargo.toml" \
         "$WORK/none-fixture/src/main.rs" "$root/fixture/src/main.rs" >"$WORK/none-upload.batch"
     timeout 60 sftp "${SFTP_OPTIONS[@]}" -b "$WORK/none-upload.batch" motor@192.168.4.2 \
         >>"$NATIVE_LOG" 2>&1 || fail "cannot upload the None-role fixture"
-    remote_command "/system/bin/cp $REMOTE_ROOT/lorry-native $root/lorry"
-    remote_command_expect_failure "$none /system/bin/ls /user/cfg"
+    remote_command "/user/bin/cp $REMOTE_ROOT/lorry-native $root/lorry"
+    remote_command "$none /user/bin/ls /user/cfg"
+    remote_command_expect_failure "$none /user/bin/ls /user/cfg/russhd"
 
     remote_command "cd $root && $none $root/lorry cache clean"
-    remote_command "[ ! -e /devtools/lorry/none/cache ] && [ -d /devtools/lorry/user/cache ]" ||
-        fail "None's cache clean did not remove exactly /devtools/lorry/none/cache"
+    remote_command "[ ! -e /none/dev/lorry/cache ] && [ -d /user/dev/lorry/cache ]" ||
+        fail "None's cache clean did not remove exactly /none/dev/lorry/cache"
     remote_command "cd $root/fixture && $none $root/lorry vendor --accept-all"
     remote_command "[ -f /none/cfg/lorry-workspaces/$decisions ] && [ ! -e /user/cfg/lorry-workspaces/$decisions ]" ||
         fail "None's workspace decisions are not in /none/cfg/lorry-workspaces"
     output="$(remote_command "cd $root/fixture && $none $root/lorry run")" ||
         fail "None could not build and run a package"
     [[ "$output" == *"none-role ok"* ]] || fail "None's package did not run: $output"
-    remote_command "[ -d /devtools/lorry/none/cache/rustc-queries ]" ||
-        fail "None's build did not use /devtools/lorry/none/cache"
+    remote_command "[ -d /none/dev/lorry/cache/rustc-queries ]" ||
+        fail "None's build did not use /none/dev/lorry/cache"
 
-    remote_command "/system/bin/cp /none/cfg/lorry.toml $root/lorry.toml.orig"
+    remote_command "/user/bin/cp /none/cfg/lorry.toml $root/lorry.toml.orig"
     NONE_CONFIG_SAVED=1
     remote_command "echo 'not-a-setting = 1' >> /none/cfg/lorry.toml"
     if output="$(remote_command "cd $root/fixture && $none $root/lorry build")"; then
@@ -779,7 +780,7 @@ run_none_role() {
     fi
     [[ "$output" == *"/none/cfg/lorry.toml"* ]] ||
         fail "None's Lorry did not report its own configuration file: $output"
-    remote_command "/system/bin/cat $root/lorry.toml.orig > /none/cfg/lorry.toml"
+    remote_command "/user/bin/cat $root/lorry.toml.orig > /none/cfg/lorry.toml"
     NONE_CONFIG_SAVED=0
 }
 
@@ -789,29 +790,29 @@ cleanup() {
     set +e
     timing_finish "$status"
     if [ "$REMOTE_POLICY" -eq 1 ]; then
-        timeout 5 "${SSH[@]}" "/system/bin/cat $REMOTE_ROOT/user-config.orig > /user/cfg/lorry.toml" \
+        timeout 5 "${SSH[@]}" "/user/bin/cat $REMOTE_ROOT/user-config.orig > /user/cfg/lorry.toml" \
             >/dev/null 2>&1 || echo "test-native: could not restore the guest's /user/cfg/lorry.toml" >&2
         local root file removals=""
         while read -r root; do
             file="/user/cfg/lorry-workspaces/$(decisions_name "$root").toml"
-            removals="$removals[ ! -f $file ] || /system/bin/rm $file; "
+            removals="$removals[ ! -f $file ] || /user/bin/rm $file; "
         done < <(remote_decision_roots)
         timeout 10 "${SSH[@]}" "$removals" >/dev/null 2>&1 ||
             echo "test-native: could not remove this run's guest workspace decisions" >&2
     fi
     if [ "$NONE_CONFIG_SAVED" -eq 1 ]; then
-        timeout 5 "${SSH[@]}" "/system/bin/cat $NONE_REMOTE_ROOT/lorry.toml.orig > /none/cfg/lorry.toml" \
+        timeout 5 "${SSH[@]}" "/user/bin/cat $NONE_REMOTE_ROOT/lorry.toml.orig > /none/cfg/lorry.toml" \
             >/dev/null 2>&1 || echo "test-native: could not restore the guest's /none/cfg/lorry.toml" >&2
     fi
     if [ "$NONE_CREATED" -eq 1 ]; then
         local none_decisions
         none_decisions="/none/cfg/lorry-workspaces/$(decisions_name "$NONE_REMOTE_ROOT/fixture").toml"
-        timeout 10 "${SSH[@]}" "[ ! -f $none_decisions ] || /system/bin/rm $none_decisions; /system/bin/rm -r $NONE_REMOTE_ROOT" \
+        timeout 10 "${SSH[@]}" "[ ! -f $none_decisions ] || /user/bin/rm $none_decisions; /user/bin/rm -r $NONE_REMOTE_ROOT" \
             >/dev/null 2>&1 || echo "test-native: could not remove the None-role fixture" >&2
     fi
     if [ "$REMOTE_CREATED" -eq 1 ] && [ "$WARM" -eq 0 ]; then
         case "$REMOTE_ROOT" in
-            "$REMOTE_BASE"/*) timeout 5 "${SSH[@]}" "/system/bin/rm -r $REMOTE_ROOT" >/dev/null 2>&1 ;;
+            "$REMOTE_BASE"/*) timeout 5 "${SSH[@]}" "/user/bin/rm -r $REMOTE_ROOT" >/dev/null 2>&1 ;;
         esac
     fi
     if [ "$VM_STARTED" -eq 1 ]; then

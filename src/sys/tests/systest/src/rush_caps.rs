@@ -23,7 +23,7 @@ pub fn run_print_caps_child(args: &[String]) -> ! {
 }
 
 fn rush(caps: u64, script: &str) -> std::process::Output {
-    std::process::Command::new("/system/bin/rush")
+    std::process::Command::new("/user/bin/rush")
         .arg("-c")
         .arg(script)
         .env(MOTOR_OS_CAPS_ENV_KEY, format!("0x{caps:x}"))

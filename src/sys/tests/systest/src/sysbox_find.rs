@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-const SYSBOX: &str = "/system/bin/sysbox";
+const SYSBOX: &str = "/user/bin/sysbox";
 
 fn build_tree(root: &Path) {
     let _ = std::fs::remove_dir_all(root);

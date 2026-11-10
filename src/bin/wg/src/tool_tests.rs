@@ -16,7 +16,7 @@ pub(super) const TOOL_CAPS: u64 = caps::CAP_INTERACTIVE
     | caps::CAP_SPAWN_DETACHED;
 
 pub(super) fn command(args: &[&str], input: &str, caps: u64, expected: i32) -> String {
-    let mut child = Command::new("/system/bin/wg-tool")
+    let mut child = Command::new("/user/bin/wg-tool")
         .args(args)
         .env_clear()
         .env(caps::MOTOR_OS_CAPS_ENV_KEY, format!("0x{caps:x}"))

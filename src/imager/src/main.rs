@@ -982,6 +982,49 @@ mod tests {
     use moto_sdk::async_fs::FileSystem;
 
     #[test]
+    fn every_image_uses_user_commands_and_keeps_only_legacy_shells() {
+        for yaml in [
+            include_str!("../motor-os-base.yaml"),
+            include_str!("../motor-os.yaml"),
+            include_str!("../motor-os-dev.yaml"),
+            include_str!("../motor-os-wasm.yaml"),
+            include_str!("../motor-os-system-tty.yaml"),
+            include_str!("../motor-os-vsock-test.yaml"),
+            include_str!("../motor-os-ro-root.yaml"),
+        ] {
+            let config: Config = serde_yaml::from_str(yaml).unwrap();
+            assert!(config.directories.contains(&"/none/dev".to_owned()));
+            for command in ["rush", "sysbox"] {
+                assert!(config.input_files.contains(&format!("/user/bin/{command}")));
+            }
+            let legacy: Vec<_> = config
+                .input_files
+                .iter()
+                .filter(|path| path.starts_with("/system/bin/"))
+                .map(String::as_str)
+                .collect();
+            assert_eq!(legacy, ["/system/bin/rush"]);
+            let mut files = BTreeMap::new();
+            for overlay in config.static_dirs {
+                add_static_dir(&mut files, Path::new("../..").join(overlay), Path::new("/"));
+            }
+            assert_eq!(
+                files
+                    .keys()
+                    .filter(|path| path.starts_with("/system/bin/"))
+                    .collect::<Vec<_>>(),
+                [&"/system/bin/sh".to_owned()]
+            );
+            for path in ["/user/cfg/rush.cfg", "/user/cfg/sshd.toml"] {
+                let contents = fs::read_to_string(&files[path]).unwrap();
+                assert!(!contents.contains("/system/bin"));
+            }
+            assert!(!files.contains_key("/system/cfg/rush.cfg"));
+            assert!(!files.contains_key("/system/cfg/sshd.toml"));
+        }
+    }
+
+    #[test]
     fn production_image_requires_ripgrep() {
         let config: Config = serde_yaml::from_str(include_str!("../motor-os.yaml")).unwrap();
 
@@ -996,11 +1039,7 @@ mod tests {
         assert_eq!(config.assembly_dirs, ["libc", "rg", "tar"]);
         assert_eq!(
             config.assembly_required_executables,
-            [
-                "rg/system/bin/rg",
-                "tar/system/bin/tar",
-                "tar/system/bin/zstd"
-            ]
+            ["rg/user/bin/rg", "tar/user/bin/tar", "tar/user/bin/zstd"]
         );
         assert!(!config.assembly_dirs.iter().any(|path| path == "helix"));
         assert!(!config
@@ -1016,10 +1055,10 @@ mod tests {
             .input_files
             .iter()
             .any(|path| path.contains("/tests/")));
-        assert!(!config
+        assert!(config
             .input_files
             .iter()
-            .any(|path| path == "/system/bin/curl"));
+            .any(|path| path == "/user/bin/curl"));
         assert!(config
             .input_files
             .iter()
@@ -1069,11 +1108,11 @@ mod tests {
         assert!(config
             .input_files
             .iter()
-            .any(|path| path == "/devtools/bin/lorry"));
+            .any(|path| path == "/user/bin/dev/lorry"));
         assert!(config
             .input_files
             .iter()
-            .any(|path| path == "/system/bin/curl"));
+            .any(|path| path == "/user/bin/curl"));
         assert!(config
             .input_files
             .iter()
@@ -1112,11 +1151,11 @@ mod tests {
         assert!(config
             .assembly_required_executables
             .iter()
-            .any(|path| path == "wasmtime/devtools/bin/wasmtime"));
+            .any(|path| path == "wasmtime/user/bin/dev/wasmtime"));
         assert!(config
             .assembly_required_executables
             .iter()
-            .any(|path| path == "wasmtime/devtools/bin/wasmtime-rt"));
+            .any(|path| path == "wasmtime/user/bin/dev/wasmtime-rt"));
         assert!(config
             .assembly_required_executables
             .iter()
@@ -1147,11 +1186,11 @@ mod tests {
         assert!(config
             .assembly_required_executables
             .iter()
-            .any(|path| path == "helix/devtools/helix/hx"));
+            .any(|path| path == "helix/user/lib/helix/hx"));
         assert!(config
             .assembly_required_executables
             .iter()
-            .any(|path| path == "sed/devtools/bin/sed"));
+            .any(|path| path == "sed/user/bin/dev/sed"));
         // Scratch and configuration belong to the roles, not to /devtools.
         for path in ["/devtools/tmp", "/devtools/cfg"] {
             assert!(!config.directories.iter().any(|candidate| candidate == path));
@@ -1162,7 +1201,7 @@ mod tests {
         // Each role has its own Lorry repository and cache.
         for role in ["user", "none"] {
             for path in ["cache", "vendor", "vendor/.staging"] {
-                let path = format!("/devtools/lorry/{role}/{path}");
+                let path = format!("/{role}/dev/lorry/{path}");
                 assert!(config.directories.contains(&path));
             }
         }
@@ -1175,8 +1214,8 @@ mod tests {
             .any(|path| path == "/user/cfg/lorry" || path.starts_with("/user/cfg/lorry/")));
         assert_eq!(config.source_dirs.len(), 5);
         for (source, destination) in [
-            ("src/bin/red", "/devtools/src/motor-os/bin/red"),
-            ("src/bin/lorry", "/devtools/src/motor-os/bin/lorry"),
+            ("src/bin/red", "/none/dev/motor-os/bin/red"),
+            ("src/bin/lorry", "/none/dev/motor-os/bin/lorry"),
         ] {
             assert!(config
                 .source_dirs
@@ -1188,12 +1227,12 @@ mod tests {
         let mut library_sources: Vec<_> = config
             .source_dirs
             .iter()
-            .filter(|dir| dir.destination.starts_with("/devtools/src/motor-os/sys/"))
+            .filter(|dir| dir.destination.starts_with("/none/dev/motor-os/sys/"))
             .map(|dir| {
                 let name = dir.source.strip_prefix("src/sys/lib/").unwrap();
                 assert_eq!(
                     dir.destination,
-                    format!("/devtools/src/motor-os/sys/lib/{name}")
+                    format!("/none/dev/motor-os/sys/lib/{name}")
                 );
                 name
             })
@@ -1218,17 +1257,17 @@ mod tests {
         assert_eq!(
             config.assembly_required_executables,
             [
-                "rg/system/bin/rg",
-                "javy/devtools/bin/javy",
-                "javy/devtools/bin/wasmi",
-                "wasmtime/devtools/bin/wasmtime",
-                "wasmtime/devtools/bin/wasmtime-rt"
+                "rg/user/bin/rg",
+                "javy/user/bin/dev/javy",
+                "javy/user/bin/dev/wasmi",
+                "wasmtime/user/bin/dev/wasmtime",
+                "wasmtime/user/bin/dev/wasmtime-rt"
             ]
         );
         for path in [
-            "/devtools/javy",
-            "/devtools/javy/plugins",
-            "/devtools/wasmtime",
+            "/user/lib/javy",
+            "/user/lib/javy/plugins",
+            "/user/lib/wasmtime",
             "/user/tmp",
         ] {
             assert!(config.directories.iter().any(|candidate| candidate == path));
@@ -1263,7 +1302,7 @@ mod tests {
         assert!(config
             .input_files
             .iter()
-            .filter(|path| path.starts_with("/system/bin/"))
+            .filter(|path| path.starts_with("/user/bin/"))
             .all(|path| !path.contains("services")));
         assert!(!config
             .input_files
@@ -1448,10 +1487,10 @@ mod tests {
         if root.exists() {
             fs::remove_dir_all(&root).unwrap();
         }
-        fs::create_dir_all(root.join("first/system/cfg")).unwrap();
-        fs::create_dir_all(root.join("second/system/cfg")).unwrap();
-        fs::write(root.join("first/system/cfg/rush.cfg"), "first\n").unwrap();
-        fs::write(root.join("second/system/cfg/rush.cfg"), "second\n").unwrap();
+        fs::create_dir_all(root.join("first/user/cfg")).unwrap();
+        fs::create_dir_all(root.join("second/user/cfg")).unwrap();
+        fs::write(root.join("first/user/cfg/rush.cfg"), "first\n").unwrap();
+        fs::write(root.join("second/user/cfg/rush.cfg"), "second\n").unwrap();
 
         let mut files = BTreeMap::new();
         add_static_dir(&mut files, root.join("first"), Path::new("/"));
@@ -1459,8 +1498,8 @@ mod tests {
 
         assert_eq!(files.len(), 1);
         assert_eq!(
-            files.get("/system/cfg/rush.cfg").unwrap(),
-            &root.join("second/system/cfg/rush.cfg")
+            files.get("/user/cfg/rush.cfg").unwrap(),
+            &root.join("second/user/cfg/rush.cfg")
         );
 
         let policy_path = root.join("permissions.yaml");
@@ -1483,7 +1522,7 @@ entries: []
         .unwrap();
         let resolved = resolve_image_files(&files, &[], &policy).unwrap();
         assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].source, root.join("second/system/cfg/rush.cfg"));
+        assert_eq!(resolved[0].source, root.join("second/user/cfg/rush.cfg"));
         assert_eq!(
             permissions::mode_string(resolved[0].permissions),
             "rw-r--r--"
@@ -1546,14 +1585,14 @@ entries: []
         .unwrap();
 
         let system_script = root.join("system-script");
-        fs::write(&system_script, b"#!/system/bin/rush\n").unwrap();
+        fs::write(&system_script, b"#!/user/bin/rush\n").unwrap();
         let user_elf = root.join("user-elf");
         let mut elf = [0_u8; 64];
         elf[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
         elf[16..18].copy_from_slice(&3_u16.to_le_bytes());
         fs::write(&user_elf, elf).unwrap();
         let dev_script = root.join("dev-script");
-        fs::write(&dev_script, b"#!/system/bin/rush\n").unwrap();
+        fs::write(&dev_script, b"#!/user/bin/rush\n").unwrap();
         for path in [&system_script, &user_elf, &dev_script] {
             let mut mode = fs::metadata(path).unwrap().permissions();
             mode.set_mode(0o755);
@@ -1561,7 +1600,7 @@ entries: []
         }
 
         let raw_files = BTreeMap::from([
-            ("/system/bin/script".to_owned(), system_script),
+            ("/system/bin/sh".to_owned(), system_script),
             ("/user/bin/elf".to_owned(), user_elf),
             ("/devtools/bin/script".to_owned(), dev_script),
         ]);
@@ -1605,7 +1644,7 @@ entries: []
 
                 for (path, expected) in [
                     ("/", "rwxr-xr-x"),
-                    ("/system/bin/script", "r-xr-xr-x"),
+                    ("/system/bin/sh", "r-xr-xr-x"),
                     ("/user/bin/elf", "r-xr-xr-x"),
                     ("/devtools/bin/script", "rwxrwxr-x"),
                 ] {
@@ -1643,14 +1682,14 @@ entries: []
         fs::write(root.join("nested/.lorry/vendor/object"), "generated\n").unwrap();
 
         let mut files = BTreeMap::new();
-        add_source_dir(&mut files, root.clone(), Path::new("/devtools/src/example"));
+        add_source_dir(&mut files, root.clone(), Path::new("/none/dev/example"));
 
         let destinations: Vec<_> = files.keys().map(String::as_str).collect();
         assert_eq!(
             destinations,
             [
-                "/devtools/src/example/Cargo.toml",
-                "/devtools/src/example/src/main.rs"
+                "/none/dev/example/Cargo.toml",
+                "/none/dev/example/src/main.rs"
             ]
         );
 
@@ -1663,10 +1702,7 @@ entries: []
             .collect();
         assert_eq!(
             staged,
-            [
-                "/devtools/src/example/src/main.rs",
-                "/user/cfg/example/main.rs"
-            ]
+            ["/none/dev/example/src/main.rs", "/user/cfg/example/main.rs"]
         );
         fs::remove_dir_all(root).unwrap();
     }

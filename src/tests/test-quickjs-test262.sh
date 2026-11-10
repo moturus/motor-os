@@ -91,16 +91,16 @@ test_vm_configure_ssh
 echo "test-quickjs-test262: runner=$TEST_VM_RUNNER image=$copy console=$CONSOLE_LOG"
 start_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$CONSOLE_LOG"
 guest=/user/tmp/quickjs-test262
-vm_ssh "/system/bin/mkdir $guest"
+vm_ssh "/user/bin/mkdir $guest"
 printf 'put "%s" "%s/%s"\n' "$WORK/source.tar" "$guest" source.tar "$WORK/suite.tar.zst" "$guest" suite.tar.zst |
   sftp -F /dev/null -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
     -o UserKnownHostsFile="$WD/test-known-hosts" -i "$WD/test.key" -P 2222 \
     -b - motor@192.168.4.2 > /dev/null
-vm_ssh "/system/bin/rush -c 'cd $guest && tar -x -f source.tar && tar -x -f suite.tar.zst'"
-vm_ssh "/system/bin/rush -c 'cd $guest && cc -O2 -D_GNU_SOURCE -I. run-test262.c /devtools/quickjs/lib/libqjs.a -o run-test262'"
+vm_ssh "/user/bin/rush -c 'cd $guest && tar -x -f source.tar && tar -x -f suite.tar.zst'"
+vm_ssh "/user/bin/rush -c 'cd $guest && cc -O2 -D_GNU_SOURCE -I. run-test262.c /user/lib/quickjs/lib/libqjs.a -o run-test262'"
 started="$SECONDS"
 status=0
-out="$(vm_ssh "/system/bin/rush -c 'cd $guest && ./run-test262 -m -c test262.conf -a -t 3'" 2>&1)" ||
+out="$(vm_ssh "/user/bin/rush -c 'cd $guest && ./run-test262 -m -c test262.conf -a -t 3'" 2>&1)" ||
   status=$?
 result="$(printf '%s\n' "$out" | grep -a '^Result: ' | tail -1 || true)"
 echo "test-quickjs-test262: ${result:-no summary} in $((SECONDS - started)) s, status $status"

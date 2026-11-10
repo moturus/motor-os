@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
 fn run(root: &Path, arguments: &[&str], input: &[u8]) -> Output {
-    let mut child = Command::new("/system/bin/sysbox")
+    let mut child = Command::new("/user/bin/sysbox")
         .arg("sort")
         .args(arguments)
         .current_dir(root)
@@ -116,7 +116,7 @@ pub fn run_test() {
     assert_eq!(std::fs::read(root.join("out")).unwrap(), b"a\nz\n");
     std::fs::write(root.join("-f"), b"b\na").unwrap();
     expect(run(&root, &["--", "-f"], b""), 0, b"a\nb\n", None);
-    let wrapper = Command::new("/system/bin/sort")
+    let wrapper = Command::new("/user/bin/sort")
         .arg("one *")
         .current_dir(&root)
         .stdin(Stdio::null())

@@ -141,7 +141,7 @@ GUEST_SSH="/user/bin/ssh -p 2222 -o IdentitiesOnly=yes -o BatchMode=yes -o Stric
 
 remove_ssh_fixtures() {
   if [ -n "$VMM_PID" ] && serial_test_vm_alive; then
-    vm_ssh "/system/bin/rm $GUEST_KEY $GUEST_KNOWN $GUEST_STREAM_HELPER" \
+    vm_ssh "/user/bin/rm $GUEST_KEY $GUEST_KNOWN $GUEST_STREAM_HELPER" \
       >/dev/null 2>&1 || true
   fi
 }
@@ -152,7 +152,7 @@ remove_test_root() {
     local dir
     for dir in "$TEST_TMP" "$NONE_TEST_ROOT"; do
       ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=2 -o ConnectionAttempts=1 \
-        motor@192.168.4.2 /system/bin/rm -r "$dir" >/dev/null 2>&1 || true
+        motor@192.168.4.2 /user/bin/rm -r "$dir" >/dev/null 2>&1 || true
     done
     TEST_ROOT_CREATED=0
   fi
@@ -161,7 +161,7 @@ remove_test_root() {
 remove_helix_fixtures() {
   if [ -n "$GUEST_HELIX_ROOT" ] && [ -n "$VMM_PID" ] &&
     serial_test_vm_alive; then
-    vm_ssh "/system/bin/rm -r $GUEST_HELIX_ROOT" >/dev/null 2>&1 || true
+    vm_ssh "/user/bin/rm -r $GUEST_HELIX_ROOT" >/dev/null 2>&1 || true
     GUEST_HELIX_ROOT=""
   fi
 }
@@ -203,7 +203,7 @@ start_serial_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$CONSOLE_LOG" \
   "$SCRATCH/console-in"
 
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-  motor@192.168.4.2 /system/bin/rush -c true > /dev/null; do
+  motor@192.168.4.2 /user/bin/rush -c true > /dev/null; do
   if ! serial_test_vm_alive; then
     cat "$CONSOLE_LOG" >&2
     fail "$TEST_VM_LABEL exited before SSH became ready"
@@ -365,10 +365,10 @@ end_guest_process() {
   local deadline=$((SECONDS + 10))
   local out
 
-  out="$(vm_ssh "/system/bin/rush -c 'kill $pid'" 2>&1)" ||
+  out="$(vm_ssh "/user/bin/rush -c 'kill $pid'" 2>&1)" ||
     [[ "$out" == *"no such process"* ]] ||
     fail "$label: cannot kill guest process $pid: '$out'"
-  while out="$(vm_ssh "/system/bin/rush -c 'kill -0 $pid'" 2>&1)"; do
+  while out="$(vm_ssh "/user/bin/rush -c 'kill -0 $pid'" 2>&1)"; do
     [ "$SECONDS" -lt "$deadline" ] ||
       fail "$label: guest process $pid is still running after kill"
     sleep 0.1
@@ -524,7 +524,7 @@ finish_pty 130 "terminal-stdin Default leaf"
 
 # stdin is a pipe, so Ctrl+C reaches the leaf through its reserved terminal fd
 # and a terminal-backed non-interactive rush remains Default between routes.
-start_pty "/system/bin/rush -c 'echo | TMPDIR=$TEST_TMP $TEST_BIN/systest ctrl-c-default-child'"
+start_pty "/user/bin/rush -c 'echo | TMPDIR=$TEST_TMP $TEST_BIN/systest ctrl-c-default-child'"
 wait_pty_output "CTRL_C_DEFAULT_READY" "terminal-fd3 Default leaf"
 printf '\003' >&"$PTY_IN_FD"
 finish_pty 130 "terminal-fd3 Default leaf"
@@ -561,7 +561,7 @@ wait_pty_output "end=quit" "crossterm handler"
 finish_pty 0 "crossterm handler"
 
 echo "-- rush read builtin interruption --"
-start_pty "/system/bin/rush -i -c \"trap 'echo READ_TRAP' INT; echo READ_READY; for i in 1 2; do read foo; echo READ_FINISHED; done; echo LIST_FINISHED\""
+start_pty "/user/bin/rush -i -c \"trap 'echo READ_TRAP' INT; echo READ_READY; for i in 1 2; do read foo; echo READ_FINISHED; done; echo LIST_FINISHED\""
 wait_pty_output "READ_READY" "rush read builtin"
 printf '\003' >&"$PTY_IN_FD"
 wait_pty_output "READ_TRAP" "rush interrupted read trap"
@@ -570,13 +570,13 @@ case "$PTY_OUTPUT" in
   *READ_FINISHED*|*LIST_FINISHED*) fail "rush continued after interrupted read: '$PTY_OUTPUT'" ;;
 esac
 
-start_pty "/system/bin/rush -i -c 'echo READ_DATA_READY; IFS= read -r foo; printf \"READ_DATA=[%s]\\n\" \"\$foo\"'"
+start_pty "/user/bin/rush -i -c 'echo READ_DATA_READY; IFS= read -r foo; printf \"READ_DATA=[%s]\\n\" \"\$foo\"'"
 wait_pty_output "READ_DATA_READY" "rush read data"
 printf '  one\tbad\177\\two  \r' >&"$PTY_IN_FD"
 wait_pty_output $'READ_DATA=[  one\tba\\two  ]' "rush read tabs and backspace"
 finish_pty 0 "rush read data"
 
-start_pty "/system/bin/rush -i -c 'echo READ_EOF_READY; read foo; printf \"\\nREAD_EOF=%s:%s\\n\" \"\$?\" \"\$foo\"'"
+start_pty "/user/bin/rush -i -c 'echo READ_EOF_READY; read foo; printf \"\\nREAD_EOF=%s:%s\\n\" \"\$?\" \"\$foo\"'"
 wait_pty_output "READ_EOF_READY" "rush read EOF"
 printf 'partial\004\004' >&"$PTY_IN_FD"
 wait_pty_output "READ_EOF=1:partial" "rush read partial EOF"
@@ -620,7 +620,7 @@ wait_pty_output "end=quit" "nested ssh normal exit"
 finish_nested_pty 0 "nested ssh normal exit"
 
 echo "-- Motor ssh byte stream, prefix expiry, and local escape --"
-start_nested_pty "COLUMNS=100 LINES=30 $GUEST_SSH -t motor@127.0.0.1 /system/bin/rush $GUEST_STREAM_HELPER"
+start_nested_pty "COLUMNS=100 LINES=30 $GUEST_SSH -t motor@127.0.0.1 /user/bin/rush $GUEST_STREAM_HELPER"
 wait_pty_output "STREAM_READY" "nested ssh byte stream"
 printf 'byte-transparent-x~.y\n' >&"$PTY_IN_FD"
 wait_pty_output "STREAM_ONE=<byte-transparent-x~.y>" "nested ssh byte stream"
@@ -638,7 +638,7 @@ printf '\n~.' >&"$PTY_IN_FD"
 finish_nested_pty 255 "nested ssh local escape"
 
 echo "-- Motor ssh remote failure restoration --"
-start_nested_pty "$GUEST_SSH -t motor@127.0.0.1 '/system/bin/rush -c \"exit 7\"'"
+start_nested_pty "$GUEST_SSH -t motor@127.0.0.1 '/user/bin/rush -c \"exit 7\"'"
 finish_nested_pty 7 "nested ssh remote failure"
 
 echo "-- Motor ssh Ctrl+C routing --"
@@ -660,7 +660,7 @@ end_guest_process "$nested_child_pid" "nested ssh non-pty Ctrl+C"
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   echo "-- Helix editor --"
 
-  helix_bin=/devtools/helix/hx
+  helix_bin=/user/lib/helix/hx
   # Exercise the shipped configuration before the isolated editor-only cases.
   out="$(vm_ssh 'NO_COLOR=1 hx --health rust')"
   printf '%s\n' "$out" | grep -Fxq '  ✓ rust-analyzer: /devtools/rust/bin/rust-analyzer' ||
@@ -672,14 +672,14 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   helix_env="XDG_CACHE_HOME=$helix_cache TMPDIR=$helix_tmp"
   helix_health_env="$helix_env NO_COLOR=1"
   for path in "$GUEST_HELIX_ROOT" "$helix_cache" "$helix_tmp"; do
-    vm_ssh "/system/bin/mkdir $path" || fail "cannot create Helix fixture directory $path"
+    vm_ssh "/user/bin/mkdir $path" || fail "cannot create Helix fixture directory $path"
   done
 
   out="$(vm_ssh "$helix_env $helix_bin --version")"
   printf '%s\n' "$out" | grep -Eq '^helix 25\.07\.1 \([0-9a-f]{8}\)' ||
     fail "Helix version does not identify its fork commit: '$out'"
   out="$(vm_ssh "$helix_health_env $helix_bin --health")"
-  printf '%s\n' "$out" | grep -Fq '/devtools/helix/runtime' ||
+  printf '%s\n' "$out" | grep -Fq '/user/lib/helix/runtime' ||
     fail "Helix health omitted the compiled runtime path: '$out'"
   for language in rust toml markdown markdown.inline html c cpp json yaml bash lua; do
     out="$(vm_ssh "$helix_health_env $helix_bin --health $language")"

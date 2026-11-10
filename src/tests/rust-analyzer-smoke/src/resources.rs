@@ -86,7 +86,7 @@ pub fn summarize(report: &Value, server: &str) -> io::Result<Value> {
         .filter(|process| {
             process["debug_name"]
                 .as_str()
-                .is_some_and(|name| name.starts_with("/devtools/bin/lorry check"))
+                .is_some_and(|name| name.starts_with("/user/bin/dev/lorry check"))
         })
         .collect::<Vec<_>>();
     if checks.is_empty() {
@@ -131,9 +131,10 @@ pub fn check_processes(summary: &Value, server: &str, roots: &[&str]) -> io::Res
     {
         let name = process["debug_name"].as_str().ok_or_else(invalid)?;
         let tool = [
-            "/devtools/bin/lorry ",
+            "/user/bin/dev/lorry ",
             "/devtools/rust/bin/rustc ",
             "/devtools/llvm/bin/llvm ",
+            // The 1.99.1-2 compiler launchers still name the compatibility shell.
             "/system/bin/rush /devtools/bi",
         ]
         .iter()
@@ -163,11 +164,11 @@ mod tests {
         json!({"interval_ms": 100, "samples": [
             {"elapsed_us": 1000, "physical_used": 10000, "processes": [
                 [10, 1, 1, 100, 4, "server"],
-                [11, 10, 1, 50, 2, "/devtools/bin/lorry check…"],
+                [11, 10, 1, 50, 2, "/user/bin/dev/lorry check…"],
                 [99, 1, 1, 999999, 999, "unrelated"]]},
             {"elapsed_us": 101000, "physical_used": 20000, "processes": [
                 [10, 1, 1, 200, 3, "server"],
-                [11, 10, 0, null, null, "/devtools/bin/lorry check…"],
+                [11, 10, 0, null, null, "/user/bin/dev/lorry check…"],
                 [12, 11, 1, 500, 8, "rustc"]]}
         ]})
     }
@@ -221,7 +222,7 @@ mod tests {
         let observed = |name| json!({"observed_processes": [{"debug_name": name}]});
         for name in [
             "server",
-            "/devtools/bin/lorry check…",
+            "/user/bin/dev/lorry check…",
             "/devtools/rust/bin/rustc --cr…",
             "/devtools/llvm/bin/llvm clang…",
             "/system/bin/rush /devtools/bi…",

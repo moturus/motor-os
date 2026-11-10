@@ -65,7 +65,7 @@ mod tests {
 
     #[test]
     fn display_names_are_basenames_without_terminal_controls() {
-        assert_eq!(display_name("/system/bin/sleep"), "sleep");
+        assert_eq!(display_name("/user/bin/sleep"), "sleep");
         assert_eq!(display_name("-rush"), "rush");
         assert_eq!(display_name("/tmp/\x1b]2;owned\x07"), "?]2;owned?");
         assert_eq!(display_name(&"x".repeat(80)), "x".repeat(MAX_TITLE_CHARS));

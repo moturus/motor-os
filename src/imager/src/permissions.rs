@@ -140,6 +140,16 @@ impl PermissionPolicy {
                 &format!("tree '{}'", path.display()),
                 &source,
             )?;
+            for mode in [profile.directory, profile.file, profile.script, profile.elf] {
+                validate_path_mode(&path, mode).map_err(|reason| {
+                    format!(
+                        "permission policy '{}': tree '{}' mode '{}': {reason}",
+                        source.display(),
+                        path.display(),
+                        mode_string(mode)
+                    )
+                })?;
+            }
             trees.push(TreeRule { path, profile });
         }
 
@@ -147,6 +157,14 @@ impl PermissionPolicy {
         for rule in raw.entries {
             let path = parse_path(&rule.path, "entry", &source)?;
             let mode = parse_mode(&rule.mode, &format!("entry '{}'", path.display()), &source)?;
+            validate_path_mode(&path, mode).map_err(|reason| {
+                format!(
+                    "permission policy '{}': entry '{}' mode '{}': {reason}",
+                    source.display(),
+                    path.display(),
+                    mode_string(mode)
+                )
+            })?;
             if entries.insert(path.clone(), mode).is_some() {
                 return Err(format!(
                     "permission policy '{}': duplicate entry '{}'",
@@ -207,14 +225,16 @@ impl PermissionPolicy {
                 ImageEntryKind::Directory => self.directory_permissions(&path),
                 ImageEntryKind::File(class) => self.file_permissions(&path, class),
             };
-            validate_entry_mode(kind, mode).map_err(|reason| {
-                format!(
-                    "permission policy '{}': '{}' resolves to '{}': {reason}",
-                    self.source.display(),
-                    path.display(),
-                    mode_string(mode)
-                )
-            })?;
+            validate_entry_mode(kind, mode)
+                .and_then(|()| validate_path_mode(&path, mode))
+                .map_err(|reason| {
+                    format!(
+                        "permission policy '{}': '{}' resolves to '{}': {reason}",
+                        self.source.display(),
+                        path.display(),
+                        mode_string(mode)
+                    )
+                })?;
 
             if path.parent() == Some(Path::new("/system/bin"))
                 && matches!(
@@ -398,6 +418,14 @@ pub(crate) fn validate_entry_mode(
     }
 }
 
+pub(crate) fn validate_path_mode(path: &Path, mode: RolePermissions) -> Result<(), &'static str> {
+    if (path.starts_with("/system") || path.starts_with("/user")) && mode.none.can_write() {
+        Err("paths under /system and /user must deny None write access")
+    } else {
+        Ok(())
+    }
+}
+
 pub fn mode_string(mode: RolePermissions) -> String {
     fn access(value: AccessPermissions) -> &'static str {
         match value {
@@ -482,8 +510,8 @@ trees:
             "rwxr-xr-x"
         );
         assert_eq!(
-            mode_string(policy.file_permissions(Path::new("/system/bin/sh"), FileClass::Script)),
-            "r-xr-xr-x"
+            mode_string(policy.file_permissions(Path::new("/user/bin/sh"), FileClass::Script)),
+            "rwxrwxr-x"
         );
         assert_eq!(
             mode_string(policy.file_permissions(Path::new("/user/bin/tool"), FileClass::Script)),
@@ -512,9 +540,10 @@ trees:
         for (path, mode) in [
             ("/devtools", "rwxrwxr-x"),
             ("/devtools/llvm/bin", "rwxrwxr-x"),
-            ("/devtools/lorry", "rwxrwxr-x"),
-            ("/devtools/lorry/user/cache", "rwxrwx---"),
-            ("/devtools/lorry/none/cache", "rwxrwxrwx"),
+            ("/user/dev/lorry", "rwxrwxr-x"),
+            ("/user/dev/lorry/cache", "rwxrwxr-x"),
+            ("/none/dev/lorry/cache", "rwxrwxrwx"),
+            ("/none/dev/motor-os", "rwxrwxrwx"),
         ] {
             assert_eq!(
                 mode_string(policy.directory_permissions(Path::new(path))),
@@ -522,8 +551,9 @@ trees:
             );
         }
         for (path, mode) in [
-            ("/devtools/lorry/user/vendor/repository.toml", "rw-rw----"),
-            ("/devtools/lorry/none/vendor/repository.toml", "rw-rw-rw-"),
+            ("/user/dev/lorry/vendor/repository.toml", "rw-rw-r--"),
+            ("/none/dev/lorry/vendor/repository.toml", "rw-rw-rw-"),
+            ("/none/dev/hello-world/hello.rs", "rw-rw-rw-"),
         ] {
             assert_eq!(
                 mode_string(policy.file_permissions(Path::new(path), FileClass::Regular)),
@@ -532,9 +562,9 @@ trees:
         }
         assert_eq!(
             mode_string(
-                policy.file_permissions(Path::new("/system/cfg/sshd.toml"), FileClass::Regular)
+                policy.file_permissions(Path::new("/user/cfg/sshd.toml"), FileClass::Regular)
             ),
-            "rw-r-----"
+            "rwxrw----"
         );
         // What SFTP gives a new file, so that shipped and installed key lists match.
         for path in [
@@ -575,7 +605,7 @@ trees:
         let policy = parse(include_str!("../motor-os-permissions.yaml")).unwrap();
         let mut entries = [
             ImageEntry {
-                path: PathBuf::from("/system/cfg/sshd.toml"),
+                path: PathBuf::from("/user/cfg/sshd.toml"),
                 kind: ImageEntryKind::File(FileClass::Regular),
             },
             ImageEntry {
@@ -598,6 +628,18 @@ trees:
                 path: PathBuf::from("/system/tmp"),
                 kind: ImageEntryKind::Directory,
             },
+            ImageEntry {
+                path: PathBuf::from("/user/cfg"),
+                kind: ImageEntryKind::Directory,
+            },
+            ImageEntry {
+                path: PathBuf::from("/user/cfg/rush.cfg"),
+                kind: ImageEntryKind::File(FileClass::Regular),
+            },
+            ImageEntry {
+                path: PathBuf::from("/user/cfg/rush.toml"),
+                kind: ImageEntryKind::File(FileClass::Regular),
+            },
         ];
         for class in [FileClass::Script, FileClass::Elf] {
             entries[2].kind = ImageEntryKind::File(class);
@@ -605,6 +647,110 @@ trees:
                 .validate_image(&entries)
                 .unwrap_err()
                 .contains("may not be shipped under /system/logs"));
+        }
+    }
+
+    #[test]
+    fn protected_trees_reject_inherited_and_exact_none_write_modes() {
+        for path in [
+            "/system",
+            "/system/cfg/settings",
+            "/user",
+            "/user/bin/dev/tool",
+        ] {
+            for kind in [
+                ImageEntryKind::Directory,
+                ImageEntryKind::File(FileClass::Regular),
+            ] {
+                let mode = match kind {
+                    ImageEntryKind::Directory => "rwxrwxrwx",
+                    _ => "rw-rw-rw-",
+                };
+                let inherited = policy("  []\n", "  []\n")
+                    .replace("directory: \"rwxr-xr-x\"", "directory: \"rwxrwxrwx\"")
+                    .replace("file: \"rw-r--r--\"", "file: \"rw-rw-rw-\"");
+                let exact = policy(
+                    "  []\n",
+                    &format!("  - path: \"{path}\"\n    mode: \"{mode}\"\n"),
+                );
+                for contents in [inherited, exact] {
+                    let entry = ImageEntry {
+                        path: PathBuf::from(path),
+                        kind,
+                    };
+                    assert!(parse(&contents)
+                        .and_then(|policy| policy.validate_image(&[entry]))
+                        .unwrap_err()
+                        .contains("must deny None write"));
+                }
+            }
+        }
+        for path in ["/none/dev/source", "/username", "/system-extra"] {
+            validate_path_mode(
+                Path::new(path),
+                RolePermissions::all(AccessPermissions::Rwx),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn unused_protected_tree_rules_also_reject_none_write() {
+        for path in ["/system", "/user/bin/optional"] {
+            let tree = format!(
+                "  - path: '{path}'\n    directory: 'rwxr-xr-x'\n    file: 'rw-r--r--'\n    script: 'rwxr-xr-x'\n    elf: 'r-xr-xr-x'\n"
+            );
+            for (field, initial, writable) in [
+                ("directory", "rwxr-xr-x", "rwxrwxrwx"),
+                ("file", "rw-r--r--", "rw-rw-rw-"),
+                ("script", "rwxr-xr-x", "rwxrwxrwx"),
+            ] {
+                let tree = tree.replace(
+                    &format!("{field}: '{initial}'"),
+                    &format!("{field}: '{writable}'"),
+                );
+                assert!(parse(&policy(&tree, "  []\n"))
+                    .unwrap_err()
+                    .contains("must deny None write"));
+            }
+        }
+    }
+
+    #[test]
+    fn shared_configuration_preserves_private_siblings() {
+        let policy = PermissionPolicy::builtin().unwrap();
+        for path in ["/user/cfg", "/user/cfg/helix"] {
+            assert_eq!(
+                mode_string(policy.directory_permissions(Path::new(path))),
+                "rwxrwxr-x"
+            );
+        }
+        for path in [
+            "rush.cfg",
+            "rush.toml",
+            "rmux.toml",
+            "lorry.toml",
+            "helix/languages.toml",
+        ] {
+            let path = Path::new("/user/cfg").join(path);
+            assert_eq!(
+                mode_string(policy.file_permissions(&path, FileClass::Regular)),
+                "rwxrw-r--"
+            );
+        }
+        for path in ["/user/cfg/private", "/user/cfg/ssh", "/user/cfg/russhd"] {
+            assert_eq!(
+                policy.directory_permissions(Path::new(path)).none,
+                AccessPermissions::None
+            );
+        }
+        for path in ["/user/cfg/sshd.toml", "/user/cfg/private.toml"] {
+            assert_eq!(
+                policy
+                    .file_permissions(Path::new(path), FileClass::Regular)
+                    .none,
+                AccessPermissions::None
+            );
         }
     }
 
@@ -762,8 +908,8 @@ trees:
     #[test]
     fn source_classification_uses_only_host_execute_and_file_headers() {
         let directory = TestDirectory::create();
-        let script_minimal = directory.write("minimal", b"#!/system/bin/rush\n", 0o500);
-        let script_full = directory.write("full", b"#!/system/bin/rush\n", 0o777);
+        let script_minimal = directory.write("minimal", b"#!/user/bin/rush\n", 0o500);
+        let script_full = directory.write("full", b"#!/user/bin/rush\n", 0o777);
         let data = directory.write("data", b"plain data\n", 0o666);
         let unknown = directory.write("unknown", b"plain data\n", 0o700);
 

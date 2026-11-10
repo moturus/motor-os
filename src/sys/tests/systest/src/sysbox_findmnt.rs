@@ -19,7 +19,7 @@ pub fn run_test() {
         assert!(output.status.success(), "{output:?}");
         String::from_utf8(output.stdout).unwrap()
     };
-    let table = run("/system/bin/sysbox", &["findmnt"]);
+    let table = run("/user/bin/sysbox", &["findmnt"]);
     let identity = |text: &str| {
         text.lines()
             .skip(1)
@@ -45,14 +45,14 @@ pub fn run_test() {
     ];
     assert_eq!(identity(&table), expected);
     // Usage is sampled and can change between invocations.
-    for wrapper in ["/system/bin/findmnt", "/system/bin/df"] {
+    for wrapper in ["/user/bin/findmnt", "/user/bin/df"] {
         assert_eq!(identity(&run(wrapper, &[])), expected);
     }
     for help in ["-h", "--help"] {
-        assert!(run("/system/bin/sysbox", &["findmnt", help]).contains("usage: findmnt"));
+        assert!(run("/user/bin/sysbox", &["findmnt", help]).contains("usage: findmnt"));
     }
     for args in [&["findmnt", "bad"][..], &["findmnt", "--help", "bad"]] {
-        let output = child("/system/bin/sysbox").args(args).output().unwrap();
+        let output = child("/user/bin/sysbox").args(args).output().unwrap();
         assert_eq!(output.status.code(), Some(1));
         assert!(output.stdout.is_empty());
     }

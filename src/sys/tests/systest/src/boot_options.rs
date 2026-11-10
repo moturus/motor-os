@@ -110,9 +110,7 @@ pub fn console(system_tty: bool) {
     let shell = processes
         .iter()
         .find(|p| {
-            p.active != 0
-                && p.parent_pid == tty.pid
-                && p.debug_name().starts_with("/system/bin/rush")
+            p.active != 0 && p.parent_pid == tty.pid && p.debug_name().starts_with("/user/bin/rush")
         })
         .unwrap();
     let expected_shell = role_cap | CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED | PARENT_OWNED_CAPS;

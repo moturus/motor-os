@@ -2702,11 +2702,11 @@ mod tests {
         );
         assert_eq!(
             default_cache_directory(&BTreeMap::new(), Some(Role::Interactive)).unwrap(),
-            Path::new("/devtools/lorry/user/cache")
+            Path::new("/user/dev/lorry/cache")
         );
         assert_eq!(
             default_cache_directory(&BTreeMap::new(), Some(Role::None)).unwrap(),
-            Path::new("/devtools/lorry/none/cache")
+            Path::new("/none/dev/lorry/cache")
         );
         assert!(default_cache_directory(&BTreeMap::new(), None).is_err());
     }

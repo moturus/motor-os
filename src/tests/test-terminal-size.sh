@@ -147,10 +147,10 @@ TEST_ROOT_CREATED=0
 save_red_stderr() {
   if [ -n "$VMM_PID" ] && serial_test_vm_alive; then
     ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=2 -o ConnectionAttempts=1 \
-      motor@192.168.4.2 "/system/bin/cat $TEST_TMP/red-*.stderr" > "$RED_STDERR_LOG"
+      motor@192.168.4.2 "/user/bin/cat $TEST_TMP/red-*.stderr" > "$RED_STDERR_LOG"
     if [ "$RMUX_CONSOLE_STARTED" = "1" ]; then
       ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=2 -o ConnectionAttempts=1 \
-        motor@192.168.4.2 "/system/bin/cat $TEST_TMP/rmux-console.stderr" > "$RMUX_CONSOLE_STDERR_LOG"
+        motor@192.168.4.2 "/user/bin/cat $TEST_TMP/rmux-console.stderr" > "$RMUX_CONSOLE_STDERR_LOG"
     fi
   fi
 }
@@ -161,7 +161,7 @@ remove_test_root() {
     local dir
     for dir in "$TEST_TMP" "$NONE_TEST_ROOT"; do
       ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=2 -o ConnectionAttempts=1 \
-        motor@192.168.4.2 /system/bin/rm -r "$dir" >/dev/null 2>&1 || true
+        motor@192.168.4.2 /user/bin/rm -r "$dir" >/dev/null 2>&1 || true
     done
     TEST_ROOT_CREATED=0
   fi
@@ -184,7 +184,7 @@ trap cleanup EXIT
 # middle of its bar. The wrapper gives red inherited, pipe-relayed stderr so
 # runtime diagnostics are retained too. Stdin/stdout remain terminal streams.
 start_red() {
-  printf '/system/bin/rush -c red 2>%s/red-%s.stderr\r' "$TEST_TMP" "$1"
+  printf '/user/bin/rush -c red 2>%s/red-%s.stderr\r' "$TEST_TMP" "$1"
 }
 
 # The serial console's stdin: the fifo stays open on fd 3 so the console can be
@@ -196,7 +196,7 @@ start_serial_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" "$CONSOLE_LOG" \
   "$SCRATCH/console-in"
 
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-  motor@192.168.4.2 /system/bin/rush -c true >/dev/null; do
+  motor@192.168.4.2 /user/bin/rush -c true >/dev/null; do
   if ! serial_test_vm_alive; then
     fail "$TEST_VM_LABEL exited before SSH became ready (log: $CONSOLE_LOG)"
   fi
@@ -595,7 +595,7 @@ sleep 3
 # the replay starts with it, on a fresh line.
 echo "-- rush's editor on the serial console --"
 edit_at="$(wc -c < "$CONSOLE_LOG")"
-printf "PS1='\$ ' /system/bin/rush -i\r" >&3
+printf "PS1='\$ ' /user/bin/rush -i\r" >&3
 wait_console_since "$edit_at" $'\\$ \033\\[?25h'
 printf '\033[?2048;1$y\033[48;30;100;0;0t' >&3
 sleep 2
@@ -723,7 +723,7 @@ rmux_at="$(wc -c < "$CONSOLE_LOG")"
 # console rmux grant (CAP_SPAWN, CAP_LOG, CAP_SPAWN_DETACHED, CAP_INTERACTIVE,
 # CAP_VSOCK, CAP_NET, CAP_FS_WRITE) in the wrapper.
 RMUX_CONSOLE_STARTED=1
-printf 'TMPDIR=%s MOTOR_OS_CAPS=0x3ec /system/bin/rush -c rmux 2>%s/rmux-console.stderr\r' "$RMUX_TMPDIR" "$TEST_TMP" >&3
+printf 'TMPDIR=%s MOTOR_OS_CAPS=0x3ec /user/bin/rush -c rmux 2>%s/rmux-console.stderr\r' "$RMUX_TMPDIR" "$TEST_TMP" >&3
 wait_console_since "$rmux_at" $'\033\\[?2048h'
 answered_rmux_at="$(wc -c < "$CONSOLE_LOG")"
 printf '\033[?2048;1$y\033[48;30;100;0;0t' >&3
@@ -799,7 +799,7 @@ console_keys '\025'
 # A program that never subscribed to resizes is not sent one: top reads an ESC
 # as "quit". A live top repaints every second; a dead one leaves a quiet shell.
 m="$(wc -c < "$CONSOLE_LOG")"
-console_keys '/system/bin/top\r' 3
+console_keys '/user/bin/top\r' 3
 console_since "$m" | LC_ALL=C grep -aq 'uptime:' || fail "top did not paint in a pane"
 printf '\033[48;20;60;0;0t' >&3
 sleep 3
@@ -819,7 +819,7 @@ sleep 4
 # raises becomes the `window-change` russhd turns into a report.
 echo "-- russhd pty session --"
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-  motor@192.168.4.2 /system/bin/rush -c true > /dev/null; do
+  motor@192.168.4.2 /user/bin/rush -c true > /dev/null; do
   if ! serial_test_vm_alive; then
     fail "$TEST_VM_LABEL exited before SSH became ready (log: $CONSOLE_LOG)"
   fi

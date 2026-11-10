@@ -300,7 +300,7 @@ pub(crate) fn verbose_echo(src: &str, sh: &Shell) {
 /// the system and user profiles. Missing files are not an error.
 ///
 /// This replaces rush's old `-i <script>` flag:
-/// `ENV=/system/cfg/rush.cfg rush -i`
+/// `ENV=/user/cfg/rush.cfg rush -i`
 /// is the portable spelling of what that flag did.
 fn source_startup_files(sh: &mut Shell) {
     if sh.name().starts_with('-') {

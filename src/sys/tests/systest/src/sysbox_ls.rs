@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-const SYSBOX: &str = "/system/bin/sysbox";
+const SYSBOX: &str = "/user/bin/sysbox";
 
 fn run(cwd: &Path, args: &[&str]) -> Output {
     Command::new(SYSBOX)
@@ -201,9 +201,9 @@ fn test_multiple_operands(root: &Path) {
 }
 
 /// Runs a shell command line in `cwd` through rush, the way an interactive
-/// user does; `ls` in it is the packaged /system/bin/ls wrapper.
+/// user does; `ls` in it is the packaged /user/bin/ls wrapper.
 fn rush(cwd: &Path, command: &str) -> Output {
-    Command::new("/system/bin/rush")
+    Command::new("/user/bin/rush")
         .args(["-c", command])
         .current_dir(cwd)
         .output()

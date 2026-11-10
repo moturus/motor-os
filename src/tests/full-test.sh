@@ -443,7 +443,7 @@ ping_external() {
   local host="$1"
   local output
 
-  if output="$(vm_ssh /system/bin/ping -c 1 "$host" 2>&1)"; then
+  if output="$(vm_ssh /user/bin/ping -c 1 "$host" 2>&1)"; then
     printf '%s\n' "$output"
     return
   fi
@@ -469,7 +469,7 @@ expect_ping_error() {
   local expected="$2"
   local output
 
-  if output="$(vm_ssh /system/bin/ping -c 1 "$host" 2>&1)"; then
+  if output="$(vm_ssh /user/bin/ping -c 1 "$host" 2>&1)"; then
     printf '%s\n' "$output"
     fail "ping unexpectedly resolved '$host'"
   fi
@@ -486,7 +486,7 @@ wait_for_ping_error() {
   local output=""
 
   for _ in $(seq 1 20); do
-    if output="$(vm_ssh /system/bin/ping -c 1 "$host" 2>&1)"; then
+    if output="$(vm_ssh /user/bin/ping -c 1 "$host" 2>&1)"; then
       printf '%s\n' "$output"
       fail "ping unexpectedly resolved '$host'"
     fi
@@ -511,7 +511,7 @@ read_udp_socket_count() {
 
   for _ in $(seq 1 20); do
     count=""
-    if output="$(vm_ssh /system/bin/stats get 2 2>&1)"; then
+    if output="$(vm_ssh /user/bin/stats get 2 2>&1)"; then
       count="$(printf '%s\n' "$output" |
         awk '$2 == "net.udp_sockets" { print $3 }')"
       if [ "$count" = "$expected" ]; then
@@ -624,7 +624,7 @@ ssh_split_stderr="/tmp/full-test-ssh-stderr.$$"
 # The probe's `ls` of a missing path exits 2, like ls(1); expecting that exact
 # status here also pins remote exit-status propagation through russhd.
 ssh_split_status=0
-vm_ssh "SSH_STDOUT_MARKER=ssh-stdout-marker /system/bin/printenv SSH_STDOUT_MARKER; /system/bin/ls /ssh-stderr-separation-probe" \
+vm_ssh "SSH_STDOUT_MARKER=ssh-stdout-marker /user/bin/printenv SSH_STDOUT_MARKER; /user/bin/ls /ssh-stderr-separation-probe" \
   > "$ssh_split_stdout" 2> "$ssh_split_stderr" || ssh_split_status="$?"
 [ "$ssh_split_status" -eq 2 ] ||
   fail "russhd did not deliver ls's error status (got $ssh_split_status)"
@@ -637,7 +637,7 @@ rm -f "$ssh_split_stdout" "$ssh_split_stderr"
 # A command that never reads stdin leaves it for the next one, even though the
 # client's EOF reaches the remote shell first.
 ssh_stdin_out="$(printf 'ssh-stdin-marker\n' |
-  vm_ssh '/system/bin/sysbox echo first; /system/bin/sysbox cat')" ||
+  vm_ssh '/user/bin/sysbox echo first; /user/bin/sysbox cat')" ||
   fail "stdin across SSH commands failed"
 [ "$ssh_stdin_out" = "$(printf 'first\nssh-stdin-marker')" ] ||
   fail "a command that never read stdin lost it: '$ssh_stdin_out'"
@@ -648,7 +648,7 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
 fi
 # Before uploading any test binaries, the RAM mount is empty and hides the
 # sentinel shipped on disk. Listing also exercises mounted-root metadata/name.
-out="$(vm_ssh_stdout "/system/bin/ls /none/tmp")" ||
+out="$(vm_ssh_stdout "/user/bin/ls /none/tmp")" ||
   fail "cannot list fresh /none/tmp"
 [ -z "$out" ] || fail "fresh memfs is not empty: $out"
 vm_ssh "[ ! -e /none/tmp/.shadowed-by-memfs ]" ||
@@ -685,25 +685,25 @@ printf '%s\n' "put $ROOT_DIR/build/bin/$BUILD/sysbox-utility-tests $TEST_TMP/sys
   sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
     -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
     -i "$WD/test.key" motor@192.168.4.2
-out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP $TEST_TMP/sysbox-utility-tests /system/bin/sysbox")" ||
+out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP $TEST_TMP/sysbox-utility-tests /user/bin/sysbox")" ||
   fail "sysbox utility tests failed: $out"
 [ "${out##*$'\n'}" = "sysbox utility-tests: ALL PASS" ] || fail "sysbox utility tests did not finish: $out"
 printf '%s\n' "$out"
 
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
-  vm_ssh /system/bin/rush /devtools/tests/quickjs-smoke.sh || fail "QuickJS smoke failed"
+  vm_ssh /user/bin/rush /devtools/tests/quickjs-smoke.sh || fail "QuickJS smoke failed"
   "$WD/test-rust-analyzer-crates.sh"
   "$WD/test-rust-analyzer-native.sh"
   "$WD/test-rustfmt-native.sh"
   "$WD/test-gix.sh" --guest
 fi
 
-if vm_ssh /system/bin/mkdir /fs-permissions-root-probe; then
+if vm_ssh /user/bin/mkdir /fs-permissions-root-probe; then
   fail "mkdir returned success after a denied root-level creation"
 fi
 vm_ssh "[ ! -e /fs-permissions-root-probe ]" ||
   fail "Interactive session created a root-level directory"
-if vm_ssh /system/bin/rmdir /system/tmp; then
+if vm_ssh /user/bin/rmdir /system/tmp; then
   fail "rmdir returned success after a denied system-directory removal"
 fi
 vm_ssh "[ -d /system/tmp ]" ||
@@ -711,31 +711,31 @@ vm_ssh "[ -d /system/tmp ]" ||
 # NONE's own tree: a NONE-role process writes /none/cfg and /none/tmp but
 # cannot add entries to /none itself. 0x204 is CAP_SPAWN and CAP_FS_WRITE
 # without CAP_INTERACTIVE, so only the directory modes decide.
-for none_dir in /none/cfg /none/tmp; do
-  vm_ssh "MOTOR_OS_CAPS=0x204 /system/bin/rush -c 'echo none >$none_dir/fs-permissions-none-probe'" ||
+for none_dir in /none/cfg /none/tmp /none/dev; do
+  vm_ssh "MOTOR_OS_CAPS=0x204 /user/bin/rush -c 'echo none >$none_dir/fs-permissions-none-probe'" ||
     fail "a NONE-role process could not write $none_dir"
-  vm_ssh /system/bin/rm "$none_dir/fs-permissions-none-probe"
+  vm_ssh /user/bin/rm "$none_dir/fs-permissions-none-probe"
 done
-if vm_ssh "MOTOR_OS_CAPS=0x204 /system/bin/mkdir /none/fs-permissions-none-probe"; then
+if vm_ssh "MOTOR_OS_CAPS=0x204 /user/bin/mkdir /none/fs-permissions-none-probe"; then
   fail "mkdir returned success after a denied /none creation"
 fi
 vm_ssh "[ ! -e /none/fs-permissions-none-probe ]" ||
   fail "a NONE-role process created an entry directly in /none"
 # Higher roles' temporary directories are closed. The positive controls are
 # the /none/tmp write above and the /user/tmp write below.
-if vm_ssh "MOTOR_OS_CAPS=0x204 /system/bin/ls /user/tmp" >/dev/null 2>&1; then
+if vm_ssh "MOTOR_OS_CAPS=0x204 /user/bin/ls /user/tmp" >/dev/null 2>&1; then
   fail "a NONE-role process listed /user/tmp"
 fi
-if vm_ssh /system/bin/mkdir /system/tmp/fs-permissions-probe; then
+if vm_ssh /user/bin/mkdir /system/tmp/fs-permissions-probe; then
   fail "mkdir returned success after a denied /system/tmp creation"
 fi
 vm_ssh "[ ! -e /system/tmp/fs-permissions-probe ]" ||
   fail "Interactive session created an entry in /system/tmp"
-vm_ssh /system/bin/mkdir "$TEST_TMP/fs-permissions-write-probe"
-vm_ssh /system/bin/rm -r "$TEST_TMP/fs-permissions-write-probe"
+vm_ssh /user/bin/mkdir "$TEST_TMP/fs-permissions-write-probe"
+vm_ssh /user/bin/rm -r "$TEST_TMP/fs-permissions-write-probe"
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
-  vm_ssh "/system/bin/rush -c 'echo writable >/devtools/src/.fs-permissions-write-probe'"
-  vm_ssh /system/bin/rm /devtools/src/.fs-permissions-write-probe
+  vm_ssh "/user/bin/rush -c 'echo writable >/none/dev/.fs-permissions-write-probe'"
+  vm_ssh /user/bin/rm /none/dev/.fs-permissions-write-probe
 fi
 
 check_bin_permissions() {
@@ -746,14 +746,14 @@ check_bin_permissions() {
   local name
   local rows
 
-  listing="$(vm_ssh /system/bin/ls -l "$directory")" ||
+  listing="$(vm_ssh /user/bin/ls -l "$directory")" ||
     fail "cannot list $directory"
   rows="$(printf '%s\n' "$listing" | awk 'NF { print $1, $NF }')"
   [ -n "$rows" ] || fail "$directory is empty"
   while read -r mode name; do
     case "$policy:$mode" in
       system:-r-xr-xr-x) ;;
-      mutable:-r-xr-xr-x|mutable:-rwxrwxr-x) ;;
+      mutable:-r-xr-xr-x|mutable:-rwxrwxr-x|mutable:drwxrwxr-x) ;;
       *) fail "$directory/$name has unexpected mode '$mode'" ;;
     esac
   done <<EOF
@@ -763,52 +763,54 @@ EOF
 
 check_bin_permissions /system/bin system
 check_bin_permissions /user/bin mutable
+"$WD/test-image-layout.sh"
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   check_bin_permissions /devtools/bin mutable
-  editable_script=/devtools/bin/www
+  check_bin_permissions /user/bin/dev mutable
+  editable_script=/user/bin/dev/www
   saved_script="$TEST_TMP/fs-permissions-www.saved"
-  vm_ssh /system/bin/cp "$editable_script" "$saved_script"
-  vm_ssh "/system/bin/rush -c 'echo >>$editable_script'" ||
+  vm_ssh /user/bin/cp "$editable_script" "$saved_script"
+  vm_ssh "/user/bin/rush -c 'echo >>$editable_script'" ||
     fail "Interactive session could not edit $editable_script in place"
-  vm_ssh "/system/bin/rush -c 'cat $saved_script >$editable_script'" ||
+  vm_ssh "/user/bin/rush -c 'cat $saved_script >$editable_script'" ||
     fail "could not restore $editable_script after its write probe"
-  # Interactive owns /devtools, where a user installs a toolchain.
-  vm_ssh "/system/bin/mv $editable_script $editable_script.renamed &&
-    /system/bin/mv $editable_script.renamed $editable_script" ||
+  # Interactive owns the installed development commands.
+  vm_ssh "/user/bin/mv $editable_script $editable_script.renamed &&
+    /user/bin/mv $editable_script.renamed $editable_script" ||
     fail "Interactive session could not rename $editable_script"
-  vm_ssh /system/bin/rm "$saved_script"
-  check_bin_permissions /devtools/bin mutable
+  vm_ssh /user/bin/rm "$saved_script"
+  check_bin_permissions /user/bin/dev mutable
 fi
 
-EXPECTED_PATH=/system/bin:/user/bin
+EXPECTED_PATH=/user/bin
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
-  EXPECTED_PATH=$EXPECTED_PATH:/devtools/bin
+  EXPECTED_PATH=$EXPECTED_PATH:/user/bin/dev:/devtools/bin
 fi
-[ "$(vm_ssh_stdout /system/bin/printenv PATH)" = "PATH=$EXPECTED_PATH" ] ||
+[ "$(vm_ssh_stdout /user/bin/printenv PATH)" = "PATH=$EXPECTED_PATH" ] ||
   fail "russhd PATH does not match $EXPECTED_PATH"
-[ "$(vm_ssh_stdout "/system/bin/rush -c 'pwd'")" = "/user" ] ||
+[ "$(vm_ssh_stdout "/user/bin/rush -c 'pwd'")" = "/user" ] ||
   fail "russhd did not start the SSH command in /user"
-[ "$(vm_ssh_stdout /system/bin/printenv HOME)" = "HOME=/user" ] ||
+[ "$(vm_ssh_stdout /user/bin/printenv HOME)" = "HOME=/user" ] ||
   fail "russhd did not set HOME to /user"
 rush_path="$(printf 'printenv PATH\nexit\n' |
-  vm_ssh_stdout "ENV=/system/cfg/rush.cfg /system/bin/rush --piped")"
+  vm_ssh_stdout "ENV=/user/cfg/rush.cfg /user/bin/rush --piped")"
 printf '%s\n' "$rush_path" | grep -q "PATH=$EXPECTED_PATH$" ||
   fail "interactive Rush PATH does not match $EXPECTED_PATH: '$rush_path'"
-[ "$(vm_ssh_stdout "/system/bin/rush -c 'printenv TMPDIR'")" = "TMPDIR=/user/tmp" ] ||
+[ "$(vm_ssh_stdout "/user/bin/rush -c 'printenv TMPDIR'")" = "TMPDIR=/user/tmp" ] ||
   fail "an Interactive shell did not get /user/tmp as its TMPDIR"
-[ "$(vm_ssh_stdout "TMPDIR=/chosen/tmp /system/bin/rush -c 'printenv TMPDIR'")" = "TMPDIR=/chosen/tmp" ] ||
+[ "$(vm_ssh_stdout "TMPDIR=/chosen/tmp /user/bin/rush -c 'printenv TMPDIR'")" = "TMPDIR=/chosen/tmp" ] ||
   fail "Rush replaced an explicit TMPDIR"
 for service in russhd strobe sys-init sys-tty dns-resolver; do
-  vm_ssh "[ ! -e /system/bin/$service ]" ||
-    fail "service $service was installed in /system/bin"
+  vm_ssh "[ ! -e /user/bin/$service ]" ||
+    fail "service $service was installed in /user/bin"
 done
 
 ping -c 1 -W 2 192.168.4.2
 ping -c 1 -W 2 2001:db8::2
-vm_ssh /system/bin/ping -c 1 192.168.4.1
-vm_ssh /system/bin/ping -c 1 2001:db8::1
-vm_ssh /system/bin/ping -c 1 127.0.0.1
-vm_ssh /system/bin/ping -c 1 localhost
+vm_ssh /user/bin/ping -c 1 192.168.4.1
+vm_ssh /user/bin/ping -c 1 2001:db8::1
+vm_ssh /user/bin/ping -c 1 127.0.0.1
+vm_ssh /user/bin/ping -c 1 localhost
 
 test_udp_fragmentation
 test_wireguard
@@ -831,7 +833,7 @@ udp_sockets="$(read_udp_socket_count)"
 
 # PID of the guest process running `program`, or nothing.
 guest_pid() {
-  vm_ssh /system/bin/ps |
+  vm_ssh /user/bin/ps |
     awk -v program="$1" '$NF == program { gsub(/[+*?]/, "", $1); print $1; exit }'
 }
 
@@ -839,8 +841,8 @@ guest_pid() {
 # defined, and a later per-call client reconnects after the service restarts.
 resolver_pid="$(guest_pid /system/services/dns-resolver)"
 [ -n "$resolver_pid" ] || fail "could not find the dns-resolver process"
-vm_ssh "/system/bin/rush -c 'kill $resolver_pid'"
-vm_ssh /system/bin/ping -c 1 127.0.0.1
+vm_ssh "/user/bin/rush -c 'kill $resolver_pid'"
+vm_ssh /user/bin/ping -c 1 127.0.0.1
 wait_for_ping_error google.com NotConnected
 
 # A loopback listener that cannot bind must leave native resolution running.
@@ -875,8 +877,8 @@ done
 [ "$logged" = "1" ] || fail "dns-resolver did not report its loopback DNS startup failure"
 resolver_pid="$(guest_pid /system/services/dns-resolver)"
 [ -n "$resolver_pid" ] || fail "could not find the IPC-only dns-resolver process"
-vm_ssh "/system/bin/rush -c 'kill $resolver_pid'"
-vm_ssh "/system/bin/rush -c 'kill $holder_pid'"
+vm_ssh "/user/bin/rush -c 'kill $resolver_pid'"
+vm_ssh "/user/bin/rush -c 'kill $holder_pid'"
 wait_for_ping_error google.com NotConnected
 udp_sockets="$(read_udp_socket_count 0)"
 [ "$udp_sockets" = "0" ] ||
@@ -987,25 +989,25 @@ test_stdio_errors
 # inherited stdio, so the outer rush's stdin and stdout relay tasks
 # carry both directions; the no-delay tail must not be lost to the
 # child-exit race.
-out="$(printf 'relay-smoke\n' | vm_ssh_stdout "/system/bin/rush -c 'read X && echo GOT=\$X'")"
+out="$(printf 'relay-smoke\n' | vm_ssh_stdout "/user/bin/rush -c 'read X && echo GOT=\$X'")"
 [ "$out" = "GOT=relay-smoke" ] || fail "stdin relay smoke: got '$out'"
-out="$(vm_ssh_stdout "/system/bin/rush -c 'echo tail-smoke'")"
+out="$(vm_ssh_stdout "/user/bin/rush -c 'echo tail-smoke'")"
 [ "$out" = "tail-smoke" ] || fail "relay tail smoke: got '$out'"
 
 # Rush reads its own stdin only through the line it needs, so the rest reaches
 # the command it runs: from the read builtin, and from the piped line reader.
-out="$(printf 'a\nb\n' | vm_ssh_stdout "/system/bin/rush -c 'read X; echo X=\$X; cat'")"
+out="$(printf 'a\nb\n' | vm_ssh_stdout "/user/bin/rush -c 'read X; echo X=\$X; cat'")"
 [ "$out" = $'X=a\nb' ] || fail "rush read took the next line: got '$out'"
 for mode in --piped -i; do
-  out="$(printf 'read X\nhello\necho X=$X\n' | vm_ssh_stdout "PS1= /system/bin/rush $mode")"
+  out="$(printf 'read X\nhello\necho X=$X\n' | vm_ssh_stdout "PS1= /user/bin/rush $mode")"
   [ "$out" = "X=hello" ] || fail "rush $mode read: got '$out'"
-  out="$(printf 'head -n 1\nhello\n' | vm_ssh_stdout "PS1= /system/bin/rush $mode")"
+  out="$(printf 'head -n 1\nhello\n' | vm_ssh_stdout "PS1= /user/bin/rush $mode")"
   [ "$out" = "hello" ] || fail "rush $mode took head's input: got '$out'"
 done
 
 # A foreground status 130 is rush's v1 interrupt indication. It fires INT once
 # and abandons the rest of the pipeline, loop, and enclosing command list.
-rush_interrupt_cmd="/system/bin/rush -c \"trap 'echo INTERRUPTED' INT; for I in 1 2; do TMPDIR=$TEST_TMP $TEST_BIN/systest ctrl-c-exit-130 | echo PIPELINE_TAIL; echo LOOP_TAIL; done; echo LIST_TAIL\""
+rush_interrupt_cmd="/user/bin/rush -c \"trap 'echo INTERRUPTED' INT; for I in 1 2; do TMPDIR=$TEST_TMP $TEST_BIN/systest ctrl-c-exit-130 | echo PIPELINE_TAIL; echo LOOP_TAIL; done; echo LIST_TAIL\""
 rush_interrupt_status=0
 if out="$(vm_ssh_stdout "$rush_interrupt_cmd")"; then
   fail "rush foreground status 130 unexpectedly succeeded: '$out'"
@@ -1023,32 +1025,32 @@ route_dir=$TEST_TMP/stdio-routes
 # A debug build's runtime logs to stderr. Where a route merges stderr into the
 # compared output, drop those log lines first.
 without_runtime_logs() { sed -E '/^ *[0-9]+:[0-9]{3}: (TRACE|DEBUG|INFO|WARN|ERROR) /d' <<<"$1"; }
-vm_ssh "/system/bin/mkdir $route_dir"
+vm_ssh "/user/bin/mkdir $route_dir"
 kind="TMPDIR=$TEST_TMP $TEST_BIN/systest stdio-file-direct-kind pipe"
-out="$(vm_ssh_stdout "/system/bin/rush -c '$kind file pipe >$route_dir/simple; echo RC=\$?; cat $route_dir/simple'")"
+out="$(vm_ssh_stdout "/user/bin/rush -c '$kind file pipe >$route_dir/simple; echo RC=\$?; cat $route_dir/simple'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush simple direct route: '$out'"
-out="$(vm_ssh_stdout "/system/bin/rush -c 'TMPDIR=$TEST_TMP $TEST_BIN/systest stdio-file-direct-kind null file pipe >$route_dir/background & wait; echo RC=\$?; cat $route_dir/background'")"
+out="$(vm_ssh_stdout "/user/bin/rush -c 'TMPDIR=$TEST_TMP $TEST_BIN/systest stdio-file-direct-kind null file pipe >$route_dir/background & wait; echo RC=\$?; cat $route_dir/background'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush background direct route: '$out'"
-out="$(vm_ssh_stdout "/system/bin/rush -c '{ $kind pipe pipe; } >$route_dir/group; echo RC=\$?; cat $route_dir/group'")"
+out="$(vm_ssh_stdout "/user/bin/rush -c '{ $kind pipe pipe; } >$route_dir/group; echo RC=\$?; cat $route_dir/group'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush group pump route: '$out'"
-out="$(vm_ssh_stdout "/system/bin/rush -c 'for X in one; do $kind pipe pipe; done >$route_dir/loop; echo RC=\$?; cat $route_dir/loop'")"
+out="$(vm_ssh_stdout "/user/bin/rush -c 'for X in one; do $kind pipe pipe; done >$route_dir/loop; echo RC=\$?; cat $route_dir/loop'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush loop pump route: '$out'"
-out="$(vm_ssh_stdout "/system/bin/rush -c 'F() { $kind pipe pipe; }; F >$route_dir/function; echo RC=\$?; cat $route_dir/function'")"
+out="$(vm_ssh_stdout "/user/bin/rush -c 'F() { $kind pipe pipe; }; F >$route_dir/function; echo RC=\$?; cat $route_dir/function'")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush function pump route: '$out'"
-out="$(vm_ssh_stdout "/system/bin/rush -c '$kind pipe pipe | cat >$route_dir/pipeline; cat $route_dir/pipeline'")"
+out="$(vm_ssh_stdout "/user/bin/rush -c '$kind pipe pipe | cat >$route_dir/pipeline; cat $route_dir/pipeline'")"
 [ "$out" = "kind-ok" ] || fail "rush pipeline pump route: '$out'"
-out="$(vm_ssh_stdout "/system/bin/rush -c '$kind file pipe 2>&1 1>$route_dir/split; echo RC=\$?; cat $route_dir/split'")"
+out="$(vm_ssh_stdout "/user/bin/rush -c '$kind file pipe 2>&1 1>$route_dir/split; echo RC=\$?; cat $route_dir/split'")"
 out="$(without_runtime_logs "$out")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush 2>&1 1>f order: '$out'"
-out="$(vm_ssh_stdout "/system/bin/rush -c '$kind file file 1>$route_dir/joined 2>&1; echo RC=\$?; cat $route_dir/joined'")"
+out="$(vm_ssh_stdout "/user/bin/rush -c '$kind file file 1>$route_dir/joined 2>&1; echo RC=\$?; cat $route_dir/joined'")"
 out="$(without_runtime_logs "$out")"
 [ "$out" = $'RC=0\nkind-ok' ] || fail "rush 1>f 2>&1 order: '$out'"
-out="$(vm_ssh_stdout "/system/bin/rush -c 'echo builtin >$route_dir/builtin; cat $route_dir/builtin'")"
+out="$(vm_ssh_stdout "/user/bin/rush -c 'echo builtin >$route_dir/builtin; cat $route_dir/builtin'")"
 [ "$out" = "builtin" ] || fail "rush builtin pump route: '$out'"
 
-# The packaged /system/bin/rg exercises the direct-file identity route through rush
+# The packaged /user/bin/rg exercises the direct-file identity route through rush
 # and ripgrep together; the in-tree systest above pins the same route directly.
-out="$(vm_ssh_stdout "/system/bin/rush -c 'mkdir $TEST_TMP/rg-stdio-e2e; cd $TEST_TMP/rg-stdio-e2e; echo alpha > input.txt; echo alpha > results.txt; TMPDIR=$TEST_TMP $TEST_BIN/systest stdio-file-direct-kind pipe file pipe results.txt >> results.txt; PROBE=\$?; echo alpha > results.txt; /system/bin/rg --files-with-matches alpha . >> results.txt; echo PROBE=\$PROBE; cat results.txt'")"
+out="$(vm_ssh_stdout "/user/bin/rush -c 'mkdir $TEST_TMP/rg-stdio-e2e; cd $TEST_TMP/rg-stdio-e2e; echo alpha > input.txt; echo alpha > results.txt; TMPDIR=$TEST_TMP $TEST_BIN/systest stdio-file-direct-kind pipe file pipe results.txt >> results.txt; PROBE=\$?; echo alpha > results.txt; /user/bin/rg --files-with-matches alpha . >> results.txt; echo PROBE=\$PROBE; cat results.txt'")"
 [ "$out" = $'PROBE=0\nalpha\n./input.txt' ] ||
   fail "ripgrep searched its own output file: got '$out'"
 echo "ripgrep file-stdio regression PASS"
@@ -1056,7 +1058,7 @@ echo "ripgrep file-stdio regression PASS"
 # A C program sees a pipeline's input end as EOF, not as an error: mlibc reports
 # what the runtime returns, whereas Rust's std turns any stdin error into EOF.
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
-  out="$(vm_ssh_stdout "/system/bin/rush -c 'printf \"a\nb\n\" | /devtools/bin/lua -e \"for l in io.lines() do print(l) end\"; echo RC=\$?'")"
+  out="$(vm_ssh_stdout "/user/bin/rush -c 'printf \"a\nb\n\" | /user/bin/dev/lua -e \"for l in io.lines() do print(l) end\"; echo RC=\$?'")"
   [ "$out" = $'a\nb\nRC=0' ] || fail "Lua did not read piped stdin to EOF: '$out'"
   echo "C piped-stdin EOF PASS"
 
@@ -1064,13 +1066,13 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   # script after a bare -i and an attached backup suffix. An in-place edit
   # keeps the file's permissions, here narrower than the default.
   sed_dir="$TEST_TMP/sed-e2e"
-  out="$(vm_ssh_stdout "/system/bin/rush -c '[ -d $sed_dir ] || mkdir $sed_dir; cd $sed_dir; printf \"alpha\nbeta\n\" | /devtools/bin/sed -n s/beta/BETA/p; echo RC=\$?; printf \"one\ntwo\n\" > f; chmod rwxrw---- f; /devtools/bin/sed -i s/one/ONE/ f; /devtools/bin/sed -i.bak -e s/two/TWO/ f; cat f f.bak; ls -l f'")"
+  out="$(vm_ssh_stdout "/user/bin/rush -c '[ -d $sed_dir ] || mkdir $sed_dir; cd $sed_dir; printf \"alpha\nbeta\n\" | /user/bin/dev/sed -n s/beta/BETA/p; echo RC=\$?; printf \"one\ntwo\n\" > f; chmod rwxrw---- f; /user/bin/dev/sed -i s/one/ONE/ f; /user/bin/dev/sed -i.bak -e s/two/TWO/ f; cat f f.bak; ls -l f'")"
   [ "$out" = $'BETA\nRC=0\nONE\nTWO\nONE\ntwo\n-rwxrw---- 8 f' ] ||
     fail "sed pipeline or in-place edit: '$out'"
   # A writable file in a directory where no file can be created: the edit is
   # staged in memory, and the file keeps its permissions.
   locked="$sed_dir/locked"
-  out="$(vm_ssh_stdout "/system/bin/rush -c 'mkdir $locked; printf \"one\ntwo\n\" > $locked/f; chmod rwxrw---- $locked/f; chmod rwxr-xr-x $locked; /devtools/bin/sed -i s/one/ONE/ $locked/f; cat $locked/f; ls -l $locked/f; chmod rwxrwxr-x $locked; rm -r $locked'")"
+  out="$(vm_ssh_stdout "/user/bin/rush -c 'mkdir $locked; printf \"one\ntwo\n\" > $locked/f; chmod rwxrw---- $locked/f; chmod rwxr-xr-x $locked; /user/bin/dev/sed -i s/one/ONE/ $locked/f; cat $locked/f; ls -l $locked/f; chmod rwxrwxr-x $locked; rm -r $locked'")"
   [ "$out" = "ONE"$'\n'"two"$'\n'"-rwxrw---- 8 $locked/f" ] ||
     fail "sed did not edit a file in a read-only directory in place: '$out'"
   echo "sed PASS"
@@ -1080,7 +1082,7 @@ fi
 # meaningful outside rush: `ps` lists it and `kill` finds it (rush's jobs.rs,
 # docs/plans/pid-refactoring-design.md). The sleep is long enough that only a
 # kill that landed lets `wait` return.
-out="$(vm_ssh_stdout "/system/bin/rush -c 'sleep 3600 & B=\$!; /system/bin/ps; kill \$B; echo KILL_RC=\$?; wait; echo REAPED=\$B'")"
+out="$(vm_ssh_stdout "/user/bin/rush -c 'sleep 3600 & B=\$!; /user/bin/ps; kill \$B; echo KILL_RC=\$?; wait; echo REAPED=\$B'")"
 bang="$(printf '%s\n' "$out" | sed -n 's/^REAPED=//p')"
 [ -n "$bang" ] || fail "rush did not reap the background job: '$out'"
 printf '%s\n' "$out" | grep -q '^KILL_RC=0$' ||
@@ -1167,7 +1169,7 @@ wait_motor_process() {
   local found
 
   while [ "$SECONDS" -lt "$deadline" ]; do
-    processes="$(vm_ssh /system/bin/ps)"
+    processes="$(vm_ssh /user/bin/ps)"
     found=0
     printf '%s\n' "$processes" | grep -Fq "$name" && found=1
     if { [ "$presence" = present ] && [ "$found" = 1 ]; } ||
@@ -1258,8 +1260,8 @@ vm_ssh "TMPDIR=$RMUX_HANGUP_TMPDIR" /user/bin/rmux kill-session -t hangup
 # select a different server, not alias the same service name.
 RMUX_DELIMITERS="$TEST_TMP/full-test-rmux;:=&%3B&amp;&col;&eq;"
 RMUX_ESCAPES="$TEST_TMP/full-test-rmux%3B%3A%3D%26%253B%26amp%3B%26col%3B%26eq%3B"
-vm_ssh "/system/bin/mkdir '$RMUX_DELIMITERS'"
-vm_ssh "/system/bin/mkdir '$RMUX_ESCAPES'"
+vm_ssh "/user/bin/mkdir '$RMUX_DELIMITERS'"
+vm_ssh "/user/bin/mkdir '$RMUX_ESCAPES'"
 printf '\001d' | vm_ssh "TMPDIR='$RMUX_DELIMITERS' /user/bin/rmux new -s delimiters" > /dev/null
 printf '\001d' | vm_ssh "TMPDIR='$RMUX_ESCAPES' /user/bin/rmux new -s escapes" > /dev/null
 out="$(vm_ssh "TMPDIR='$RMUX_DELIMITERS' /user/bin/rmux ls")"
@@ -1282,7 +1284,7 @@ status=0
 out="$(vm_ssh "TMPDIR=$TEST_TMP/full-test-rmux-closing $RMUX_PROBE closing")" || status=$?
 [ "$status" -eq 5 ] || fail "rmux final input lost exit 5: status=$status, '$out'"
 [ "$out" = "final input acknowledged; exit=5" ] || fail "rmux closing probe: '$out'"
-vm_ssh /system/bin/mkdir "$RMUX_CAPS_TMPDIR"
+vm_ssh /user/bin/mkdir "$RMUX_CAPS_TMPDIR"
 
 rmux_caps() {
   vm_ssh "TMPDIR=$RMUX_CAPS_TMPDIR $*"
@@ -1295,7 +1297,7 @@ wait_vm_caps() {
   local line=""
 
   while [ "$SECONDS" -lt "$deadline" ]; do
-    line="$(vm_ssh /system/bin/cat "$path" 2>/dev/null)" || line=""
+    line="$(vm_ssh /user/bin/cat "$path" 2>/dev/null)" || line=""
     case "$line" in
       caps=*) printf '%s' "$line"; return ;;
     esac
@@ -1442,11 +1444,11 @@ rmux_caps /user/bin/rmux kill-session -t priv
 # here only when the Interactive or None role may execute it, so System-only
 # executables stay uncolored. A pane supplies the terminal that enables colors;
 # the child names do not appear in the command, so they only match ls output.
-vm_ssh /system/bin/mkdir "$TEST_TMP/sysbox-ls-color"
-vm_ssh /system/bin/mkdir "$TEST_TMP/sysbox-ls-color/amber-dir"
-vm_ssh /system/bin/mkdir "$TEST_TMP/sysbox-ls-color/z-directory"
-vm_ssh /system/bin/cp /system/bin/ls "$TEST_TMP/sysbox-ls-color/a-file"
-vm_ssh /system/bin/cp /system/bin/ls "$TEST_TMP/sysbox-ls-color/default-file"
+vm_ssh /user/bin/mkdir "$TEST_TMP/sysbox-ls-color"
+vm_ssh /user/bin/mkdir "$TEST_TMP/sysbox-ls-color/amber-dir"
+vm_ssh /user/bin/mkdir "$TEST_TMP/sysbox-ls-color/z-directory"
+vm_ssh /user/bin/cp /user/bin/ls "$TEST_TMP/sysbox-ls-color/a-file"
+vm_ssh /user/bin/cp /user/bin/ls "$TEST_TMP/sysbox-ls-color/default-file"
 # A runtime-created regular file grants execute to System only.
 vm_ssh "echo system-only > $TEST_TMP/sysbox-ls-color/system-only-file"
 rmux_ls() {
@@ -1455,7 +1457,7 @@ rmux_ls() {
   # the color frame after the shell's completed startup records.
   printf '\014'
   sleep 1
-  printf '/system/bin/ls %s %s\n' "$1" "$2"
+  printf '/user/bin/ls %s %s\n' "$1" "$2"
   sleep 1
   printf 'exit\n'
 }
@@ -1508,7 +1510,7 @@ check_ls_colors "-l"
 # name. The names deliberately put a file before a directory lexically. -a is
 # accepted and changes nothing: Motor FS has no hidden entries.
 for option in "" "-l" "-a" "-la"; do
-  sorted_ls="$(vm_ssh_stdout /system/bin/ls $option "$TEST_TMP/sysbox-ls-color")"
+  sorted_ls="$(vm_ssh_stdout /user/bin/ls $option "$TEST_TMP/sysbox-ls-color")"
   case "$sorted_ls" in
     *"amber-dir"*"z-directory"*"a-file"*"default-file"*"system-only-file"*) ;;
     *) fail "ls $option did not sort directories before files: '$sorted_ls'" ;;
@@ -1517,7 +1519,7 @@ done
 
 # Long listings use Linux-shaped type/permission fields. The three permission
 # triplets are Motor FS System, Interactive, and None roles, in that order.
-long_ls="$(vm_ssh_stdout /system/bin/ls -l "$TEST_TMP/sysbox-ls-color")"
+long_ls="$(vm_ssh_stdout /user/bin/ls -l "$TEST_TMP/sysbox-ls-color")"
 case "$long_ls" in
   *"drwxrwxr-x"*"amber-dir"*) ;;
   *) fail "ls -l did not report directory permissions: '$long_ls'" ;;
@@ -1674,7 +1676,7 @@ end=quit" ] || fail "crossterm pty mode check decoded '$(crossterm_readings "$ou
 # lone CR, as an SSH client sends it: one host write is not guaranteed to be
 # one guest write, and an LF that arrives after its CR is the command's anyway.
 out="$(printf '%s\rq' "TMPDIR=$TEST_TMP $TEST_BIN/crossterm-smoke keys" |
-  ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 /system/bin/rush 2>/dev/null)"
+  ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 /user/bin/rush 2>/dev/null)"
 [ "$(crossterm_readings "$out")" = "key=Char('q')
 end=quit" ] || fail "Rush kept its command's type-ahead: '$(crossterm_readings "$out")'"
 case "$out" in

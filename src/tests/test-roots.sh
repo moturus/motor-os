@@ -24,7 +24,7 @@ remove_test_roots() {
   for dir in "$TEST_TMP" "$NONE_TEST_ROOT"; do
     if "$@" "[ -e $dir ]"; then
       echo "removing the leftover $dir"
-      "$@" "/system/bin/rm -r $dir" || fail "cannot remove the leftover $dir"
+      "$@" "/user/bin/rm -r $dir" || fail "cannot remove the leftover $dir"
     fi
   done
 }

@@ -179,7 +179,7 @@ impl Session {
 
     fn assert_private(&self, path: &str) {
         let output = self.guest(&format!(
-            "MOTOR_OS_CAPS=0x4 /system/bin/cat {}",
+            "MOTOR_OS_CAPS=0x4 /user/bin/cat {}",
             quoted(path)
         ));
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -213,9 +213,9 @@ fn main() {
         // SETSTAT and FSETSTAT.
         let parent = format!("{root}/mode-{kind}");
         let path = format!("{parent}/file");
-        session.run(&format!("/system/bin/mkdir {}", quoted(&parent)));
+        session.run(&format!("/user/bin/mkdir {}", quoted(&parent)));
         session.run(&format!("echo original > {}", quoted(&path)));
-        session.run(&format!("/system/bin/chmod rwxr-xr-x {}", quoted(&parent)));
+        session.run(&format!("/user/bin/chmod rwxr-xr-x {}", quoted(&parent)));
         let handle = session.open(&path);
         let target = if kind == 9 { path.as_bytes() } else { &handle };
         // A combined chmod+truncate must reject the mode before destroying data.
@@ -223,11 +223,11 @@ fn main() {
         session.mode(kind, target, 0o600, size, 3);
         session.close(&handle);
         assert_eq!(
-            session.run(&format!("/system/bin/cat {}", quoted(&path))),
+            session.run(&format!("/user/bin/cat {}", quoted(&path))),
             b"original\n"
         );
 
-        session.run(&format!("/system/bin/chmod rwxrwxr-x {}", quoted(&parent)));
+        session.run(&format!("/user/bin/chmod rwxrwxr-x {}", quoted(&parent)));
         let handle = session.open(&path);
         // SETSTAT defers its mode on every writable handle of the entry.
         let second = (kind == 9).then(|| session.open(&path));
@@ -243,13 +243,13 @@ fn main() {
         if let Some(second) = second {
             // The first close installed the deferred mode; after the shell
             // hides the file again, the second close installs it once more.
-            session.run(&format!("/system/bin/chmod rwxrw---- {}", quoted(&path)));
+            session.run(&format!("/user/bin/chmod rwxrw---- {}", quoted(&path)));
             session.assert_private(&path);
             session.close(&second);
         }
         assert_eq!(
             session.run(&format!(
-                "MOTOR_OS_CAPS=0x4 /system/bin/cat {}",
+                "MOTOR_OS_CAPS=0x4 /user/bin/cat {}",
                 quoted(&path)
             )),
             b"private contents\n"
@@ -261,12 +261,12 @@ fn main() {
     let parent = format!("{root}/mode-9");
     let handle = session.open(&path);
     session.run(&format!(
-        "/system/bin/mv {} {}",
+        "/user/bin/mv {} {}",
         quoted(&path),
         quoted(&moved)
     ));
     session.run(&format!("echo replacement > {}", quoted(&path)));
-    session.run(&format!("/system/bin/chmod rwxr-xr-x {}", quoted(&parent)));
+    session.run(&format!("/user/bin/chmod rwxr-xr-x {}", quoted(&parent)));
     // SETSTAT follows the path's replacement, even while the old handle exists.
     session.mode(9, path.as_bytes(), 0o600, None, 0);
     session.assert_private(&path);
@@ -281,17 +281,17 @@ fn main() {
     session.close(&writer);
     assert_eq!(
         session.run(&format!(
-            "MOTOR_OS_CAPS=0x4 /system/bin/cat {}",
+            "MOTOR_OS_CAPS=0x4 /user/bin/cat {}",
             quoted(&moved)
         )),
         b"private contents\n"
     );
-    session.run(&format!("/system/bin/chmod rwxrwxr-x {}", quoted(&parent)));
+    session.run(&format!("/user/bin/chmod rwxrwxr-x {}", quoted(&parent)));
     session.mode(10, &handle, 0o600, None, 0);
     session.assert_private(&moved);
     assert_eq!(
         session.run(&format!(
-            "MOTOR_OS_CAPS=0x4 /system/bin/cat {}",
+            "MOTOR_OS_CAPS=0x4 /user/bin/cat {}",
             quoted(&path)
         )),
         b"replacement\n"

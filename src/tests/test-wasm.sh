@@ -127,8 +127,8 @@ for vm in "${vms[@]}"; do
     "$evidence/$label-console.log" "${runner_args[@]}"
   sftp_options=(-F /dev/null -o IdentitiesOnly=yes -o BatchMode=yes
     -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" -i "$WD/test.key" -P 2222)
-  installed=(javy/devtools/bin/javy javy/devtools/bin/wasmi
-    wasmtime/devtools/bin/wasmtime wasmtime/devtools/bin/wasmtime-rt)
+  installed=(javy/user/bin/dev/javy javy/user/bin/dev/wasmi
+    wasmtime/user/bin/dev/wasmtime wasmtime/user/bin/dev/wasmtime-rt)
   {
     for suite in "${suites[@]}"; do printf 'put "%s" /user/tmp/%s\n' "$(binary "$suite")" "$suite"; done
     # Keep fixtures and retained outputs on disk for the low-RAM qualification.

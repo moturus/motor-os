@@ -21,7 +21,7 @@ const STDIO_IS_TERMINAL_ENV_KEY: &str = "MOTURUS_STDIO_IS_TERMINAL";
 /// Tell an interactive Rush that its OSC title belongs to an rmux pane.
 ///
 /// Unlike the terminal hint above, this is ordinary inherited state: the
-/// `/system/bin/sh` wrapper is a Rush script and passes it to the interactive
+/// `/user/bin/sh` wrapper is a Rush script and passes it to the interactive
 /// Rush it starts. Other shells and programs simply ignore it.
 const RMUX_PANE_ENV_KEY: &str = "RMUX_PANE";
 

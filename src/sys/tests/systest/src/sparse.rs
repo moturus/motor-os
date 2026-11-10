@@ -136,7 +136,7 @@ fn test_process_memory_stats() {
 // reservation. Both display modes must agree with the byte metrics exactly.
 fn check_ps_memory(pid: u64, expected: [u64; 2]) {
     for tree in [false, true] {
-        let mut command = std::process::Command::new("/system/bin/ps");
+        let mut command = std::process::Command::new("/user/bin/ps");
         if tree {
             command.arg("-H");
         }

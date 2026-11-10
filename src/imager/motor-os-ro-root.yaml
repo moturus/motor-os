@@ -5,8 +5,9 @@ input_files:
   - "/system/services/strobe"
   - "/system/services/sys-init"
   - "/system/services/sys-tty"
+  - "/user/bin/rush"
   - "/system/bin/rush"
-  - "/system/bin/sysbox"
+  - "/user/bin/sysbox"
   - "/user/bin/systest"
 directories:
   - "/system"
@@ -23,6 +24,7 @@ directories:
   - "/user/tmp"
   - "/none"
   - "/none/cfg"
+  - "/none/dev"
   - "/none/tmp"
 static_dirs:
   - "img_files/motor-os-base"

@@ -80,7 +80,7 @@ boot_console() {
   export SERIAL_VM_HAS_SSH=1
   CONSOLE_LOG="$LOG_DIR/$name.log"
   start_serial_test_vm "$SCRATCH/run-$VMM.sh" "$TEST_VM_LABEL" "$CONSOLE_LOG" "$SCRATCH/input" "$@"
-  until vm_ssh /system/bin/rush -c true >/dev/null 2>&1; do
+  until vm_ssh /user/bin/rush -c true >/dev/null 2>&1; do
     serial_test_vm_alive || fail 'VM exited before SSH'
     sleep 0.5
   done

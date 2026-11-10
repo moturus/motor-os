@@ -37,12 +37,12 @@ pub fn run_test(root: &Path) {
         .unwrap();
     expect(output, 0, b"-e a\nb\n", b"");
     if cfg!(target_os = "motor") {
-        let output = std::process::Command::new("/system/bin/echo")
+        let output = std::process::Command::new("/user/bin/echo")
             .args(["-n", "wrapper"])
             .output()
             .unwrap();
         expect(output, 0, b"wrapper", b"");
-        let output = std::process::Command::new("/system/bin/rush")
+        let output = std::process::Command::new("/user/bin/rush")
             .args(["-c", "echo 'a\\nb'"])
             .output()
             .unwrap();

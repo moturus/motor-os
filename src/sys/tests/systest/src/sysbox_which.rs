@@ -2,7 +2,7 @@
 
 use std::process::{Command, Output};
 
-const WHICH: &str = "/system/bin/which";
+const WHICH: &str = "/user/bin/which";
 
 fn run(command: &str) -> Output {
     Command::new(WHICH).arg(command).output().unwrap()
@@ -19,7 +19,7 @@ fn assert_found(command: &str, expected: &str) {
 }
 
 pub fn run_test() {
-    assert_found("ls", "/system/bin/ls\n");
+    assert_found("ls", "/user/bin/ls\n");
     assert_found("red", "/user/bin/red\n");
 
     let missing = run("nonexisting-command");

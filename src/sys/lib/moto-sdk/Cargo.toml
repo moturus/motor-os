@@ -30,7 +30,7 @@ moto-sys = { version = "0.4.0", path = "../moto-sys" }
 # The std filesystem implementation off Motor OS. Motor OS never builds tokio:
 # in the native test workspace that the developer image stages, an empty
 # placeholder fills tokio's Cargo.lock entry (see
-# img_files/motor-os-dev/devtools/src/motor-os/sys/lib/tokio-placeholder).
+# img_files/motor-os-dev/none/dev/motor-os/sys/lib/tokio-placeholder).
 [target.'cfg(unix)'.dependencies]
 camino = "1.1.10"
 tokio = { version = "1.44.2", default-features = false, features = ["fs", "io-util", "rt", "sync", "time"] }

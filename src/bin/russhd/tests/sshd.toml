@@ -7,7 +7,7 @@
 
 version = 2
 listen_on = '0.0.0.0:2222'
-path = "/system/bin:/user/bin"
+path = "/user/bin"
 
 # the default/test host key
 

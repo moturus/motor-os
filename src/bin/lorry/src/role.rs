@@ -1,7 +1,7 @@
 //! Where Lorry keeps per-user state on Motor OS.
 //!
 //! Each process role has its own configuration, repository, cache, and scratch
-//! directories, so a None-role Lorry never reads or writes Interactive state.
+//! directories. Interactive's repository is readable by None, but not writable.
 //! System has none: Lorry refuses to run as System.
 
 use std::path::{Path, PathBuf};
@@ -40,8 +40,8 @@ impl Role {
     /// This role's repository and cache.
     pub fn state_directory(self) -> &'static Path {
         Path::new(match self {
-            Self::Interactive => "/devtools/lorry/user",
-            Self::None => "/devtools/lorry/none",
+            Self::Interactive => "/user/dev/lorry",
+            Self::None => "/none/dev/lorry",
         })
     }
 
@@ -82,9 +82,10 @@ mod tests {
         );
         assert_eq!(Role::None.config_file(), Path::new("/none/cfg/lorry.toml"));
         assert_eq!(
-            Role::None.state_directory(),
-            Path::new("/devtools/lorry/none")
+            Role::Interactive.state_directory(),
+            Path::new("/user/dev/lorry")
         );
+        assert_eq!(Role::None.state_directory(), Path::new("/none/dev/lorry"));
         assert_eq!(Role::None.temp_directory(), Path::new("/none/tmp"));
         refuse_system().unwrap();
     }

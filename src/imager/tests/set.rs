@@ -115,7 +115,7 @@ fn all_commands_preserve_other_credentials_permissions_and_boot_data() {
                 )
             );
             assert_eq!(read(&raw, KEY), (NEW_KEY.to_vec(), secret_permissions()));
-            assert_eq!(read(&raw, SSH).1, secret_permissions());
+            assert_eq!(read(&raw, SSH).1, credential_permissions());
             assert_eq!(read(&raw, CA).0, b"unchanged trust store");
             assert_eq!(read(&raw, CLIENT_KEY).0, b"client private key");
             assert_eq!(fs::read(fixture.root.join("ssl-key.pem")).unwrap(), NEW_KEY);
@@ -444,7 +444,7 @@ fn invalid_destinations_and_secret_permissions_are_rejected() {
             } else {
                 fs.delete_entry(Role::System, id).await?;
                 if problem == "directory" {
-                    let parent = resolve(fs, "/system/cfg").await?;
+                    let parent = resolve(fs, "/user/cfg").await?;
                     fs.create_entry(
                         Role::System,
                         parent,
@@ -471,6 +471,15 @@ fn credential_destinations_follow_the_trust_rules() {
         AccessPermissions::R,
     );
     for (path, permissions) in [
+        (SSH, none_reads),
+        (
+            SSH,
+            RolePermissions::new(
+                AccessPermissions::Rwx,
+                AccessPermissions::Rwx,
+                AccessPermissions::None,
+            ),
+        ),
         (USERS, open_file),
         (USERS, none_reads),
         (MOTOR_KEYS, open_file),
@@ -488,6 +497,11 @@ fn credential_destinations_follow_the_trust_rules() {
         let key_file = fixture.root.join("key.pub");
         fs::write(&key_file, LOGIN_KEY).unwrap();
         fixture.fails_unchanged(&["--ssh-key", key_file.to_str().unwrap()]);
+        if matches!(path, SSH | "/user/cfg" | "/user") {
+            let host_key = fixture.root.join("host-key");
+            fs::write(&host_key, HOST_KEY).unwrap();
+            fixture.fails_unchanged(&["--ssh-server-key", host_key.to_str().unwrap()]);
+        }
     }
 
     // A key file may be None-readable: the write ends with the standard mode.
@@ -524,6 +538,19 @@ fn credential_destinations_follow_the_trust_rules() {
     fs::write(&fixture_key, LOGIN_KEY).unwrap();
     fixture.fails_unchanged(&["--ssh-key", fixture_key.to_str().unwrap()]);
     fixture.fails_unchanged(&["--ssh-password", "new-password"]);
+}
+
+#[test]
+fn tls_key_permissions_still_exclude_interactive_write() {
+    let fixture = Fixture::new(false, BASE);
+    with_fs(&fixture.image, async |fs| {
+        let id = resolve(fs, KEY).await?;
+        fs.set_all_permissions_image_admin(Role::System, id, credential_permissions())
+            .await
+    });
+    fs::write(fixture.root.join("ssl-cert.pem"), NEW_CERT).unwrap();
+    fs::write(fixture.root.join("ssl-key.pem"), NEW_KEY).unwrap();
+    fixture.fails_unchanged(&["--ssl-keys", fixture.root.to_str().unwrap()]);
 }
 
 #[test]

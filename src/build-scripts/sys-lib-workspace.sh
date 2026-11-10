@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # sys-lib-workspace.sh -- assemble on the host the Motor OS library workspace
-# that the developer image stages under /devtools/src/motor-os/sys/lib.
+# that the developer image stages under /none/dev/motor-os/sys/lib.
 #
 # The crates are the source_dirs of src/imager/motor-os-dev.yaml below that
 # path. The workspace manifest, and the empty tokio placeholder that fills the
@@ -27,7 +27,7 @@ fi
 destination="$1"
 
 ROOT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd)"
-STAGED=/devtools/src/motor-os/sys/lib
+STAGED=/none/dev/motor-os/sys/lib
 die() { echo "sys-lib-workspace: $*" >&2; exit 1; }
 
 [ ! -e "$destination" ] || die "destination already exists: $destination"

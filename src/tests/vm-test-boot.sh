@@ -38,7 +38,7 @@ start_test_vm() {
   # ConnectionAttempts does not reliably cover a slow debug boot. The caller's
   # whole-suite deadline bounds this loop.
   until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-    motor@192.168.4.2 /system/bin/rush -c true; do
+    motor@192.168.4.2 /user/bin/rush -c true; do
     if ! kill -0 "$VMM_PID" 2>/dev/null; then
       wait "$VMM_PID" || vmm_status="$?"
       VMM_PID=""

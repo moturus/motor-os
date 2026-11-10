@@ -97,7 +97,7 @@ ping_external() {
   local host="$1"
   local output
 
-  if output="$(vm_ssh /system/bin/ping -c 1 "$host" 2>&1)"; then
+  if output="$(vm_ssh /user/bin/ping -c 1 "$host" 2>&1)"; then
     printf '%s\n' "$output"
     return
   fi
@@ -123,7 +123,7 @@ expect_ping_error() {
   local expected="$2"
   local output
 
-  if output="$(vm_ssh /system/bin/ping -c 1 "$host" 2>&1)"; then
+  if output="$(vm_ssh /user/bin/ping -c 1 "$host" 2>&1)"; then
     printf '%s\n' "$output"
     fail "ping unexpectedly resolved '$host'"
   fi
@@ -140,7 +140,7 @@ wait_for_ping_error() {
   local output=""
 
   for _ in $(seq 1 20); do
-    if output="$(vm_ssh /system/bin/ping -c 1 "$host" 2>&1)"; then
+    if output="$(vm_ssh /user/bin/ping -c 1 "$host" 2>&1)"; then
       printf '%s\n' "$output"
       fail "ping unexpectedly resolved '$host'"
     fi
@@ -164,7 +164,7 @@ read_udp_socket_count() {
 
   for _ in $(seq 1 20); do
     count=""
-    if output="$(vm_ssh /system/bin/stats get 2 2>&1)"; then
+    if output="$(vm_ssh /user/bin/stats get 2 2>&1)"; then
       count="$(printf '%s\n' "$output" |
         awk '$2 == "net.udp_sockets" { print $3 }')"
       if [ "$count" = "1" ]; then
@@ -227,7 +227,7 @@ VMM_PID="$!"
 # does not reliably cover a slow debug boot. Retry explicitly; the overall
 # 600-second harness timeout bounds this loop.
 until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-  motor@192.168.4.2 /system/bin/rush -c true; do
+  motor@192.168.4.2 /user/bin/rush -c true; do
   if ! kill -0 "$VMM_PID" 2>/dev/null; then
     vmm_status=0
     wait "$VMM_PID" || vmm_status="$?"
@@ -261,10 +261,10 @@ remove_test_roots vm_ssh
 
 ping -c 1 -W 2 192.168.4.2
 ping -c 1 -W 2 2001:db8::2
-vm_ssh /system/bin/ping -c 1 192.168.4.1
-vm_ssh /system/bin/ping -c 1 2001:db8::1
-vm_ssh /system/bin/ping -c 1 127.0.0.1
-vm_ssh /system/bin/ping -c 1 localhost
+vm_ssh /user/bin/ping -c 1 192.168.4.1
+vm_ssh /user/bin/ping -c 1 2001:db8::1
+vm_ssh /user/bin/ping -c 1 127.0.0.1
+vm_ssh /user/bin/ping -c 1 localhost
 
 test_udp_fragmentation
 
@@ -303,11 +303,11 @@ udp_sockets="$(read_udp_socket_count)"
 
 # Verify that numeric lookup is independent of the service, lookup failure is
 # defined, and a later per-call client reconnects after the service restarts.
-resolver_pid="$(vm_ssh /system/bin/ps |
+resolver_pid="$(vm_ssh /user/bin/ps |
   awk '$NF == "/system/services/dns-resolver" { gsub(/[+*?]/, "", $1); print $1; exit }')"
 [ -n "$resolver_pid" ] || fail "could not find the dns-resolver process"
-vm_ssh "/system/bin/rush -c 'kill $resolver_pid'"
-vm_ssh /system/bin/ping -c 1 127.0.0.1
+vm_ssh "/user/bin/rush -c 'kill $resolver_pid'"
+vm_ssh /user/bin/ping -c 1 127.0.0.1
 wait_for_ping_error google.com NotConnected
 
 "${SSH[@]}" MOTOR_OS_CAPS=0x148 /system/services/dns-resolver \
@@ -351,9 +351,9 @@ systest_output="$(cat "$SYSTEST_LOG")"
 # inherited stdio, so the outer rush's stdin and stdout relay tasks
 # carry both directions; the no-delay tail must not be lost to the
 # child-exit race.
-out="$(printf 'relay-smoke\n' | vm_ssh "/system/bin/rush -c 'read X && echo GOT=\$X'")"
+out="$(printf 'relay-smoke\n' | vm_ssh "/user/bin/rush -c 'read X && echo GOT=\$X'")"
 [ "$out" = "GOT=relay-smoke" ] || fail "stdin relay smoke: got '$out'"
-out="$(vm_ssh "/system/bin/rush -c 'echo tail-smoke'")"
+out="$(vm_ssh "/user/bin/rush -c 'echo tail-smoke'")"
 [ "$out" = "tail-smoke" ] || fail "relay tail smoke: got '$out'"
 
 # SFTP integration test against the running VM (before the trap shuts it down).
