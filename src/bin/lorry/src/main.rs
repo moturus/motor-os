@@ -7,6 +7,7 @@ mod build_script;
 mod bundle;
 mod cache;
 mod cache_clean;
+mod cargo_env;
 mod cargo_registry;
 mod change_review;
 mod check_message;

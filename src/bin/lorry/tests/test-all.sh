@@ -97,6 +97,8 @@ bash "$SCRIPT_DIR/dependency-defaults-contract.sh" "$LORRY"
 "$SCRIPT_DIR/git-patch-contract.sh" "$LORRY"
 
 "$SCRIPT_DIR/rustflags-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/env-contract.sh" "$LORRY"
+bash "$SCRIPT_DIR/env-cache-contract.sh" "$LORRY"
 "$SCRIPT_DIR/compatibility-query-contract.sh" "$LORRY"
 "$SCRIPT_DIR/metadata-contract.sh" "$LORRY"
 "$SCRIPT_DIR/target-description-contract.sh" "$LORRY"

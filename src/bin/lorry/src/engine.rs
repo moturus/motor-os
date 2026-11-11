@@ -368,7 +368,7 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
                     &target_options,
                     &RuntimeOptions {
                         current_dir: &current,
-                        environment: &program_environment(&cargo, &manifest, &artifacts)?,
+                        environment: &program_environment(&config, &cargo, &manifest, &artifacts)?,
                         kind: process::ChildKind::Program,
                         verbosity: cli.verbosity,
                     },
@@ -497,7 +497,7 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
                 &target_options,
                 &RuntimeOptions {
                     current_dir: &current,
-                    environment: &program_environment(&cargo, &manifest, &artifacts)?,
+                    environment: &program_environment(&config, &cargo, &manifest, &artifacts)?,
                     kind: process::ChildKind::Program,
                     verbosity: cli.verbosity,
                 },
@@ -1403,6 +1403,7 @@ fn build_inner(
         }
     }
     let executor_options = executor::Options {
+        environment: &build.config.environment,
         cargo: &cargo,
         child_lease_fd: build.child_lease_fd,
         workspace_root: &build.manifest.workspace_root,
@@ -1530,12 +1531,13 @@ fn build_inner(
                     output: &script.output,
                     out_dir: &script.out_dir,
                 });
-                let mut environment = crate::compile::runtime_environment(
+                let mut environment = build.config.environment.clone();
+                environment.extend(crate::compile::runtime_environment(
                     &cargo,
                     member,
                     &library_paths[&harness.key.compile_kind],
                     output.as_ref(),
-                )?;
+                )?);
                 if harness.key.kind == UnitKind::IntegrationHarness
                     && let Some(programs) = integration_binaries
                         .as_ref()
@@ -1863,7 +1865,7 @@ fn runtime_library_paths(
         child_lease_fd: build.child_lease_fd,
         program: &build.toolchain.rustc,
         arguments: &arguments,
-        environment: &BTreeMap::new(),
+        environment: &build.config.environment,
         current_dir: &build.manifest.workspace_root,
         verbose: build.verbosity == Verbosity::Verbose,
         color: false,
@@ -3180,11 +3182,12 @@ pub(crate) fn repository_tree_limits(policy: &PolicyLimits) -> Result<TreeLimits
 }
 
 fn program_environment(
+    config: &Config,
     cargo: &Path,
     manifest: &Manifest,
     artifacts: &BuildArtifacts,
 ) -> Result<BTreeMap<String, OsString>> {
-    let mut environment = BTreeMap::new();
+    let mut environment = config.environment.clone();
     let id = crate::metadata::package::path_package_id(
         &manifest.root,
         &manifest.name,

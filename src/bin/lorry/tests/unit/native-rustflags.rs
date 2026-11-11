@@ -68,6 +68,7 @@ fn native_motor_rustflags_reach_host_commands_environment_and_identity() {
         host: target.into(),
         compatibility: CargoCompat::V1_99,
         query_cache: None,
+        environment: BTreeMap::new(),
     };
     let flags = vec![
         "--cfg=native_flag".into(),
@@ -143,6 +144,7 @@ fn native_motor_rustflags_reach_host_commands_environment_and_identity() {
                     &planned.unit,
                     &planned.settings,
                     &EnvironmentOptions {
+                        configured: &BTreeMap::new(),
                         cargo: Path::new("/lorry"),
                         rustc: &rustc.rustc,
                         host: target,

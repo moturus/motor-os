@@ -47,6 +47,7 @@ pub trait EventReporter: Sync {
 }
 
 pub struct Options<'a> {
+    pub environment: &'a BTreeMap<String, std::ffi::OsString>,
     pub child_lease_fd: Option<i32>,
     pub cargo: &'a Path,
     pub workspace_root: &'a Path,
@@ -727,6 +728,7 @@ fn execute_unit<'a>(
                     &planned.unit,
                     &planned.settings,
                     &EnvironmentOptions {
+                        configured: options.environment,
                         cargo: options.cargo,
                         rustc: &options.toolchain.rustc,
                         host: &options.host.triple,
@@ -794,7 +796,12 @@ fn execute_unit<'a>(
                     .collect();
                 build_script::add_caller_environment(
                     &mut environment,
-                    &admission.caller_env,
+                    &admission
+                        .caller_env
+                        .iter()
+                        .filter(|name| !options.environment.contains_key(*name))
+                        .cloned()
+                        .collect(),
                     &caller,
                 )?;
                 let mut read_only = sandbox_inputs(
@@ -950,6 +957,9 @@ fn execute_unit<'a>(
                     &linked,
                 )?
                 .ok_or_else(|| Error::failure("rustc invocation unexpectedly missing"))?;
+                let mut environment = options.environment.clone();
+                environment.extend(planned_invocation.environment);
+                planned_invocation.environment = environment;
                 let driver = options.toolchain.clippy.as_ref().filter(|_| {
                     options
                         .workspace_members
@@ -1012,6 +1022,7 @@ fn execute_unit<'a>(
                     planned,
                     manifest,
                     invocation: &planned_invocation,
+                    configured_environment: options.environment,
                     host_profile: options.host_profile,
                     target_profile: options.target_profile,
                     dependencies: &dependencies,
@@ -2102,6 +2113,7 @@ mod tests {
                 &plan,
                 &manifests,
                 &Options {
+                    environment: &BTreeMap::new(),
                     cargo: &cargo,
                     child_lease_fd: None,
                     workspace_root: &fixture.0,
@@ -2247,6 +2259,7 @@ mod tests {
             &plan,
             &manifests,
             &Options {
+                environment: &BTreeMap::new(),
                 cargo: &cargo,
                 child_lease_fd: None,
                 workspace_root: &fixture.0,

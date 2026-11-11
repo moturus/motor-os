@@ -32,7 +32,7 @@ pub fn rustc_query(cli: &Cli, options: &RustcQueryOptions) -> Result<i32> {
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let workspace = SourceWorkspace::load(&current, cli.manifest_path.as_deref().map(Path::new))?;
     Manifest::report_warnings(&workspace.packages, cli.verbosity);
-    let config = Config::load_workspace(
+    let mut config = Config::load_workspace(
         &current,
         &workspace.root,
         workspace
@@ -41,7 +41,9 @@ pub fn rustc_query(cli: &Cli, options: &RustcQueryOptions) -> Result<i32> {
             .map(|package| package.root.as_path()),
     )?;
     // The query runs rustc with the repository's rustflags.
-    if !crate::cargo_registry::selected(cli, &config) {
+    if crate::cargo_registry::selected(cli, &config) {
+        config.trust_cargo_cache();
+    } else {
         config.require_approved_cargo_configs()?;
     }
     let toolchain = Toolchain::discover(cli.toolchain.as_deref(), &config, false)?;
@@ -69,6 +71,7 @@ pub fn rustc_query(cli: &Cli, options: &RustcQueryOptions) -> Result<i32> {
     arguments.extend(flags.into_iter().map(OsString::from));
 
     let mut command = Command::new(&toolchain.rustc);
+    command.envs(&config.environment);
     process::remove_cargo_client_environment(&mut command);
     command
         .args(arguments)

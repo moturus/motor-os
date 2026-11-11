@@ -335,6 +335,7 @@ mod tests {
             host: "x86_64-unknown-linux-gnu".to_owned(),
             compatibility: CargoCompat::V1_99,
             query_cache: None,
+            environment: Default::default(),
         }
     }
 
@@ -354,6 +355,7 @@ mod tests {
             host: "x86_64-unknown-linux-gnu".to_owned(),
             compatibility: CargoCompat::V1_99,
             query_cache: None,
+            environment: Default::default(),
         }
     }
 

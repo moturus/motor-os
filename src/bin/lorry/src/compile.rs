@@ -1290,6 +1290,7 @@ mod tests {
             host: "x86_64-unknown-linux-gnu".to_owned(),
             compatibility: CargoCompat::V1_99,
             query_cache: None,
+            environment: BTreeMap::new(),
         }
     }
 

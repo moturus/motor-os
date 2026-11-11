@@ -26,6 +26,8 @@ pub struct Config {
     pub build_target_dir: Option<PathBuf>,
     pub environment_target_dir: Option<PathBuf>,
     pub build_rustflags: Vec<String>,
+    /// Cargo `[env]` values after merging configuration and caller overrides.
+    pub environment: BTreeMap<String, OsString>,
     /// Cargo's `build.jobs` or `CARGO_BUILD_JOBS`.
     pub build_jobs: Option<crate::cli::Jobs>,
     /// Cargo settings that Lorry reads but ignores, reported as notes.
@@ -411,7 +413,9 @@ impl Config {
             }
         }
         let environment = current_environment();
-        Self::load_project_with_environment(current, workspace_root, &environment)
+        Self::load_project_with_environment(current, workspace_root, &environment, |name| {
+            env::var_os(name)
+        })
     }
 
     pub fn load_global() -> Result<Self> {
@@ -432,19 +436,22 @@ impl Config {
         package_root: &Path,
         environment: &BTreeMap<String, String>,
     ) -> Result<Self> {
-        Self::load_project_with_environment(package_root, package_root, environment)
+        Self::load_project_with_environment(package_root, package_root, environment, |name| {
+            environment.get(name).map(OsString::from)
+        })
     }
 
     fn load_project_with_environment(
         current: &Path,
         workspace_root: &Path,
         environment: &BTreeMap<String, String>,
+        caller: impl FnMut(&str) -> Option<OsString>,
     ) -> Result<Self> {
         reject_environment(environment)?;
         let mut config = Config::default();
         load_lorry_layers(workspace_root, environment, &mut config)?;
         validate_storage_layout(&config, environment)?;
-        load_cargo_layers(current, workspace_root, environment, &mut config)?;
+        load_cargo_layers(current, workspace_root, environment, &mut config, caller)?;
         apply_cargo_environment(environment, &mut config)?;
         Ok(config)
     }
@@ -1635,9 +1642,10 @@ fn load_cargo_layers(
     workspace_root: &Path,
     environment: &BTreeMap<String, String>,
     config: &mut Config,
+    caller: impl FnMut(&str) -> Option<OsString>,
 ) -> Result<()> {
     // Like Cargo, an empty CARGO_HOME is unset.
-    let cargo_home = environment
+    let mut cargo_home = environment
         .get("CARGO_HOME")
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
@@ -1646,6 +1654,25 @@ fn load_cargo_layers(
                 .get("HOME")
                 .map(|home| Path::new(home).join(".cargo"))
         });
+    if let Some(home) = &mut cargo_home {
+        if home.is_relative() {
+            *home = env::current_dir()
+                .map_err(|error| Error::failure(format!("failed to resolve Cargo home: {error}")))?
+                .join(&*home);
+        }
+        // Cargo normalizes its home, but leaves relative [env] values intact.
+        let mut normalized = PathBuf::new();
+        for component in home.components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    normalized.pop();
+                }
+                _ => normalized.push(component.as_os_str()),
+            }
+        }
+        *home = normalized;
+    }
     // The CARGO_HOME file is the user's; every other file is the repository's.
     let mut layers = Vec::new();
     if let Some(home) = cargo_home.as_deref()
@@ -1667,9 +1694,11 @@ fn load_cargo_layers(
             layers.push((path, Some(workspace_root)));
         }
     }
+    let mut variables = crate::cargo_env::Definitions::default();
     for (path, repository) in layers {
-        merge_cargo_file(&path, repository, config)?;
+        merge_cargo_file(&path, repository, config, &mut variables)?;
     }
+    config.environment = variables.resolve(caller)?;
     Ok(())
 }
 
@@ -1701,7 +1730,12 @@ const IGNORED_CARGO_TABLES: &[&str] = &[
 /// Merges one Cargo configuration file. For a repository's file, given the
 /// workspace root, settings that can run a program or write outside the
 /// workspace are recorded for approval.
-fn merge_cargo_file(path: &Path, repository: Option<&Path>, config: &mut Config) -> Result<()> {
+fn merge_cargo_file(
+    path: &Path,
+    repository: Option<&Path>,
+    config: &mut Config,
+    variables: &mut crate::cargo_env::Definitions,
+) -> Result<()> {
     let document = Document::load(path, "Cargo configuration")?;
     let mut risky = Vec::new();
     for (key, item) in document.root().iter() {
@@ -1710,17 +1744,29 @@ fn merge_cargo_file(path: &Path, repository: Option<&Path>, config: &mut Config)
                 "Cargo configuration `{key}` in `{}`; it does not change Lorry builds",
                 path.display()
             ));
-        } else if !matches!(key, "build" | "target" | "resolver" | "alias") {
+        } else if !matches!(key, "build" | "target" | "resolver" | "alias" | "env") {
             return Err(Error::at(
                 path,
                 document.line_of_item(item),
                 format!("unsupported Cargo configuration table or key `{key}`"),
-                "Lorry reads build, target, and resolver configuration and accepts aliases without executing them",
+                "Lorry reads build, target, resolver, and env configuration and accepts aliases without executing them",
             ));
         }
     }
     if let Some(item) = document.root().get("alias") {
         require_table(path, &document, item, "alias")?;
+    }
+    if let Some(item) = document.root().get("env") {
+        variables.merge(path, &document, item)?;
+        if repository.is_some() {
+            for (name, value) in item.as_table_like().unwrap().iter() {
+                risky.push(format!(
+                    "env.{name} = {} (shared with all child processes, including dependency build scripts; \
+                     the caller's {name} value wins unless force = true)",
+                    crate::toml::json(value)
+                ));
+            }
+        }
     }
     let definition_root = path
         .parent()
@@ -3443,17 +3489,40 @@ native-tools = ["cxx-compiler"]
                 config.ignored
             );
         }
-        for rejected in [
-            "[build]\njobs = 0\n",
-            "[profile.dev]\nopt-level = 1\n",
-            "[env]\nA = \"b\"\n",
-        ] {
+        for rejected in ["[build]\njobs = 0\n", "[profile.dev]\nopt-level = 1\n"] {
             fs::write(package.join(".cargo/config.toml"), rejected).unwrap();
             assert!(
                 Config::load_with_environment(&package, &environment).is_err(),
                 "accepted {rejected:?}"
             );
         }
+    }
+
+    #[test]
+    fn cargo_env_uses_injected_caller_values_and_requires_workspace_approval() {
+        let temp = TempDir::new();
+        let package = temp.0.join("pkg");
+        fs::create_dir_all(package.join(".cargo")).unwrap();
+        let path = package.join(".cargo/config.toml");
+        fs::write(&path, "[env]\nTOKEN = ''\nFORCED = { value = 'fixed', force = true }\nEMPTY = 'default'\nPATH = 'configured-path'\n").unwrap();
+        let caller = BTreeMap::from([
+            ("HOME".to_owned(), temp.0.join("home").display().to_string()),
+            ("TOKEN".to_owned(), "private-caller-value".to_owned()),
+            ("FORCED".to_owned(), "caller".to_owned()),
+            ("EMPTY".to_owned(), String::new()),
+        ]);
+        let config = Config::load_with_environment(&package, &caller).unwrap();
+        assert_eq!(config.environment["TOKEN"], "private-caller-value");
+        assert_eq!(config.environment["FORCED"], "fixed");
+        assert_eq!(config.environment["EMPTY"], "");
+        assert_eq!(config.environment["PATH"], "configured-path");
+        assert_eq!(config.cargo_trust.len(), 1);
+        assert_eq!(config.cargo_trust[0].file, path);
+        assert!(config.require_approved_cargo_configs().is_err());
+        let settings = config.cargo_trust[0].settings.join("\n");
+        assert!(settings.contains("dependency build scripts"));
+        assert!(settings.contains("the caller's TOKEN value wins unless force = true"));
+        assert!(!settings.contains("private-caller-value"));
     }
 
     #[test]

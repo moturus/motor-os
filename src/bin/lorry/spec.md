@@ -685,14 +685,29 @@ layered over user/system settings. A member-local lorry.toml fails with the
 workspace location to which its settings should move. System constraints
 still apply.
 
+Cargo `[env]` accepts strings and tables with `value`, `force`, and `relative`.
+Layers merge by variable and table field. An inherited value retains the path
+of its defining configuration file. Caller values (including empty values)
+win unless `force = true`; `relative = true` resolves against the parent of
+the defining `.cargo` directory without rewriting the value's spelling.
+`CARGO_HOME`, `RUSTUP_HOME`, and `RUSTUP_TOOLCHAIN` are forbidden, as in Cargo.
+Unknown table fields are errors in Lorry; Cargo ignores them.
+Effective values reach build scripts, compiler invocations, run programs, and
+ordinary and bundled test harnesses. Cache keys include these values verbatim,
+including workspace-specific paths. Generated package/dependency metadata,
+native-tool variables, and sandbox temporary directories take precedence.
+Compiler probes use approved configuration only; vendoring does not execute a
+repository's unapproved environment settings.
+
 Only the `CARGO_HOME` file and environment variables belong to the user.
 Every other Cargo configuration file is the repository's. In one, these
 settings can run a program or write outside the workspace and need the user's
-approval: a target `linker` or `runner`; rustflags outside a short safe list
-(`--cfg`, `--check-cfg`, lint levels, `--cap-lints`, `--remap-path-prefix`,
-and the `-C` options `codegen-units`, `debug-assertions`, `debuginfo`,
-`default-linker-libraries`, `force-frame-pointers`, `link-self-contained`,
-`opt-level`, `overflow-checks`, `panic`, `target-cpu`, and `target-feature`);
+approval: an `[env]` value; a target `linker` or `runner`; rustflags outside a
+short safe list (`--cfg`, `--check-cfg`, lint levels, `--cap-lints`,
+`--remap-path-prefix`, and the `-C` options `codegen-units`, `debug-assertions`,
+`debuginfo`, `default-linker-libraries`, `force-frame-pointers`,
+`link-self-contained`, `opt-level`, `overflow-checks`, `panic`, `target-cpu`,
+and `target-feature`);
 and a `build.target-dir` outside the workspace root. Approval covers one file
 by its path and the SHA-256 of its text, so any edit needs a new approval.
 `vendor` lists such files with their settings in its review and records an
@@ -1365,11 +1380,17 @@ build-script or procedural-macro capability. Their native-tool grants may omit
 before receiving native tools. Missing-grant diagnostics suggest the member's
 name, and do not suggest pinning mutable member source trees. They place the
 suggested rule in the current workspace's table of the user configuration.
-Named build-script rules may grant `caller-env = ["NAME"]`. Only matching
-script grants expose those variables, with an empty allowlist by default.
+Named build-script rules may grant `caller-env = ["NAME"]`. Apart from
+variables supplied by Lorry and Cargo `[env]`, only matching script grants
+expose caller variables, with an empty allowlist by default. Approved `[env]`
+entries apply to every package's build scripts and other child processes;
+non-forced entries forward the caller's value when present. The review names
+that inheritance and scope without displaying the caller's value.
 Unset and empty values remain distinct script/cache inputs. Compiler, Cargo,
 native-tool, loader, and temporary-directory control variables cannot be
-overridden through this allowlist. If a script tracks a caller-set variable
+overridden through this allowlist. `[env]` may configure values such as
+`LD_PRELOAD`, `PATH`, and `CC_*`, subject to the generated-value precedence
+described above. If a script tracks a caller-set variable
 that was hidden, Lorry warns with its name and configuration advice, never its
 value. Crates.io and Git caller grants must match the portable capability
 record; changed grants require another vendor review before compilation.

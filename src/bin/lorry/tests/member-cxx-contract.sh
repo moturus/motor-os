@@ -148,4 +148,14 @@ PY
         --locked --offline -- differential-script-clean-messages "$WORK/lorry-$target.json" "$WORK/cargo-view-$target.json"
 done
 target/lorry/x86_64-unknown-linux-gnu/debug/grammar
+# Generated native-tool flags take precedence over Cargo environment defaults.
+cat >>"$WORK/project/.cargo/config.toml" <<'EOF'
+[env]
+CXXFLAGS_x86_64_unknown_linux_gnu = "-DFROM_CARGO_ENV=1"
+EOF
+sed -i '/^\[native-tools\."x86_64-unknown-linux-gnu"\.cxx-compiler\]$/a flags = ["-DFROM_LORRY_NATIVE_TOOLS=1"]' "$USER_CONFIG"
+sed -i '/^fn main() {/a\    assert_eq!(std::env::var("CXXFLAGS_x86_64_unknown_linux_gnu").unwrap(), "-DFROM_LORRY_NATIVE_TOOLS=1");' grammar/build.rs
+env HOME="$WORK/home" "$LORRY" vendor --locked --accept-all
+env HOME="$WORK/home" "$LORRY" build --target x86_64-unknown-linux-gnu
+target/lorry/x86_64-unknown-linux-gnu/debug/grammar
 echo "PASS: granted cc-rs C++ builds match Cargo natively and for Motor; missing grants deny environment and execution"

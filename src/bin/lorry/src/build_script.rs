@@ -140,6 +140,7 @@ pub struct RunOptions<'a> {
 }
 
 pub struct EnvironmentOptions<'a> {
+    pub configured: &'a BTreeMap<String, OsString>,
     pub cargo: &'a Path,
     pub rustc: &'a Path,
     pub host: &'a str,
@@ -185,7 +186,7 @@ pub fn environment(
         }
     }
 
-    let mut values = BTreeMap::new();
+    let mut values = options.configured.clone();
     value(&mut values, "CARGO", options.cargo);
     value(&mut values, "CARGO_MANIFEST_DIR", &manifest.root);
     value(&mut values, "CARGO_MANIFEST_PATH", &manifest.path);
@@ -1499,6 +1500,7 @@ mod tests {
             &unit,
             &settings,
             &EnvironmentOptions {
+                configured: &BTreeMap::new(),
                 cargo: Path::new("/tools/lorry"),
                 rustc: Path::new("/tools/rustc"),
                 host: "x86_64-unknown-linux-gnu",

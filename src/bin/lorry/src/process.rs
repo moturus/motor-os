@@ -37,8 +37,14 @@ pub fn query(program: &Path, arguments: &[&str], description: &str) -> Result<Ou
     Ok(output)
 }
 
-pub fn query_rustc(program: &Path, arguments: &[&str], description: &str) -> Result<Output> {
+pub fn query_rustc(
+    program: &Path,
+    arguments: &[&str],
+    description: &str,
+    environment: &BTreeMap<String, OsString>,
+) -> Result<Output> {
     let mut command = Command::new(program);
+    command.envs(environment);
     remove_cargo_client_environment(&mut command);
     let output = command
         .args(arguments)

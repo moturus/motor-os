@@ -282,12 +282,37 @@ note; the spec lists the rest. Project
 `lorry.toml` belongs at the workspace root. A member-local file is rejected
 with the location to which its settings should move.
 
+Cargo `[env]` settings reach build scripts, rustc, `run`, and test harnesses.
+Strings supply defaults; `{ value = "...", force = true }` overrides an existing
+caller value, including an empty one. With `relative = true`, the value becomes
+an absolute path relative to the parent of the defining `.cargo` directory,
+preserving the value's spelling (including `.` and repeated slashes).
+Configuration layers merge before caller values are applied. Effective values
+participate in build and compiler-query caches. Lorry still supplies its own
+package metadata, dependency metadata, native-tool variables, and sandbox
+temporary directories.
+
+For native Motor builds using `cc` (including ring), a workspace can select
+Motor's C toolchain in `.cargo/config.toml`:
+
+```toml
+[env]
+CFLAGS_x86_64_unknown_motor = "--target=x86_64-unknown-motor"
+```
+
+Motor's built-in native-tool configuration already supplies this flag.
+
 Only your `$CARGO_HOME/config.toml` and environment variables are your own
 Cargo settings; any other `.cargo/config.toml` belongs to the repository. When
 such a file sets a linker, a runner, rustflags beyond a short harmless list,
-or a target directory outside the workspace, Lorry needs your approval of that
-exact file: `lorry vendor` shows the settings and asks, and builds stop with a
-hint until you approve. `vendor --accept-all` approves them all.
+an `[env]` value, or a target directory outside the workspace, Lorry needs
+your approval of that exact file: `lorry vendor` shows the settings and asks,
+and builds stop with a hint until you approve. `vendor --accept-all` approves
+them all.
+
+Approving `[env]` shares its effective values with every child process,
+including dependency build scripts. A non-forced entry forwards your existing
+value when present, even if the file's default is empty.
 
 `locate-project` emits `{"root":"/absolute/path/Cargo.toml"}`, or the path
 alone with `--message-format plain`. The manifest is discovered in the

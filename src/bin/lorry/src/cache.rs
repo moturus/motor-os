@@ -66,6 +66,7 @@ pub struct UnitInput<'a> {
     pub planned: &'a PlannedUnit,
     pub manifest: &'a Manifest,
     pub invocation: &'a RustcInvocation,
+    pub configured_environment: &'a BTreeMap<String, OsString>,
     pub host_profile: &'a Path,
     pub target_profile: &'a Path,
     pub dependencies: &'a [DependencyInput<'a>],
@@ -322,6 +323,12 @@ impl BuildCache {
             &replacements,
         );
         rustc_arguments_digest(&mut digest, &input.invocation.arguments, &replacements)?;
+        // Configured values can be embedded verbatim by dependencies or their
+        // build scripts. Workspace path substitutions would alias checkouts.
+        for (name, value) in input.configured_environment {
+            digest.string("configured-environment-name", name);
+            digest.os("configured-environment-value", value, &[]);
+        }
         // Other process variables are rechecked after compilation when rustc
         // reports reading them, as Cargo does.
         let mut environment = input
@@ -1003,6 +1010,7 @@ fn sysroot_digest(
         &toolchain.rustc,
         &["--print", "sysroot"],
         "rustc sysroot query",
+        &toolchain.environment,
     )?;
     let text = String::from_utf8(output.stdout)
         .map_err(|_| Error::failure("rustc sysroot output is not Unicode"))?;

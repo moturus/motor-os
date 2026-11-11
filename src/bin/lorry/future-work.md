@@ -65,6 +65,16 @@ regressions in the product suite.
 
 ## Differences from Cargo
 
+- **Configured environment invalidation.** Every effective Cargo `[env]`
+  value currently enters every compiler-unit and build-script-run cache key.
+  Changing a runtime-only value such as `RUST_LOG` therefore rebuilds
+  dependencies and stores additional cache entries, while Cargo keeps them
+  fresh. Retain this conservative behavior for the initial `[env]` support.
+  A finer-grained design should recheck the variables rustc reports reading,
+  resolve configured values before caller values, and still hash implicit
+  compiler inputs. Preserve verbatim values across workspace boundaries and
+  audit build-script tracking and completed-profile freshness together.
+
 - **Resolver contexts.** Lorry resolves host and target feature contexts
   separately, so one package can add more than one group of dependencies.
   The extra groups normally select packages that are already chosen. If one

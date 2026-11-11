@@ -629,7 +629,7 @@ fn record_decisions(
     cargo_configs: &[crate::config::CargoTrust],
     selected: &Resolution,
 ) -> Result<()> {
-    let unchanged = (!accept_all || config.policy.accept_all)
+    let unchanged = !accept_all
         && config.policy.approved_review.as_deref() == Some(commitment)
         && proposed.is_empty()
         && cargo_configs.is_empty();
