@@ -2179,11 +2179,8 @@ fn is_executable(path: &str) -> bool {
 
 #[cfg(not(unix))]
 fn is_executable(path: &str) -> bool {
-    // Motor OS has no execute permission bit; treat any existing file as
-    // executable (matching how command resolution accepts it).
-    std::fs::metadata(path)
-        .map(|m| m.is_file())
-        .unwrap_or(false)
+    // stat reports permissions for the caller's role, including directory x.
+    moto_rt::fs::stat(path).is_ok_and(|attr| attr.perm & moto_rt::fs::PERM_EXEC != 0)
 }
 
 /// Whether `path` is something the shell could *run*: an executable regular
