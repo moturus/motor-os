@@ -186,6 +186,26 @@ EOT2"#,
     r#"cat <<EOT
 backtick: `echo sub`
 EOT"#,
+    // The commands under one here-document share its position. The loops are
+    // bounded, so a position that fails to advance cannot hang the corpus.
+    r#"{ read a; read b; echo "$a $b"; } <<EOT
+x
+y
+EOT"#,
+    r#"for i in 1 2 3; do read x || break; echo "got $x"; done <<EOT
+a
+b
+EOT"#,
+    r#"{ read a; cat; } <<EOT
+x
+y
+z
+EOT"#,
+    r#"for i in 1 2 3 4; do read x || break; cat /dev/null; echo "got $x"; done <<EOT
+a
+b
+c
+EOT"#,
 
     // ---- §2.9.2 pipelines ----
     r#"echo hi | cat"#,
@@ -349,6 +369,13 @@ const DIVERGENCES: &[(&str, &str)] = &[
     // OS enforces: a child there takes only inherit/null/pipe as its stdio, so
     // an arbitrary fd cannot be handed to `cat >&3` at all).
     (r#"exec 3>"$T/f"; echo fd3 >&3; exec 3>&-; cat "$T/f""#, "fds > 2 are not wired (no fd passing on Motor OS)"),
+    // A here-document reaches an external command through a pipe, so what that
+    // command reads cannot be counted: `read` sees `x` again where dash is at
+    // the end.
+    (r#"{ cat; read b; echo "[$b]"; } <<EOT
+x
+y
+EOT"#, "what an external command reads from a here-document is not taken from the shell"),
 ];
 
 struct Run {

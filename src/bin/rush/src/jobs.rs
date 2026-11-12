@@ -109,7 +109,8 @@ pub enum ChildIn {
     /// copy of the offset, so what it does read is not taken from the shell,
     /// which sees those bytes again (a documented limit, see the README).
     File(Arc<File>),
-    Heredoc(Arc<String>),
+    /// What is left of a here-document, which we feed through a pipe.
+    Heredoc(Vec<u8>),
 }
 
 /// A child's standard output/error: inherited, or pumped into a file (a captured
@@ -171,9 +172,11 @@ pub fn spawn(
 
     // Only a here-document is fed by us. Draining a file here instead would
     // take input from the shell that the child may never read.
-    let feed: Option<Vec<u8>> = match &stdin {
-        ChildIn::Inherit | ChildIn::Null | ChildIn::File(_) => None,
-        ChildIn::Heredoc(b) => Some(b.as_bytes().to_vec()),
+    let (child_stdin, feed) = match stdin {
+        ChildIn::Inherit => (Stdio::inherit(), None),
+        ChildIn::Null => (Stdio::null(), None),
+        ChildIn::File(file) => (Stdio::from(file.try_clone()?), None),
+        ChildIn::Heredoc(bytes) => (Stdio::piped(), Some(bytes)),
     };
     let out_file = match &stdout {
         ChildOut::Inherit | ChildOut::ParentStdout | ChildOut::ParentStderr => None,
@@ -186,12 +189,7 @@ pub fn spawn(
         ChildOut::File(f) => Some(f.clone()),
     };
 
-    cmd.stdin(match &stdin {
-        ChildIn::File(file) => Stdio::from(file.try_clone()?),
-        ChildIn::Heredoc(_) => Stdio::piped(),
-        ChildIn::Null => Stdio::null(),
-        ChildIn::Inherit => Stdio::inherit(),
-    });
+    cmd.stdin(child_stdin);
     cmd.stdout(match &stdout {
         ChildOut::DirectFile(file) => Stdio::from(file.try_clone()?),
         ChildOut::File(_) => Stdio::piped(),

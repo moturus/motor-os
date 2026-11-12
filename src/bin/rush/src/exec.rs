@@ -28,9 +28,9 @@
 //! redirections to fds > 2, are not wired (Motor OS cannot hand a child an
 //! arbitrary fd at all); `&` on anything but a lone external command delivers
 //! isolation but not concurrency (there is no `fork` — see
-//! [`exec_background`]); on Motor OS a child's reads from an input file it
-//! shares with the shell do not move the shell's position (see
-//! [`ChildIn::File`]).
+//! [`exec_background`]); a child's reads from input it shares with the shell
+//! do not move the shell's position, for a file on Motor OS (see
+//! [`ChildIn::File`]) and for a here-document everywhere (see [`Heredoc`]).
 
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
@@ -38,7 +38,7 @@ use std::io::{IsTerminal, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::ast::{
     AndOr, AndOrOp, Assignment, CaseClause, Command as AstCommand, CompoundCommand, ForClause,
@@ -108,8 +108,40 @@ enum FdSource {
     // Keep the original descriptor when a redirection copies this source.
     Inherit(u8),
     File(Arc<File>),
-    /// stdin fed from a here-document body via a pipe (written after spawn).
-    Heredoc(Arc<String>),
+    /// stdin from a here-document body; a child is fed it through a pipe.
+    Heredoc(Arc<Heredoc>),
+}
+
+/// A here-document body and how much of it has been read.
+///
+/// The commands under one redirection share the position as they would share
+/// a file offset: in `{ read a; read b; } <<EOF` the second `read` continues
+/// where the first stopped. An external command is fed what is left, but
+/// through a pipe, so what it reads cannot be counted and is not taken from
+/// the shell.
+struct Heredoc {
+    body: String,
+    pos: AtomicUsize,
+}
+
+impl Heredoc {
+    fn unread(&self) -> &[u8] {
+        let pos = self.pos.load(Ordering::Relaxed);
+        self.body.as_bytes().get(pos..).unwrap_or_default()
+    }
+}
+
+/// Reads a here-document from its shared position, and advances it.
+struct HeredocReader(Arc<Heredoc>);
+
+impl Read for HeredocReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let unread = self.0.unread();
+        let len = unread.len().min(buf.len());
+        buf[..len].copy_from_slice(&unread[..len]);
+        self.0.pos.fetch_add(len, Ordering::Relaxed);
+        Ok(len)
+    }
 }
 
 impl FdSource {
@@ -141,7 +173,8 @@ impl FdSource {
 
     /// A reader for this fd used as *standard input* (for `read`): `Inherit` →
     /// the shell's stdin, unbuffered so that the bytes after the line stay for
-    /// the next command; a file → the file; a here-document → its body.
+    /// the next command; a file → the file; a here-document → what is left of
+    /// its body.
     fn reader(&self) -> Box<dyn Read> {
         match self {
             FdSource::Inherit(_) => Box::new(crate::sys::RawStdin::default()),
@@ -149,7 +182,7 @@ impl FdSource {
                 .try_clone()
                 .map(|x| Box::new(x) as Box<dyn Read>)
                 .unwrap_or_else(|_| Box::new(std::io::empty())),
-            FdSource::Heredoc(b) => Box::new(std::io::Cursor::new(b.as_bytes().to_vec())),
+            FdSource::Heredoc(doc) => Box::new(HeredocReader(doc.clone())),
         }
     }
 }
@@ -1408,7 +1441,7 @@ fn child_in(fd: &FdSource, background: bool) -> ChildIn {
         FdSource::Inherit(_) if background => ChildIn::Null,
         FdSource::Inherit(_) => ChildIn::Inherit,
         FdSource::File(f) => ChildIn::File(f.clone()),
-        FdSource::Heredoc(b) => ChildIn::Heredoc(b.clone()),
+        FdSource::Heredoc(doc) => ChildIn::Heredoc(doc.unread().to_vec()),
     }
 }
 
@@ -1489,7 +1522,8 @@ fn build_fds_for_simple(
                 } else {
                     expand::expand_heredoc_body(&doc.body, shell, io)
                 };
-                fds[fd_num] = FdSource::Heredoc(Arc::new(body));
+                let pos = AtomicUsize::new(0);
+                fds[fd_num] = FdSource::Heredoc(Arc::new(Heredoc { body, pos }));
                 sole_use[fd_num] = false;
             }
         }

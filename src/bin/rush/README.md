@@ -101,11 +101,13 @@ cannot be quietly fixed or quietly introduced.
   builtin/compound command gives isolation but not concurrency (no `fork`);
 - **Redirections to fds above 2** (`exec 3>file`, `>&3`): Motor OS hands a child
   only inherit/null/pipe as its stdio, so an arbitrary fd cannot reach one at all;
-- **Input a child shares with the shell, on Motor OS**: a command run inside
-  `while read …; do …; done < file`, or in a loop fed by a pipeline, starts at
-  the shell's position in that input, and what it leaves unread stays there.
-  But what it does read is not taken from the shell, whose next `read` sees
-  those bytes again. On the Unix host the two share one offset, as in dash;
+- **Input a child shares with the shell**: a command run inside
+  `while read …; do …; done < file`, or in a loop fed by a pipeline or a
+  here-document, starts at the shell's position in that input, and what it
+  leaves unread stays there. But on Motor OS, and for a here-document on both
+  platforms, what it does read is not taken from the shell, whose next `read`
+  sees those bytes again. On the Unix host a file's offset is shared, as in
+  dash;
 - `umask` affecting file creation, `times` accounting (both display-only); the
   `monitor`/`notify`/`vi`/`nolog`/`hashall`/`ignoreeof` options are accepted but
   inert; a `case` with plain `pat)` patterns *inside* `$( … )` (lexer

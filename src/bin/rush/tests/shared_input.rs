@@ -1,6 +1,7 @@
 //! Input that several commands share: a file redirected onto a compound
-//! command, or the staged input of a pipeline stage. An external command must
-//! find it at the shell's position and must not consume what it never reads.
+//! command, the staged input of a pipeline stage, or a here-document. Each
+//! command must find it at the shell's position, and an external command must
+//! not consume what it never reads.
 
 use std::fs;
 use std::path::PathBuf;
@@ -37,20 +38,27 @@ impl Drop for InputFile {
     }
 }
 
+/// Where a test's compound command gets `INPUT` from.
+#[derive(Clone, Copy)]
+enum Input {
+    Pipeline,
+    File,
+    Heredoc,
+}
+
 /// Run `body`, a compound command whose `$1` is the Rush executable, with
-/// `INPUT` as its standard input: redirected from a file, or through a
-/// pipeline.
-fn check(name: &str, from_file: bool, body: &str, expected: &str) {
-    let input = from_file.then(|| InputFile::new(name));
-    let script = if from_file {
-        format!(r#"{body} < "$2""#)
-    } else {
-        format!(r#"printf '%s' '{INPUT}' | {body}"#)
+/// `INPUT` as its standard input.
+fn check(name: &str, input: Input, body: &str, expected: &str) {
+    let file = matches!(input, Input::File).then(|| InputFile::new(name));
+    let script = match input {
+        Input::Pipeline => format!(r#"printf '%s' '{INPUT}' | {body}"#),
+        Input::File => format!(r#"{body} < "$2""#),
+        Input::Heredoc => format!("{body} <<EOF\n{INPUT}EOF\n"),
     };
     let mut command = Command::new(RUSH);
     command.args(["-c", &script, "shared-input", RUSH]);
-    if let Some(input) = &input {
-        command.arg(&input.0);
+    if let Some(file) = &file {
+        command.arg(&file.0);
     }
     let output = command.output().unwrap();
     assert_eq!(
@@ -68,7 +76,7 @@ fn check(name: &str, from_file: bool, body: &str, expected: &str) {
 }
 
 /// A loop over the input that runs `child` between its `read`s.
-fn check_loop(name: &str, from_file: bool, child: &str, expected: &str) {
+fn check_loop(name: &str, input: Input, child: &str, expected: &str) {
     // The child is the Rush executable, so it really spawns a process instead
     // of taking Rush's in-process path for shell scripts or builtins.
     let body = format!(
@@ -77,19 +85,19 @@ fn check_loop(name: &str, from_file: bool, child: &str, expected: &str) {
             "$1" -c '{child}' || exit $?
         done"#
     );
-    check(name, from_file, &body, expected);
+    check(name, input, &body, expected);
 }
 
 const NO_READ_OUTPUT: &str = "loop:first\nloop:second\nloop:third\nloop:fourth\n";
 
 #[test]
 fn pipeline_input_survives_a_child_that_reads_nothing() {
-    check_loop("pipeline-no-read", false, ":", NO_READ_OUTPUT);
+    check_loop("pipeline-no-read", Input::Pipeline, ":", NO_READ_OUTPUT);
 }
 
 #[test]
 fn redirected_input_survives_a_child_that_reads_nothing() {
-    check_loop("redirect-no-read", true, ":", NO_READ_OUTPUT);
+    check_loop("redirect-no-read", Input::File, ":", NO_READ_OUTPUT);
 }
 
 // The shell reads one line and a child reads the rest.
@@ -102,12 +110,62 @@ const READ_REST_OUTPUT: &str = "shell:first\nchild:second\nchild:third\nchild:fo
 
 #[test]
 fn pipeline_input_reaches_a_child_at_the_shells_position() {
-    check("pipeline-read-rest", false, READ_REST, READ_REST_OUTPUT);
+    check(
+        "pipeline-read-rest",
+        Input::Pipeline,
+        READ_REST,
+        READ_REST_OUTPUT,
+    );
 }
 
 #[test]
 fn redirected_input_reaches_a_child_at_the_shells_position() {
-    check("redirect-read-rest", true, READ_REST, READ_REST_OUTPUT);
+    check(
+        "redirect-read-rest",
+        Input::File,
+        READ_REST,
+        READ_REST_OUTPUT,
+    );
+}
+
+#[test]
+fn heredoc_input_reaches_a_child_at_the_shells_position() {
+    check(
+        "heredoc-read-rest",
+        Input::Heredoc,
+        READ_REST,
+        READ_REST_OUTPUT,
+    );
+}
+
+// A here-document read by builtins alone, then with a child in between. The
+// loop is bounded, so a position that fails to advance fails the test instead
+// of hanging it.
+const BUILTINS: &str = r#"{ IFS= read -r a; IFS= read -r b; printf '%s %s\n' "$a" "$b"; }"#;
+const BOUNDED_LOOP: &str = r#"for round in 1 2 3 4 5 6; do
+        IFS= read -r item || break
+        printf 'loop:%s\n' "$item"
+        "$1" -c ':' || exit $?
+    done"#;
+
+#[test]
+fn heredoc_input_advances_across_builtins() {
+    check(
+        "heredoc-builtins",
+        Input::Heredoc,
+        BUILTINS,
+        "first second\n",
+    );
+}
+
+#[test]
+fn heredoc_input_survives_a_child_that_reads_nothing() {
+    check(
+        "heredoc-no-read",
+        Input::Heredoc,
+        BOUNDED_LOOP,
+        NO_READ_OUTPUT,
+    );
 }
 
 // What a child reads is taken from the shell only on the Unix host, where the
@@ -121,11 +179,16 @@ const READ_ONE_OUTPUT: &str = "loop:first\nchild:second\nloop:third\nchild:fourt
 #[cfg(unix)]
 #[test]
 fn pipeline_input_advances_only_by_what_the_child_reads() {
-    check_loop("pipeline-read-one", false, READ_ONE, READ_ONE_OUTPUT);
+    check_loop(
+        "pipeline-read-one",
+        Input::Pipeline,
+        READ_ONE,
+        READ_ONE_OUTPUT,
+    );
 }
 
 #[cfg(unix)]
 #[test]
 fn redirected_input_advances_only_by_what_the_child_reads() {
-    check_loop("redirect-read-one", true, READ_ONE, READ_ONE_OUTPUT);
+    check_loop("redirect-read-one", Input::File, READ_ONE, READ_ONE_OUTPUT);
 }
