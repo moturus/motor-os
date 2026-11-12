@@ -80,7 +80,10 @@ and dependencies. `manifest/profiles.rs` resolves the selected profile once
 per command. `toml.rs` wraps TOML parsing with byte, nesting, and node limits
 and retains source locations for diagnostics. `config.rs` merges the supported
 Lorry and Cargo configuration layers while enforcing which layer may control
-security-sensitive settings. `toolchain.rs` discovers `rustc`, identifies the
+security-sensitive settings. Both config discovery and Cargo-cache lookup use
+`/user/cfg/cargo` as Motor's default Cargo home, independent of the caller's
+role; an explicit `CARGO_HOME` overrides it. The image's Cargo config supplies
+ordinary C/C++ defaults. `toolchain.rs` discovers `rustc`, identifies the
 Cargo-compatibility family, and evaluates target `cfg` expressions. Like
 Cargo's `.rustc_info.json`, it keeps the answers to rustc's version and cfg
 queries in the global cache, keyed by the rustc path, size, and mtime.
@@ -241,7 +244,7 @@ It records only:
   `spec.md`;
 - the normalized workspace member/feature scope;
 - the reviewed `(host, target)` build contexts; and
-- the explicit build-script, procedural-macro, and native-tool capability
+- the explicit build-script and procedural-macro capability
   grants.
 
 The canonical review document is reconstructed, never stored. Review format 4
@@ -256,7 +259,7 @@ Builds from Cargo's cache skip this section: they read no admission state,
 and `Config::trust_cargo_cache` sets a policy flag that removes the default
 deny, the build-script and procedural-macro grants, and Lorry's default
 package limit. Explicit denies and configured limits still apply. Their
-trusted build scripts get the native tools configured for the target.
+trusted build scripts run with the compiler environment.
 
 With Lorry repositories, `engine.rs` requires the discovered host and selected
 target to be an exact reviewed context. Before anything compiles,
@@ -270,7 +273,7 @@ state, lock, manifests, configuration, and policy. Reuse compiles and runs nothi
 evidence and explicit capabilities into exact generated allow rules. Policy
 evaluation still considers every matching explicit deny, so a generated allow
 cannot override administrator policy, resource limits, integrity checks, or
-unavailable native-tool grants. Repository lookup during
+missing build-time code grants. Repository lookup during
 reconstruction is inspection, not admission: nothing compiles or enters a
 build cache until the commitment and policy both pass.
 
@@ -311,7 +314,7 @@ The resulting graph must actually contain the requested identity.
 Dependency change review temporarily supplies exact candidate allow rules so full
 evidence can be collected under default-deny policy. Explicit denies and all
 other constraints remain active. The review shows requirement, locked graph,
-admission evidence, build-script, and native-tool changes. `--accept-all`
+admission evidence and build-time code changes. `--accept-all`
 approves the complete displayed candidate without a prompt; one interactive
 confirmation otherwise authorizes the shown identity and capability changes.
 
@@ -329,7 +332,7 @@ reject definite denials and impossible admission before expensive work.
 Inspection adds license, source-tree, archive, file-count, build-script,
 procedural-macro, and other evidence and requires the exact graph to be
 unchanged between passes. Both executable-code forms need separate explicit
-grants; native tools remain available only to build scripts.
+grants.
 
 Build scripts are compiled as host units. Procedural macros are distinct host
 units whose normal dependency closure is also compiled for the compiler host,
@@ -347,21 +350,27 @@ paths, and constructs a cleared, explicit environment. A unit edge from the
 script run of each direct `links` dependency to the dependent script run
 carries metadata as `DEP_<LINKS>_<KEY>`. As in Cargo, that edge orders the
 runs and enters the dependent's `OUT_DIR` hash.
-`native_tool.rs` exposes only configured compiler/archiver roles and includes
-their identities and arguments in build/cache identity. Linux applies the
-filesystem/network/process sandbox in `sandbox.rs`. Motor warns and runs the
-same build-script contract without isolation. Linux proc macros execute
-inside rustc; Linux-to-Motor uses the same host artifact and execution path.
+Build-script environment construction passes PATH and compiler variables,
+which enter run and cache identities. Linux applies filesystem and network
+limits in `sandbox.rs`; programs in readable paths may execute. Linux proc
+macros execute inside rustc.
+
+`motor_child.rs` keeps configuration, approvals, and run/test execution in the
+caller-role parent. Authenticated IPC connects it to an acquisition worker
+without detach authority or a None build worker with only spawn and filesystem
+write authority. Motor compilation and build scripts cannot access private
+Interactive state or the network. They can read public files, execute any
+None-executable program, and write every None-writable tree, including other
+workspaces, caches, repositories, and None approvals. `motor_fs.rs` preserves
+source identity through None's execute bit and shares workspace state by kind.
 
 Motor's native compiler toolchain is an installed platform capability, not a
 Lorry bootstrap responsibility. Standard development images provide `/devtools/bin/cc`
 and `/devtools/bin/c++`, the `/devtools/llvm/bin/llvm` multicall with Clang, LLD, and
-LLVM binutils, and the complete C/C++ sysroot below `/devtools/llvm`. Lorry
-binds and admits these existing entry points through configured native-tool
-roles. A multicall role keeps its fixed subcommand in `prefix-args`; it never
-broadens into ambient PATH discovery. Tools for non-LLVM input formats, such
-as the kloader's current NASM source, remain separate explicit capabilities
-unless those inputs are converted.
+LLVM binutils, and the complete C/C++ sysroot below `/devtools/llvm` until
+the next toolchain release moves it. Build scripts find compilers and archivers
+through PATH or the caller's compiler environment. No Lorry native-tool grants
+or argument prefixes remain.
 
 ## Compilation, cache, tests, and bundles
 
@@ -394,13 +403,16 @@ and filenames rather than the output-directory topology.
 `cache.rs` stores only verified library/procedural-macro artifacts and
 build-script results.
 It routes immutable crates.io and Git units to
-`$HOME/.cache/lorry` on Linux or the role's `/<role>/dev/lorry/cache` on
-Motor by default,
+`$HOME/.cache/lorry` on Linux and `/none/dev/lorry/cache` on Motor,
 while mutable path units stay in the project's `target/lorry/.cache`.
-`cache.directory` may replace the global root from system or user
+On Motor, reads fall back to `/user/dev/lorry/cache` without modifying it.
+Corrupt fallback entries warn and miss, so a build can replace them in its
+writable cache. Motor rejects cache-directory overrides; Interactive cleanup
+removes both role caches, while None cleanup removes only its own.
+On Linux, `cache.directory` may replace the global root from system or user
 configuration; `config.rs` resolves and validates that root for both package
 builds and package-independent cleanup. Cache keys include normalized compiler
-inputs, sources, dependencies, configuration, native tools, and build-script
+inputs, sources, dependencies, configuration, compiler environment, and build-script
 observations; shared keys additionally normalize the project root and
 diagnostic-only rustc verbosity. Ordinary keys use immutable registry identity,
 metadata fingerprints for mutable paths, and upstream cache keys; ordinary

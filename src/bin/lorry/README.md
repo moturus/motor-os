@@ -28,8 +28,8 @@ None of these operations invokes Cargo. Tests use Cargo only as a
 compatibility oracle.
 
 Motor development images install Lorry, curl, the native toolchain, supported
-first-party source snapshots, and small system and user configurations. The
-images do not preinstall a dependency repository. On a fresh image, run
+first-party source snapshots, and configurations for Interactive and None.
+They preseed dependencies for the staged system-library workspace. For other projects, run
 `lorry fetch` for source navigation, or `lorry vendor` (or
 `lorry vendor --accept-all`) with network access once for each project; build,
 run, test, and review then consume the verified local state offline.
@@ -178,8 +178,9 @@ registry units do not use incremental compilation.
 
 Compiled crates.io and Git dependencies, including host procedural-macro
 dynamic libraries, are reused from the
-per-user cache at `$HOME/.cache/lorry` on Linux and the role's
-`/<role>/dev/lorry/cache` on Motor. Mutable path-dependency units remain in
+per-user cache at `$HOME/.cache/lorry` on Linux. Motor reads
+`/none/dev/lorry/cache` first, then `/user/dev/lorry/cache`, and writes
+compiled dependencies only to the None cache. Mutable path-dependency units remain in
 `target/lorry/.cache`; root artifacts, tests, and incremental state are always
 project-local. The cache is a performance aid, not a source integrity
 authority: ordinary builds trust complete entries atomically published by
@@ -187,8 +188,8 @@ Lorry, while `--strict-validation` rehashes their payloads.
 
 The first missing immutable dependency prints `Rebuilding global dependency
 cache`; a build after project-local `lorry clean` does not print it when those
-dependencies remain cached. User or system `lorry.toml` may override the
-default with an absolute path:
+dependencies remain cached. On Linux, user or system `lorry.toml` may override
+the default with an absolute path:
 
 ```toml
 [cache]
@@ -207,9 +208,10 @@ Project `clean` removes selected state below `target/lorry`. Repeated package
 selectors and `--workspace` remove only those packages' owned artifacts;
 an unselected clean removes the shared Lorry artifact tree. It needs no lockfile
 or compilable targets and leaves immutable global dependencies cached.
-`lorry cache clean` may be
-run outside a package and removes the configured global Lorry cache. It
-succeeds when the cache is already absent.
+`lorry cache clean` may run outside a package. On Linux it removes the configured
+global cache. On Motor, None removes `/none/dev/lorry/cache`; Interactive
+removes both that build cache and `/user/dev/lorry/cache`. Motor rejects
+`cache.directory` overrides. An already absent cache is success.
 
 ## Tools and agents
 
@@ -289,18 +291,23 @@ an absolute path relative to the parent of the defining `.cargo` directory,
 preserving the value's spelling (including `.` and repeated slashes).
 Configuration layers merge before caller values are applied. Effective values
 participate in build and compiler-query caches. Lorry still supplies its own
-package metadata, dependency metadata, native-tool variables, and sandbox
-temporary directories.
+package metadata, dependency metadata, and sandbox temporary directories.
 
-For native Motor builds using `cc` (including ring), a workspace can select
-Motor's C toolchain in `.cargo/config.toml`:
+On Motor, Lorry's default Cargo home is `/user/cfg/cargo` for both roles.
+The image supplies these ordinary defaults in its `config.toml` so native
+builds using `cc` (including ring and Helix's grammars) select Motor's target
+and C++ library:
 
 ```toml
 [env]
 CFLAGS_x86_64_unknown_motor = "--target=x86_64-unknown-motor"
+CXXFLAGS_x86_64_unknown_motor = "--target=x86_64-unknown-motor"
+CXXSTDLIB_x86_64_unknown_motor = "c++"
 ```
 
-Motor's built-in native-tool configuration already supplies this flag.
+Caller values and workspace Cargo configuration can override these defaults.
+An explicit `CARGO_HOME` selects that directory's configuration instead.
+On Linux, the default Cargo home remains `$HOME/.cargo`.
 
 Only your `$CARGO_HOME/config.toml` and environment variables are your own
 Cargo settings; any other `.cargo/config.toml` belongs to the repository. When
@@ -376,10 +383,10 @@ units. On Motor, the development image supplies the matching driver through
 ## Cargo's cache
 
 By default, build, check, Clippy, run, test, metadata, and tree read crates.io
-sources from Cargo's cache (`$CARGO_HOME/registry`, or `~/.cargo/registry`).
+sources from Cargo's cache under `CARGO_HOME/registry`. The default home is
+`~/.cargo` on Linux and `/user/cfg/cargo` on Motor.
 This works like Cargo. There is no admission, and packages, build scripts,
-and procedural macros need no allow rules or grants. A build script gets
-every native tool configured for its target. Deny rules and configured limits
+and procedural macros need no allow rules or grants. Deny rules and configured limits
 still apply; Lorry's default package limit does not. Git sources still come
 from Lorry repositories, which `lorry fetch` fills.
 
@@ -449,10 +456,9 @@ Lorry remembers your decisions for each workspace in your own configuration
 (`/user/cfg/lorry-workspaces/` on Motor OS, `/none/cfg/lorry-workspaces/` as
 None, `~/.config/lorry/workspaces/` on Linux); a cloned repository cannot write them. After `vendor --accept-all`,
 the workspace's build scripts and procedural macros run as they do with Cargo,
-build scripts get every configured native tool, and later reviews there are
+later reviews there are
 approved without asking. Without it, an interactive review also lists build
-scripts and procedural macros that no rule grants, with the native tools each
-build script would get; one "yes" approves exactly those. Builds use a
+scripts and procedural macros that no rule grants; one "yes" approves exactly those. Builds use a
 committed `.lorry/` record only after you approve its review, so a fresh clone
 needs one `lorry vendor`. Delete the workspace's file to forget the decisions.
 
@@ -493,7 +499,7 @@ Builds from Lorry repositories, and vendor, use compact generated state at
 the workspace root's `.lorry/dependencies-v2.toml`. The compact file contains
 a SHA-256 commitment, normalized member/feature scope, explicitly reviewed
 `(host, target)` contexts, and exceptional execution capabilities such as
-build-script, procedural-macro, or native-tool grants. The hash commits to a
+build-script or procedural-macro grants. The hash commits to a
 canonical review document that Lorry reconstructs from Cargo.toml,
 Cargo.lock, and verified repository objects. That document is not checked in.
 [Portable dependency admission state](spec.md#portable-dependency-admission-state)
@@ -511,7 +517,7 @@ all supported target kinds. Later member or feature selectors replace that
 scope as a whole. Plain vendor repeats the stored scope; operational flags
 do not reset it. `vendor --locked --workspace` restores the whole-workspace
 default scope. Unused local feature declarations do not invalidate approval.
-Old per-member records and root records in the retired review format 3 are
+Old per-member records and root records in the retired review formats 3 and 4 are
 rejected. Workspace-root `lorry vendor --locked` writes one root review and
 removes the member records that its scope replaces.
 
@@ -601,14 +607,15 @@ Rust compiler wrappers are unsupported.
 
 Normal package authors do not need a project `lorry.toml`. Installation
 configuration supplies repository locations, compiler policy, network tools,
-test extraction roots, the global cache location, and approved native tools.
+test extraction roots, the global cache location.
 Linux reads the user Lorry configuration below `$HOME/.config/lorry`. On Motor
 OS each role has its own state: Interactive Lorry reads `/user/cfg/lorry.toml`
-and keeps its repository and cache in `/user/dev/lorry`; None-role Lorry
-uses `/none/cfg/lorry.toml` and `/none/dev/lorry`. Lorry refuses to run as
-System. Its curl, CA bundle, C and C++ compilers, and archiver are built in.
-The image makes Interactive's repository and cache readable by None. Each
-role still uses its own repository and cache; shared lookup is a later milestone.
+and uses `/user/dev/lorry` for source acquisition; None uses
+`/none/cfg/lorry.toml` and `/none/dev/lorry`. Lorry refuses to run as
+System. Builds always run in a None child and write the None cache. Both
+roles read both repositories and caches. `run` and `test` execute the built
+programs in the parent with the caller's capabilities. Workspaces must be
+under `/none`, with sources readable and the workspace writable by None.
 
 A project's own `lorry.toml` cannot grant anything, because a cloned
 repository controls it. It may set only `cargo-compat-version`, the `vendor`
@@ -616,7 +623,7 @@ table, and the `keep-artifacts` and `keep-sources` retention flags. Grants
 for one workspace go in your configuration, under that workspace's table:
 
 ```toml
-[workspaces."/user/helix".policy.rules.allow-helix-loader]
+[workspaces."/none/helix".policy.rules.allow-helix-loader]
 action = "allow"
 name = "helix-loader"
 source = "path"
@@ -626,9 +633,13 @@ allow-build-script = true
 Lorry checks every `[workspaces]` table but applies only the one naming the
 current workspace root. Such a table may also set `repositories.local`.
 
-Repository lookup order is local, user, then system. System repositories are
-read-only. Vendoring writes the configured local repository, or the user
-repository when no local repository exists. Repository objects are immutable,
+Repository lookup order is local, none, then user. Setting
+`prefer-user-vendored-sources = true` swaps the last two, with fallback. On
+Motor both roles read this preference from `/user/cfg/lorry.toml`; other
+settings and approvals come from the caller's configuration. Vendoring writes
+the local repository when configured, otherwise the caller's role repository
+on Motor or `user` on Linux. Motor caches are always read None first, then user.
+Repository objects are immutable,
 content-addressed, and fully verified before publication. Ordinary builds
 trust their bounded metadata and recorded digests; `--strict-validation`
 rehashes retained archive and source contents before use.
@@ -681,14 +692,26 @@ Cargo package `build.rs` programs are part of Lorry's supported package model;
 they are unrelated to OS image-build scripts. On Linux, dependency build
 scripts run without network access, with read-only
 sources and toolchains, a cleared environment, and writes limited to their
-private output and temporary directories. Child tools require explicit
-compiler or archiver grants, except in builds from Cargo's cache.
+private output and temporary directories. Programs in readable sandbox paths
+may execute. Build scripts receive the caller's `PATH` and compiler variables
+(`CC`, `CXX`, `AR`, `RANLIB`, `CFLAGS`, `CXXFLAGS`, `ARFLAGS`, `CXXSTDLIB`),
+including `HOST_`, `TARGET_`, and target-suffixed forms. These values enter
+the build cache keys. Other caller variables still require `caller-env`.
 Registry and Git scripts may also read and watch the exact workspace
 `Cargo.lock`. Directory watches and lock symlinks escaping the workspace are
 rejected.
 
-Motor OS prints an explicit warning and runs build scripts without that
-isolation. Do not interpret the warning mode as sandboxed.
+Motor runs compilation, build scripts, and procedural macros in a None child
+with only the caller's spawn and filesystem-write capabilities. It has no
+network or detach authority. It cannot write `/system` or `/user`, or read
+private configuration, `/user/tmp`, `/system/tmp`, or `/system/logs`. Public
+files, including shared configuration, remain readable. It may write every
+None-writable tree, including other workspaces, caches, source repositories,
+and other scripts' output directories, and run any executable None can run.
+A script can also modify None's approvals under `/none/cfg`; these limits
+are accepted. Filesystem restrictions rely on installed permissions.
+Fetch and vendor keep the caller's role, remove detach authority,
+and remove network authority with `--offline`. The parent handles approval.
 
 Build scripts may print Cargo's directives. As under Cargo, metadata reaches
 the build scripts of dependent packages as `DEP_<LINKS>_<KEY>`. Unlike Cargo,

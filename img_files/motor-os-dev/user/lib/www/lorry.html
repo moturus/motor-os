@@ -508,6 +508,9 @@ lorry fetch                      # fetch the locked sources, for browsing; grant
 lorry review                     # print the canonical review of the dependency set
 lorry metadata, tree, locate-project   # Cargo-compatible project queries
 lorry cache clean</code></pre>
+<p>On Motor, <code>cache clean</code> as Interactive removes both
+<code>/user/dev/lorry/cache</code> and <code>/none/dev/lorry/cache</code>.
+As None it removes only the None cache. These cache locations are fixed.</p>
 <div class="table-wrap">
 <table>
   <tr><th>Option</th><th>Meaning</th></tr>
@@ -539,10 +542,12 @@ operational failures exit 101; an interrupted run exits 130.</p>
 <div class="table-wrap">
 <table>
   <tr><th>On Motor OS</th><th>Purpose</th></tr>
-  <tr><td><code>/user/cfg/lorry.toml</code></td><td>Your Lorry configuration: the Cargo compatibility version (1.99), policy limits, and the reviewed grants for build scripts and procedural macros. Rules for one workspace go in its <code>[workspaces."/path"]</code> table. The curl program, CA bundle, and native C and C++ tools are built in.</td></tr>
+  <tr><td><code>/user/cfg/lorry.toml</code></td><td>Your Lorry configuration: the Cargo compatibility version (1.99), policy limits, and the reviewed grants for build scripts and procedural macros. Rules for one workspace go in its <code>[workspaces."/path"]</code> table. The curl program and CA bundle have built-in defaults.</td></tr>
+  <tr><td><code>/user/cfg/cargo/config.toml</code></td><td>Shared Cargo configuration for both roles, including ordinary Motor C/C++ defaults. An explicit <code>CARGO_HOME</code> selects another directory.</td></tr>
   <tr><td><code>/user/cfg/lorry-workspaces/</code></td><td>Lorry's record of your decisions for each workspace: <code>vendor --accept-all</code>, the review you approved, and the build-time code and repository Cargo files you approved. Delete a file to forget them.</td></tr>
   <tr><td><code>/user/dev/lorry/vendor</code></td><td>The user repository: content-addressed, immutable objects under <code>objects/crates-io/sha256/</code>, a <code>.staging</code> area, and a <code>repository.toml</code>. Ships empty.</td></tr>
-  <tr><td><code>/user/dev/lorry/cache</code></td><td>Compiled dependency units shared between projects, read-only views of dependency sources, and saved answers from rustc.</td></tr>
+  <tr><td><code>/none/dev/lorry/cache</code></td><td>Compiled dependency units shared between projects, source views, and saved answers from rustc. Builds read this cache before the user cache.</td></tr>
+  <tr><td><code>/user/dev/lorry/cache</code></td><td>Saved answers from Interactive acquisition's rustc queries, and any preinstalled compiled entries. Builds read but never write this cache.</td></tr>
   <tr><td><code>/user/cfg/lorry-redirect-sites.toml</code></td><td>The list of sites whose HTTP redirects have been allowed or denied.</td></tr>
   <tr><td><code>/none/cfg</code>, <code>/none/dev/lorry</code></td><td>The same files for Lorry running as None, with its own configuration. Interactive's repository and cache are readable by None. Lorry refuses to run as System.</td></tr>
   <tr><td><code>PROJECT/.lorry/dependencies-v2.toml</code></td><td>The project's admission record: which packages, at which checksums, were reviewed for which host and target pairs. Committed with the project, never edited by hand.</td></tr>
@@ -556,10 +561,11 @@ key is an error. A project's own file grants nothing, because a cloned repositor
 controls it: it may set only the Cargo compatibility version, vendor targets, and which
 dependency forms to keep. Policy, tools, and paths come from your file. On Linux your file
 is <code>$HOME/.config/lorry/lorry.toml</code> and the cache is <code>$HOME/.cache/lorry</code>.
-Repositories come in three roles, <code>system</code> (read-only, Linux only),
-<code>user</code>, and <code>local</code>, set in a workspace's table. Lookup goes local,
-then user, then system. Vendoring writes to the local repository if one is configured,
-otherwise to the user's.</p>
+Repositories are <code>local</code>, <code>none</code>, and <code>user</code>, searched
+in that order. <code>prefer-user-vendored-sources = true</code> swaps the last two with
+fallback; on Motor both roles read this setting from <code>/user/cfg/lorry.toml</code>.
+Vendoring writes to the local repository if configured, otherwise to the caller's role
+repository on Motor or the user repository on Linux.</p>
 
 <h2>Vendoring and admission</h2>
 <p><code>lorry vendor</code> resolves the whole workspace from <code>Cargo.toml</code> and
@@ -629,10 +635,15 @@ allow-build-script = true</code></pre>
 <p><code>allow-build-script</code> and <code>allow-proc-macro</code> are independent grants,
 required even when the default action is <code>allow</code>. A workspace member's own build
 script needs a rule with <code>source = "path"</code> that names the member. A build script
-that needs a C compiler or an archiver uses the tools declared under
-<code>[native-tools."x86_64-unknown-motor"]</code>, which on the image are
-<code>/devtools/bin/cc</code> and <code>/devtools/llvm/bin/llvm ar</code>, and only with the
-build-script grant. The developer image ships grants for the common crates that the
+that needs a C compiler or an archiver finds it through <code>PATH</code> or the caller's
+compiler variables, such as <code>CC</code>, <code>CFLAGS</code>, and <code>AR</code>.
+The current image supplies <code>cc</code> and <code>c++</code> in
+<code>/devtools/bin</code>, and <code>ar</code> in <code>/user/bin/dev</code>.
+Both directories are on <code>PATH</code>. Shared C/C++ target flags and the C++ standard
+library are ordinary <code>[env]</code> defaults in
+<code>/user/cfg/cargo/config.toml</code>. Both roles use that Cargo home unless
+<code>CARGO_HOME</code> selects another; caller values and workspace configuration
+can override the defaults. The developer image ships grants for the common crates that the
 in-tree programs need (serde and its derive macro, libc, proc-macro2, quote, rustls,
 thiserror, and others).</p>
 
@@ -659,9 +670,14 @@ thiserror, and others).</p>
   on the child's stdin and stdout. This gives process separation, not a sandbox.</li>
   <li><strong>Build scripts</strong> of members and dependencies run on Linux in a
   mandatory sandbox: no network, read-only inputs, writes only to <code>OUT_DIR</code> and a
-  private temporary directory, a cleared environment, and only approved child tools. On
-  Motor OS they run without isolation, and Lorry prints a warning every time it applies
-  one. Scripts may use Cargo's directives, and metadata reaches dependent scripts as
+  private temporary directory, and an environment limited to build inputs, compiler
+  variables, <code>PATH</code>, and explicitly granted variables. Programs in readable
+  paths may execute. Motor builds, including scripts and macros, run in a None child
+  without network or detach authority. Installed permissions protect <code>/system</code>,
+  <code>/user</code>, and private files, but every None-writable tree remains writable,
+  including other workspaces and None's approvals. The parent handles approval and runs
+  <code>run</code> and <code>test</code> programs with the caller's capabilities.
+  Scripts may use Cargo's directives, and metadata reaches dependent scripts as
   <code>DEP_&lt;LINKS&gt;_&lt;KEY&gt;</code>. Unlike Cargo, a link search path must be
   inside the script's <code>OUT_DIR</code>.</li>
   <li><strong>Check and Clippy.</strong> <code>lorry check</code> compiles to metadata

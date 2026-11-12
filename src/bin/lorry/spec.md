@@ -81,7 +81,7 @@ targets are unsupported.
 
 For supported projects, clean release builds must produce byte-identical final
 executables under equivalent source, manifest, lock, compiler/toolchain,
-target, profile, native-tool, and host inputs:
+target, profile, and host inputs:
 
 - Linux Cargo and Linux Lorry native builds must match.
 - Linux Cargo and Lorry cross-builds for Motor must match where both builds are
@@ -211,12 +211,11 @@ For vendor, the option suppresses human progress and emits
 availability, added/removed source evidence, added/removed capabilities, and
 the complete candidate canonical review as a TOML string. Source items include
 exact identities, checksums where applicable, tree hashes, licenses, and
-build-time code flags; capability items include native-tool roles. Roles use
-the canonical alphabetical order. Human and JSON modes use the same approval
+build-time code flags and caller-environment grants. Approval follows the same
 rules, including nonterminal rejection and explicit `--accept-all`. When the
 review proposes build-time code, a `reason: "lorry-vendor-grants"` line
 before it names each package, its source kind, whether it has a build script
-or procedural macro, and the configured native-tool roles.
+or procedural macro.
 
 `build`, `check`, `run`, `test`, `clean`, `metadata`, and `tree` accept
 `--locked`, `--offline`, and `--frozen`. Those commands already prohibit
@@ -286,9 +285,10 @@ root compilation, freshness validation, and artifact publication.
   release the lock before starting a program or harness.
   On Linux, compiler and build-script children inherit a read-only lease. If Lorry is killed,
   the next command waits for surviving children before changing the tree.
-- `cache clean` requires no current package and removes exactly
-  the configured global cache directory. Its default is `$HOME/.cache/lorry`
-  on Linux and `/<role>/dev/lorry/cache` on Motor. An absent cache is success. A
+- `cache clean` requires no current package. On Linux it removes the configured
+  global cache directory, defaulting to `$HOME/.cache/lorry`. On Motor, None
+  removes `/none/dev/lorry/cache`; Interactive removes both that build cache
+  and `/user/dev/lorry/cache`. An absent cache is success. A
   cache root that is a file or symbolic link is rejected rather than traversed
   or removed.
 - `new PATH` creates Cargo's default edition-2024 binary package template.
@@ -678,11 +678,15 @@ replacement, unstable features, or a compiler wrapper, is an error rather
 than adopted or silently ignored.
 Lorry reads `$CARGO_HOME/config.toml` first, then the `.cargo` directory
 of each ancestor of the invocation directory from `/` down; later files take
-precedence. An empty `CARGO_HOME` is unset, as in Cargo. Package selection and
---manifest-path do not move that search. An alias table may exist; Lorry does
-not execute aliases. Project lorry.toml is the workspace root's own file,
-layered over user/system settings. A member-local lorry.toml fails with the
-workspace location to which its settings should move. System constraints
+precedence. An empty `CARGO_HOME` is unset, as in Cargo. The default Cargo home
+is `$HOME/.cargo` on Linux and `/user/cfg/cargo` for both roles on Motor.
+Motor's image supplies target-specific C/C++ flags and the C++ standard library
+through `[env]` in that home's `config.toml`; caller and workspace overrides
+retain their ordinary precedence. An explicit `CARGO_HOME` replaces this home.
+Package selection and --manifest-path do not move that search. An alias table
+may exist; Lorry does not execute aliases. Project lorry.toml is the workspace
+root's own file, layered over user/system settings. A member-local lorry.toml
+fails with the workspace location to which its settings should move. System constraints
 still apply.
 
 Cargo `[env]` accepts strings and tables with `value`, `force`, and `relative`.
@@ -694,8 +698,8 @@ the defining `.cargo` directory without rewriting the value's spelling.
 Unknown table fields are errors in Lorry; Cargo ignores them.
 Effective values reach build scripts, compiler invocations, run programs, and
 ordinary and bundled test harnesses. Cache keys include these values verbatim,
-including workspace-specific paths. Generated package/dependency metadata,
-native-tool variables, and sandbox temporary directories take precedence.
+including workspace-specific paths. Generated package/dependency metadata and
+sandbox temporary directories take precedence.
 Compiler probes use approved configuration only; vendoring does not execute a
 repository's unapproved environment settings.
 
@@ -791,7 +795,8 @@ ask.
   network. Missing selected objects must identify the package/version/source
   and recommend `lorry fetch`.
 - Cargo cache mode reads crates.io sources from Cargo's archive/source cache
-  below `CARGO_HOME`, by default `~/.cargo`. It is offline and never fetches or
+  below `CARGO_HOME`, by default `~/.cargo` on Linux and `/user/cfg/cargo` on
+  Motor. It is offline and never fetches or
   repairs that cache. Its first use verifies each cached archive and extracted
   source against each other and Cargo.lock, then atomically records the
   resulting Lorry evidence below the target tree. Later ordinary builds trust
@@ -799,8 +804,7 @@ ask.
   content comparison. Git sources still come from Lorry repositories.
 - In Cargo cache mode compilation needs no admission state, and policy trusts
   packages as Cargo does. Crates.io, Git, and path packages need no allow
-  rule; build scripts and procedural macros need no grant; a build script gets
-  every native tool configured for its target; and Lorry's default package
+  rule; build scripts and procedural macros need no grant; and Lorry's default package
   limit does not apply. Deny rules, system constraints, configured limits, and
   integrity checks still apply.
 - `--use-cargo-registry` or `--no-use-cargo-registry` chooses the mode. Without
@@ -833,9 +837,6 @@ host-independent logical paths without changing their physical storage:
 - dependency rustc runs from the workspace root and receives an internal
   `--remap-path-prefix` from the physical source root to the
   workspace-relative logical root for remapped packages;
-- an approved C compiler receives the equivalent
-  `-ffile-prefix-map=<physical-root>=<workspace-relative-logical-root>`.
-  Archivers and other native tools are unchanged;
 - source reads, integrity and policy checks, build-script working directories,
   and sandbox roots remain physical. Dep-info paths under a logical root are
   translated back to physical paths only for containment validation;
@@ -894,7 +895,7 @@ requirement and never trusted evidence. The workspace record contains:
   objects before synthesizing any generated policy;
 - the normalized member/feature review scope;
 - the reviewed `(host, target)` build contexts; and
-- the explicit build-script, procedural-macro, and native-tool capability
+- the explicit build-script and procedural-macro capability
   grants that must stay visible in a source diff.
 
 Outside Cargo cache mode, compilation using registry/Git dependencies
@@ -913,7 +914,7 @@ format versions or keys are hard errors.
 
 ### Workspace migration
 
-A successful workspace review writes one root record with review format 4.
+A successful workspace review writes one root record with review format 5.
 Plain vendor retains the stored normalized member/feature scope and prints it
 in human mode. Any package or feature selector replaces that scope as a whole;
 operational options do not reset it. Unused member declarations preserve the
@@ -928,9 +929,10 @@ limitation and shows the complete candidate instead of claiming a semantic
 comparison.
 Old per-member records require explicit review with workspace-root
 `vendor --locked`; their presence never supplies workspace approval.
-A root record in the retired single-package review format 3 is rejected by
-every command that reads admission. Workspace-root `vendor --locked` treats
-it as absent and writes a new review; the old contexts are not kept.
+A root record in retired review format 3 (single-package scope) or 4 (native-tool
+grants) is rejected by every command that reads admission. Workspace-root
+`vendor --locked` treats it as absent and writes a new review; the old contexts
+are not kept.
 Before confirmation, vendor names the selected members' records that the
 new scope replaces. After publishing root approval, it removes those exact
 records and reports their paths. Member records are not parsed. Unselected
@@ -950,7 +952,7 @@ one context. Their exact scalar values and the table schemas are:
 ```toml
 # Generated by Lorry. Do not edit.
 format-version = 3
-review-format-version = 4
+review-format-version = 5
 review-sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 [review-scope]
@@ -969,7 +971,6 @@ version = "0.2.186"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 build-script = true
 proc-macro = false
-native-tools = ["archiver", "c-compiler"]
 ```
 
 The scope fields occur in the order shown. Arrays and booleans are always
@@ -990,8 +991,7 @@ Capabilities are sorted and unique by `(package, version, checksum)`, must
 refer to a selected verified crates.io or Git identity, and must grant at
 least one capability. The checksum field is the registry checksum for a
 crates.io package and SHA-256 of the canonical Cargo.lock source string for a
-Git package. `native-tools` is sorted and duplicate-free, recognizes only the
-roles defined by this specification, and requires `build-script = true`.
+Git package.
 Optional `caller-env` names are sorted, unique, and require `build-script = true`.
 Omission means no caller grants and remains omitted in canonical output,
 preserving old empty-grant commitments. Names use the same controlled-variable
@@ -1002,7 +1002,7 @@ least one must be true. Each true value requires matching verified source
 evidence. Packages with no exceptional capability do not appear in the
 compact file.
 
-### Canonical review format 4
+### Canonical review format 5
 
 The review document is reconstructed rather than stored. It is UTF-8 TOML
 with LF line endings, contains no comments or host observations, and has
@@ -1010,7 +1010,7 @@ exactly one final LF. SHA-256 covers its exact bytes. It begins with these
 four keys in this order, followed by the review scope table:
 
 ```toml
-review-format-version = 4
+review-format-version = 5
 source-tree-format-version = 1
 cargo-lock-format-version = 4
 resolver-version = 2
@@ -1034,7 +1034,7 @@ each table and no trailing space.
 | `context-git` | `host`, `target`, `name`, `version`, `source`, `compile-kinds`, `host-features`, `target-features` | `(host, target, name, version, source)` |
 | `registry-source` | `name`, `version`, `checksum`, `license`, `source-tree-sha256`, `build-script`, `proc-macro` | `(name, version, checksum)` |
 | `git-source` | `name`, `version`, `source`, `license`, `source-tree-sha256`, `build-script`, `proc-macro` | `(name, version, source)` |
-| `capability` | `package`, `version`, `checksum`, `build-script`, `proc-macro`, `native-tools` | `(package, version, checksum)` |
+| `capability` | `package`, `version`, `checksum`, `build-script`, `proc-macro` | `(package, version, checksum)` |
 
 The sections record, respectively, reviewed build contexts; every registry
 and Git lock node including inactive nodes; per-context selection, compile
@@ -1049,7 +1049,7 @@ checks.
 The `registry-source` and `git-source` booleans are verified manifest evidence.
 The matching `capability` booleans are explicit grants and may be true only
 when the corresponding evidence is true. A procedural-macro-only capability has
-`build-script = false`, `proc-macro = true`, and no native tools.
+`build-script = false` and `proc-macro = true`.
 
 Compile kinds are `host` and `target`. Every array is present, including
 when empty. A locked registry
@@ -1068,7 +1068,7 @@ are `true` or `false`.
 
 Inline arrays use comma-space separation. Set-valued arrays are sorted by
 UTF-8 bytes and reject duplicates, except that compile kinds use `host` before
-`target`, native tools use `archiver`, `c-compiler`, then `cxx-compiler`, and dependency
+`target`, and dependency
 references sort by `(source, name, version)` with `crates.io` before `git`
 before `path`.
 Repeated tables reject duplicate complete keys. Semantic versions use the
@@ -1106,8 +1106,7 @@ state.
 
 Exact state entries act as generated allow rules during policy evaluation.
 They may satisfy default-deny admission but must never override an explicit
-deny, system constraint, resource limit, source-integrity check, or native-tool
-restriction. Prepared source evidence must reproduce the
+deny, system constraint, resource limit, or source-integrity check. Prepared source evidence must reproduce the
 state exactly. A project without portable state uses the existing configured
 policy as a compatibility mode; its next successful ordinary vendor operation
 creates state.
@@ -1127,7 +1126,7 @@ Before visible project changes, vendoring enforces explicit denies, system
 constraints, HTTPS and archive integrity, source identity, and all resource
 limits. Lorry presents a deterministic graph and evidence
 difference including requirements, package additions/removals, checksums,
-licenses, source digests, build scripts, and native-tool roles.
+licenses, source digests, build scripts, and procedural macros.
 
 An existing package's previous capability set may be proposed but is never
 silently carried to a new identity. Interactive approval covers the displayed
@@ -1147,8 +1146,7 @@ it forgets the decisions. It holds:
 
 - `accept-all = true`, after `vendor --accept-all`. From then on, every
   command treats that workspace's build scripts and procedural macros as
-  Cargo does: they need no grants, and build scripts receive every configured
-  native tool. Default-deny admission, deny rules, integrity checks, and
+  Cargo does: they need no grants. Default-deny admission, deny rules, integrity checks, and
   limits still apply, and later reviews in the workspace are approved without
   asking.
 - `approved-review-sha256`, the admission review the user last approved,
@@ -1158,12 +1156,10 @@ it forgets the decisions. It holds:
   new, and asks once.
 - `[[grant]]` entries for build-time code approved in an interactive review.
   With a terminal and without `accept-all`, a missing build-script or
-  procedural-macro grant joins the review instead of failing, listed with the
-  native tools each build script will receive. One approval covers what the
+  procedural-macro grant joins the review instead of failing. One approval covers what the
   review shows. Crates.io and Git grants pin the exact version and checksum or
   source tree; a workspace member is named only, and another path package
-  keeps its source-tree pin. Such grants become exact allow rules whose build
-  scripts receive every configured native tool. Without a terminal, a missing
+  keeps its source-tree pin. Such grants become exact allow rules. Without a terminal, a missing
   grant is an error whose help names the review and `--accept-all`.
 
 Verified immutable repository objects may be published before project files.
@@ -1186,13 +1182,12 @@ written `/<role>/dev/lorry`. Lorry refuses to run as System. Motor merges:
 1. `<role cfg>/lorry.toml`;
 2. the workspace root's own `lorry.toml`.
 
-On Motor, Lorry's paths and native tools are built in: curl
-`/user/bin/curl` with CA bundle `/system/cfg/ssl/ca-certificates.crt`, and
-for `x86_64-unknown-motor` the C compiler `/devtools/bin/cc` and C++ compiler
-`/devtools/bin/c++` (both with `--target=x86_64-unknown-motor`; the C++
-standard library is `c++`) and the archiver `/devtools/llvm/bin/llvm ar`.
-Configuration replaces any of them. Motor has no system layer, so
-`repositories.system` and `system-constraints` are Linux-only.
+On Motor, Lorry defaults to curl `/user/bin/curl` and CA bundle
+`/system/cfg/ssl/ca-certificates.crt`. Compiler selection comes from PATH
+and compiler environment variables. There is no native-tool table.
+`system-constraints` is Linux-only. Both roles read the root
+`prefer-user-vendored-sources` setting from `/user/cfg/lorry.toml`, defaulting
+to false; `/none/cfg/lorry.toml` cannot override it.
 
 Linux merges:
 
@@ -1211,7 +1206,7 @@ runs, or choose where Lorry writes, because a cloned repository controls
 it. It may set only `config-version`, `cargo-compat-version`, the `vendor`
 table, and `repositories.keep-artifacts` and `keep-sources`; any other key
 is an error that names the user configuration file. Policy, toolchain,
-network, test, native-tool, and `use-cargo-registry` settings come from
+network, test, and `use-cargo-registry` settings come from
 system and user configuration.
 
 User and system configuration may hold per-workspace settings in
@@ -1224,25 +1219,24 @@ tables.
 
 Configuration version 1 defines compiler selection, the three repository
 roles, retention flags, the global cache directory, vendor targets/host
-inclusion, curl and CA paths, test extraction root, target-specific native
-tools, admission rules/limits, and system constraints.
+inclusion, curl and CA paths, test extraction root, admission rules/limits,
+and system constraints.
 
-`cache.directory` is an absolute normalized path owned by system or user
-configuration. It defaults to
-`$HOME/.cache/lorry` on Linux and `/<role>/dev/lorry/cache` on Motor. It must not
-be a filesystem root or overlap a dependency repository. Lorry creates it on
-the first build that needs cache storage.
+On Linux, `cache.directory` is an absolute normalized path owned by system or
+user configuration, defaulting to `$HOME/.cache/lorry`. It must not be a
+filesystem root or overlap a dependency repository. Lorry creates it on the
+first build that needs cache storage. Motor rejects `cache.directory` and uses
+fixed role caches below `/none/dev/lorry/cache` and `/user/dev/lorry/cache`.
 
-Repository roles are layer-owned:
-
-- `repositories.system` is trusted/base-owned and read-only to Lorry;
-- `repositories.user` is user/base-owned and writable; on Motor it defaults to
-  `/<role>/dev/lorry/vendor`;
-- `repositories.local` belongs to one workspace's table and is writable.
-
-Canonical repository paths must be distinct and non-nesting. Lookup order is
-local, user, then system. Vendoring writes local when configured, otherwise
-user, and fails if neither writable role exists.
+The repositories are `local`, `none`, and `user`. Motor always includes
+`/none/dev/lorry/vendor` and `/user/dev/lorry/vendor`; Linux has no default
+`none` repository. Paths must be distinct and non-nesting. Lookup checks local,
+none, then user; `prefer-user-vendored-sources` swaps none and user with fallback.
+Fetch and vendor write local when configured, otherwise the caller's role
+repository on Motor or user on Linux. Git sources stay in `.lorry/vendor/git`.
+Motor builds write only `/none/dev/lorry/cache` and read it before the user
+cache. Acquisition writes rustc queries in the caller's cache; it compiles no
+dependencies.
 
 ## Dependency repository and vendoring
 
@@ -1368,16 +1362,13 @@ with default deny, at least one allow must match. Integrity checks cannot be
 disabled. Policy may constrain package identity, version/source/checksum,
 exact license expression, build-script presence, source digest, path roots,
 procedural-macro presence, sizes, file counts, dependency depth, package
-count, and native-tool roles. Outside Cargo cache mode and accepted
+count. Outside Cargo cache mode and accepted
 workspaces, build scripts and procedural macros always require their
 respective explicit allows or recorded grants, even under default allow.
 Policy rules express those grants with `allow-build-script = true` and
-`allow-proc-macro = true`; neither grant implies the other. Native-tool roles
-additionally require the build-script grant.
+`allow-proc-macro = true`; neither grant implies the other.
 Editable workspace members require a named `source = "path"` rule for each
-build-script or procedural-macro capability. Their native-tool grants may omit
-`source-tree-sha256`; a same-named nonmember path package still requires that pin
-before receiving native tools. Missing-grant diagnostics suggest the member's
+build-script or procedural-macro capability. Missing-grant diagnostics suggest the member's
 name, and do not suggest pinning mutable member source trees. They place the
 suggested rule in the current workspace's table of the user configuration.
 Named build-script rules may grant `caller-env = ["NAME"]`. Apart from
@@ -1387,7 +1378,7 @@ entries apply to every package's build scripts and other child processes;
 non-forced entries forward the caller's value when present. The review names
 that inheritance and scope without displaying the caller's value.
 Unset and empty values remain distinct script/cache inputs. Compiler, Cargo,
-native-tool, loader, and temporary-directory control variables cannot be
+compiler-selection, loader, and temporary-directory control variables cannot be
 overridden through this allowlist. `[env]` may configure values such as
 `LD_PRELOAD`, `PATH`, and `CC_*`, subject to the generated-value precedence
 described above. If a script tracks a caller-set variable
@@ -1792,36 +1783,46 @@ except that `rustc-link-arg-cdylib` also reaches a dependent cdylib. As in Cargo
 `rustc-link-arg-cdylib` (or `rustc-cdylib-link-arg`) reach only those targets
 of the package, in the same order, and each needs a matching target.
 
-Lorry supports `c-compiler`, `cxx-compiler`, and `archiver` native-tool roles. They are
-configured per target as absolute executable, fixed prefix-argument array, and
-flag array; they are never discovered from ambient `PATH`, `CC`, `CFLAGS`,
-`CXX`, `CXXFLAGS`, `AR`, or `ARFLAGS`. A package rule must grant each role explicitly and pin a
-source-tree digest unless it names an editable workspace member. Tool bytes,
-path, identity, arguments, environment, and
-outputs are build/cache/audit inputs. For a granted C or C++ compiler, Lorry exposes
-the canonical sibling `lib` directory of its `bin` directory read-only when
-present, and exposes each absolute existing directory named by an exact
-`--sysroot=<path>` flag read-only. These are the only implicit compiler
-resource roots; an invalid configured sysroot fails before the build script
-runs. Neither root is exposed without the corresponding compiler grant. The C++ role
-projects target-qualified `CXX` and `CXXFLAGS`, and receives the same scoped
-source-path remapping as the C compiler. Its optional `stdlib` setting projects
-`CXXSTDLIB_<target>`; an empty string tells cc-rs to omit its C++ runtime library,
-and omission preserves cc-rs's target default. Named libraries use portable
-ASCII library names. This setting is rejected on other tool roles and cannot
-come from caller-variable grants.
-Undeclared helpers must be denied. Linux acceptance must include a native tool
-that exists in target configuration but is absent from the package grant: it
-receives neither an environment entry nor execute permission. This
-distinguishes package admission from mere administrator configuration.
-The cc-rs member contract exercises Helix's C++ scanner pattern, generated Rust
-code, and linking. Native Linux and cross-Motor executables match Cargo bytes;
-JSON comparisons account for separate verified registry source locations.
+Build scripts receive Lorry's PATH and the compiler variables CC, CXX, AR,
+RANLIB, CFLAGS, CXXFLAGS, ARFLAGS, and CXXSTDLIB: plain, HOST_, TARGET_, and
+host/target suffixed forms (both hyphens and underscores). Absence and empty
+values remain distinct. These values participate in build-script run records,
+dependency cache keys, and freshness checks. Other variables require caller-env.
+There are no native-tool grants, prefix arguments, or executable allowlists.
+Linux retains Landlock filesystem limits and network denial. The effective
+PATH directories and directories of explicitly selected CC/CXX/AR/RANLIB
+programs are readable and executable. For installation `bin`/`sbin`
+directories, sibling include, lib, lib64, and libexec directories are
+also readable so the selected compiler can use its resources. These paths
+remain unwritable. The compiler and archiver are selected as under Cargo.
+The C++ contract compares native and cross-Motor bytes against Cargo.
 
-Motor runs build scripts without isolation and emits an explicit warning for
-every sandbox application. This is not a sandboxed mode and must not be
-described as one. The warning remains mandatory until equivalent native
-isolation is implemented.
+On Motor the caller-role parent owns configuration, approvals, and execution
+of `run` and `test` programs. An authenticated child receives the effective
+configuration and uses `own & (CAP_SPAWN | CAP_FS_WRITE)` for build, check,
+Clippy, metadata, tree, review, and compilation for run/test. Fetch/vendor keep
+the caller's role without CAP_SPAWN_DETACHED; --offline also removes CAP_NET.
+The child validates its mask and IPC peer. Its TMPDIR belongs to its role.
+Fetch/vendor redirect decisions are also requested through the parent, which
+reads the terminal and retains operation-scoped decisions across requests.
+The worker declines Motor's session terminal stream so its relay cannot take
+input away from the parent's prompts.
+The parent records decisions before the vendor child writes admission state.
+
+The Motor build-script sandbox requires None and explicitly sets the build
+mask. No network or detach authority remains. None cannot write /system or
+/user, or read private user configuration, /user/tmp, /system/tmp, or
+/system/logs. Public configuration and other public content remain readable.
+Any None-writable tree, including other workspaces, repositories, caches,
+approvals in /none/cfg, and scripts' OUT_DIRs, remains writable. Any executable
+None can run remains available. Filesystem isolation relies on installed modes.
+
+A Motor workspace must be accessible to None under /none. Lorry shares
+workspace directories as None rwx, mutable data as rw-, executable sources as
+rwx, and completed binaries as r-x, preserving higher roles. Source hashes and
+metadata fingerprints use None's execute bit by entry ID for pathname and
+open-file checks. An execute-bit-only change invalidates verification. Public
+sources under /user retain None r-- or r-x, never write permission.
 
 On Linux, procedural macros execute within rustc and have the same access as
 that compiler process; Lorry adds no separate proc-macro sandbox. On Motor,
@@ -1839,10 +1840,13 @@ Lorry stores verified library and procedural-macro outputs plus build-script
 `OUT_DIR`/directive results.
 Immutable crates.io and Git units are stored in the
 per-user cache below
-`$HOME/.cache/lorry/v1/units/sha256/` on Linux and
-`/<role>/dev/lorry/cache/v1/units/sha256/` on Motor, unless `cache.directory`
-selects another root. Mutable path-package units, including selected package
-libraries, are stored in the project below `target/lorry/.cache/v1/units/sha256/`.
+`$HOME/.cache/lorry/v1/units/sha256/` on Linux, unless `cache.directory`
+selects another root. Motor writes `/none/dev/lorry/cache/v1/units/sha256/`
+and reads it before `/user/dev/lorry/cache/v1/units/sha256/`; fallback reads
+never modify the user cache. A corrupt or inaccessible read-only entry produces
+a warning and a cache miss; rebuilding publishes into the writable cache.
+Mutable path-package units, including selected package libraries, are stored
+in the project below `target/lorry/.cache/v1/units/sha256/`.
 Selected binaries, tests, and incremental state are not unit-cache entries.
 
 Messages and resolved metadata name Lorry-repository and Git dependency
@@ -1854,8 +1858,7 @@ that metadata changes. An invalid view is quarantined and published again.
 
 Cache keys cover Lorry/cache schema, compiler identity, normalized rustc
 arguments, the variables Lorry sets for rustc, package source identity,
-dependency unit identities, build-script executable/environment/directives/output,
-and approved native tools.
+dependency unit identities, and build-script executable/environment/directives/output.
 Like Cargo, a key does not cover the rest of the process environment.
 rustc reports each variable that a unit reads with `env!` or `option_env!`
 (`# env-dep:` lines in dep-info). Lorry records those values with the
@@ -2004,9 +2007,13 @@ using race-resistant exclusive operations, reject links/unexpected files/
 tampering, invoke payloads without a shell, forward harness arguments, and
 aggregate failures. Unix platforms additionally enforce private directory,
 manifest, and executable modes.
-Motor seals each extracted executable through `File::set_permissions`, using
-the running launcher's read/execute permissions and the existing open file.
-Generated launchers require no libc permission entry point.
+Motor seals each extracted executable read/execute for the extracting role
+through `moto_rt::fs::set_file_perm` on the existing open descriptor. Generated
+Motor launchers deliberately use `#![feature(rustc_private)]` to access the
+compiler sysroot's native runtime API. Standard Rust's `set_readonly` cannot
+grant execute permission; no runtime or standard-library change is needed.
+The default extraction root follows the original
+caller's temporary directory, even though a None worker builds the bundle.
 
 ## Image, dependency, and licensing boundary
 
@@ -2014,8 +2021,8 @@ Lorry's executable does not bootstrap an OS image. Motor's development image
 installs both roles' configurations with the default policy and limits, and
 exact executable-code grants for Lorry's own dependencies in the Interactive
 one. It installs a writable repository per role under
-`/<role>/dev/lorry/vendor`. The only dependency objects and cache entries
-are the Interactive role's, for the Motor OS library sources the image stages
+`/<role>/dev/lorry/vendor`. The image carries Interactive repository objects
+and None compiled cache entries for the Motor OS library sources staged
 in `/none/dev/motor-os/sys/lib`; the image build vendors and compiles that
 workspace with the image's own Lorry. Any other fresh project must run
 networked `vendor` before its offline build. Imager inputs, debug/release image

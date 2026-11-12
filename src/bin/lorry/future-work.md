@@ -97,8 +97,6 @@ regressions in the product suite.
   successful run, such as the compiler errors of a feature probe. Cargo shows
   it only when the script fails, or with `-vv`. See
   `render_build_script_output` in `src/executor.rs`.
-- **GCC as a native tool.** A build script cannot use GCC: its driver starts
-  `cc1`, which the build-script sandbox blocks. Clang works.
 - **Config `rustflags` are always appended (from dev).** Cargo appends only
   arrays. A string value replaces the lower layer, and mixing a string with
   an array is an error. See `src/config.rs`.

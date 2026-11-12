@@ -1,6 +1,8 @@
 # Developing Motor OS on Motor OS: image layout, Lorry as None, native tests
 
-Status: milestones 1-2 implemented; milestones 3-5 ready, updated 2026-11-10;
+Status: milestones 1-2 implemented; milestone 3 and its review fixes
+implemented and validated locally;
+milestones 4-5 ready, updated 2026-11-11;
 milestone 6 remains conditional. v1 is commit e7d46767, v2 is 3035a48a,
 v3 is 29779e3f, v4 is 98fe39e0.
 Milestone 1 is implemented: kernel command-line access, the System-console
@@ -9,7 +11,15 @@ Milestone 2 moves user commands, development tools, configuration, and sources
 to their new paths, and the imager rejects None-writable entries under
 `/system` and `/user`. The 1.99.1-2 compiler trees and test fixtures remain
 under `/devtools`; only the compatibility rush and sh copies remain under
-`/system/bin`. Milestones 3-6 have not been implemented by this work.
+`/system/bin`. Milestone 3's local implementation passed its complete
+Lorry gate with Cargo `[env]` support committed separately in `1d0ff2f9`.
+The subsequent review fixes passed the complete Lorry gate in 1,171 seconds.
+The approved shared defaults live in `/user/cfg/cargo/config.toml`, with
+`/user/cfg/cargo` as Motor's default Cargo home for both roles.
+The updated native Lorry gate, release red/rush/russhd/Helix builds, and release
+developer-source gate pass. Code and tests are staged; no milestone 3 commit
+has been made.
+Milestones 4-6 have not been implemented by this work.
 
 ## The workflow this serves
 
@@ -428,18 +438,20 @@ way. The built-in tool table, the per-workspace tool grants, the argument
 prefixes, the tools listed in `vendor`'s review, and the Landlock list of
 programs a script may run all go; the sandbox on Linux keeps its filesystem
 and network limits. On Motor `cc` and `c++` are the toolchain's launchers in
-`/user/bin/dev`, which select the Motor target through clang's configuration
-files. Whether a dependency's build script and procedural macros run at all
+`/user/bin/dev`. Their default clang configuration is insufficient for cc-rs
+1.11, which passes its own incorrect target mapping. Cargo `[env]` must supply
+the overriding Motor C/C++ target flags and C++ standard library selection.
+Whether a dependency's build script and procedural macros run at all
 is still decided in `vendor`'s review, as today.
 
-Two things the grants supply today must be supplied another way before
+Three things the grants supply today must be supplied another way before
 they are deleted:
 
 - **The archiver.** Lorry's built-in table names `llvm ar` and hands it to
   scripts as `AR_<target>` (`config.rs`). The toolchain ships launchers for
   `cc` and `c++` only. Release 1.99.1-3 adds an `ar` launcher in
   `/user/bin/dev` that runs `/user/lib/llvm/bin/llvm ar`. Step 3f checks
-  which archiver name the `cc` fork looks for when `AR` is unset, and the
+  which archiver name the `cc` crate looks for when `AR` is unset, and the
   launcher gets that name.
 - **The environment.** Lorry starts every build script with an empty
   environment plus the variables it computes (`build_script.rs`), and the
@@ -451,6 +463,13 @@ they are deleted:
   forms. Everything else stays as today: cleared unless `caller-env` allows
   it. These variables become part of the cache key of a dependency whose
   build script ran with them.
+- **Motor C/C++ defaults.** `CFLAGS_x86_64_unknown_motor` and
+  `CXXFLAGS_x86_64_unknown_motor` need `--target=x86_64-unknown-motor`;
+  `CXXSTDLIB_x86_64_unknown_motor` needs `c++`. Supply them through Cargo
+  `[env]` in `/user/cfg/cargo/config.toml`, preserving caller and workspace
+  overrides. Both roles default to that Cargo home; an explicit `CARGO_HOME`
+  selects another configuration. The image supplies the defaults to ring,
+  russhd, and Helix without per-project settings.
 
 ### User-replaceable tools
 
@@ -1041,12 +1060,87 @@ assertions stay on the old paths until milestone 4 rebuilds the toolchain.
   the developer image carries one. A C dependency (`ring`) builds on the
   guest before and after the grants go.
 
+Milestone 3 implementation status (2026-11-11): the parent/worker split,
+role-specific writes and shared reads, source permissions and fingerprints,
+parent-run programs/tests, sandbox masks, compiler environment, transitional
+archiver, and grant removal are implemented locally. Focused Motor regressions
+pass in both roles, including Git source modes, caller-role execution, bundled
+tests, workspace paths, and cache/repository separation. Linux and Motor Clippy
+are clean. Before the shared Cargo-home change, the complete Lorry suite
+(`tests/test-all.sh --keep`) passed in 1,171 seconds. With that change, all host
+checks passed; the native phase caught the image-permission issue described
+below. After the correction, `tests/test-native.sh --warm --keep` passed,
+including cross/native Lorry byte identity, editor integration, cancellation
+and recovery, both-role regressions, and ring's compiler/archiver and SHA-256
+checks. Its guest phase took 426 seconds. The native driver built both copies
+from the reviewed source and manifests.
+
+Review fixes cover parent-owned redirect prompts (including declining the
+worker's automatic session-terminal relay), permissions only on newly created
+directories, warned misses for corrupt read-only cache entries, explicit
+rejection of Motor cache-directory overrides, and Interactive cleanup of both
+role caches. Linux exposes selected compiler installations through PATH or
+compiler variables, including symlinks and installation resources. Guest
+drivers now expect None-built outputs; the real-project driver stages writable
+workspaces under `/none/tmp` and prepares dependencies without network access.
+`tests/test-native-projects.sh --release` passed: red in 14 seconds, rush in 18,
+russhd in 215, and Helix in 274, including its static C/C++ grammars. Fixture
+preparation supplies both reviewed targets from local caches, and materializes
+Helix's themes link into regular archive members. The developer-source driver
+also prepares local fixtures, including both red's and Lorry's locked Git
+sources, preserving guest registry acquisition checks without external
+networking. `src/tests/test-dev-sources.sh --release` passed on a freshly rebuilt
+image, including source builds, output permissions, cache placement, and native
+library tests without rebuilding prepared dependencies. The imager's 54 unit
+and 16 integration tests pass; its Clippy check is clean. The direct
+moto-sys dependency was removed in favor of
+`moto_sdk::sys`. Parent-owned approval records and the bundle's existing
+`moto_rt` permission API are retained deliberately.
+
+An earlier gate found a pre-existing compiler-target problem: `cc` 1.11.0's
+target table maps `x86_64-unknown-motor` to `x86_64-unknown-none-elf`, overriding
+the installed clang launcher's default and losing the libc headers. The old
+native-tool settings supplied an overriding C flag, so the before-removal
+baseline passed. An isolated diagnostic with
+`CFLAGS_x86_64_unknown_motor=--target=x86_64-unknown-motor` also passes after
+removal. Cargo `[env]` support landed separately in `1d0ff2f9`. The ring
+fixture first supplied that flag through `.cargo/config.toml`, and its native
+build and SHA-256 assertion passed without a shell override. The approved image
+configuration now supplies C/C++ target flags and `CXXSTDLIB` through the shared
+Cargo home. The ring fixture's own configuration has been removed so its native
+test verifies the image defaults. Both-role regression coverage checks the
+shared home, caller and workspace overrides, and an explicit `CARGO_HOME`.
+That regression caught the new directory inheriting `/user/cfg`'s private
+permissions: Interactive could load the defaults, while None could not. The
+image policy now shares only the Cargo directory and `config.toml`; credential
+files retain private permissions. Guest source archives are staged under
+`/none/tmp` with read access for None, which then extracts the writable sources.
+A subsequent gate exposed a stale None-cache test assumption: reading a shared
+user-cache entry requires no None-cache write. A cache-hit/miss diagnostic
+confirmed correct fallback and write placement. The fixture now uses a distinct
+configured environment to exercise a cache miss and verifies that value at
+compile time and runtime; the directory assertion remains. No code outside the
+main repository has been changed.
+
+Left for milestone 5b: the Motor-only Rust tests added here that run Lorry
+or inspect a workspace do not create their own fixtures. They are in
+`tests/unit/motor-children.rs`, `motor-new.rs`, and `motor-source-modes.rs`.
+`tests/test-native.sh` passes them a fixture workspace, the Lorry executable
+to run, and a redirecting mock curl in `LORRY_MODE_WORKSPACE`,
+`LORRY_NATIVE_LORRY`, and `LORRY_REDIRECT_CURL`. It also runs `vendor` and
+`run` in that workspace before the tests inspect the results, and repeats
+the tests in each role. It keeps the fixtures on disk under
+`/none/dev/lorry-tests` rather than `/none/tmp`, so that `--warm` runs can
+reuse them. Without that driver these tests panic on the missing variables,
+so a plain `lorry test` in the Lorry crate fails on Motor until 5b.
+
 **Milestone 4: the toolchain archive.** Before the tests, because the native
 suite needs lorry on the standard image.
 
 - 4a. `../motor-os-toolchain`: `install.sh` for the new layout, overlays for
   lorry, gix, mdbg, the host imager, Helix, sed, lua, QuickJS, javy, wasmtime,
-  and the doc site; the `ar` launcher; an installer that can run again
+  and the doc site; the `ar` launcher and shared Cargo configuration in
+  `/user/cfg/cargo/config.toml`; an installer that can run again
   over its own installation, sets modes an Interactive process can set, and
   says that a reboot is needed;
   `toolchain_package` callable for repackaging; the other out-of-repo paths;
@@ -1074,7 +1168,12 @@ suite needs lorry on the standard image.
   through both Cargo and Lorry on every Linux run.
 - 5b. `systest` as a test crate; sysbox, rush, and rmux tests into their
   crates. Lorry's shell scripts into Rust tests in the Lorry crate, in
-  several patches, the native Helix build among them.
+  several patches, the native Helix build among them. The Motor-only Rust
+  tests that milestone 3 left dependent on `tests/test-native.sh` create
+  their own fixtures under `/none/tmp` here, so that `lorry test` in the
+  crate passes on Motor without that driver. How the checks that need both
+  roles (one role writes, the other verifies) are ordered without it is
+  decided in this step.
 - 5c. `cross-test.sh` from the cross-system parts of `full-test.sh`,
   including the System console via `--system-tty` and the no-IP run on a
   copy of the standard image with networking configured off, and the

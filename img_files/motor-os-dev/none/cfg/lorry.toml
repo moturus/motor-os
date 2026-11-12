@@ -1,8 +1,8 @@
 config-version = 1
 cargo-compat-version = "1.99"
 
-# Lorry's paths and native tools on Motor are built in; settings here
-# replace them. Per-workspace rules go in [workspaces."<root>"] tables.
+# Motor repository paths have defaults; compilers come from PATH and the
+# caller's environment. Per-workspace rules go in [workspaces."<root>"].
 
 [policy]
 default = "allow"

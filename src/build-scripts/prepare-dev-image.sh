@@ -8,7 +8,7 @@
 # image build boots the new image once to do both, and the native test step
 # needs neither. It leaves on the image the workspace's Cargo.lock, its
 # admission record, the motor user's approval, and the dependencies compiled
-# into the Interactive Lorry cache.
+# into the None Lorry cache.
 
 usage() {
   echo "usage: $0 debug|release" >&2
