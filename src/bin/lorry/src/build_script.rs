@@ -12,7 +12,7 @@ use crate::diagnostic::{Error, Result};
 use crate::hash::{FieldDigest, modified_time, sha256_file};
 use crate::identity::CargoDebugInfo;
 use crate::manifest::{Manifest, Target, TargetKind};
-use crate::sandbox::{Executable, NetworkAccess, Policy, Sandbox};
+use crate::sandbox::{NetworkAccess, Policy, Sandbox};
 use crate::source_tree::{Exclusions, Limits as TreeLimits, Tree};
 use crate::toolchain::TargetInfo;
 use crate::unit::{Unit, UnitKind, UnitSettings};
@@ -132,7 +132,6 @@ pub struct RunOptions<'a> {
     pub out_dir: &'a Path,
     pub temp_dir: &'a Path,
     pub read_only: &'a [PathBuf],
-    pub executables: &'a [Executable],
     pub timeout: Duration,
     pub max_output_bytes: u64,
     pub out_dir_limits: TreeLimits,
@@ -294,7 +293,54 @@ pub fn environment(
         ))
     })?;
     value(&mut values, dynamic_library_path_variable(), dynamic);
+    values.extend(tool_environment_with(
+        options.host,
+        &options.target.triple,
+        |name| {
+            options
+                .configured
+                .get(name)
+                .cloned()
+                .or_else(|| std::env::var_os(name))
+        },
+    ));
     Ok(values)
+}
+
+/// Cargo's native compiler inputs are available without a policy grant. The
+/// complete script environment already participates in dependency cache keys.
+pub(crate) fn tool_environment(host: &str, target: &str) -> BTreeMap<String, OsString> {
+    tool_environment_with(host, target, |name| std::env::var_os(name))
+}
+
+fn tool_environment_with(
+    host: &str,
+    target: &str,
+    mut lookup: impl FnMut(&str) -> Option<OsString>,
+) -> BTreeMap<String, OsString> {
+    let mut names = BTreeSet::from(["PATH".to_owned()]);
+    for variable in [
+        "CC",
+        "CXX",
+        "AR",
+        "RANLIB",
+        "CFLAGS",
+        "CXXFLAGS",
+        "ARFLAGS",
+        "CXXSTDLIB",
+    ] {
+        names.insert(variable.to_owned());
+        names.insert(format!("HOST_{variable}"));
+        names.insert(format!("TARGET_{variable}"));
+        for triple in [host, target] {
+            names.insert(format!("{variable}_{triple}"));
+            names.insert(format!("{variable}_{}", triple.replace('-', "_")));
+        }
+    }
+    names
+        .into_iter()
+        .filter_map(|name| lookup(&name).map(|value| (name, value)))
+        .collect()
 }
 
 pub(crate) fn validate_caller_environment_name(name: &str) -> Result<()> {
@@ -437,7 +483,6 @@ pub fn run(options: &RunOptions<'_>) -> Result<Output> {
     let policy = Policy {
         read_only,
         writable: vec![out_dir.clone(), temp_dir, PathBuf::from("/dev/null")],
-        executables: options.executables.to_vec(),
         network: NetworkAccess::Deny,
     };
     let mut command = Command::new(options.executable);
@@ -1379,6 +1424,8 @@ mod tests {
         assert!(add_caller_environment(&mut environment, &grant, &caller).is_err());
     }
 
+    include!("../tests/unit/build-script-environment.rs");
+
     #[test]
     fn tracks_present_and_explicitly_absent_environment_inputs() {
         let fixture = Fixture::new();
@@ -1537,7 +1584,6 @@ mod tests {
         );
         for rejected in [
             "HOME",
-            "PATH",
             "RUSTFLAGS",
             "RUSTC_WRAPPER",
             "RUSTC_WORKSPACE_WRAPPER",
@@ -1547,6 +1593,7 @@ mod tests {
         ] {
             assert!(!environment.contains_key(rejected), "leaked {rejected}");
         }
+        assert_eq!(environment.get("PATH"), std::env::var_os("PATH").as_ref());
     }
 
     #[cfg(target_os = "linux")]
@@ -1631,7 +1678,6 @@ mod tests {
                 out_dir: &self.out,
                 temp_dir: &self.temp,
                 read_only: &self.read_only,
-                executables: &[],
                 timeout,
                 max_output_bytes,
                 out_dir_limits: crate::source_tree::DEFAULT_LIMITS,

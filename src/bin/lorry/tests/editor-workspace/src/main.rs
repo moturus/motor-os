@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[path = "../../helpers/share-fixture.rs"]
+mod fixture_modes;
+
 fn main() -> io::Result<()> {
     if env::current_exe()?
         .file_name()
@@ -72,6 +75,7 @@ fn run(
     fs::create_dir_all(home.join(".cargo"))?;
     fs::create_dir_all(wrappers.join("invocations"))?;
     fixture(&root)?;
+    fixture_modes::share(&case_root)?;
     // Motor reads the guest's user configuration instead; test-native.sh
     // grants the same rule there.
     fs::write(

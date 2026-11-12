@@ -287,7 +287,8 @@ fn launcher_source(layout: &Layout, payloads: &[Payload<'_>], manifest: &str) ->
         ));
     }
     Ok(format!(
-        "const EXTRACTION_ROOT: &str = {extraction_root:?};\n\
+        "#![cfg_attr(target_os = \"motor\", feature(rustc_private))]\n\
+         const EXTRACTION_ROOT: &str = {extraction_root:?};\n\
          const EXTRACTION_DIRECTORY: &str = {directory:?};\n\
          const MANIFEST: &[u8] = {manifest:?}.as_bytes();\n\
          static PAYLOADS: &[Payload] = &[\n{table}];\n\n{LAUNCHER_RUNTIME}"
@@ -295,6 +296,9 @@ fn launcher_source(layout: &Layout, payloads: &[Payload<'_>], manifest: &str) ->
 }
 
 const LAUNCHER_RUNTIME: &str = r#"
+#[cfg(target_os = "motor")]
+extern crate moto_rt;
+
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -604,14 +608,11 @@ fn set_private_executable(_file: &File, path: &Path) -> Result<(), String> {
 
 #[cfg(target_os = "motor")]
 fn set_private_executable(file: &File, _path: &Path) -> Result<(), String> {
-    let launcher = std::env::current_exe().map_err(display("locate bundle launcher"))?;
-    let permissions = fs::metadata(launcher).map_err(display("inspect bundle launcher"))?.permissions();
-    if !permissions.readonly() {
-        return Err("bundle launcher must be sealed read/execute".to_owned());
-    }
-    // Motor exposes executable permissions through metadata. Preserve the launcher's
-    // read/execute permissions while sealing the extracted file's open descriptor.
-    file.set_permissions(permissions).map_err(display("set private executable permissions"))
+    use std::os::fd::AsRawFd;
+    // Seal for the extracting role; the launcher can be writable to this role
+    // when a less privileged build worker produced it.
+    moto_rt::fs::set_file_perm(file.as_raw_fd(), moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC)
+        .map_err(|error| format!("set private executable permissions: {error:?}"))
 }
 
 #[cfg(not(any(unix, target_os = "motor")))]

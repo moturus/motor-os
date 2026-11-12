@@ -719,7 +719,7 @@ trees:
     #[test]
     fn shared_configuration_preserves_private_siblings() {
         let policy = PermissionPolicy::builtin().unwrap();
-        for path in ["/user/cfg", "/user/cfg/helix"] {
+        for path in ["/user/cfg", "/user/cfg/helix", "/user/cfg/cargo"] {
             assert_eq!(
                 mode_string(policy.directory_permissions(Path::new(path))),
                 "rwxrwxr-x"
@@ -731,6 +731,7 @@ trees:
             "rmux.toml",
             "lorry.toml",
             "helix/languages.toml",
+            "cargo/config.toml",
         ] {
             let path = Path::new("/user/cfg").join(path);
             assert_eq!(
@@ -744,7 +745,11 @@ trees:
                 AccessPermissions::None
             );
         }
-        for path in ["/user/cfg/sshd.toml", "/user/cfg/private.toml"] {
+        for path in [
+            "/user/cfg/sshd.toml",
+            "/user/cfg/private.toml",
+            "/user/cfg/cargo/credentials.toml",
+        ] {
             assert_eq!(
                 policy
                     .file_permissions(Path::new(path), FileClass::Regular)

@@ -1,0 +1,3 @@
+#!/user/bin/rush
+# Transitional launcher until toolchain 1.99.1-3 installs it.
+exec /devtools/llvm/bin/llvm ar "$@"

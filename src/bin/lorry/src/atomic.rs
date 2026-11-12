@@ -397,7 +397,7 @@ impl AtomicDirectory {
 
     fn create(parent: &Path, mut next_name: impl FnMut() -> String) -> Result<Self> {
         if !parent.is_dir() {
-            fs::create_dir_all(parent).map_err(|error| {
+            crate::fs_check::create_dir_all(parent).map_err(|error| {
                 Error::failure(format!(
                     "failed to create output parent `{}`: {error}",
                     parent.display()

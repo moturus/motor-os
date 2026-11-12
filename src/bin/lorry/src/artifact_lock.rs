@@ -27,7 +27,7 @@ pub struct ArtifactLock {
 
 impl ArtifactLock {
     pub fn acquire(target_directory: &Path) -> Result<Self> {
-        fs::create_dir_all(target_directory).map_err(|error| {
+        crate::fs_check::create_dir_all(target_directory).map_err(|error| {
             Error::failure(format!(
                 "failed to create target directory `{}`: {error}",
                 target_directory.display()
@@ -57,6 +57,8 @@ impl ArtifactLock {
             ))
         })?;
         verify_open_file(&file, &path, "artifact lock")?;
+        #[cfg(target_os = "motor")]
+        crate::fs_check::set_file_mode(&file, &path, false)?;
         file.lock().map_err(|error| {
             Error::failure(format!(
                 "failed to acquire artifact lock `{}`: {error}",
@@ -124,7 +126,7 @@ impl Drop for ArtifactLock {
 #[cfg(target_os = "motor")]
 fn motor_boot_id() -> Result<u64> {
     // Older kernels leave the field zero.
-    let boot_id = moto_sys::KernelStaticPage::get().boot_random_id;
+    let boot_id = moto_sdk::sys::KernelStaticPage::get().boot_random_id;
     if boot_id == 0 {
         return Err(Error::failure(
             "Motor kernel provides no nonzero boot identity",
@@ -175,14 +177,15 @@ fn wait_for_previous_owner(path: &Path, current_boot: u64) -> Result<()> {
     }
 
     let started = Instant::now();
-    let mut child = [moto_sys::stats::ProcessInfoV1::default(); 1];
+    let mut child = [moto_sdk::sys::stats::ProcessInfoV1::default(); 1];
     loop {
-        let count =
-            moto_sys::stats::ProcessInfoV1::list_children(pid, &mut child).map_err(|error| {
+        let count = moto_sdk::sys::stats::ProcessInfoV1::list_children(pid, &mut child).map_err(
+            |error| {
                 Error::failure(format!(
                     "failed to query previous Motor build's children: {error}"
                 ))
-            })?;
+            },
+        )?;
         if count == 0 {
             return Ok(());
         }

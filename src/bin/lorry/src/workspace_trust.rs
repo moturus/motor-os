@@ -29,7 +29,7 @@ pub(crate) struct Decisions {
 }
 
 /// Build-time code the user approved in a review.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct Grant {
     pub name: String,
     pub source: GrantSource,
@@ -40,7 +40,7 @@ pub(crate) struct Grant {
 /// Outside packages are pinned exactly. A workspace member is named only,
 /// like a hand-written member rule, because its sources are edited; another
 /// path package keeps its source-tree pin.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum GrantSource {
     CratesIo {
         version: Version,
@@ -53,6 +53,36 @@ pub(crate) enum GrantSource {
     Path {
         source_tree_sha256: Option<String>,
     },
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct DecisionUpdate {
+    pub accept_all: bool,
+    pub commitment: String,
+    pub proposed: Vec<Grant>,
+    pub cargo_configs: BTreeSet<(PathBuf, String)>,
+    pub selected: BTreeSet<(String, Version)>,
+}
+
+impl DecisionUpdate {
+    pub(crate) fn record(self, workspace: &Path) -> Result<()> {
+        let store = Store::for_process(workspace).ok_or_else(|| {
+            Error::failure("cannot record workspace decisions without an absolute HOME")
+                .with_help("set HOME to the absolute path of the current user's home directory")
+        })?;
+        store.update(|decisions| {
+            decisions.accept_all |= self.accept_all;
+            decisions.approved_review = Some(self.commitment);
+            decisions.grants.retain(|grant| match &grant.source {
+                GrantSource::Path { .. } => true,
+                GrantSource::CratesIo { version, .. } | GrantSource::Git { version, .. } => self
+                    .selected
+                    .contains(&(grant.name.clone(), version.clone())),
+            });
+            decisions.grants.extend(self.proposed);
+            decisions.cargo_configs.extend(self.cargo_configs);
+        })
+    }
 }
 
 /// The decisions file of one workspace.
@@ -370,7 +400,7 @@ impl Store {
 
 impl Decisions {
     /// Applies the decisions to the workspace's policy. Grants become exact
-    /// allow rules whose build scripts receive the configured native tools.
+    /// allow rules for build scripts and procedural macros.
     pub fn apply(self, policy: &mut Policy, provenance: &Path) -> Result<()> {
         policy.accept_all = self.accept_all;
         policy.approved_review = self.approved_review;
@@ -411,8 +441,6 @@ impl Decisions {
                     license: None,
                     allow_build_script: grant.build_script,
                     allow_proc_macro: grant.proc_macro,
-                    native_tools: BTreeSet::new(),
-                    configured_native_tools: grant.build_script,
                     caller_env: BTreeSet::new(),
                     provenance: provenance.to_path_buf(),
                 },
@@ -523,7 +551,7 @@ mod tests {
             .unwrap();
         assert_eq!(libc.checksum.as_deref(), Some(checksum.as_str()));
         assert_eq!(libc.version.as_ref().unwrap().to_string(), "=0.2.189");
-        assert!(libc.allow_build_script && libc.configured_native_tools);
+        assert!(libc.allow_build_script);
 
         // Another workspace has its own file, and a moved file is refused.
         let other = store(&temp, "/user/other");

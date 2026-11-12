@@ -640,7 +640,7 @@ fn path_executable(path: &Path, _metadata: &Metadata) -> Result<bool> {
             "failed to inspect Motor source permissions `{path}`: {error}"
         ))
     })?;
-    Ok(attr.perm & moto_rt::fs::PERM_EXEC != 0)
+    crate::motor_fs::none_executable(attr.entry_id)
 }
 
 #[cfg(not(any(unix, target_os = "motor")))]
@@ -664,7 +664,7 @@ fn file_executable(file: &File, _metadata: &Metadata) -> Result<bool> {
             "failed to inspect open Motor source permissions: {error}"
         ))
     })?;
-    Ok(attr.perm & moto_rt::fs::PERM_EXEC != 0)
+    crate::motor_fs::none_executable(attr.entry_id)
 }
 
 #[cfg(not(any(unix, target_os = "motor")))]

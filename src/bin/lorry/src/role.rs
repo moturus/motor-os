@@ -20,8 +20,8 @@ impl Role {
     /// runs. Off Motor OS no role-based path is used.
     pub fn current() -> Self {
         #[cfg(target_os = "motor")]
-        if moto_sys::ProcessStaticPage::get().capabilities
-            & (moto_sys::caps::CAP_SYS | moto_sys::caps::CAP_INTERACTIVE)
+        if moto_sdk::sys::ProcessStaticPage::get().capabilities
+            & (moto_sdk::sys::caps::CAP_SYS | moto_sdk::sys::caps::CAP_INTERACTIVE)
             == 0
         {
             return Self::None;
@@ -45,6 +45,10 @@ impl Role {
         })
     }
 
+    pub fn cache_directory(self) -> PathBuf {
+        self.state_directory().join("cache")
+    }
+
     /// This role's temporary directory.
     pub fn temp_directory(self) -> &'static Path {
         Path::new(match self {
@@ -61,7 +65,7 @@ impl Role {
 /// Refuses a System-role process on Motor OS.
 pub(crate) fn refuse_system() -> Result<()> {
     #[cfg(target_os = "motor")]
-    if moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_SYS != 0 {
+    if moto_sdk::sys::ProcessStaticPage::get().capabilities & moto_sdk::sys::caps::CAP_SYS != 0 {
         return Err(
             crate::diagnostic::Error::failure("Lorry does not run as System")
                 .with_help("run Lorry from an Interactive shell, or as None"),
@@ -86,6 +90,14 @@ mod tests {
             Path::new("/user/dev/lorry")
         );
         assert_eq!(Role::None.state_directory(), Path::new("/none/dev/lorry"));
+        assert_eq!(
+            Role::None.cache_directory(),
+            Path::new("/none/dev/lorry/cache")
+        );
+        assert_eq!(
+            Role::Interactive.cache_directory(),
+            Path::new("/user/dev/lorry/cache")
+        );
         assert_eq!(Role::None.temp_directory(), Path::new("/none/tmp"));
         refuse_system().unwrap();
     }

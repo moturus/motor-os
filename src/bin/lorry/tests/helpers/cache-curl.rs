@@ -6,6 +6,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+#[path = "cache-curl-git.rs"]
+mod git;
+
 const REGISTRY_SOURCE: &str = "registry+https://github.com/rust-lang/crates.io-index";
 const INDEX_PREFIX: &str = "https://index.crates.io/";
 const ARCHIVE_PREFIX: &str = "https://static.crates.io/crates/";
@@ -101,6 +104,7 @@ fn prepare(arguments: &[std::ffi::OsString]) -> Result<(), String> {
         })?;
     }
 
+    git::prepare(&cargo_home, &output, &arguments[2..])?;
     let executable =
         env::current_exe().map_err(|error| format!("failed to locate mock executable: {error}"))?;
     let installed = output.join("curl");
@@ -119,12 +123,15 @@ fn serve(arguments: &[std::ffi::OsString]) -> Result<(), String> {
     if option(arguments, "--output")? != "-" {
         return Err("mock accepts only `--output -`".to_owned());
     }
-    let nonce = control_nonce(write_out)?;
     let executable =
         env::current_exe().map_err(|error| format!("failed to locate mock executable: {error}"))?;
     let root = executable
         .parent()
         .ok_or_else(|| "mock executable has no parent directory".to_owned())?;
+    if write_out.contains("LORRY-CURL-GIT-1 ") {
+        return git::serve(root, arguments, url, write_out);
+    }
+    let nonce = control_nonce(write_out)?;
     let path = if let Some(relative) = url.strip_prefix(INDEX_PREFIX) {
         safe_relative(relative)?;
         root.join("index").join(relative)

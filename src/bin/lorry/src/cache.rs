@@ -93,6 +93,7 @@ pub struct Restored {
 
 pub struct BuildCache {
     units: PathBuf,
+    read_only_units: Option<PathBuf>,
     quarantine: PathBuf,
     cargo: PathBuf,
     workspace_root: PathBuf,
@@ -115,9 +116,13 @@ struct VerifiedEntry {
     payload_manifest: Vec<u8>,
 }
 
+fn units_directory(root: &Path) -> PathBuf {
+    root.join("v1/units/sha256")
+}
+
 impl BuildCache {
     pub fn new(root: &Path, options: &Options<'_>) -> Result<Self> {
-        let units = root.join("v1/units/sha256");
+        let units = units_directory(root);
         let quarantine = root.join("v1/quarantine");
         fs::create_dir_all(&units).map_err(|error| {
             Error::failure(format!(
@@ -174,6 +179,7 @@ impl BuildCache {
 
         Ok(Self {
             units,
+            read_only_units: None,
             quarantine,
             cargo: options.cargo.to_owned(),
             workspace_root: options.root_manifest.workspace_root.clone(),
@@ -461,7 +467,9 @@ impl BuildCache {
             && !fs::symlink_metadata(entry.payload.join("library.a"))
                 .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
         {
-            self.quarantine(&self.entry_path(key), key)?;
+            if self.entry_path(key).exists() {
+                self.quarantine(&self.entry_path(key), key)?;
+            }
             return Ok(None);
         }
         let mut sources = None;
@@ -716,6 +724,10 @@ impl BuildCache {
         package: &crate::resolver::PackageKey,
     ) -> Result<()> {
         let entry = self.entry_path(key);
+        if !entry.exists() && self.read_only_units.is_some() {
+            // A hit in the shared user cache is never modified by a build.
+            return Ok(());
+        }
         if artifact_owner::matches(&entry, package) {
             return Ok(());
         }
@@ -731,7 +743,35 @@ impl BuildCache {
         let path = self.entry_path(key);
         match fs::symlink_metadata(&path) {
             Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(root) = &self.read_only_units else {
+                    return Ok(None);
+                };
+                let hash = hex(&key.0);
+                let path = root.join(&hash[..2]).join(hash);
+                match fs::symlink_metadata(&path) {
+                    Ok(_) => {
+                        return Ok(match self.verify_entry_at(key, &path) {
+                            Ok(entry) => Some(entry),
+                            Err(error) => {
+                                eprintln!(
+                                    "warning: ignoring corrupt read-only Lorry cache entry `{}`: {error}",
+                                    path.display()
+                                );
+                                None
+                            }
+                        });
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                    Err(error) => {
+                        eprintln!(
+                            "warning: ignoring unreadable read-only Lorry cache entry `{}`: {error}",
+                            path.display()
+                        );
+                        return Ok(None);
+                    }
+                }
+            }
             Err(error) => {
                 return Err(Error::failure(format!(
                     "failed to inspect build-cache entry `{}`: {error}",
@@ -755,7 +795,11 @@ impl BuildCache {
 
     fn verify_entry(&self, key: CacheKey) -> Result<VerifiedEntry> {
         let entry = self.entry_path(key);
-        let metadata = fs::symlink_metadata(&entry).map_err(|error| {
+        self.verify_entry_at(key, &entry)
+    }
+
+    fn verify_entry_at(&self, key: CacheKey, entry: &Path) -> Result<VerifiedEntry> {
+        let metadata = fs::symlink_metadata(entry).map_err(|error| {
             Error::failure(format!(
                 "failed to inspect cache entry `{}`: {error}",
                 entry.display()
@@ -764,7 +808,7 @@ impl BuildCache {
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(Error::failure("cache entry is not a regular directory"));
         }
-        let mut names = fs::read_dir(&entry)
+        let mut names = fs::read_dir(entry)
             .map_err(|error| Error::failure(format!("failed to read cache entry: {error}")))?
             .map(|child| {
                 child
@@ -893,7 +937,8 @@ impl BuildCache {
             max_tree_bytes: 4 * 1024 * 1024,
         };
         Self {
-            units: root.join("v1/units/sha256"),
+            units: units_directory(root),
+            read_only_units: None,
             quarantine: root.join("v1/quarantine"),
             cargo: PathBuf::from("/test/lorry"),
             workspace_root: PathBuf::from("/test/workspace"),
@@ -909,11 +954,20 @@ impl BuildCache {
 
 impl BuildCaches {
     pub fn new(shared_root: &Path, local_root: &Path, options: &Options<'_>) -> Result<Self> {
-        Ok(Self {
+        let caches = Self {
             shared: BuildCache::new(shared_root, options)?,
             local: BuildCache::new(local_root, options)?,
             shared_rebuild_reported: AtomicBool::new(false),
-        })
+        };
+        #[cfg(target_os = "motor")]
+        let caches = {
+            let mut caches = caches;
+            caches.shared.read_only_units = Some(units_directory(
+                &crate::role::Role::Interactive.cache_directory(),
+            ));
+            caches
+        };
+        Ok(caches)
     }
 
     pub fn for_unit(&self, planned: &PlannedUnit) -> &BuildCache {
@@ -2553,6 +2607,8 @@ mod tests {
         };
         assert!(!cache.restore(key, &restore, None).unwrap().is_some());
     }
+
+    include!("../tests/unit/cache-fallback.rs");
 
     #[test]
     fn stored_entries_carry_their_owner_and_keep_a_matching_one() {

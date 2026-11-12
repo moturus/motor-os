@@ -1025,7 +1025,7 @@ enum BuildOutcome {
     NoTargets,
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 fn build(build: Build<'_>, resolution: Resolution) -> Result<BuildArtifacts> {
     build_reported(build, resolution, MessageFormat::Human)
 }
@@ -1430,7 +1430,6 @@ fn build_inner(
         out_dir_limits: source_limits,
         cache: &cache,
         admission: &prepared.admission,
-        native_tools: &build.config.native_tools,
         jobs: build.jobs,
         keep_going: build.keep_going,
         reporter: &message_reporter,
@@ -2000,6 +1999,10 @@ fn trusted_freshness_base(inputs: &TrustedFreshness<'_>) -> Result<[u8; 32]> {
         digest.metadata("member-manifest", &member.path)?;
     }
     compiler_environment_digest(&mut digest);
+    digest.debug(
+        "build-script-tools",
+        &crate::build_script::tool_environment(&inputs.host.triple, &inputs.target.triple),
+    );
     for path in [
         inputs.host_options.linker.as_deref(),
         inputs.target_options.linker.as_deref(),
@@ -2011,11 +2014,6 @@ fn trusted_freshness_base(inputs: &TrustedFreshness<'_>) -> Result<[u8; 32]> {
         match crate::toolchain::program_path(path) {
             Some(resolved) => digest.metadata("linker", &resolved)?,
             None => digest.os("linker-name", path.as_os_str()),
-        }
-    }
-    for tool in inputs.config.native_tools.values() {
-        if let Some(path) = tool.program.as_deref() {
-            digest.metadata("native-tool", path)?;
         }
     }
     Ok(digest.finish())
@@ -2083,6 +2081,10 @@ fn freshness_base(
         digest.debug("dependency-file-count", &package.evidence.file_count);
     }
     compiler_environment_digest(&mut digest);
+    digest.debug(
+        "build-script-tools",
+        &crate::build_script::tool_environment(&build.host.triple, &build.target.triple),
+    );
     for path in [
         build.host_options.linker.as_deref(),
         build.target_options.linker.as_deref(),
@@ -2094,15 +2096,6 @@ fn freshness_base(
             digest.file("linker", path)?;
         } else {
             digest.os("linker-path", path.as_os_str());
-        }
-    }
-    for tool in build.config.native_tools.values() {
-        if let Some(path) = tool.program.as_deref() {
-            if build.validation.is_strict() && path.is_file() {
-                digest.file("native-tool", path)?;
-            } else {
-                digest.os("native-tool-path", path.as_os_str());
-            }
         }
     }
     Ok(digest.finish())
@@ -3322,7 +3315,6 @@ mod tests {
     }
     use crate::config::{CargoCompat, PolicyAction, PolicyRule};
     use crate::repository::RepositorySet;
-    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -4765,8 +4757,6 @@ mod tests {
                 license: Some("MIT".to_owned()),
                 allow_build_script: true,
                 allow_proc_macro: false,
-                native_tools: BTreeSet::new(),
-                configured_native_tools: false,
                 caller_env: Default::default(),
                 provenance: fixture.0.join("lorry.toml"),
             },
@@ -4933,8 +4923,6 @@ mod tests {
                 license: Some("MIT".to_owned()),
                 allow_build_script: true,
                 allow_proc_macro: false,
-                native_tools: BTreeSet::new(),
-                configured_native_tools: false,
                 caller_env: Default::default(),
                 provenance: fixture.0.join("lorry.toml"),
             },

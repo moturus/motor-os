@@ -42,15 +42,6 @@ EOF
 cat >"$WORK/project/grammar/build.rs" <<'EOF'
 fn main() {
     let target = std::env::var("TARGET").unwrap().replace(['-', '.'], "_");
-    if std::env::var_os("PROBE_UNGRANTED").is_some() {
-        for variable in ["CXX", "CXXFLAGS", "CXXSTDLIB"] {
-            assert!(std::env::var_os(format!("{variable}_{target}")).is_none());
-        }
-        let error = std::process::Command::new(include_str!("compiler-path").trim())
-            .arg("--version").output().unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
-        panic!("C++ capability correctly denied");
-    }
     assert_eq!(std::env::var(format!("CXXSTDLIB_{target}")).unwrap(), "");
     std::fs::write(std::path::Path::new(&std::env::var_os("OUT_DIR").unwrap()).join("generated.rs"), "42").unwrap();
     println!("cargo:rerun-if-changed=scanner.cc");
@@ -59,15 +50,24 @@ fn main() {
         .compile("helix_grammar_fixture_scanner");
 }
 EOF
-# Use actual compiler ELF files: shell wrappers cannot be sandbox executables.
+# Use the same compiler and archiver environment for Cargo and Lorry.
 HOST_CXX="$(realpath /usr/bin/clang++)"
 HOST_AR="$(realpath "$(dirname "$HOST_CXX")/llvm-ar")"
+# A compiler installation outside the built-in system and Rust paths needs
+# both execution and read access to its own resources. Include a space too.
+mkdir -p "$WORK/native tools/bin" "$WORK/native tools/include"
+printf '#define CUSTOM_COMPILER_HEADER 1\n' >"$WORK/native tools/include/compiler.h"
+cat >"$WORK/native tools/bin/custom-c++" <<EOF
+#!/bin/sh
+exec "$HOST_CXX" -include "$WORK/native tools/include/compiler.h" "\$@"
+EOF
+chmod +x "$WORK/native tools/bin/custom-c++"
+HOST_CXX="$WORK/native tools/bin/custom-c++"
 SDK_ROOT="$(dirname "$(dirname "$LORRY_MOTOR_LINKER")")"
 # The Clang that the toolchain's motor-clang++ wrapper runs.
 MOTOR_LLVM="$("$RUSTC" --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin"
 MOTOR_CXX="$(realpath "$MOTOR_LLVM/clang")"
 MOTOR_AR="$(realpath "$MOTOR_LLVM/llvm-ar")"
-printf '%s\n' "$HOST_CXX" >"$WORK/project/grammar/compiler-path"
 cat >"$WORK/project/.cargo/config.toml" <<EOF
 [target.x86_64-unknown-motor]
 linker = "$LORRY_MOTOR_LINKER"
@@ -94,30 +94,9 @@ action = "allow"
 name = "grammar"
 source = "path"
 allow-build-script = true
-native-tools = ["cxx-compiler", "archiver"]
-caller-env = ["PROBE_UNGRANTED"]
-[native-tools."x86_64-unknown-linux-gnu".cxx-compiler]
-program = "$HOST_CXX"
-stdlib = ""
-[native-tools."x86_64-unknown-linux-gnu".archiver]
-program = "$HOST_AR"
-[native-tools."x86_64-unknown-motor".cxx-compiler]
-program = "$MOTOR_CXX"
-flags = ["--no-default-config", "--sysroot=$SDK_ROOT", "--target=x86_64-unknown-motor", "-D_GNU_SOURCE", "-D_DEFAULT_SOURCE"]
-stdlib = ""
-[native-tools."x86_64-unknown-motor".archiver]
-program = "$MOTOR_AR"
 EOF
 env HOME="$WORK/home" "$LORRY" vendor --locked --accept-all
-# Keep the approved review but not the standing `--accept-all`, which would
-# give the script every configured tool; the role grants are under test.
-sed -i '/^accept-all = true$/d' "$WORK"/home/.config/lorry/workspaces/*.toml
-USER_CONFIG="$WORK/home/.config/lorry/lorry.toml"
-cp "$USER_CONFIG" "$WORK/grants.toml"
-sed -i 's/native-tools = \["cxx-compiler", "archiver"\]/native-tools = ["archiver"]/' "$USER_CONFIG"
-if env HOME="$WORK/home" PROBE_UNGRANTED=1 "$LORRY" check >"$WORK/denied.out" 2>"$WORK/denied.err"; then exit 1; fi
-grep -F 'C++ capability correctly denied' "$WORK/denied.err" >/dev/null
-cp "$WORK/grants.toml" "$USER_CONFIG"
+# Compiler selection is supplied by the caller, without tool grants.
 for target in x86_64-unknown-linux-gnu x86_64-unknown-motor; do
     compiler="$HOST_CXX"; archiver="$HOST_AR"; flags=()
     if [ "$target" = x86_64-unknown-motor ]; then
@@ -125,7 +104,7 @@ for target in x86_64-unknown-linux-gnu x86_64-unknown-motor; do
         flags=(--no-default-config "--sysroot=$SDK_ROOT" --target=x86_64-unknown-motor -D_GNU_SOURCE -D_DEFAULT_SOURCE)
     fi
     suffix="${target//-/_}"
-    env HOME="$WORK/home" "$LORRY" build --target "$target" -j1 --message-format=json >"$WORK/lorry-$target.json"
+    env HOME="$WORK/home" "CXX_$suffix=$compiler" "CXXFLAGS_$suffix=${flags[*]}" "CXXSTDLIB_$suffix=" "AR_$suffix=$archiver" "$LORRY" build --target "$target" -j1 --message-format=json >"$WORK/lorry-$target.json"
     env "CXX_$suffix=$compiler" "CXXFLAGS_$suffix=${flags[*]}" "CXXSTDLIB_$suffix=" "AR_$suffix=$archiver" \
         "$LORRY_TEST_CARGO" build --target "$target" -j1 --locked --offline --message-format=json >"$WORK/cargo-$target.json"
     cmp "target/lorry/$target/debug/grammar" "target/$target/debug/grammar"
@@ -148,14 +127,11 @@ PY
         --locked --offline -- differential-script-clean-messages "$WORK/lorry-$target.json" "$WORK/cargo-view-$target.json"
 done
 target/lorry/x86_64-unknown-linux-gnu/debug/grammar
-# Generated native-tool flags take precedence over Cargo environment defaults.
-cat >>"$WORK/project/.cargo/config.toml" <<'EOF'
-[env]
-CXXFLAGS_x86_64_unknown_linux_gnu = "-DFROM_CARGO_ENV=1"
-EOF
-sed -i '/^\[native-tools\."x86_64-unknown-linux-gnu"\.cxx-compiler\]$/a flags = ["-DFROM_LORRY_NATIVE_TOOLS=1"]' "$USER_CONFIG"
-sed -i '/^fn main() {/a\    assert_eq!(std::env::var("CXXFLAGS_x86_64_unknown_linux_gnu").unwrap(), "-DFROM_LORRY_NATIVE_TOOLS=1");' grammar/build.rs
-env HOME="$WORK/home" "$LORRY" vendor --locked --accept-all
-env HOME="$WORK/home" "$LORRY" build --target x86_64-unknown-linux-gnu
-target/lorry/x86_64-unknown-linux-gnu/debug/grammar
-echo "PASS: granted cc-rs C++ builds match Cargo natively and for Motor; missing grants deny environment and execution"
+# Resolve the same compiler through PATH as well as the absolute CXX above.
+mkdir -p "$WORK/tool-shims"
+ln -s "$HOST_CXX" "$WORK/tool-shims/custom-c++"
+env HOME="$WORK/home" PATH="$WORK/tool-shims:$PATH" \
+    CXX_x86_64_unknown_linux_gnu=custom-c++ CXXSTDLIB_x86_64_unknown_linux_gnu= \
+    AR_x86_64_unknown_linux_gnu="$HOST_AR" \
+    "$LORRY" run --target x86_64-unknown-linux-gnu -j1 --offline
+echo "PASS: compiler environment drives cc-rs C++ builds matching Cargo natively and for Motor"

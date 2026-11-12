@@ -1,0 +1,6 @@
+# cc-rs otherwise maps Motor to an ELF target without Motor's libc headers.
+# Ordinary defaults: caller values and workspace Cargo configuration can override.
+[env]
+CFLAGS_x86_64_unknown_motor = "--target=x86_64-unknown-motor"
+CXXFLAGS_x86_64_unknown_motor = "--target=x86_64-unknown-motor"
+CXXSTDLIB_x86_64_unknown_motor = "c++"

@@ -406,7 +406,7 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
             })
             .map(|reconstructed| reconstructed.review);
         let proposals = proposed_grants(&selected, &evidence, &admission)?;
-        write_proposals(&proposals, &config, cli.lorry_messages, &mut output)?;
+        write_proposals(&proposals, cli.lorry_messages, &mut output)?;
         write_cargo_configs(&cargo_configs, cli.lorry_messages, &mut output)?;
         let mode = if accept_all {
             change_review::Mode::AcceptAll
@@ -454,13 +454,6 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
     if let Some(lock) = staged_lock {
         lock.commit()?;
     }
-    CompactState {
-        scope,
-        review_sha256: commitment.clone(),
-        contexts: recorded,
-        capabilities,
-    }
-    .write(&workspace.root)?;
     record_decisions(
         &config,
         options.accept_all,
@@ -469,6 +462,13 @@ pub(crate) fn vendor_workspace(cli: &Cli, options: &VendorOptions) -> Result<i32
         &cargo_configs,
         &selected,
     )?;
+    CompactState {
+        scope,
+        review_sha256: commitment.clone(),
+        contexts: recorded,
+        capabilities,
+    }
+    .write(&workspace.root)?;
     migration.remove()?;
     migration.report(cli.lorry_messages, true)?;
     progress.report("Verified Cargo.lock and workspace admission")?;
@@ -514,31 +514,20 @@ fn proposed_grants(
     Ok(grants)
 }
 
-/// Lists the proposed build-time code and the native tools each build
-/// script will receive, so one approval covers what it names.
+/// Lists proposed build scripts and procedural macros before their approval.
 fn write_proposals(
     grants: &[workspace_trust::Grant],
-    config: &Config,
     json: bool,
     output: &mut impl Write,
 ) -> Result<()> {
     if grants.is_empty() {
         return Ok(());
     }
-    let tools = config
-        .native_tools
-        .keys()
-        .map(|(_, role)| *role)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .map(crate::admission_state::native_tool_name)
-        .collect::<Vec<_>>();
     let write_error =
         |error: io::Error| Error::failure(format!("failed to write build-time grants: {error}"));
     if json {
         let message = serde_json::json!({
             "reason": "lorry-vendor-grants",
-            "native_tools": tools,
             "grants": grants.iter().map(|grant| serde_json::json!({
                 "name": grant.name,
                 "source": match &grant.source {
@@ -552,11 +541,6 @@ fn write_proposals(
         });
         return writeln!(output, "{message}").map_err(write_error);
     }
-    let tools = if tools.is_empty() {
-        "none configured".to_owned()
-    } else {
-        tools.join(", ")
-    };
     writeln!(output, "Build-time code to approve ({}):", grants.len()).map_err(write_error)?;
     for grant in grants {
         let version = match &grant.source {
@@ -566,7 +550,7 @@ fn write_proposals(
         };
         let mut kinds = Vec::new();
         if grant.build_script {
-            kinds.push(format!("build script (native tools: {tools})"));
+            kinds.push("build script".to_owned());
         }
         if grant.proc_macro {
             kinds.push("procedural macro".to_owned());
@@ -641,28 +625,25 @@ fn record_decisions(
         .workspace
         .as_deref()
         .ok_or_else(|| Error::failure("workspace decisions need the workspace root"))?;
-    let store = workspace_trust::Store::for_process(workspace).ok_or_else(|| {
-        Error::failure("cannot record workspace decisions without an absolute HOME")
-            .with_help("set HOME to the absolute path of the current user's home directory")
-    })?;
-    store.update(|decisions| {
-        decisions.accept_all |= accept_all;
-        decisions.approved_review = Some(commitment.to_owned());
-        decisions.grants.retain(|grant| match &grant.source {
-            workspace_trust::GrantSource::Path { .. } => true,
-            workspace_trust::GrantSource::CratesIo { version, .. }
-            | workspace_trust::GrantSource::Git { version, .. } => selected
-                .packages
-                .iter()
-                .any(|package| package.key.name == grant.name && package.key.version == *version),
-        });
-        decisions.grants.extend(proposed);
-        decisions.cargo_configs.extend(
-            cargo_configs
-                .iter()
-                .map(|trust| (trust.file.clone(), trust.sha256.clone())),
-        );
-    })
+    let update = workspace_trust::DecisionUpdate {
+        accept_all,
+        commitment: commitment.to_owned(),
+        proposed,
+        cargo_configs: cargo_configs
+            .iter()
+            .map(|trust| (trust.file.clone(), trust.sha256.clone()))
+            .collect(),
+        selected: selected
+            .packages
+            .iter()
+            .map(|package| (package.key.name.clone(), package.key.version.clone()))
+            .collect(),
+    };
+    #[cfg(target_os = "motor")]
+    if crate::motor_child::is_child() {
+        return crate::motor_child::record_decisions(update);
+    }
+    update.record(workspace)
 }
 
 fn review_scope(

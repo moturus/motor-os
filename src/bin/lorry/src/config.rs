@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -11,12 +11,14 @@ use crate::diagnostic::{Error, Result};
 use crate::role::Role;
 use crate::toml::Document;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+mod wire;
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CargoCompat {
     V1_99,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, Eq, PartialEq)]
 pub struct Config {
     pub cargo_compat: Option<CargoCompat>,
     /// The `use-cargo-registry` setting, if any layer sets it.
@@ -27,19 +29,20 @@ pub struct Config {
     pub environment_target_dir: Option<PathBuf>,
     pub build_rustflags: Vec<String>,
     /// Cargo `[env]` values after merging configuration and caller overrides.
+    #[cfg_attr(target_os = "motor", serde(with = "wire::environment"))]
     pub environment: BTreeMap<String, OsString>,
     /// Cargo's `build.jobs` or `CARGO_BUILD_JOBS`.
     pub build_jobs: Option<crate::cli::Jobs>,
     /// Cargo settings that Lorry reads but ignores, reported as notes.
     pub ignored: Vec<String>,
     pub incompatible_rust_versions: Option<IncompatibleRustVersions>,
+    #[serde(with = "wire")]
     pub targets: BTreeMap<TargetSelector, TargetOptions>,
     pub cache: CacheConfig,
     pub repositories: Repositories,
     pub vendor: VendorConfig,
     pub network: NetworkConfig,
     pub test: TestConfig,
-    pub native_tools: BTreeMap<(String, NativeToolRole), NativeTool>,
     pub policy: Policy,
     /// Repository Cargo configuration files whose settings can run a
     /// program or write outside the workspace; each needs approval.
@@ -48,7 +51,7 @@ pub struct Config {
 }
 
 /// One repository Cargo configuration file that needs the user's approval.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct CargoTrust {
     pub file: PathBuf,
     /// SHA-256 of the exact text Lorry read; any edit needs a new approval.
@@ -57,35 +60,36 @@ pub struct CargoTrust {
     pub settings: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, Eq, PartialEq)]
 pub struct CacheConfig {
     pub directory: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum TargetSelector {
     Triple(String),
     Cfg(String),
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, Eq, PartialEq)]
 pub struct TargetOptions {
     pub linker: Option<PathBuf>,
     pub runner: Option<Vec<String>>,
     pub rustflags: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IncompatibleRustVersions {
     Allow,
     Fallback,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct Repositories {
-    pub system: Option<PathBuf>,
+    pub none: Option<PathBuf>,
     pub user: Option<PathBuf>,
     pub local: Option<PathBuf>,
+    pub prefer_user_vendored_sources: bool,
     pub keep_artifacts: bool,
     pub keep_sources: bool,
 }
@@ -93,16 +97,17 @@ pub struct Repositories {
 impl Default for Repositories {
     fn default() -> Self {
         Self {
-            system: None,
+            none: None,
             user: None,
             local: None,
+            prefer_user_vendored_sources: false,
             keep_artifacts: true,
             keep_sources: true,
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct VendorConfig {
     pub targets: Vec<String>,
     pub include_host: bool,
@@ -120,22 +125,26 @@ impl Default for VendorConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, Eq, PartialEq)]
 pub struct NetworkConfig {
     pub curl: Option<PathBuf>,
     pub ca_bundle: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, Eq, PartialEq)]
 pub struct TestConfig {
     pub extraction_root: Option<PathBuf>,
 }
 
 impl TestConfig {
     /// Where a test bundle for `target` extracts. A Motor target uses the
-    /// running role's temporary directory, which is Interactive's off Motor.
+    /// caller's temporary directory, which is Interactive's off Motor.
     pub fn extraction_root(&self, target: &str) -> PathBuf {
-        self.extraction_root_for(target, Role::current())
+        #[cfg(target_os = "motor")]
+        let role = crate::motor_child::caller_role();
+        #[cfg(not(target_os = "motor"))]
+        let role = Role::current();
+        self.extraction_root_for(target, role)
     }
 
     fn extraction_root_for(&self, target: &str, role: Role) -> PathBuf {
@@ -149,32 +158,13 @@ impl TestConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum NativeToolRole {
-    CCompiler,
-    Archiver,
-    CxxCompiler,
-}
-
-impl NativeToolRole {
-    pub const ALL: [Self; 3] = [Self::CCompiler, Self::Archiver, Self::CxxCompiler];
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct NativeTool {
-    pub cpp_stdlib: Option<String>,
-    pub program: Option<PathBuf>,
-    pub prefix_args: Vec<String>,
-    pub flags: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PolicyDefault {
     Deny,
     Allow,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct Policy {
     pub default: PolicyDefault,
     pub path_roots: Vec<PathBuf>,
@@ -227,7 +217,7 @@ impl Default for Policy {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct PolicyLimits {
     pub max_packages: u64,
     pub max_packages_source: LimitSource,
@@ -241,7 +231,7 @@ pub struct PolicyLimits {
     pub build_script_output_bytes: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub enum LimitSource {
     Default,
     File(PathBuf),
@@ -265,13 +255,13 @@ impl Default for PolicyLimits {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PolicyAction {
     Allow,
     Deny,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct PolicyRule {
     pub action: PolicyAction,
     pub name: Option<String>,
@@ -282,15 +272,11 @@ pub struct PolicyRule {
     pub license: Option<String>,
     pub allow_build_script: bool,
     pub allow_proc_macro: bool,
-    pub native_tools: BTreeSet<NativeToolRole>,
-    /// Gives a granted build script whatever native tools are configured,
-    /// as an approved review does; hand-written rules name their roles.
-    pub configured_native_tools: bool,
     pub caller_env: BTreeSet<String>,
     pub provenance: PathBuf,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 struct Constraint {
     key: String,
     provenance: PathBuf,
@@ -298,7 +284,7 @@ struct Constraint {
 
 /// Linux has one layer that is both system and user configuration. Motor has
 /// only the user's: Lorry's paths and tools there are built in.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 enum LayerKind {
     LinuxBase,
     MotorUser,
@@ -447,21 +433,27 @@ impl Config {
         environment: &BTreeMap<String, String>,
         caller: impl FnMut(&str) -> Option<OsString>,
     ) -> Result<Self> {
+        #[cfg(target_os = "motor")]
+        if let Some(config) = crate::motor_child::configuration(workspace_root)? {
+            return Ok(config);
+        }
         reject_environment(environment)?;
         let mut config = Config::default();
         load_lorry_layers(workspace_root, environment, &mut config)?;
         validate_storage_layout(&config, environment)?;
         load_cargo_layers(current, workspace_root, environment, &mut config, caller)?;
         apply_cargo_environment(environment, &mut config)?;
+        load_shared_source_preference(&mut config)?;
         Ok(config)
     }
 
     fn load_global_with_environment(environment: &BTreeMap<String, String>) -> Result<Self> {
         let mut config = Config::default();
         load_global_lorry_layers(environment, &mut config)?;
-        if let Some(role) = motor_role() {
-            add_motor_repository(&mut config, role);
+        if motor_role().is_some() {
+            add_motor_repository(&mut config);
         }
+        load_shared_source_preference(&mut config)?;
         validate_storage_layout(&config, environment)?;
         Ok(config)
     }
@@ -474,9 +466,12 @@ impl Config {
         &self,
         environment: &BTreeMap<String, String>,
     ) -> Result<PathBuf> {
+        if let Some(role) = motor_role() {
+            return Ok(role.cache_directory());
+        }
         match &self.cache.directory {
             Some(directory) => Ok(directory.clone()),
-            None => default_cache_directory(environment, motor_role()),
+            None => default_cache_directory(environment),
         }
     }
 
@@ -572,13 +567,7 @@ fn motor_role() -> Option<Role> {
     cfg!(target_os = "motor").then(Role::current)
 }
 
-fn default_cache_directory(
-    environment: &BTreeMap<String, String>,
-    motor: Option<Role>,
-) -> Result<PathBuf> {
-    if let Some(role) = motor {
-        return Ok(role.state_directory().join("cache"));
-    }
+fn default_cache_directory(environment: &BTreeMap<String, String>) -> Result<PathBuf> {
     let home = environment.get("HOME").ok_or_else(|| {
         Error::failure("HOME is required to locate Lorry's global build cache")
             .with_help("set HOME to the absolute path of the current user's home directory")
@@ -631,9 +620,8 @@ fn load_lorry_layers(
         fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
     let layers = global_lorry_layers(environment);
     load_lorry_files(&layers, Some(&workspace), config)?;
-    if let Some(role) = motor_role() {
-        add_motor_repository(config, role);
-        add_motor_native_tools(config);
+    if motor_role().is_some() {
+        add_motor_repository(config);
     }
     if let Some(store) = crate::workspace_trust::Store::for_workspace(&workspace, environment) {
         store.load()?.apply(&mut config.policy, store.path())?;
@@ -647,53 +635,46 @@ fn load_lorry_layers(
     Ok(())
 }
 
-/// Each role has its own user repository; configuration may replace it.
-fn add_motor_repository(config: &mut Config, role: Role) {
+/// Both roles search both repositories; their write destination is chosen by
+/// the running role, independently of source lookup preference.
+fn add_motor_repository(config: &mut Config) {
     config
         .repositories
         .user
-        .get_or_insert_with(|| role.state_directory().join("vendor"));
+        .get_or_insert_with(|| Role::Interactive.state_directory().join("vendor"));
+    config
+        .repositories
+        .none
+        .get_or_insert_with(|| Role::None.state_directory().join("vendor"));
 }
 
-/// Motor's development image installs these tools; configuration may replace
-/// any of them.
-fn add_motor_native_tools(config: &mut Config) {
-    let target = "x86_64-unknown-motor".to_owned();
-    let flags = vec![format!("--target={target}")];
-    for (role, tool) in [
-        (
-            NativeToolRole::CCompiler,
-            NativeTool {
-                cpp_stdlib: None,
-                program: Some(PathBuf::from("/devtools/bin/cc")),
-                prefix_args: Vec::new(),
-                flags: flags.clone(),
-            },
-        ),
-        (
-            NativeToolRole::CxxCompiler,
-            NativeTool {
-                cpp_stdlib: Some("c++".to_owned()),
-                program: Some(PathBuf::from("/devtools/bin/c++")),
-                prefix_args: Vec::new(),
-                flags,
-            },
-        ),
-        (
-            NativeToolRole::Archiver,
-            NativeTool {
-                cpp_stdlib: None,
-                program: Some(PathBuf::from("/devtools/llvm/bin/llvm")),
-                prefix_args: vec!["ar".to_owned()],
-                flags: Vec::new(),
-            },
-        ),
-    ] {
-        config
-            .native_tools
-            .entry((target.clone(), role))
-            .or_insert(tool);
+fn load_shared_source_preference(_config: &mut Config) -> Result<()> {
+    #[cfg(target_os = "motor")]
+    {
+        let path = Role::Interactive.config_file();
+        let preference = match fs::metadata(&path) {
+            Ok(_) => {
+                let document = Document::load(&path, "shared Lorry configuration")?;
+                optional_bool(
+                    &path,
+                    &document,
+                    document.root(),
+                    "shared Lorry configuration",
+                    "prefer-user-vendored-sources",
+                )?
+                .unwrap_or(false)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(Error::failure(format!(
+                    "failed to read shared Lorry configuration `{}`: {error}",
+                    path.display()
+                )));
+            }
+        };
+        _config.repositories.prefer_user_vendored_sources = preference;
     }
+    Ok(())
 }
 
 fn load_global_lorry_layers(
@@ -799,13 +780,16 @@ fn merge_lorry_file(
                 type_error(path, &document, item, "use-cargo-registry", "a boolean")
             })?);
     }
+    if let Some(item) = document.root().get("prefer-user-vendored-sources") {
+        config.repositories.prefer_user_vendored_sources =
+            require_bool(path, &document, item, "prefer-user-vendored-sources")?;
+    }
     merge_toolchain(path, &document, config)?;
     merge_cache(path, &document, config)?;
     merge_repositories(path, kind, &document, config)?;
     merge_vendor(path, &document, config)?;
     merge_network(path, &document, config)?;
     merge_test(path, &document, config)?;
-    merge_native_tools(path, &document, config)?;
     merge_policy(path, &document, config)?;
     merge_workspaces(path, kind, &document, workspace, config)?;
     merge_constraints(path, kind, &document, config)?;
@@ -817,13 +801,13 @@ fn validate_lorry_root(path: &Path, document: &Document) -> Result<()> {
         "config-version",
         "cargo-compat-version",
         "use-cargo-registry",
+        "prefer-user-vendored-sources",
         "toolchain",
         "cache",
         "repositories",
         "vendor",
         "network",
         "test",
-        "native-tools",
         "policy",
         "workspaces",
         "system-constraints",
@@ -950,6 +934,14 @@ fn merge_cache(path: &Path, document: &Document, config: &mut Config) -> Result<
     let table = require_table(path, document, item, "cache")?;
     reject_unknown_keys(path, document, table, "cache", &["directory"])?;
     if let Some(item) = table.get("directory") {
+        if cfg!(target_os = "motor") {
+            return Err(Error::at(
+                path,
+                document.line_of_item(item),
+                "`cache.directory` is not supported on Motor",
+                "remove the override; Motor uses /none/dev/lorry/cache and /user/dev/lorry/cache",
+            ));
+        }
         config.cache.directory = Some(absolute_path(path, document, item, "cache.directory")?);
     }
     Ok(())
@@ -982,13 +974,13 @@ fn merge_repositories(
         document,
         table,
         "repositories",
-        &["system", "user", "local", "keep-artifacts", "keep-sources"],
+        &["none", "user", "local", "keep-artifacts", "keep-sources"],
     )?;
     for (key, destination, allowed) in [
         (
-            "system",
-            &mut config.repositories.system,
-            kind == LayerKind::LinuxBase,
+            "none",
+            &mut config.repositories.none,
+            matches!(kind, LayerKind::LinuxBase | LayerKind::MotorUser),
         ),
         (
             "user",
@@ -1002,7 +994,7 @@ fn merge_repositories(
                     path,
                     document.line_of_item(item),
                     format!("`repositories.{key}` is not owned by this configuration layer"),
-                    "define system and user repositories only in their designated layers",
+                    "define none and user repositories only in their designated layers",
                 ));
             }
             *destination = Some(absolute_path(
@@ -1098,85 +1090,6 @@ fn merge_test(path: &Path, document: &Document, config: &mut Config) -> Result<(
     if let Some(item) = table.get("extraction-root") {
         config.test.extraction_root =
             Some(absolute_path(path, document, item, "test.extraction-root")?);
-    }
-    Ok(())
-}
-
-fn merge_native_tools(path: &Path, document: &Document, config: &mut Config) -> Result<()> {
-    let Some(item) = document.root().get("native-tools") else {
-        return Ok(());
-    };
-    let targets = require_table(path, document, item, "native-tools")?;
-    for (target, item) in targets.iter() {
-        validate_target_at(path, document.line_of_item(item), target)?;
-        let roles = require_table(path, document, item, &format!("native-tools.{target}"))?;
-        for (role_name, item) in roles.iter() {
-            let role = parse_native_role(path, document.line_of_item(item), role_name)?;
-            let table = require_table(
-                path,
-                document,
-                item,
-                &format!("native-tools.{target}.{role_name}"),
-            )?;
-            reject_unknown_keys(
-                path,
-                document,
-                table,
-                &format!("native-tools.{target}.{role_name}"),
-                &["program", "prefix-args", "flags", "stdlib"],
-            )?;
-            let tool = config
-                .native_tools
-                .entry((target.to_owned(), role))
-                .or_default();
-            if let Some(item) = table.get("stdlib") {
-                let name = format!("native-tools.{target}.{role_name}.stdlib");
-                if role != NativeToolRole::CxxCompiler {
-                    return Err(Error::at(
-                        path,
-                        document.line_of_item(item),
-                        format!("`{name}` is only supported for cxx-compiler"),
-                        "configure the C++ standard library on the C++ compiler role",
-                    ));
-                }
-                let library = require_string(path, document, item, &name)?;
-                if library.bytes().any(|byte| {
-                    !byte.is_ascii_alphanumeric() && !matches!(byte, b'_' | b'+' | b'-' | b'.')
-                }) {
-                    return Err(Error::at(
-                        path,
-                        document.line_of_item(item),
-                        format!("`{name}` must be a library name or an empty string"),
-                        "use an empty string to omit the C++ standard library",
-                    ));
-                }
-                tool.cpp_stdlib = Some(library);
-            }
-            if let Some(item) = table.get("program") {
-                tool.program = Some(absolute_path(
-                    path,
-                    document,
-                    item,
-                    &format!("native-tools.{target}.{role_name}.program"),
-                )?);
-            }
-            if let Some(item) = table.get("prefix-args") {
-                tool.prefix_args = native_arguments(
-                    path,
-                    document,
-                    item,
-                    &format!("native-tools.{target}.{role_name}.prefix-args"),
-                )?;
-            }
-            if let Some(item) = table.get("flags") {
-                tool.flags = native_arguments(
-                    path,
-                    document,
-                    item,
-                    &format!("native-tools.{target}.{role_name}.flags"),
-                )?;
-            }
-        }
     }
     Ok(())
 }
@@ -1321,7 +1234,6 @@ fn merge_policy_rules(
                 "license",
                 "allow-build-script",
                 "allow-proc-macro",
-                "native-tools",
                 "caller-env",
             ],
         )?;
@@ -1410,10 +1322,6 @@ fn merge_policy_rules(
             "allow-proc-macro",
         )?
         .unwrap_or(false);
-        let native_tools = match table.get("native-tools") {
-            Some(item) => parse_native_roles(path, document, item)?,
-            None => BTreeSet::new(),
-        };
         let mut caller_env = BTreeSet::new();
         if let Some(item) = table.get("caller-env") {
             for name in require_string_array(path, document, item, "policy rule caller-env")? {
@@ -1433,28 +1341,6 @@ fn merge_policy_rules(
                 "set name and allow-build-script = true; outside-source caller grants must be covered by portable admission",
             ));
         }
-        if !native_tools.is_empty() && !allow_build_script {
-            return Err(Error::at(
-                path,
-                document.line_of_table(table),
-                format!(
-                    "policy rule `{id}` grants native tools without `allow-build-script = true`"
-                ),
-                "explicitly allow the build script before granting native tools",
-            ));
-        }
-        if !native_tools.is_empty()
-            && source.as_deref() != Some("crates.io")
-            && source_tree_sha256.is_none()
-            && !(source.as_deref() == Some("path") && name.is_some())
-        {
-            return Err(Error::at(
-                path,
-                document.line_of_table(table),
-                format!("path policy rule `{id}` grants native tools without a source-tree digest"),
-                "pin `source-tree-sha256`, or name an editable workspace member with source = \"path\"",
-            ));
-        }
         output.insert(
             id.to_owned(),
             PolicyRule {
@@ -1467,8 +1353,6 @@ fn merge_policy_rules(
                 license,
                 allow_build_script,
                 allow_proc_macro,
-                native_tools,
-                configured_native_tools: false,
                 caller_env,
                 provenance: path.to_path_buf(),
             },
@@ -1579,7 +1463,7 @@ fn collect_leaf_paths(table: &Table, prefix: &str, output: &mut Vec<String>) {
 
 fn validate_repository_layout(repositories: &Repositories) -> Result<()> {
     let paths = [
-        ("system", repositories.system.as_deref()),
+        ("none", repositories.none.as_deref()),
         ("user", repositories.user.as_deref()),
         ("local", repositories.local.as_deref()),
     ];
@@ -1609,7 +1493,17 @@ fn validate_repository_layout(repositories: &Repositories) -> Result<()> {
 
 fn validate_storage_layout(config: &Config, environment: &BTreeMap<String, String>) -> Result<()> {
     validate_repository_layout(&config.repositories)?;
+    if motor_role().is_some() {
+        for role in [Role::None, Role::Interactive] {
+            validate_cache_layout(&role.cache_directory(), &config.repositories)?;
+        }
+        return Ok(());
+    }
     let cache = config.cache_directory_with_environment(environment)?;
+    validate_cache_layout(&cache, &config.repositories)
+}
+
+fn validate_cache_layout(cache: &Path, repositories: &Repositories) -> Result<()> {
     if cache.parent().is_none() {
         return Err(Error::failure(format!(
             "global cache directory `{}` cannot be a filesystem root",
@@ -1618,14 +1512,14 @@ fn validate_storage_layout(config: &Config, environment: &BTreeMap<String, Strin
         .with_help("configure a dedicated Lorry cache directory"));
     }
     for (name, repository) in [
-        ("system", config.repositories.system.as_deref()),
-        ("user", config.repositories.user.as_deref()),
-        ("local", config.repositories.local.as_deref()),
+        ("none", repositories.none.as_deref()),
+        ("user", repositories.user.as_deref()),
+        ("local", repositories.local.as_deref()),
     ] {
         let Some(repository) = repository else {
             continue;
         };
-        if cache == repository || cache.starts_with(repository) || repository.starts_with(&cache) {
+        if cache == repository || cache.starts_with(repository) || repository.starts_with(cache) {
             return Err(Error::failure(format!(
                 "cache.directory `{}` and repositories.{name} `{}` overlap",
                 cache.display(),
@@ -1635,6 +1529,16 @@ fn validate_storage_layout(config: &Config, environment: &BTreeMap<String, Strin
         }
     }
     Ok(())
+}
+
+/// Both Motor roles read the same user-owned Cargo configuration by default.
+/// An explicit CARGO_HOME is resolved by the caller before this fallback.
+pub(crate) fn default_cargo_home(home: Option<&OsStr>) -> Option<PathBuf> {
+    if cfg!(target_os = "motor") {
+        Some(PathBuf::from("/user/cfg/cargo"))
+    } else {
+        home.map(|home| Path::new(home).join(".cargo"))
+    }
 }
 
 fn load_cargo_layers(
@@ -1649,11 +1553,7 @@ fn load_cargo_layers(
         .get("CARGO_HOME")
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
-        .or_else(|| {
-            environment
-                .get("HOME")
-                .map(|home| Path::new(home).join(".cargo"))
-        });
+        .or_else(|| default_cargo_home(environment.get("HOME").map(OsStr::new)));
     if let Some(home) = &mut cargo_home {
         if home.is_relative() {
             *home = env::current_dir()
@@ -2447,64 +2347,6 @@ fn positive_integer(path: &Path, document: &Document, item: &Item, name: &str) -
     }
 }
 
-fn native_arguments(
-    path: &Path,
-    document: &Document,
-    item: &Item,
-    name: &str,
-) -> Result<Vec<String>> {
-    let arguments = require_string_array(path, document, item, name)?;
-    for argument in &arguments {
-        if argument.is_empty()
-            || argument
-                .bytes()
-                .any(|byte| byte == 0 || byte.is_ascii_whitespace())
-        {
-            return Err(Error::at(
-                path,
-                document.line_of_item(item),
-                format!("`{name}` contains an empty, whitespace-bearing, or NUL argument"),
-                "use one non-empty argument per array element",
-            ));
-        }
-    }
-    Ok(arguments)
-}
-
-fn parse_native_role(path: &Path, line: usize, value: &str) -> Result<NativeToolRole> {
-    match value {
-        "c-compiler" => Ok(NativeToolRole::CCompiler),
-        "cxx-compiler" => Ok(NativeToolRole::CxxCompiler),
-        "archiver" => Ok(NativeToolRole::Archiver),
-        _ => Err(Error::at(
-            path,
-            line,
-            format!("unsupported native-tool role `{value}`"),
-            "supported roles are c-compiler, cxx-compiler, and archiver",
-        )),
-    }
-}
-
-fn parse_native_roles(
-    path: &Path,
-    document: &Document,
-    item: &Item,
-) -> Result<BTreeSet<NativeToolRole>> {
-    let mut output = BTreeSet::new();
-    for value in require_string_array(path, document, item, "policy rule native-tools")? {
-        let role = parse_native_role(path, document.line_of_item(item), &value)?;
-        if !output.insert(role) {
-            return Err(Error::at(
-                path,
-                document.line_of_item(item),
-                format!("duplicate native-tool role `{value}`"),
-                "list each granted role once",
-            ));
-        }
-    }
-    Ok(output)
-}
-
 fn optional_digest(
     path: &Path,
     document: &Document,
@@ -2670,6 +2512,9 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    #[cfg(target_os = "motor")]
+    include!("../tests/unit/motor-storage.rs");
+
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
     struct TempDir(PathBuf);
@@ -2682,7 +2527,7 @@ mod tests {
             Path::new("/tmp/lorry-tests")
         );
         assert_eq!(
-            defaults.extraction_root("x86_64-unknown-motor"),
+            defaults.extraction_root_for("x86_64-unknown-motor", Role::Interactive),
             Path::new("/user/tmp/lorry/test-extraction")
         );
         assert_eq!(
@@ -2743,18 +2588,10 @@ mod tests {
     fn global_cache_defaults_follow_the_host_platform() {
         let environment = BTreeMap::from([("HOME".to_owned(), "/home/test".to_owned())]);
         assert_eq!(
-            default_cache_directory(&environment, None).unwrap(),
+            default_cache_directory(&environment).unwrap(),
             Path::new("/home/test/.cache/lorry")
         );
-        assert_eq!(
-            default_cache_directory(&BTreeMap::new(), Some(Role::Interactive)).unwrap(),
-            Path::new("/user/dev/lorry/cache")
-        );
-        assert_eq!(
-            default_cache_directory(&BTreeMap::new(), Some(Role::None)).unwrap(),
-            Path::new("/none/dev/lorry/cache")
-        );
-        assert!(default_cache_directory(&BTreeMap::new(), None).is_err());
+        assert!(default_cache_directory(&BTreeMap::new()).is_err());
     }
 
     #[test]
@@ -2815,7 +2652,7 @@ mod tests {
                 "config-version = 1\ncargo-compat-version = \"1.99\"\n\
                  [toolchain]\nrustc = \"/base/rustc\"\n\
                  [cache]\ndirectory = \"{}\"\n\
-                 [repositories]\nsystem = \"{}\"\nuser = \"{}\"\n\
+                 [repositories]\nnone = \"{}\"\nuser = \"{}\"\n\
                  [network]\ncurl = \"{}\"\nca-bundle = \"{}\"\n\
                  [workspaces.\"{}\".repositories]\nlocal = \"{}\"\n",
                 temp.0.join("cache").display(),
@@ -2867,7 +2704,7 @@ mod tests {
             config.incompatible_rust_versions,
             Some(IncompatibleRustVersions::Fallback)
         );
-        assert!(config.repositories.system.is_some());
+        assert!(config.repositories.none.is_some());
         assert!(config.repositories.user.is_some());
         assert!(config.repositories.local.is_some());
         assert!(!config.repositories.keep_sources);
@@ -2894,6 +2731,11 @@ mod tests {
             .approved_cargo_configs
             .insert((trust.file.clone(), trust.sha256.clone()));
         approved.require_approved_cargo_configs().unwrap();
+        let encoded = serde_json::to_vec(&approved).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Config>(&encoded).unwrap(),
+            approved
+        );
         let mut stale = config.clone();
         stale
             .policy
@@ -2926,6 +2768,10 @@ mod tests {
             assert_eq!(config.cargo_trust.len(), usize::from(risky), "{target_dir}");
         }
 
+        // Motor's shared-home fallback is covered by its native storage test.
+        if cfg!(target_os = "motor") {
+            return;
+        }
         // Like Cargo, an empty CARGO_HOME is unset: `$HOME/.cargo` is read.
         fs::remove_file(package.join(".cargo/config.toml")).unwrap();
         fs::create_dir_all(temp.0.join("home/.cargo")).unwrap();
@@ -2940,33 +2786,6 @@ mod tests {
         ]);
         let config = Config::load_with_environment(&package, &environment).unwrap();
         assert_eq!(config.build_rustflags, ["--cfg", "from_home"]);
-    }
-
-    #[test]
-    fn motor_tools_are_built_in_but_configuration_wins() {
-        let mut config = Config::default();
-        let target = "x86_64-unknown-motor".to_owned();
-        config.native_tools.insert(
-            (target.clone(), NativeToolRole::CCompiler),
-            NativeTool {
-                cpp_stdlib: None,
-                program: Some(PathBuf::from("/user/bin/my-cc")),
-                prefix_args: Vec::new(),
-                flags: Vec::new(),
-            },
-        );
-        add_motor_native_tools(&mut config);
-        assert_eq!(config.native_tools.len(), 3);
-        let tool = |role| &config.native_tools[&(target.clone(), role)];
-        assert_eq!(
-            tool(NativeToolRole::CCompiler).program.as_deref(),
-            Some(Path::new("/user/bin/my-cc"))
-        );
-        assert_eq!(
-            tool(NativeToolRole::CxxCompiler).cpp_stdlib.as_deref(),
-            Some("c++")
-        );
-        assert_eq!(tool(NativeToolRole::Archiver).prefix_args, ["ar"]);
     }
 
     #[test]
@@ -3053,14 +2872,13 @@ mod tests {
         let config_path = temp.0.join("lorry.toml");
         let system = temp.0.join("system");
         let user = temp.0.join("user");
-        let compiler = temp.0.join("llvm");
         let source = format!(
             r#"
 config-version = 1
 cargo-compat-version = "1.99"
 
 [repositories]
-system = "{}"
+none = "{}"
 user = "{}"
 keep-artifacts = true
 keep-sources = true
@@ -3071,11 +2889,6 @@ targets = [
   "x86_64-unknown-motor",
 ]
 include-host = true
-
-[native-tools."x86_64-unknown-motor".c-compiler]
-program = "{}"
-prefix-args = ["clang"]
-flags = ["--target=x86_64-unknown-motor"]
 
 [policy]
 default = "deny"
@@ -3100,17 +2913,15 @@ source = "path"
 source-tree-sha256 = "776e07288265b7ececb54ef5ed914c3a6093f00b49bd4d12d34764325659b351"
 license = "Apache-2.0 AND ISC"
 allow-build-script = true
-native-tools = ["c-compiler", "archiver"]
 
 [system-constraints]
 locked = [
-  "repositories.system",
+  "repositories.none",
   "policy.rules.allow-ring-0_17_14",
 ]
 "#,
             system.display(),
             user.display(),
-            compiler.display(),
         );
         fs::write(&config_path, source).unwrap();
         let mut config = Config::default();
@@ -3123,83 +2934,6 @@ locked = [
             config.policy.limits.max_packages_source,
             LimitSource::File(config_path.clone())
         );
-        assert_eq!(
-            config
-                .native_tools
-                .get(&("x86_64-unknown-motor".to_owned(), NativeToolRole::CCompiler))
-                .unwrap()
-                .prefix_args,
-            ["clang"]
-        );
-    }
-
-    #[test]
-    fn parses_explicit_cxx_compiler_configuration_and_grants() {
-        let temp = TempDir::new();
-        let path = temp.0.join("lorry.toml");
-        let compiler = temp.0.join("clang++");
-        fs::write(&compiler, "fixture compiler").unwrap();
-        fs::write(
-            &path,
-            format!(
-                r#"config-version = 1
-[native-tools."x86_64-unknown-motor".cxx-compiler]
-program = "{}"
-flags = ["--target=x86_64-unknown-motor"]
-[policy.rules.grammar]
-action = "allow"
-name = "grammar"
-source = "path"
-allow-build-script = true
-native-tools = ["cxx-compiler"]
-"#,
-                compiler.display()
-            ),
-        )
-        .unwrap();
-        let mut config = Config::default();
-        merge_lorry_file(&path, LayerKind::MotorUser, None, &mut config).unwrap();
-        let tool =
-            &config.native_tools[&("x86_64-unknown-motor".into(), NativeToolRole::CxxCompiler)];
-        assert_eq!(tool.program.as_deref(), Some(compiler.as_path()));
-        assert_eq!(tool.flags, ["--target=x86_64-unknown-motor"]);
-        assert_eq!(
-            config.policy.rules["grammar"].native_tools,
-            BTreeSet::from([NativeToolRole::CxxCompiler])
-        );
-    }
-
-    #[test]
-    fn cxx_standard_library_configuration_is_typed_and_role_specific() {
-        let temp = TempDir::new();
-        let path = temp.0.join("lorry.toml");
-        for role in ["c-compiler", "cxx-compiler", "archiver"] {
-            for value in [
-                "\"\"",
-                "\"c++\"",
-                "\"stdc++\"",
-                "\"a b\"",
-                "\"../lib\"",
-                "true",
-                "0",
-            ] {
-                fs::write(&path, format!("config-version = 1\n[native-tools.\"x86_64-unknown-motor\".{role}]\nstdlib = {value}\n")).unwrap();
-                let mut config = Config::default();
-                let parsed = merge_lorry_file(&path, LayerKind::MotorUser, None, &mut config);
-                if role == "cxx-compiler" && ["\"\"", "\"c++\"", "\"stdc++\""].contains(&value) {
-                    parsed.unwrap();
-                    assert_eq!(
-                        config.native_tools
-                            [&("x86_64-unknown-motor".into(), NativeToolRole::CxxCompiler)]
-                            .cpp_stdlib
-                            .as_deref(),
-                        Some(value.trim_matches('"'))
-                    );
-                } else {
-                    assert!(parsed.is_err(), "{role}: {value}");
-                }
-            }
-        }
     }
 
     #[test]
@@ -3210,7 +2944,7 @@ native-tools = ["cxx-compiler"]
         fs::write(
             &system,
             format!(
-                "config-version = 1\n[repositories]\nsystem = \"{}\"\n\
+                "config-version = 1\n[repositories]\nnone = \"{}\"\n\
                  [policy]\ndefault = \"deny\"\n\
                  [system-constraints]\nlocked = [\"policy.default\", \"policy.rules\"]\n",
                 temp.0.join("repo").display()
@@ -3272,10 +3006,6 @@ native-tools = ["cxx-compiler"]
             ("[toolchain]\nrustc = \"/bin/true\"\n", "toolchain"),
             ("[network]\ncurl = \"/bin/true\"\n", "network"),
             ("[test]\nextraction-root = \"/tmp/x\"\n", "test"),
-            (
-                "[native-tools.\"x86_64-unknown-motor\".c-compiler]\nflags = []\n",
-                "native-tools",
-            ),
             ("[repositories]\nlocal = \"/tmp/x\"\n", "repositories.local"),
             (
                 "[workspaces.\"/tmp\".policy.rules.x]\naction = \"allow\"\n",
@@ -3722,36 +3452,6 @@ native-tools = ["cxx-compiler"]
     }
 
     #[test]
-    fn source_agnostic_native_tool_grants_require_a_tree_digest() {
-        let temp = TempDir::new();
-        let path = temp.0.join("lorry.toml");
-        fs::write(
-            &path,
-            "config-version = 1\n\
-             [policy.rules.native]\n\
-             action = \"allow\"\n\
-             allow-build-script = true\n\
-             native-tools = [\"c-compiler\"]\n",
-        )
-        .unwrap();
-        let error = merge_lorry_file(&path, LayerKind::LinuxBase, None, &mut Config::default())
-            .unwrap_err();
-        assert!(error.to_string().contains("source-tree digest"));
-
-        fs::write(
-            &path,
-            "config-version = 1\n\
-             [policy.rules.native]\n\
-             action = \"allow\"\n\
-             source = \"crates.io\"\n\
-             allow-build-script = true\n\
-             native-tools = [\"c-compiler\"]\n",
-        )
-        .unwrap();
-        merge_lorry_file(&path, LayerKind::LinuxBase, None, &mut Config::default()).unwrap();
-    }
-
-    #[test]
     fn caller_env_grants_require_named_scripts_and_preserve_controlled_variables() {
         let temp = TempDir::new();
         let path = temp.0.join("lorry.toml");
@@ -3802,30 +3502,6 @@ native-tools = ["cxx-compiler"]
             let error = merge_lorry_file(&path, LayerKind::MotorUser, None, &mut Config::default())
                 .unwrap_err();
             assert!(error.render().contains(variable));
-        }
-    }
-
-    #[test]
-    fn unpinned_path_native_tool_grants_require_a_named_member_rule() {
-        let temp = TempDir::new();
-        let path = temp.0.join("lorry.toml");
-        for (identity, accepted) in [
-            ("source = \"path\"\nname = \"member\"\n", true),
-            ("source = \"path\"\n", false),
-            ("source = \"git\"\nname = \"member\"\n", false),
-            ("name = \"member\"\n", false),
-        ] {
-            fs::write(
-                &path,
-                format!(
-                    "config-version = 1\n[policy.rules.native]\naction = \"allow\"\n\
-                 {identity}allow-build-script = true\nnative-tools = [\"c-compiler\"]\n"
-                ),
-            )
-            .unwrap();
-            let result =
-                merge_lorry_file(&path, LayerKind::MotorUser, None, &mut Config::default());
-            assert_eq!(result.is_ok(), accepted, "{identity}: {result:?}");
         }
     }
 }

@@ -3556,7 +3556,7 @@ members = ["ignored-member"]
                 && matches!(dependency.source, DependencySource::CratesIo)
         }));
         assert!(manifest.dependencies.iter().any(|dependency| {
-            dependency.package == "moto-sys"
+            dependency.package == "moto-sdk"
                 && dependency.target.as_deref() == Some("cfg(target_os = \"motor\")")
                 && matches!(dependency.source, DependencySource::CratesIo)
         }));
@@ -3578,7 +3578,7 @@ members = ["ignored-member"]
                 .iter()
                 .any(|dependency| dependency.package == "gix-dir")
         );
-        assert_eq!(manifest.lock.as_ref().unwrap().packages.len(), 164);
+        assert_eq!(manifest.lock.as_ref().unwrap().packages.len(), 177);
     }
 
     #[test]

@@ -206,17 +206,26 @@ fail() {
 }
 
 CONSOLE_LOG=/tmp/test-dev-sources.log
+DEPENDENCIES=/none/tmp/dev-sources-dependencies
+"$ROOT_DIR/src/bin/lorry/tests/prepare-dev-sources.sh" "$VM_RUNTIME_DIR/dependencies" \
+  >"$VM_RUNTIME_DIR/dependencies.log" 2>&1 ||
+  fail "cannot prepare local dependencies; see $VM_RUNTIME_DIR/dependencies.log"
 runner_args=()
 if [ "$VMM" = qemu ] && [ -n "${FULL_TEST_QEMU_ARGS:-}" ]; then
   # Keep the suite's existing QEMU-only argument splitting.
   runner_args+=(${FULL_TEST_QEMU_ARGS})
 fi
 VMM_PID=""
+CONFIG_SAVED=0
 cleanup() {
   local status=$?
   set +e
   trap - EXIT
   if [ -n "$VMM_PID" ]; then
+    if [ "$CONFIG_SAVED" -eq 1 ]; then
+      vm_ssh "/user/bin/rush -c 'cat > /user/cfg/lorry.toml'" \
+        <"$VM_RUNTIME_DIR/lorry.toml" || status=1
+    fi
     stop_test_vm_owned "$VMM" "$TEST_VM_LABEL" || {
       [ "$status" -ne 0 ] || status=1
     }
@@ -266,9 +275,9 @@ done
 vm_ssh "[ -z \"\$(/user/bin/find /none/dev/lorry/vendor/objects -type f)\" ]" ||
   fail "developer image contains preinstalled none Lorry dependency objects"
 user_objects="$(count_guest_files /user/dev/lorry/vendor/objects)"
-user_cache_files="$(count_guest_files /user/dev/lorry/cache)"
+none_cache_files="$(count_guest_files /none/dev/lorry/cache/v1/units/sha256)"
 [ "$user_objects" -gt 0 ] || fail "developer image lacks the dependencies of $SYS_LIB"
-[ "$user_cache_files" -gt 0 ] ||
+[ "$none_cache_files" -gt 0 ] ||
   fail "developer image lacks the compiled dependencies of $SYS_LIB"
 vm_ssh "[ ! -e /user/cfg/lorry ]" ||
   fail "developer image still contains the old Lorry state directory"
@@ -280,9 +289,22 @@ expect_guest_mode /user/dev/lorry vendor drwxrwxr-x "Interactive Lorry repositor
 expect_guest_mode /user/dev/lorry cache drwxrwxr-x "Interactive Lorry cache"
 vm_ssh "[ -r /system/cfg/ssl/ca-certificates.crt ]" ||
   fail "developer image is missing the public CA trust bundle"
-for config in /user/cfg/lorry.toml /none/cfg/lorry.toml; do
+for config in /user/cfg/lorry.toml /none/cfg/lorry.toml /user/cfg/cargo/config.toml; do
   vm_ssh "[ -f $config ]" || fail "developer image is missing $config"
 done
+
+"${SCP[@]}" "$VM_RUNTIME_DIR/dependencies/dependencies.tar" \
+  motor@192.168.4.2:/none/tmp/dev-sources-dependencies.tar
+vm_ssh "[ ! -e $DEPENDENCIES ] || /user/bin/rm -r $DEPENDENCIES"
+# Make the uploaded fixture readable; only extraction runs as None.
+vm_ssh "/user/bin/chmod rwxrw-r-- /none/tmp/dev-sources-dependencies.tar"
+vm_ssh "MOTOR_OS_CAPS=0x204 /user/bin/rush -c 'mkdir $DEPENDENCIES && cd $DEPENDENCIES && tar xf /none/tmp/dev-sources-dependencies.tar && cd /none/dev/motor-os/bin && tar xf $DEPENDENCIES/git.tar'"
+vm_ssh "/user/bin/rm /none/tmp/dev-sources-dependencies.tar"
+rm -rf "$VM_RUNTIME_DIR/dependencies"
+vm_ssh "/user/bin/cat /user/cfg/lorry.toml" >"$VM_RUNTIME_DIR/lorry.toml"
+CONFIG_SAVED=1
+printf '\n[network]\ncurl = "%s/curl"\n' "$DEPENDENCIES" |
+  vm_ssh "/user/bin/rush -c 'cat >> /user/cfg/lorry.toml'"
 
 cc_version="$(vm_ssh /devtools/bin/cc --version 2>&1)" ||
   fail "native cc --version failed: $cc_version"
@@ -345,26 +367,31 @@ vm_ssh "/devtools/bin/rustc $DEV_TMP/temp-contract.rs -o $DEV_TMP/temp-contract"
 # Build trees are scratch. Remove each one after its boundary check so later
 # independent builds retain enough room for their own outputs.
 for package in red; do
-  vm_ssh "cd /none/dev/motor-os/bin/$package && $LORRY_VENDOR_ENV /user/bin/dev/lorry vendor --accept-all" ||
+  vm_ssh "cd /none/dev/motor-os/bin/$package && $LORRY_VENDOR_ENV /user/bin/dev/lorry vendor --locked --accept-all" ||
     fail "developer image cannot vendor /none/dev/motor-os/bin/$package"
   vm_ssh "cd /none/dev/motor-os/bin/$package && /user/bin/dev/lorry build" ||
     fail "developer image cannot natively build /none/dev/$package"
   expect_nested_guest_mode "/none/dev/motor-os/bin/$package/target/lorry/debug/build" \
-    build-script-build -rwxr-xr-- "Cargo-uplifted $package build scripts"
+    build-script-build -rwxrwxr-x "None-built $package build scripts"
   vm_ssh "/user/bin/rm -r /none/dev/motor-os/bin/$package/target"
 done
 [ "$(count_guest_files /user/dev/lorry/vendor/objects)" -gt "$user_objects" ] ||
   fail "Lorry did not populate /user/dev/lorry/vendor"
-[ "$(count_guest_files /user/dev/lorry/cache)" -gt "$user_cache_files" ] ||
-  fail "Lorry did not populate /user/dev/lorry/cache"
+[ "$(count_guest_files /none/dev/lorry/cache/v1/units/sha256)" -gt "$none_cache_files" ] ||
+  fail "Lorry did not populate /none/dev/lorry/cache"
+vm_ssh "[ ! -d /user/dev/lorry/cache/v1/units/sha256 ] || [ -z \"\$(/user/bin/find /user/dev/lorry/cache/v1/units/sha256 -type f)\" ]" ||
+  fail "a build wrote compiled units into the Interactive cache"
 vm_ssh "[ ! -e /user/cfg/lorry ]" ||
   fail "Lorry recreated its old state directory"
-vm_ssh "cd /none/dev/motor-os/bin/lorry && $LORRY_VENDOR_ENV /user/bin/dev/lorry vendor --accept-all" ||
+vm_ssh "cd /none/dev/motor-os/bin/lorry && $LORRY_VENDOR_ENV /user/bin/dev/lorry vendor --locked --accept-all" ||
   fail "developer image cannot vendor /none/dev/motor-os/bin/lorry"
 vm_ssh "cd /none/dev/motor-os/bin/lorry && /user/bin/dev/lorry build" ||
   fail "developer image cannot natively build /none/dev/lorry"
 vm_ssh "/user/bin/cp /none/dev/motor-os/bin/lorry/target/lorry/debug/lorry $DEV_TMP/native-lorry"
 vm_ssh "/user/bin/rm -r /none/dev/motor-os/bin/lorry/target"
+vm_ssh "/user/bin/rush -c 'cat > /user/cfg/lorry.toml'" <"$VM_RUNTIME_DIR/lorry.toml"
+CONFIG_SAVED=0
+vm_ssh "/user/bin/rm -r $DEPENDENCIES"
 
 # The library sources' tests, offline: the image carries the admitted
 # workspace and its compiled dependencies, made with the same four jobs.

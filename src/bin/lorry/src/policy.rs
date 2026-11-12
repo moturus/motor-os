@@ -3,9 +3,7 @@ use std::path::PathBuf;
 
 use semver::Version;
 
-use crate::config::{
-    LimitSource, NativeToolRole, Policy, PolicyAction, PolicyDefault, PolicyLimits, PolicyRule,
-};
+use crate::config::{LimitSource, Policy, PolicyAction, PolicyDefault, PolicyLimits, PolicyRule};
 use crate::diagnostic::{Error, Result};
 use crate::hash::hex;
 use crate::manifest::Manifest;
@@ -113,10 +111,6 @@ pub struct Admission {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackageAdmission {
-    pub native_tools: BTreeSet<NativeToolRole>,
-    /// A trusted or approved build script also gets every native tool
-    /// configured for its target.
-    pub configured_native_tools: bool,
     pub caller_env: BTreeSet<String>,
 }
 
@@ -319,20 +313,6 @@ pub fn inspect(
         if proposed {
             proposals.insert(package.key.clone());
         }
-        let configured = trusted
-            || proposed
-            || script_allows
-                .iter()
-                .any(|id| preflight.policy.rules[id.as_str()].configured_native_tools);
-        let native_tools = script_allows
-            .iter()
-            .flat_map(|id| {
-                preflight.policy.rules[id.as_str()]
-                    .native_tools
-                    .iter()
-                    .copied()
-            })
-            .collect();
         let caller_env = script_allows
             .iter()
             .flat_map(|id| {
@@ -342,14 +322,7 @@ pub fn inspect(
                     .cloned()
             })
             .collect();
-        admitted.insert(
-            package.key.clone(),
-            PackageAdmission {
-                native_tools,
-                configured_native_tools: configured && evidence.build_script,
-                caller_env,
-            },
-        );
+        admitted.insert(package.key.clone(), PackageAdmission { caller_env });
     }
 
     Ok(Admission {
@@ -842,13 +815,6 @@ fn script_rule_authorizes(rule: &PolicyRule, package: &ResolvedPackage) -> bool 
         return false;
     }
     let source = source_kind(package);
-    if source == SourceKind::Path
-        && !rule.native_tools.is_empty()
-        && rule.source_tree_sha256.is_none()
-        && !is_editable_member(package)
-    {
-        return false;
-    }
     match source {
         SourceKind::CratesIo => true,
         SourceKind::Git | SourceKind::Path => rule.source.as_deref() == Some(source.policy_name()),
@@ -1356,8 +1322,6 @@ mod tests {
             license: license.map(str::to_owned),
             allow_build_script: false,
             allow_proc_macro: false,
-            native_tools: BTreeSet::new(),
-            configured_native_tools: false,
             caller_env: Default::default(),
             provenance: Path::new("/system/lorry.toml").to_owned(),
         }
@@ -1621,7 +1585,7 @@ mod tests {
         let pass = preflight_workspace(&policy, &resolution).unwrap();
         let evidence = BTreeMap::from([(package.key.clone(), evidence(&package, true))]);
         let admission = inspect(&pass, &resolution, &evidence).unwrap();
-        assert!(admission.packages[&package.key].configured_native_tools);
+        assert!(admission.packages.contains_key(&package.key));
 
         let local = path_package(Path::new("/project/local-demo"), true, true);
         preflight_workspace(&policy, &make_resolution(vec![local])).unwrap();
@@ -1657,7 +1621,7 @@ mod tests {
         accepted.default = PolicyDefault::Allow;
         let pass = preflight_workspace(&accepted, &resolution).unwrap();
         let admission = inspect(&pass, &resolution, &evidence).unwrap();
-        assert!(admission.packages[&package.key].configured_native_tools);
+        assert!(admission.packages.contains_key(&package.key));
         assert!(admission.proposed.is_empty());
 
         // An interactive review proposes the missing grant instead of failing.
@@ -1669,22 +1633,21 @@ mod tests {
         let pass = preflight_workspace(&proposing, &resolution).unwrap();
         let admission = inspect(&pass, &resolution, &evidence).unwrap();
         assert_eq!(admission.proposed, BTreeSet::from([package.key.clone()]));
-        assert!(admission.packages[&package.key].configured_native_tools);
+        assert!(admission.packages.contains_key(&package.key));
         let member = path_package(Path::new("/project/local-demo"), true, true);
         preflight_workspace(&proposing, &make_resolution(vec![member])).unwrap();
 
-        // A recorded grant gives its script the configured tools.
+        // A recorded grant permits the build script.
         let mut granted = Policy {
             default: PolicyDefault::Allow,
             ..Policy::default()
         };
         let mut allow = rule(PolicyAction::Allow, None, None);
         allow.allow_build_script = true;
-        allow.configured_native_tools = true;
         granted.rules.insert("lorry-grant-00000".to_owned(), allow);
         let pass = preflight_workspace(&granted, &resolution).unwrap();
         let admission = inspect(&pass, &resolution, &evidence).unwrap();
-        assert!(admission.packages[&package.key].configured_native_tools);
+        assert!(admission.packages.contains_key(&package.key));
         assert!(admission.proposed.is_empty());
     }
 
@@ -1713,8 +1676,6 @@ mod tests {
                 license: Some("MIT".to_owned()),
                 allow_build_script: false,
                 allow_proc_macro: true,
-                native_tools: BTreeSet::new(),
-                configured_native_tools: false,
                 caller_env: Default::default(),
                 provenance: Path::new("/system/lorry.toml").to_owned(),
             },
@@ -1788,8 +1749,6 @@ mod tests {
                 license: Some("MIT".to_owned()),
                 allow_build_script: true,
                 allow_proc_macro: false,
-                native_tools: BTreeSet::from([NativeToolRole::CCompiler]),
-                configured_native_tools: false,
                 caller_env: Default::default(),
                 provenance: Path::new("/system/lorry.toml").to_owned(),
             },
@@ -1809,14 +1768,11 @@ mod tests {
             },
         )]);
         let admission = inspect(&pass, &resolution, &evidence).unwrap();
-        assert_eq!(
-            admission.packages[&package.key].native_tools,
-            BTreeSet::from([NativeToolRole::CCompiler])
-        );
+        assert!(admission.packages.contains_key(&package.key));
     }
 
     #[test]
-    fn member_build_time_grants_are_named_and_unpinned_tools_stay_with_members() {
+    fn member_build_time_grants_are_named() {
         let mut package = path_package(Path::new("/ws/local-demo"), true, true);
         package.local_manifest.as_mut().unwrap().editable = true;
         let evidence = BTreeMap::from([(
@@ -1837,7 +1793,6 @@ mod tests {
         grant.name = Some(package.key.name.clone());
         grant.allow_build_script = true;
         grant.allow_proc_macro = true;
-        grant.native_tools.insert(NativeToolRole::CCompiler);
         grant.caller_env.insert("PUBLIC".into());
         let mut policy = Policy::default();
         for name in [None, Some("other".to_owned()), grant.name.clone()] {
@@ -1849,10 +1804,6 @@ mod tests {
             assert_eq!(result.is_ok(), name == grant.name);
             if let Ok(pass) = result {
                 let admission = inspect(&pass, &resolution, &evidence).unwrap();
-                assert_eq!(
-                    admission.packages[&package.key].native_tools,
-                    grant.native_tools
-                );
                 assert_eq!(
                     admission.packages[&package.key].caller_env,
                     grant.caller_env
@@ -1879,18 +1830,6 @@ mod tests {
                 .render()
                 .contains("procedural macro")
         );
-        policy.rules.insert("member".into(), grant.clone());
-        package.local_manifest.as_mut().unwrap().editable = false;
-        let outside = make_resolution(vec![package]);
-        assert!(
-            preflight_workspace(&policy, &outside)
-                .unwrap_err()
-                .render()
-                .contains("build script")
-        );
-        policy.rules.get_mut("member").unwrap().source_tree_sha256 = Some(hex(&checksum(7)));
-        let pass = preflight_workspace(&policy, &outside).unwrap();
-        inspect(&pass, &outside, &evidence).unwrap();
     }
 
     #[test]

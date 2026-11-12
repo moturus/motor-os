@@ -136,7 +136,7 @@ cmp .lorry/dependencies-v2.toml "$WORK/original.admission"
 rm .lorry/dependencies-v2.toml
 "$LORRY" -q --lorry-messages vendor --locked --offline --all-features --accept-all >"$WORK/review.out" 2>"$WORK/review.json"
 test ! -s "$WORK/review.out"
-grep -F 'review-format-version = 4' .lorry/dependencies-v2.toml
+grep -F 'review-format-version = 5' .lorry/dependencies-v2.toml
 grep -F '"reason":"lorry-vendor-change"' "$WORK/review.json" >/dev/null
 test ! -e app/.lorry/dependencies-v2.toml
 cmp Cargo.lock "$WORK/original.lock"

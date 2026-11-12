@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[path = "share-fixture.rs"]
+mod fixture_modes;
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("Motor Lorry cancellation probe: {error}");
@@ -43,6 +46,7 @@ fn run() -> Result<(), String> {
     .map_err(|error| error.to_string())?;
     let source = root.join("src/main.rs");
     fs::write(&source, "fn main() {}\n").map_err(|error| error.to_string())?;
+    fixture_modes::share(&root).map_err(|error| error.to_string())?;
     let wrapper = env::current_exe().map_err(|error| error.to_string())?;
     let build = || {
         let mut command = Command::new(&lorry);
@@ -91,10 +95,16 @@ fn run() -> Result<(), String> {
     let owner = fs::read_to_string(root.join("target/.lorry-artifacts.owner"))
         .map_err(|error| error.to_string())?;
     let fields = owner.split_whitespace().collect::<Vec<_>>();
-    if fields.len() != 3 || fields[0] != "2" || fields[2] != interrupted.id().to_string() {
+    if fields.len() != 3 || fields[0] != "2" {
         return Err(format!(
             "build did not publish its boot identity and PID: {owner:?}"
         ));
+    }
+    let worker_pid = fields[2]
+        .parse::<u32>()
+        .map_err(|error| error.to_string())?;
+    if worker_pid == interrupted.id() || !process_alive(worker_pid)? {
+        return Err("artifact owner is not a live build worker".to_owned());
     }
     let boot_id = u64::from_str_radix(fields[1], 16).map_err(|error| error.to_string())?;
     if boot_id == 0 {

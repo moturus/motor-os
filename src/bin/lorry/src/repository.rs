@@ -35,7 +35,7 @@ mod index;
 pub enum Layer {
     Local,
     User,
-    System,
+    None,
 }
 
 impl Layer {
@@ -43,7 +43,7 @@ impl Layer {
         match self {
             Self::Local => "local",
             Self::User => "user",
-            Self::System => "system",
+            Self::None => "none",
         }
     }
 }
@@ -142,11 +142,16 @@ impl RepositorySet {
         validation: ValidationMode,
     ) -> Result<Self> {
         let mut layers = Vec::new();
-        for (layer, path) in [
-            (Layer::Local, repositories.local.as_deref()),
+        let mut role_layers = [
+            (Layer::None, repositories.none.as_deref()),
             (Layer::User, repositories.user.as_deref()),
-            (Layer::System, repositories.system.as_deref()),
-        ] {
+        ];
+        if repositories.prefer_user_vendored_sources {
+            role_layers.swap(0, 1);
+        }
+        for (layer, path) in
+            std::iter::once((Layer::Local, repositories.local.as_deref())).chain(role_layers)
+        {
             if let Some(path) = path {
                 layers.push(Repository::open(layer, path)?);
             }
@@ -348,6 +353,16 @@ impl RepositoryWriter {
     ) -> Result<Self> {
         let (layer, root) = if let Some(root) = &repositories.local {
             (Layer::Local, root.clone())
+        } else if cfg!(target_os = "motor")
+            && crate::role::Role::current() == crate::role::Role::None
+        {
+            (
+                Layer::None,
+                repositories
+                    .none
+                    .clone()
+                    .ok_or_else(|| Error::failure("None vendoring requires repositories.none"))?,
+            )
         } else if let Some(root) = &repositories.user {
             (Layer::User, root.clone())
         } else {
@@ -1529,13 +1544,14 @@ mod tests {
         (checksum, object)
     }
 
-    fn configurations(local: Option<&Path>, system: Option<&Path>) -> Repositories {
+    fn configurations(local: Option<&Path>, none: Option<&Path>) -> Repositories {
         Repositories {
-            system: system.map(Path::to_owned),
+            none: none.map(Path::to_owned),
             user: None,
             local: local.map(Path::to_owned),
             keep_artifacts: true,
             keep_sources: true,
+            prefer_user_vendored_sources: false,
         }
     }
 
@@ -1994,23 +2010,25 @@ mod tests {
         assert!(strict.lookup_registry(&checksum).is_err());
     }
 
+    include!("../tests/unit/repository-preference.rs");
+
     #[test]
     fn absent_layer_falls_through_but_corruption_never_does() {
         let root = TempDir::new("layers");
         let local = root.0.join("local");
-        let system = root.0.join("system");
+        let none = root.0.join("none");
         repository(&local);
-        repository(&system);
-        let (checksum, _) = registry_object(&system, b"same archive");
+        repository(&none);
+        let (checksum, _) = registry_object(&none, b"same archive");
         let set = RepositorySet::open(
-            &configurations(Some(&local), Some(&system)),
+            &configurations(Some(&local), Some(&none)),
             crate::source_tree::DEFAULT_LIMITS,
             1024,
         )
         .unwrap();
         assert_eq!(
             set.lookup_registry(&checksum).unwrap().unwrap().layer,
-            Layer::System
+            Layer::None
         );
 
         let (_, corrupt) = registry_object(&local, b"same archive");
@@ -2019,12 +2037,12 @@ mod tests {
         // one process the cached object keeps serving lookups.
         assert_eq!(
             set.lookup_registry(&checksum).unwrap().unwrap().layer,
-            Layer::System
+            Layer::None
         );
         // A fresh set — as any new process starts with — sees the corrupt
-        // local shadow and refuses to fall through to the intact system copy.
+        // local shadow and refuses to fall through to the intact none copy.
         let fresh = RepositorySet::open(
-            &configurations(Some(&local), Some(&system)),
+            &configurations(Some(&local), Some(&none)),
             crate::source_tree::DEFAULT_LIMITS,
             1024,
         )

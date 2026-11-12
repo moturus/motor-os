@@ -90,7 +90,7 @@ if interactive_vendor "$CLONE" n "$WORK/declined.typescript"; then
 fi
 grep -F 'Build-time code to approve (1):' "$WORK/declined.typescript" >/dev/null ||
     fail "the review did not list the build-time code"
-grep -F '+ tool (path): build script (native tools: none configured)' \
+grep -F '+ tool (path): build script' \
     "$WORK/declined.typescript" >/dev/null || fail "the review did not name the script and its tools"
 [ -z "$(decisions_for "$CLONE")" ] || fail "a declined review recorded decisions"
 

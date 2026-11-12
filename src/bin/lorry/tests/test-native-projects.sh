@@ -2,10 +2,11 @@
 # Native Lorry builds of real Motor OS projects in the release developer image:
 # red, rush and russhd from this checkout, and Helix from its managed
 # fork checkout (external-sources/helix, as in src/build-motor-os.sh). Each project is
-# vendored online in the guest, then built with /user/bin/dev/lorry: a debug
+# vendored offline in the guest, then built with /user/bin/dev/lorry: a debug
 # build, or a release build with --release. Every project is attempted; the
 # run fails if any of them failed.
 set -euo pipefail
+export CARGO_NET_OFFLINE=true
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LORRY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -14,7 +15,8 @@ HELIX="$ROOT_DIR/external-sources/helix"
 WD="$ROOT_DIR/src/tests"
 IMG_DIR="$ROOT_DIR/vm_images/release"
 BUDGET_SECONDS="${LORRY_NATIVE_PROJECTS_TIMEOUT:-3600}"
-REMOTE_ROOT=/user/tmp/lorry-native-projects
+REMOTE_ROOT=/none/tmp/lorry-native-projects
+NONE_CAPS=0x204
 # project, guest directory below REMOTE_ROOT, built executable.
 PROJECTS=(
     "red motor-os/src/bin/red red"
@@ -85,6 +87,55 @@ stage "$ROOT_DIR" "$WORK/lorry-native-projects/motor-os" \
 stage "$HELIX" "$WORK/lorry-native-projects/helix" .
 printf 'profile: %s\nhelix: %s\n' "$PROFILE" "$(git -C "$HELIX" rev-parse HEAD)" >"$EVIDENCE_DIR/summary.txt"
 
+# Prepare the immutable dependency repository from local Cargo/Git caches.
+# The mock curl never opens a network socket; a missing input fails here.
+source "$SCRIPT_DIR/current-toolchain.sh"
+lorry_load_current_toolchain
+RUSTC="$LORRY_TEST_RUSTC" "$LORRY_TEST_CARGO" build \
+    --manifest-path "$LORRY_DIR/Cargo.toml" --release --locked --offline
+"$LORRY_TEST_RUSTC" --edition=2024 -D warnings -O \
+    "$SCRIPT_DIR/helpers/cache-curl.rs" -o "$WORK/cache-curl"
+locks=()
+for entry in "${PROJECTS[@]}"; do
+    read -r name directory executable <<<"$entry"
+    locks+=("$WORK/lorry-native-projects/$directory/Cargo.lock")
+done
+"$WORK/cache-curl" prepare "${CARGO_HOME:-$HOME/.cargo}" "$WORK/crates-io" "${locks[@]}"
+mkdir -p "$WORK/home/.config/lorry"
+cat >"$WORK/home/.config/lorry/lorry.toml" <<EOF
+config-version = 1
+use-cargo-registry = false
+[repositories]
+user = "$WORK/lorry-native-projects/repository"
+[network]
+curl = "$WORK/crates-io/curl"
+[policy]
+default = "allow"
+EOF
+# Use the image's policy limits during host acquisition too.
+awk '
+  /^\[policy.limits\]/ { limits = 1; print; next }
+  limits && /^\[/ { exit }
+  limits { print }
+' "$ROOT_DIR/img_files/motor-os-dev/user/cfg/lorry.toml" >>"$WORK/home/.config/lorry/lorry.toml"
+for entry in "${PROJECTS[@]}"; do
+    read -r name directory executable <<<"$entry"
+    # Match the image's two vendor targets, including dependencies used only by musl.
+    (cd "$WORK/lorry-native-projects/$directory" && \
+        HOME="$WORK/home" RUSTC="$LORRY_TEST_RUSTC" \
+        "$LORRY_DIR/target/release/lorry" fetch --locked \
+            --target x86_64-unknown-motor --target x86_64-unknown-linux-musl) \
+        >"$EVIDENCE_DIR/$name-prepare.log" 2>&1 || fail "cannot prepare $name dependencies offline"
+    printf '[workspaces."%s/%s".repositories]\nlocal = "%s/repository"\n' \
+        "$REMOTE_ROOT" "$directory" "$REMOTE_ROOT" >>"$WORK/lorry-native-projects/config.toml"
+done
+# Motor tar accepts regular files/directories; materialize Helix's themes link.
+tar --dereference --hard-dereference -C "$WORK" -cf "$WORK/projects.tar" lorry-native-projects
+tar -tvf "$WORK/projects.tar" | awk '
+    substr($1, 1, 1) != "-" && substr($1, 1, 1) != "d" { print; bad = 1 }
+    END { exit bad }
+' || fail "project archive contains an unsupported member type"
+
 qemu-img create -q -f qcow2 -F qcow2 -b motor-os-dev.qcow2 "$IMG_DIR/$OVERLAY"
 export MOTO_IMAGE="$OVERLAY" MOTO_SMP="${LORRY_VM_SMP:-8}"
 export MOTO_MEMORY_MIB="${LORRY_VM_MEMORY_MIB:-8192}"
@@ -100,10 +151,13 @@ guest() {
     timeout "$remaining" "${SSH[@]}" "$*" </dev/null >"$log" 2>&1
 }
 
-scp -q -r -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
+scp -q -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
     -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
-    -i "$WD/test.key" "$WORK/lorry-native-projects" motor@192.168.4.2:/user/tmp/ ||
+    -i "$WD/test.key" "$WORK/projects.tar" motor@192.168.4.2:/none/tmp/lorry-native-projects.tar ||
     fail "cannot upload the project sources"
+# Make the uploaded fixture readable; None creates the writable source tree.
+guest unpack "/user/bin/chmod rwxrw-r-- /none/tmp/lorry-native-projects.tar && cd /none/tmp && MOTOR_OS_CAPS=$NONE_CAPS /user/bin/tar xf /none/tmp/lorry-native-projects.tar && /user/bin/rm /none/tmp/lorry-native-projects.tar && /user/bin/cat $REMOTE_ROOT/config.toml >> /user/cfg/lorry.toml" ||
+    fail "cannot unpack the sources with None's writable permissions"
 
 failed=()
 for entry in "${PROJECTS[@]}"; do
@@ -111,9 +165,9 @@ for entry in "${PROJECTS[@]}"; do
     path="$REMOTE_ROOT/$directory"
     start="$SECONDS"
     result=PASS
-    if ! guest "$name-vendor" "cd $path && /user/bin/dev/lorry vendor --accept-all"; then
+    if ! guest "$name-vendor" "cd $path && /user/bin/dev/lorry vendor --locked --offline --accept-all"; then
         result="FAIL (vendor)"
-    elif ! guest "$name-build" "cd $path && /user/bin/dev/lorry build$BUILD_ARGUMENTS"; then
+    elif ! guest "$name-build" "cd $path && /user/bin/dev/lorry build --locked --offline$BUILD_ARGUMENTS"; then
         result="FAIL (build)"
     elif ! guest "$name-check" "[ -f $path/target/lorry/$PROFILE/$executable ]"; then
         result="FAIL (no $executable)"

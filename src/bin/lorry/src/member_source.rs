@@ -72,7 +72,7 @@ fn limit_error(manifest: &Manifest, limit: String) -> Error {
     .with_help("exclude large files with `package.exclude`, or remove links that leave the package")
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 fn files(manifest: &Manifest) -> Result<Vec<PathBuf>> {
     collect(manifest, DEFAULT_LIMITS.max_entries)
 }

@@ -340,6 +340,8 @@ fn materialize_one(
     let source = staging.path().join("source");
     fs::create_dir(&source)
         .map_err(|error| Error::failure(format!("failed to create Git source staging: {error}")))?;
+    #[cfg(target_os = "motor")]
+    crate::motor_fs::directory_mode(&source)?;
 
     let limits = tree_limits(policy)?;
     let client = Client::discover(network)?;
@@ -405,11 +407,9 @@ fn materialize_one(
         ))
     })?;
     let source_tree = Tree::scan(&source, limits, Exclusions::None)?;
-    fs::write(
-        staging.path().join("git.toml"),
-        provenance(locked, &git_tree, &source_tree),
-    )
-    .map_err(|error| Error::failure(format!("failed to write Git provenance: {error}")))?;
+    let mut record = crate::atomic::AtomicFile::new(&staging.path().join("git.toml"))?;
+    record.write_all(provenance(locked, &git_tree, &source_tree).as_bytes())?;
+    record.commit()?;
     staging.commit(&destination)?;
     let source = destination.join("source");
     let package_roots = index_package_roots(&source, &source_tree);
@@ -992,3 +992,7 @@ mod tests {
         fs::remove_dir_all(workspace).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/motor-source-modes.rs"]
+mod source_mode_tests;

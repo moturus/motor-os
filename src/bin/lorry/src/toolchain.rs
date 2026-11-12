@@ -96,7 +96,7 @@ impl Toolchain {
         let query_cache = config
             .cache_directory()
             .ok()
-            .map(|cache| cache.join("rustc-queries"));
+            .map(|cache| query_cache_directory(&cache));
         let output = cached_query(
             query_cache.as_deref(),
             &rustc,
@@ -165,6 +165,10 @@ impl Toolchain {
     }
 }
 
+fn query_cache_directory(cache: &Path) -> PathBuf {
+    cache.join("rustc-queries")
+}
+
 /// Runs a rustc query, or reuses its recorded output while the rustc file is
 /// unchanged. Like Cargo's `target/.rustc_info.json`, a record is keyed on the
 /// rustc path, size, and modification time. Cache failures only cost a query.
@@ -193,9 +197,20 @@ fn cached_query(
         }
         Some(cache.join(hex(&key.finish())))
     });
-    if let Some(path) = &record
-        && let Ok(file) = fs::File::open(path)
-    {
+    #[cfg(not(target_os = "motor"))]
+    let records = record.iter().cloned().collect::<Vec<_>>();
+    #[cfg(target_os = "motor")]
+    let records = record.as_ref().map_or_else(Vec::new, |record| {
+        [crate::role::Role::None, crate::role::Role::Interactive]
+            .map(|role| {
+                query_cache_directory(&role.cache_directory()).join(record.file_name().unwrap())
+            })
+            .to_vec()
+    });
+    for path in records {
+        let Ok(file) = fs::File::open(path) else {
+            continue;
+        };
         let mut bytes = Vec::new();
         if file
             .take(MAX_RECORD_BYTES + 1)

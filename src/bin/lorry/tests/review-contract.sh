@@ -182,7 +182,7 @@ grep -F 'Previous review cannot be reconstructed; showing the complete candidate
     "$WORK/unreconstructed.stderr" >/dev/null
 expect_no_warning unreconstructed
 (cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" review) >/dev/null
-sed -i 's/^review-format-version = 4$/review-format-version = 3/' \
+sed -i 's/^review-format-version = 5$/review-format-version = 3/' \
     "$PROJECT/.lorry/dependencies-v2.toml"
 (cd "$PROJECT" && HOME="$HOME_DIR" "$LORRY" vendor --accept-all </dev/null) \
     >/dev/null 2>"$WORK/retired.stderr"

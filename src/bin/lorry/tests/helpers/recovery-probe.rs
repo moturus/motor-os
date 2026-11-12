@@ -3,6 +3,9 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+#[path = "share-fixture.rs"]
+mod fixture_modes;
+
 fn main() {
     let args = env::args_os().collect::<Vec<_>>();
     if let Some(root) = env::var_os("LORRY_RECOVERY_PROBE_ROOT") {
@@ -57,6 +60,7 @@ fn main() {
     for name in ["first", "second"] {
         fs::write(root.join(format!("src/bin/{name}.rs")), "fn main() {}\n").unwrap();
     }
+    fixture_modes::share(root).unwrap();
     build("1");
     let parent = root.join("target/lorry/debug/build/recovery-probe");
     let units = fs::read_dir(&parent)

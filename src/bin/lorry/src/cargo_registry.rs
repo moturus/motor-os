@@ -63,16 +63,15 @@ fn cache_exists() -> bool {
 fn cargo_home() -> Result<PathBuf> {
     let home = match env::var_os("CARGO_HOME") {
         Some(path) if !path.is_empty() => PathBuf::from(path),
-        _ => env::var_os("HOME")
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from)
-            .map(|home| home.join(".cargo"))
-            .ok_or_else(|| {
-                Error::failure(
-                    "--use-cargo-registry needs CARGO_HOME or HOME to locate Cargo's cache",
-                )
+        _ => crate::config::default_cargo_home(
+            env::var_os("HOME")
+                .filter(|path| !path.is_empty())
+                .as_deref(),
+        )
+        .ok_or_else(|| {
+            Error::failure("--use-cargo-registry needs CARGO_HOME or HOME to locate Cargo's cache")
                 .cargo_cache_miss()
-            })?,
+        })?,
     };
     if home.is_absolute() {
         return Ok(home);

@@ -64,7 +64,7 @@ cd "$PROJECT"
 test ! -s "$WORK/fresh.out"
 grep -F 'version = 3' Cargo.lock >/dev/null
 grep -F 'name = "outside"' Cargo.lock >/dev/null
-grep -F 'review-format-version = 4' .lorry/dependencies-v2.toml >/dev/null
+grep -F 'review-format-version = 5' .lorry/dependencies-v2.toml >/dev/null
 cp Cargo.lock "$WORK/lorry.lock"
 rm Cargo.lock
 "$LORRY_TEST_CARGO" generate-lockfile --offline
@@ -108,7 +108,7 @@ echo 'PASS: ordinary workspace vendor matches Cargo locks and excludes members f
 mkdir -p app/.lorry shared/.lorry outside/.lorry
 python3 - "$WORK/original.admission" "$WORK/member.admission" <<'PYCODE'
 import re, sys
-source = open(sys.argv[1]).read().replace('review-format-version = 4', 'review-format-version = 3')
+source = open(sys.argv[1]).read().replace('review-format-version = 5', 'review-format-version = 3')
 source = re.sub(r'\[review-scope\].*?(?=\[\[context\]\])', '', source, flags=re.S)
 open(sys.argv[2], 'w').write(source)
 PYCODE
@@ -118,12 +118,12 @@ if "$LORRY" -q --max-packages 2 build -p app >"$WORK/legacy-root.out" 2>"$WORK/l
     echo 'build accepted a retired format-3 record as workspace admission' >&2
     exit 1
 fi
-grep -F 'retired single-package review format 3' "$WORK/legacy-root.err" >/dev/null
+grep -F 'retired review format' "$WORK/legacy-root.err" >/dev/null
 cmp .lorry/dependencies-v2.toml "$WORK/member.admission"
 # The advice in that error works: vendor replaces the retired record.
 "$LORRY" -q --max-packages 2 vendor --locked --offline --accept-all \
     >"$WORK/retired.out" 2>"$WORK/retired.err"
-grep -F 'review-format-version = 4' .lorry/dependencies-v2.toml >/dev/null
+grep -F 'review-format-version = 5' .lorry/dependencies-v2.toml >/dev/null
 cp "$WORK/workspace.admission" .lorry/dependencies-v2.toml
 for package in app shared outside; do
     cp "$WORK/member.admission" "$package/.lorry/dependencies-v2.toml"
@@ -180,7 +180,7 @@ if "$LORRY" -q --max-packages 2 review -p shared >"$WORK/selected-review.toml" \
 fi
 grep -F 'does not accept package or feature selection' "$WORK/selected-review.err" >/dev/null
 cmp "$WORK/root-review.toml" "$WORK/member-review.toml"
-grep -F 'review-format-version = 4' "$WORK/root-review.toml" >/dev/null
+grep -F 'review-format-version = 5' "$WORK/root-review.toml" >/dev/null
 
 cat >>outside/Cargo.toml <<'TOML'
 [dependencies]
@@ -208,7 +208,7 @@ cmp Cargo.lock "$WORK/before-upgrade.lock"
 "$LORRY" -q --lorry-messages vendor --accept-all upgrade cfg-if --to 1.0.4 \
     >"$WORK/upgrade.out" 2>"$WORK/upgrade.json"
 cmp Cargo.lock "$WORK/after-upgrade.lock"
-grep -F 'review-format-version = 4' .lorry/dependencies-v2.toml >/dev/null
+grep -F 'review-format-version = 5' .lorry/dependencies-v2.toml >/dev/null
 python3 - "$WORK/upgrade.json" <<'PY'
 import json, sys
 message = json.load(open(sys.argv[1]))

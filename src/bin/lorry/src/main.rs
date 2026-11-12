@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "motor", feature(motor_ext))]
+
 mod admission_state;
 mod archive;
 mod artifact_lock;
@@ -32,10 +34,13 @@ mod lockfile;
 mod manifest;
 mod member_source;
 mod metadata;
+#[cfg(target_os = "motor")]
+mod motor_child;
+#[cfg(target_os = "motor")]
+mod motor_fs;
 #[cfg(test)]
 #[path = "../tests/unit/native-rustflags.rs"]
 mod native_rustflags;
-mod native_tool;
 mod new_package;
 mod offline;
 mod patch;
@@ -116,6 +121,13 @@ fn report_output_failures() {
 
 fn command_main() -> i32 {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    #[cfg(target_os = "motor")]
+    if arguments
+        .first()
+        .is_some_and(|arg| arg == motor_child::CHILD_ARGUMENT)
+    {
+        return motor_child::child_main(arguments.into_iter().skip(1).collect());
+    }
     let requested = Cli::lorry_messages_requested(&arguments);
     let (result, messages) = match Cli::parse(arguments) {
         Ok(cli) => {
@@ -144,6 +156,12 @@ fn report_error(error: diagnostic::Error, messages: bool) -> i32 {
 }
 
 fn run(cli: Cli) -> Result<i32> {
+    #[cfg(target_os = "motor")]
+    if !motor_child::is_child()
+        && let Some(code) = motor_child::execute(&cli)?
+    {
+        return Ok(code);
+    }
     let command = match &cli.command {
         Command::Build(_) => Some("build started"),
         Command::Check(_) if cli.is_clippy() => Some("clippy started"),
