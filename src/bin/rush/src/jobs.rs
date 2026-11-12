@@ -95,17 +95,19 @@ pub fn has_explicit_env<'a>(key: &str, names: impl IntoIterator<Item = &'a str>)
 
 // ---- child stdio ------------------------------------------------------------
 
-/// A child's standard input: inherited, empty, or piped and fed by us.
-///
-/// Shared shell-level files are pumped so their one live position stays in
-/// rush. A file opened solely for one external command can move directly into
-/// that child instead.
+/// A child's standard input: inherited, empty, a file, or a here-document
+/// that we feed through a pipe.
 pub enum ChildIn {
     Inherit,
     /// Nothing to read: an immediate EOF. A background job's stdin, so it cannot
     /// steal input from the terminal (POSIX §2.9.3).
     Null,
-    DirectFile(Arc<File>),
+    /// The child reads the file itself, starting at the shell's position, so
+    /// what it leaves unread is still there for the shell's next command.
+    ///
+    /// On the Unix host the two share one offset. On Motor OS the child gets a
+    /// copy of the offset, so what it does read is not taken from the shell,
+    /// which sees those bytes again (a documented limit, see the README).
     File(Arc<File>),
     Heredoc(Arc<String>),
 }
@@ -126,12 +128,12 @@ pub enum ChildOut {
 /// wire directly.
 ///
 /// Motor OS's sys-io is not reentrant under concurrent filesystem access from
-/// one process, so rush keeps all of its own FS I/O on the main thread: input
-/// files are read *before* the child starts, captured output is written *after*
-/// it exits ([`finish`](Self::finish)), and the pump threads in between touch
-/// only pipes. For a background job that means its redirected output lands in
+/// one process, so rush keeps all of its own FS I/O on the main thread:
+/// captured output is written *after* the child exits
+/// ([`finish`](Self::finish)), and the pump threads before that touch only
+/// pipes. For a background job that means its redirected output lands in
 /// the file when it is reaped rather than as it is produced — see
-/// `rush-to-sh-plan.md` §7.
+/// `rush-to-sh-plan.md` §7. An input file is never pumped: the child reads it.
 pub struct PumpedChild {
     child: Option<Child>,
     feed: Option<JoinHandle<()>>,
@@ -167,11 +169,11 @@ pub fn spawn(
         cmd.env(key, val);
     }
 
-    // Read file-backed input up front: FS access must stay on this thread.
+    // Only a here-document is fed by us. Draining a file here instead would
+    // take input from the shell that the child may never read.
     let feed: Option<Vec<u8>> = match &stdin {
-        ChildIn::Inherit | ChildIn::Null | ChildIn::DirectFile(_) => None,
+        ChildIn::Inherit | ChildIn::Null | ChildIn::File(_) => None,
         ChildIn::Heredoc(b) => Some(b.as_bytes().to_vec()),
-        ChildIn::File(f) => Some(read_all(f)),
     };
     let out_file = match &stdout {
         ChildOut::Inherit | ChildOut::ParentStdout | ChildOut::ParentStderr => None,
@@ -185,10 +187,10 @@ pub fn spawn(
     };
 
     cmd.stdin(match &stdin {
-        ChildIn::DirectFile(file) => Stdio::from(file.try_clone()?),
-        _ if feed.is_some() => Stdio::piped(),
+        ChildIn::File(file) => Stdio::from(file.try_clone()?),
+        ChildIn::Heredoc(_) => Stdio::piped(),
         ChildIn::Null => Stdio::null(),
-        _ => Stdio::inherit(),
+        ChildIn::Inherit => Stdio::inherit(),
     });
     cmd.stdout(match &stdout {
         ChildOut::DirectFile(file) => Stdio::from(file.try_clone()?),
@@ -318,15 +320,6 @@ impl PumpedChild {
         }
         self.child = None;
     }
-}
-
-/// Read an entire file into memory (single-threaded FS access).
-fn read_all(f: &Arc<File>) -> Vec<u8> {
-    let mut buf = Vec::new();
-    if let Ok(mut c) = f.try_clone() {
-        let _ = c.read_to_end(&mut buf);
-    }
-    buf
 }
 
 /// Read a pipe to end (no FS).

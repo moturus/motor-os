@@ -28,7 +28,9 @@
 //! redirections to fds > 2, are not wired (Motor OS cannot hand a child an
 //! arbitrary fd at all); `&` on anything but a lone external command delivers
 //! isolation but not concurrency (there is no `fork` — see
-//! [`exec_background`]).
+//! [`exec_background`]); on Motor OS a child's reads from an input file it
+//! shares with the shell do not move the shell's position (see
+//! [`ChildIn::File`]).
 
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
@@ -616,7 +618,7 @@ fn spawn_background(
         program,
         &argv[1..],
         &env,
-        child_in(&fds[0], true, sole_use[0]),
+        child_in(&fds[0], true),
         child_out(&fds[1], sole_use[1], 1),
         child_out(&fds[2], sole_use[2], 2),
     ) {
@@ -1351,7 +1353,7 @@ fn spawn_child(
         program,
         args,
         env,
-        child_in(&fds[0], false, sole_use[0]),
+        child_in(&fds[0], false),
         child_out(&fds[1], sole_use[1], 1),
         child_out(&fds[2], sole_use[2], 2),
     ) {
@@ -1401,11 +1403,10 @@ fn report_spawn_error(program: &str, e: std::io::Error, err_fd: &FdSource) -> i3
 
 /// The child stdin for an fd source. Background jobs read from nothing rather
 /// than competing with the shell for the terminal (POSIX §2.9.3).
-fn child_in(fd: &FdSource, background: bool, sole_use: bool) -> ChildIn {
+fn child_in(fd: &FdSource, background: bool) -> ChildIn {
     match fd {
         FdSource::Inherit(_) if background => ChildIn::Null,
         FdSource::Inherit(_) => ChildIn::Inherit,
-        FdSource::File(f) if sole_use => ChildIn::DirectFile(f.clone()),
         FdSource::File(f) => ChildIn::File(f.clone()),
         FdSource::Heredoc(b) => ChildIn::Heredoc(b.clone()),
     }
@@ -1559,10 +1560,11 @@ enum StageInput {
 /// Run a multi-stage pipeline. Every stage runs in an emulated subshell whose
 /// stdin is staged through a temp file (so `read` in a `while` loop advances)
 /// and whose stdout is captured for the next stage — or the real fd 1 when it is
-/// last. External stages spawn the program (with file-backed stdio pumped
-/// through pipes, per Motor OS's constraints); builtins/compounds/functions run
-/// in-process. The pipeline's status is the last stage's — or, under
-/// `set -o pipefail`, the last *failing* stage's.
+/// last. External stages spawn the program, which reads the staged input file
+/// itself; its file-backed output is pumped through pipes, per Motor OS's
+/// constraints. Builtins/compounds/functions run in-process. The pipeline's
+/// status is the last stage's — or, under `set -o pipefail`, the last *failing*
+/// stage's.
 fn run_pipeline(cmds: &[AstCommand], shell: &mut Shell, io: &IoEnv) -> i32 {
     let n = cmds.len();
     let mut prev = StageInput::Ambient;
@@ -1614,8 +1616,8 @@ fn run_pipeline(cmds: &[AstCommand], shell: &mut Shell, io: &IoEnv) -> i32 {
 /// `sio`, in [`exec_simple`]'s order: words, the capability check, redirections,
 /// then assignment values, all in that environment, so `echo x | echo "$(cat)"`
 /// reads the pipe as in dash. The stage is a subshell (the caller restores
-/// state), and an external command's files are pumped rather than moved into
-/// the child.
+/// state), and an external command's output files are pumped rather than moved
+/// into the child.
 fn run_simple_stage(simple: &SimpleCommand, shell: &mut Shell, sio: &IoEnv) -> i32 {
     let mut argv = Vec::new();
     for word in &simple.words {
