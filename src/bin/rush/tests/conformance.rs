@@ -230,6 +230,19 @@ EOT"#,
     r#"(echo sub)"#,
     r#"x=outer; (x=inner); echo $x"#,
     r#"x=outer; { x=inner; }; echo $x"#,
+    // An asynchronous list reads from nothing, not from the input around it,
+    // unless it redirects its own standard input.
+    r#"printf 'a\nb\nc\n' > "$T/f"; while read x; do cat & wait; echo "got $x"; done < "$T/f""#,
+    r#"printf 'a\nb\n' | { cat & wait; read x; echo "[$x]"; }"#,
+    r#"echo in > "$T/f"; { read x & wait; cat; } < "$T/f""#,
+    r#"echo in > "$T/f"; { { cat; } & wait; cat | cat & wait; echo done; } < "$T/f""#,
+    r#"echo in > "$T/f"; { cat <&0 & wait; read x; echo "[$x]"; } < "$T/f""#,
+    r#"echo in > "$T/f"; cat < "$T/f" & wait"#,
+    r#"cat <<EOT & wait
+doc
+EOT"#,
+    // Output it sends to that empty input goes nowhere.
+    r#"printf seed | { uname >&0 2>/dev/null & wait; }"#,
 
     // ---- §2.9.4 compound commands ----
     r#"if true; then echo yes; fi"#,

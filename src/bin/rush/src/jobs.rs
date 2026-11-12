@@ -113,12 +113,14 @@ pub enum ChildIn {
     Heredoc(Vec<u8>),
 }
 
-/// A child's standard output/error: inherited, or pumped into a file (a captured
-/// pipeline stage's output is a temp file, so it is `File` too).
+/// A child's standard output/error: inherited, discarded, or pumped into a file
+/// (a captured pipeline stage's output is a temp file, so it is `File` too).
 pub enum ChildOut {
     Inherit,
     ParentStdout,
     ParentStderr,
+    /// Nowhere: what the child writes is discarded.
+    Null,
     DirectFile(Arc<File>),
     File(Arc<File>),
 }
@@ -180,12 +182,12 @@ pub fn spawn(
     };
     let out_file = match &stdout {
         ChildOut::Inherit | ChildOut::ParentStdout | ChildOut::ParentStderr => None,
-        ChildOut::DirectFile(_) => None,
+        ChildOut::Null | ChildOut::DirectFile(_) => None,
         ChildOut::File(f) => Some(f.clone()),
     };
     let err_file = match &stderr {
         ChildOut::Inherit | ChildOut::ParentStdout | ChildOut::ParentStderr => None,
-        ChildOut::DirectFile(_) => None,
+        ChildOut::Null | ChildOut::DirectFile(_) => None,
         ChildOut::File(f) => Some(f.clone()),
     };
 
@@ -196,6 +198,7 @@ pub fn spawn(
         ChildOut::Inherit => Stdio::inherit(),
         ChildOut::ParentStdout => Stdio::from(std::io::stdout()),
         ChildOut::ParentStderr => Stdio::from(std::io::stderr()),
+        ChildOut::Null => Stdio::null(),
     });
     cmd.stderr(match &stderr {
         ChildOut::DirectFile(file) => Stdio::from(file.try_clone()?),
@@ -203,6 +206,7 @@ pub fn spawn(
         ChildOut::Inherit => Stdio::inherit(),
         ChildOut::ParentStdout => Stdio::from(std::io::stdout()),
         ChildOut::ParentStderr => Stdio::from(std::io::stderr()),
+        ChildOut::Null => Stdio::null(),
     });
 
     let mut child = cmd.spawn()?;

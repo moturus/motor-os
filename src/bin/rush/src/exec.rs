@@ -110,6 +110,8 @@ enum FdSource {
     File(Arc<File>),
     /// stdin from a here-document body; a child is fed it through a pipe.
     Heredoc(Arc<Heredoc>),
+    /// stdin with nothing to read: what an asynchronous list starts with.
+    Null,
 }
 
 /// A here-document body and how much of it has been read.
@@ -154,7 +156,7 @@ impl FdSource {
                 .try_clone()
                 .map(|x| Box::new(x) as Box<dyn Write>)
                 .unwrap_or_else(|_| Box::new(std::io::stdout())),
-            FdSource::Heredoc(_) => Box::new(std::io::sink()),
+            FdSource::Heredoc(_) | FdSource::Null => Box::new(std::io::sink()),
         }
     }
 
@@ -167,7 +169,7 @@ impl FdSource {
                 .try_clone()
                 .map(|x| Box::new(x) as Box<dyn Write>)
                 .unwrap_or_else(|_| Box::new(std::io::stderr())),
-            FdSource::Heredoc(_) => Box::new(std::io::sink()),
+            FdSource::Heredoc(_) | FdSource::Null => Box::new(std::io::sink()),
         }
     }
 
@@ -183,6 +185,7 @@ impl FdSource {
                 .map(|x| Box::new(x) as Box<dyn Read>)
                 .unwrap_or_else(|_| Box::new(std::io::empty())),
             FdSource::Heredoc(doc) => Box::new(HeredocReader(doc.clone())),
+            FdSource::Null => Box::new(std::io::empty()),
         }
     }
 }
@@ -249,6 +252,12 @@ fn exec_background(and_or: &AndOr, shell: &mut Shell, io: &IoEnv) -> i32 {
     if noexec(shell) {
         return 0;
     }
+    // Without job control an asynchronous list reads from nothing, unless it
+    // redirects its own standard input (POSIX §2.9.3). Otherwise it would take
+    // input from the terminal, or from the loop or pipeline around it.
+    let io = &IoEnv {
+        fds: [FdSource::Null, io.fds[1].clone(), io.fds[2].clone()],
+    };
     let started = shell.jobs.started();
     let status = match lone_simple(and_or) {
         Some(simple) => {
@@ -1442,6 +1451,7 @@ fn child_in(fd: &FdSource, background: bool) -> ChildIn {
         FdSource::Inherit(_) => ChildIn::Inherit,
         FdSource::File(f) => ChildIn::File(f.clone()),
         FdSource::Heredoc(doc) => ChildIn::Heredoc(doc.unread().to_vec()),
+        FdSource::Null => ChildIn::Null,
     }
 }
 
@@ -1455,6 +1465,8 @@ fn child_out(fd: &FdSource, sole_use: bool, destination: u8) -> ChildOut {
         FdSource::File(f) => ChildOut::File(f.clone()),
         // A here-document as *output* is meaningless; behave like inherit.
         FdSource::Heredoc(_) => ChildOut::Inherit,
+        // `>&0` under an asynchronous list: nothing to read, nowhere to write.
+        FdSource::Null => ChildOut::Null,
     }
 }
 

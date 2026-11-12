@@ -168,6 +168,62 @@ fn heredoc_input_survives_a_child_that_reads_nothing() {
     );
 }
 
+// A background command reads from nothing, not from the input around it. The
+// child would print every line it could read.
+const READ_ALL: &str = r#"while IFS= read -r line; do printf "child:%s\n" "$line"; done"#;
+const INPUTS: [(&str, Input); 3] = [
+    ("pipeline", Input::Pipeline),
+    ("redirect", Input::File),
+    ("heredoc", Input::Heredoc),
+];
+
+#[test]
+fn a_background_command_does_not_read_the_shared_input() {
+    let body = format!(
+        r#"for round in 1 2 3 4 5 6; do
+            IFS= read -r item || break
+            "$1" -c '{READ_ALL}' &
+            wait
+            printf 'loop:%s\n' "$item"
+        done"#
+    );
+    for (name, input) in INPUTS {
+        check(&format!("{name}-background"), input, &body, NO_READ_OUTPUT);
+    }
+}
+
+#[test]
+fn a_background_builtin_does_not_read_the_shared_input() {
+    // This `read` runs in place: it must fail and leave `first` unread.
+    let body = r#"{ IFS= read -r a & wait; IFS= read -r b; printf '%s\n' "$b"; }"#;
+    for (name, input) in INPUTS {
+        check(
+            &format!("{name}-background-builtin"),
+            input,
+            body,
+            "first\n",
+        );
+    }
+}
+
+#[test]
+fn a_background_command_reads_its_own_redirection() {
+    let body = format!(r#"{{ "$1" -c '{READ_ALL}' < "$2" & wait; }}"#);
+    let expected = "child:first\nchild:second\nchild:third\nchild:fourth\n";
+    check("background-own-redirect", Input::File, &body, expected);
+}
+
+#[test]
+fn a_background_command_writes_nowhere_through_its_empty_input() {
+    // `>&0` and `2>&0` copy the empty input. The output must be discarded: it
+    // must not reach the shell's own streams, which `check` requires empty.
+    let child = r#"printf "child-output\n"; printf "child-error\n" >&2"#;
+    let body = format!(r#"{{ "$1" -c '{child}' >&0 2>&0 & wait; }}"#);
+    for (name, input) in INPUTS {
+        check(&format!("{name}-background-output"), input, &body, "");
+    }
+}
+
 // What a child reads is taken from the shell only on the Unix host, where the
 // two share one file offset. On Motor OS the child reads through its own copy
 // of the offset and the shell sees those bytes again: a documented limit.

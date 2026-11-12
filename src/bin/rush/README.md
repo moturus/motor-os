@@ -80,7 +80,9 @@ cannot be quietly fixed or quietly introduced.
 - **Background jobs**: `cmd &` runs concurrently, with `$!`, `wait`
   (pid/`%job`/all), `jobs`, and `fg`. `$!` is the child's real pid on both
   platforms; a job that is not a process (a backgrounded builtin or compound
-  command) gets rush's own identity instead. On Motor OS, which has no signals,
+  command) gets rush's own identity instead. A background command reads from
+  nothing unless it redirects its own standard input, so it cannot take input
+  from the terminal or from a loop around it. On Motor OS, which has no signals,
   `kill` can only terminate — see the plan's Phase 7 for the exact
   degradations;
 - **Shell options**, enforced: `set -e` (errexit, with the POSIX condition-context
