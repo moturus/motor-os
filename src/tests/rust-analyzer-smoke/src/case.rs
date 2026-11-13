@@ -27,7 +27,7 @@ impl SemanticCase {
         let mut command = Command::new(&toolchain.rust_analyzer);
         command
             .current_dir(root)
-            .env("RUSTUP_TOOLCHAIN", &toolchain.name)
+            .env("RUSTUP_TOOLCHAIN", &toolchain.sysroot)
             .env_remove("RA_LOG");
         if let Ok(log) = std::env::var("MOTOR_RA_SMOKE_LOG") {
             command.env("RA_LOG", log);

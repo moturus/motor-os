@@ -5,7 +5,6 @@ use std::process::Command;
 use serde_json::{Value, json};
 
 pub struct Toolchain {
-    pub name: String,
     pub sysroot: PathBuf,
     pub sysroot_src: PathBuf,
     pub rust_analyzer: PathBuf,
@@ -26,14 +25,11 @@ impl Toolchain {
                 .trim(),
         )
         .canonicalize()?;
-        let name = sysroot
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| invalid("selected sysroot has no UTF-8 name"))?
-            .to_owned();
         let rust_analyzer = sysroot.join("bin/rust-analyzer").canonicalize()?;
+        // Use rustc's repository selection: a custom installation directory need
+        // not have the same name as its rustup alias.
         let rustup = Command::new("rustup")
-            .args(["which", "rust-analyzer", "--toolchain", &name])
+            .args(["which", "rust-analyzer"])
             .current_dir(repo)
             .output()?;
         if !rustup.status.success() {
@@ -53,7 +49,6 @@ impl Toolchain {
             return Err(invalid("selected sysroot has no rust-src"));
         }
         Ok(Self {
-            name,
             sysroot,
             sysroot_src,
             rust_analyzer,
@@ -63,7 +58,7 @@ impl Toolchain {
     pub fn target_cfgs(&self, target: &str) -> io::Result<Vec<String>> {
         let output = Command::new(self.sysroot.join("bin/rustc"))
             .args(["--print", "cfg", "--target", target])
-            .env("RUSTUP_TOOLCHAIN", &self.name)
+            .env("RUSTUP_TOOLCHAIN", &self.sysroot)
             .output()?;
         if !output.status.success() {
             return Err(invalid(format!("rustc could not report cfgs for {target}")));
