@@ -20,17 +20,24 @@ WD="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$WD/../.." && pwd)"
 BUILD=debug
 VMM=qemu
-usage() { echo "usage: $0 [--release] [--vmm qemu|chv]" >&2; exit 2; }
+archive=
+usage() { echo "usage: $0 [--release] [--vmm qemu|chv] [--archive PATH]" >&2; exit 2; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --release) BUILD=release; shift ;;
     --vmm) [ "$#" -ge 2 ] || usage; VMM="$2"; shift 2 ;;
     --vmm=*) VMM="${1#--vmm=}"; shift ;;
+    --archive) [ "$#" -ge 2 ] && [ -n "$2" ] && [ -z "$archive" ] || usage
+      archive="$2"; shift 2 ;;
     *) usage ;;
   esac
 done
 case "$VMM" in qemu|chv) ;; *) usage ;; esac
 fail() { echo "test-native-toolchain-install: $*" >&2; exit 1; }
+if [ -n "$archive" ]; then
+  [ -f "$archive" ] || fail "archive is missing: $archive"
+  archive="$(realpath -- "$archive")"
+fi
 . "$WD/vm-console-filter.sh"
 . "$WD/vm-test-boot.sh"
 . "$WD/vm-test-boot-check.sh"
@@ -41,7 +48,10 @@ image="$TEST_VM_IMG_DIR/$TEST_VM_IMAGE"
 
 host_sysroot="$(cd "$ROOT_DIR" && rustc --print sysroot)"
 toolchain="$(sed -n 's/^channel = "\(.*\)"/\1/p' "$ROOT_DIR/rust-toolchain.toml")"
-archive="$(bash "$ROOT_DIR/src/build-scripts/toolchain-archive.sh" "$BUILD")"
+# Ordinary suite runs repackage; release validation names the exact artifact.
+if [ -z "$archive" ]; then
+  archive="$(bash "$ROOT_DIR/src/build-scripts/toolchain-archive.sh" "$BUILD")"
+fi
 echo "test-native-toolchain-install: archive=$archive"
 sha256sum "$archive"
 
