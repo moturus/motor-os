@@ -660,13 +660,14 @@ end_guest_process "$nested_child_pid" "nested ssh non-pty Ctrl+C"
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   echo "-- Helix editor --"
 
-  helix_bin=/user/lib/helix/hx
-  # Exercise the shipped configuration before the isolated editor-only cases.
+  # The launcher supplies Motor's configuration, including the language
+  # server's terminal-input isolation. Isolate fixture data below.
+  helix_bin=/user/bin/dev/hx
   out="$(vm_ssh 'NO_COLOR=1 hx --health rust')"
   printf '%s\n' "$out" | grep -Fxq '  ✓ rust-analyzer: /user/lib/rust/bin/rust-analyzer' ||
     fail "default Rust health did not find the native server: '$out'"
 
-  GUEST_HELIX_ROOT="$TEST_TMP/helix-$$"
+  GUEST_HELIX_ROOT="$NONE_TEST_TMP/helix-$$"
   helix_cache="$GUEST_HELIX_ROOT/cache"
   helix_tmp="$GUEST_HELIX_ROOT/tmp"
   helix_env="XDG_CACHE_HOME=$helix_cache TMPDIR=$helix_tmp"

@@ -79,6 +79,12 @@ helix_sftp_batch() {
     -i "$WD/test.key" -b - motor@192.168.4.2
 }
 
+# Uploaded directories start read-only to None. Lorry's build child
+# needs writable workspace directories; source files remain readable as shipped.
+helix_share_workspace() {
+  vm_ssh "/user/bin/find '$1' -type d | while read -r path; do /user/bin/chmod rwxrwxrwx \"\$path\"; done"
+}
+
 helix_assert_file() {
   local guest="$1" expected="$2" evidence_name="$3"
   vm_ssh "/user/bin/sysbox cat '$guest'" > "$HELIX_LSP_EVIDENCE/$evidence_name.rs"
@@ -100,6 +106,7 @@ helix_lsp_log="$GUEST_HELIX_ROOT/workspace.log"
 printf 'put -r "%s" "%s"\nmkdir "%s/.git"\n' \
   "$ROOT_DIR/src/tests/helix-workspace-fixture" "$helix_workspace" "$helix_workspace" |
   helix_sftp_batch
+helix_share_workspace "$helix_workspace"
 start_pty "cd '$helix_workspace/member' && hx -v --log $helix_lsp_log"
 wait_pty_output "[scratch]" "empty workspace Helix startup"
 PTY_OUTPUT=""
@@ -177,7 +184,11 @@ vm_ssh "/user/bin/rm '$shipped_format'"
 
 helix_lsp_log="$GUEST_HELIX_ROOT/lsp.log"
 helix_log_start=1
-vm_ssh "/user/bin/sysbox cp -r /none/dev/helix-rust-demo '$helix_project'"
+# Start from sources; the preceding case has populated the shipped project's
+# build state, which an Interactive copy would make read-only to None.
+printf 'put -r "%s" "%s"\n' \
+  "$ROOT_DIR/img_files/motor-os-dev/none/dev/helix-rust-demo" "$helix_project" |
+  helix_sftp_batch
 helix_format_file="$helix_project/src/format.rs"
 helix_width_dir="$helix_project/src/width-case"
 helix_width_file="$helix_width_dir/input.rs"
@@ -189,6 +200,7 @@ helix_error_file="$helix_project/src/error.rs"
   printf 'put "%s" "%s"\n' "$rustfmt_fixtures/width.toml" "$helix_width_dir/rustfmt.toml"
   printf 'put "%s" "%s"\n' "$rustfmt_fixtures/stdin.in.rs" "$helix_error_file"
 } | helix_sftp_batch
+helix_share_workspace "$helix_project"
 start_pty "cd '$helix_project' && XDG_CACHE_HOME=$helix_cache hx -v --log $helix_lsp_log '$helix_project/src/main.rs:6:33'"
 wait_pty_output "main.rs" "Helix Rust project startup"
 helix_save_screen startup
