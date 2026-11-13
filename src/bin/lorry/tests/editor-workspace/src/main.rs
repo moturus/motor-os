@@ -46,7 +46,6 @@ fn toolchain(repo: &Path) -> io::Result<Toolchain> {
 fn toolchain(_repo: &Path) -> io::Result<Toolchain> {
     let sysroot = PathBuf::from("/user/lib/rust").canonicalize()?;
     Ok(Toolchain {
-        name: sysroot.to_string_lossy().into_owned(),
         sysroot_src: sysroot.join("lib/rustlib/src/rust/library"),
         rust_analyzer: sysroot.join("bin/rust-analyzer").canonicalize()?,
         sysroot,
