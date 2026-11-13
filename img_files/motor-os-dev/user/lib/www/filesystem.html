@@ -474,7 +474,6 @@ only.</p>
 <div class="table-wrap">
 <table>
   <tr><th>Directory</th><th>Purpose</th></tr>
-  <tr><td><code>/system/bin</code></td><td>Temporary rush and sh compatibility copies for the 1.99.1-2 compiler archive. Not on PATH.</td></tr>
   <tr><td><code>/system/services</code></td><td>sys-init, sys-tty, strobe, russhd, dns-resolver.</td></tr>
   <tr><td><code>/system/cfg</code></td><td>Configuration: <code>sys-init.cfg</code>, <code>sys-net.toml</code>, <code>libc/</code> (hosts and other libc settings), <code>ssl/</code>.</td></tr>
   <tr><td><code>/system/logs</code></td><td>Service logs written by strobe. Interactive may read them; None cannot enter the directory.</td></tr>
@@ -484,7 +483,7 @@ only.</p>
   <tr><td><code>/user/cfg</code></td><td>Interactive configuration, including <code>rush.cfg</code> and <code>sshd.toml</code>. None may traverse this directory and read explicitly shared configuration; private credentials remain closed.</td></tr>
   <tr><td><code>/user/tmp</code></td><td>Interactive scratch, closed to None.</td></tr>
   <tr><td><code>/none</code></td><td>The None role's home: <code>cfg</code> for configuration, <code>tmp</code> for scratch, and <code>dev</code> for sources and Lorry's None state. All three are writable by None.</td></tr>
-  <tr><td><code>/devtools</code></td><td>Developer image only: the 1.99.1-2 compiler launchers in <code>bin</code>, compiler trees in <code>llvm</code> and <code>rust</code>, and remaining fixtures in <code>tests</code>.</td></tr>
+  <tr><td><code>/devtools/tests</code></td><td>Developer-image test programs and fixtures. The compilers live under <code>/user/lib/llvm</code> and <code>/user/lib/rust</code>, with launchers in <code>/user/bin/dev</code>.</td></tr>
 </table>
 </div>
 
@@ -523,7 +522,6 @@ for secrets and shared runtime-directory traversal. Smaller images omit trees; t
 <table>
   <tr><th>Tree</th><th>Directories</th><th>Files</th><th>Scripts</th><th>ELF</th></tr>
   <tr><td>default</td><td><code>rwxr-xr-x</code></td><td><code>rw-r--r--</code></td><td><code>rwxr-xr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
-  <tr><td><code>/system/bin</code></td><td><code>rwxr-xr-x</code></td><td><code>rw-r--r--</code></td><td><code>r-xr-xr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
   <tr><td><code>/system/logs</code></td><td><code>rwxr-x---</code></td><td><code>rw-r-----</code></td><td><code>r-xr-----</code></td><td><code>r-xr-----</code></td></tr>
   <tr><td><code>/system/tmp</code></td><td><code>rwx------</code></td><td><code>rw-------</code></td><td><code>rwx------</code></td><td><code>r-x------</code></td></tr>
   <tr><td><code>/user/tmp</code></td><td><code>rwxrwx---</code></td><td><code>rw-rw----</code></td><td><code>rwxrwx---</code></td><td><code>r-xr-x---</code></td></tr>
@@ -539,7 +537,7 @@ sys-io creates its subdirectory with that same mode and publishes
 <code>sys-io/dhcp.toml</code> as <code>rw-r-----</code>.</p>
 <p><code>/user/cfg</code> itself is <code>rwxrwxr-x</code>. None may read
 <code>rush.cfg</code>, <code>rush.toml</code>, <code>rmux.toml</code>,
-<code>lorry.toml</code>, and the Helix configuration, whose data mode is
+<code>lorry.toml</code>, <code>cargo/config.toml</code>, and the Helix configuration, whose data mode is
 <code>rwxrw-r--</code>. Private siblings retain their closed modes.</p>
 <p><code>/user/cfg/sshd.toml</code> is <code>rwxrw----</code>, allowing Interactive
 to edit its PATH and host key. The TLS key <code>/system/cfg/ssl/ssl-key.pem</code>

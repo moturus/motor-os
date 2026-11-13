@@ -6,7 +6,7 @@ external sources and all release images with the Motor OS toolchain that
 `src/build-scripts/`. The toolchain itself is built and released by
 [motor-os-toolchain](https://github.com/moturus/motor-os-toolchain);
 [toolchain.md](toolchain.md) describes how this repository installs and uses
-it. The current toolchain is `x86_64-unknown-motor-1.99.1-2`: upstream Rust
+it. The current toolchain is `x86_64-unknown-motor-1.99.1-3`: upstream Rust
 1.99.1 with the Motor OS patches. Its compilers use Rust's `dev` channel, so
 rustc and Cargo report `1.99.1-dev`.
 
@@ -28,14 +28,14 @@ toolchain archives downloaded into the development root:
 mkdir motor-dev
 cd motor-dev
 git clone https://github.com/moturus/motor-os.git
-tar -xaf motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux.tar.zst
-motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux/install.sh
-rm -rf motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux
+tar -xaf motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux.tar.zst
+motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux/install.sh
+rm -rf motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux
 cd motor-os
 src/build-motor-os.sh
 ```
 
-The native archive, `motor-toolchain-x86_64-unknown-motor-1.99.1-2.tar.zst`,
+The native archive, `motor-toolchain-x86_64-unknown-motor-1.99.1-3.tar.zst`,
 stays in the development root, `MOTORH`, which defaults to the parent of the
 Motor OS checkout. Set it before running the script only when the archives
 live elsewhere:
@@ -134,6 +134,19 @@ The workflow performs these stages:
 6. Build the base, standard, development, and wasm images with
    `make images BUILD=release`.
 
+The toolchain release builder uses a smaller entry point:
+
+```sh
+src/build-motor-os.sh --toolchain-overlays /path/to/new/host/toolchain /path/to/images
+```
+
+It selects that compiler directory through rustup, builds the development
+programs and their supporting files, and copies the resulting overlays into
+the output directory. It skips host provisioning, native-archive extraction,
+image construction, and VMs. Normally `build-toolchain.sh` calls this on its
+own Motor OS clone; `build-toolchain.sh --motor-os PATH` calls it on the
+supplied checkout instead.
+
 The assembly holds what the images take from outside the tree:
 
 ```text
@@ -162,8 +175,8 @@ toolchain, rust-analyzer with matching `rust-src`, headers, and libraries.
 Generated `/devtools` content is never allowed to leak into the base or
 standard image.
 
-The native rust-analyzer lives at `/devtools/rust/bin/rust-analyzer` and its
-sources at `/devtools/rust/lib/rustlib/src/rust/library`. The image contains
+The native rust-analyzer lives at `/user/lib/rust/bin/rust-analyzer` and its
+sources at `/user/lib/rust/lib/rustlib/src/rust/library`. The image contains
 no Cargo shim and does not launch the server at boot. See the
 [native server guide](build-rustc.md#native-motor-os-rust-analyzer) for the
 explicit Lorry environment, trusted-project configuration, and current

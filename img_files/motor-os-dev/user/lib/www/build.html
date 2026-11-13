@@ -410,7 +410,7 @@ builds the system, its external sources, and the VM images from a clean checkout
   <li><code>sudo</code>, for installing packages and for the host side of VM networking,
   and network access, for the external sources and their dependencies.</li>
   <li>The Motor OS toolchain that <code>rust-toolchain.toml</code> names,
-  <code>x86_64-unknown-motor-1.99.1</code>: its two archives, from the release of
+  <code>x86_64-unknown-motor-1.99.1-3</code>: its two archives, from the release of
   <a href="https://github.com/moturus/motor-os-toolchain">motor-os-toolchain</a> or a build
   of that repository.</li>
 </ul>
@@ -422,9 +422,9 @@ toolchain. Cloud Hypervisor and Firecracker are not installed; QEMU is enough to
 and test.</p>
 
 <h2>Build the toolchain first</h2>
-<p>The toolchain is built separately and does not need a Motor OS checkout. On
-Ubuntu 24.04 or 26.04, create the development root and clone the toolchain
-repository inside it:</p>
+<p>The toolchain builder clones Motor OS alongside the Rust and LLVM forks to
+build the development tools included in the native archive. On Ubuntu 24.04 or
+26.04, create the development root and clone the toolchain repository inside it:</p>
 <pre><code>sudo apt-get update
 sudo apt-get install git zstd
 mkdir motor-dev
@@ -436,12 +436,14 @@ cd ..</code></pre>
 <p><code>--provision</code> installs missing build packages with <code>sudo</code>
 and installs rustup. The build fetches the sources selected by the toolchain
 repository's <code>versions.sh</code> and builds both the Linux-host cross
-toolchain and the native Motor OS toolchain. It writes these files into its
+toolchain and the native Motor OS toolchain. Pass <code>--motor-os PATH</code>
+to use a local Motor OS checkout, including its uncommitted changes, instead of
+cloning it. It writes these files into its
 parent directory, <code>motor-dev</code>, where the commands above leave you:</p>
-<pre><code>motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux.tar.zst
-motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux.tar.zst.sha256
-motor-toolchain-x86_64-unknown-motor-1.99.1.tar.zst
-motor-toolchain-x86_64-unknown-motor-1.99.1.tar.zst.sha256</code></pre>
+<pre><code>motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux.tar.zst
+motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux.tar.zst.sha256
+motor-toolchain-x86_64-unknown-motor-1.99.1-3.tar.zst
+motor-toolchain-x86_64-unknown-motor-1.99.1-3.tar.zst.sha256</code></pre>
 <p>Each toolchain build starts from scratch, replaces archives of the same name,
 and removes its <code>build/</code> directory after success. Allow about 30 GB of
 disk space during the build; the toolchain README estimates about 50 minutes on
@@ -462,16 +464,16 @@ needs <code>zstd</code> on the host to extract the <code>.tar.zst</code> archive
 shell with <code>. "$HOME/.cargo/env"</code>; otherwise ensure it is on
 <code>PATH</code>. From <code>motor-dev</code>, verify both archives, install the
 host toolchain, and build Motor OS:</p>
-<pre><code>sha256sum -c motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux.tar.zst.sha256
-sha256sum -c motor-toolchain-x86_64-unknown-motor-1.99.1.tar.zst.sha256
+<pre><code>sha256sum -c motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux.tar.zst.sha256
+sha256sum -c motor-toolchain-x86_64-unknown-motor-1.99.1-3.tar.zst.sha256
 git clone https://github.com/moturus/motor-os.git
-tar -xaf motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux.tar.zst
-motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux/install.sh
-rm -rf motor-toolchain-x86_64-unknown-motor-1.99.1-x86_64-linux
+tar -xaf motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux.tar.zst
+motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux/install.sh
+rm -rf motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux
 cd motor-os
 src/build-motor-os.sh</code></pre>
 <p>The archive's <code>install.sh</code> installs the Linux-host toolchain and links it into
-rustup; the native archive, <code>motor-toolchain-x86_64-unknown-motor-1.99.1.tar.zst</code>,
+rustup; the native archive, <code>motor-toolchain-x86_64-unknown-motor-1.99.1-3.tar.zst</code>,
 stays next to the checkout. <code>src/build-motor-os.sh</code> is the single supported entry
 point. In order, it:</p>
 <ol>

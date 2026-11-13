@@ -2,11 +2,11 @@
 
 Motor OS is cross-compiled on Linux. The supported build entry point has been
 tested on Ubuntu 24.04 and 26.04. It needs the Motor OS toolchain that
-`rust-toolchain.toml` names, `x86_64-unknown-motor-1.99.1-2`, as two archives
+`rust-toolchain.toml` names, `x86_64-unknown-motor-1.99.1-3`, as two archives
 from [motor-os-toolchain](https://github.com/moturus/motor-os-toolchain): its
 release, or a build of that repository.
 
-First build the toolchain, which does not need a Motor OS checkout. On
+First build the toolchain, which clones its own Motor OS checkout. On
 Ubuntu 24.04 or 26.04, create the development root and clone the toolchain
 repository inside it:
 
@@ -28,22 +28,24 @@ Motor OS toolchain. It writes these files into its parent directory,
 `motor-dev`, where the commands above leave you:
 
 ```text
-motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux.tar.zst
-motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux.tar.zst.sha256
-motor-toolchain-x86_64-unknown-motor-1.99.1-2.tar.zst
-motor-toolchain-x86_64-unknown-motor-1.99.1-2.tar.zst.sha256
+motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux.tar.zst
+motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux.tar.zst.sha256
+motor-toolchain-x86_64-unknown-motor-1.99.1-3.tar.zst
+motor-toolchain-x86_64-unknown-motor-1.99.1-3.tar.zst.sha256
 ```
 
 Each toolchain build starts from scratch, replaces archives of the same name,
-and removes its `build/` directory after success. Allow about 30 GB of disk
-space during the build; the toolchain README estimates about 50 minutes on
-24 cores. See its [build instructions](https://github.com/moturus/motor-os-toolchain#building)
+and removes its `build/` directory after success. `--motor-os PATH` uses an
+existing Motor OS checkout for the development programs instead of cloning it.
+See its [build instructions](https://github.com/moturus/motor-os-toolchain#building)
 for details. The resulting toolchain name must match `rust-toolchain.toml`
 in the Motor OS checkout.
 
 Alternatively, download both archives and their checksum files from a matching
 toolchain release into `motor-dev`, then enter that directory. GNU tar needs
 `zstd` on the host to extract the `.tar.zst` archive.
+Keep a `motor-os-toolchain` checkout beside Motor OS for archive repackaging
+and its offline tests; `MOTOR_TOOLCHAIN_SOURCE` can name another location.
 
 Install rustup before the host toolchain. If it is not installed yet:
 
@@ -58,18 +60,18 @@ If rustup was installed by `--provision`, load it into your current shell with
 verify both archives, install the host toolchain, and build Motor OS:
 
 ```sh
-sha256sum -c motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux.tar.zst.sha256
-sha256sum -c motor-toolchain-x86_64-unknown-motor-1.99.1-2.tar.zst.sha256
+sha256sum -c motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux.tar.zst.sha256
+sha256sum -c motor-toolchain-x86_64-unknown-motor-1.99.1-3.tar.zst.sha256
 git clone https://github.com/moturus/motor-os.git
-tar -xaf motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux.tar.zst
-motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux/install.sh
-rm -rf motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux
+tar -xaf motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux.tar.zst
+motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux/install.sh
+rm -rf motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux
 cd motor-os
 src/build-motor-os.sh
 ```
 
 `install.sh` installs the Linux-host toolchain and links it into rustup; the
-native archive, `motor-toolchain-x86_64-unknown-motor-1.99.1-2.tar.zst`, stays
+native archive, `motor-toolchain-x86_64-unknown-motor-1.99.1-3.tar.zst`, stays
 in the development root ([toolchain.md](toolchain.md)). The script installs
 missing host packages and rustup, configures the VM host, builds the external
 sources, and creates the base, standard, developer, and wasm release images.

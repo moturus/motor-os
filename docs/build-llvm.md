@@ -7,7 +7,7 @@ the toolchain provides for C and C++ on Linux and on Motor OS.
 
 ## Sources
 
-The current toolchain, `x86_64-unknown-motor-1.99.1-2`, is Rust 1.99.1 on LLVM
+The current toolchain, `x86_64-unknown-motor-1.99.1-3`, is Rust 1.99.1 on LLVM
 23.1.1:
 
 - Motor OS LLVM (branch `motor-os-1.99.1`), at the commit that the Motor OS Rust
@@ -50,7 +50,7 @@ On Linux, the host toolchain carries Clang, LLD, and the LLVM tools in
 
 ```text
 sysroot/bin/              motor-clang, motor-clang++, motor-rust-cc
-sysroot/devtools/llvm/    headers and libraries
+sysroot/user/lib/llvm/    headers and libraries
 ```
 
 `motor-clang` and `motor-clang++` compile and link C and C++ for Motor OS;
@@ -62,12 +62,12 @@ Lorry.
 The development image contains:
 
 ```text
-/devtools/llvm/bin/llvm       native LLVM/Clang/LLD multicall binary
-/devtools/llvm/include/       C and C++ headers
-/devtools/llvm/lib/           mlibc, compiler-rt, and C++ libraries
-/devtools/llvm/cfg/           clang target configuration
-/devtools/bin/cc              C compiler/linker launcher
-/devtools/bin/c++             C++ launcher
+/user/lib/llvm/bin/llvm       native LLVM/Clang/LLD multicall binary
+/user/lib/llvm/include/       C and C++ headers
+/user/lib/llvm/lib/           mlibc, compiler-rt, and C++ libraries
+/user/lib/llvm/cfg/           clang target configuration
+/user/bin/dev/cc              C compiler/linker launcher
+/user/bin/dev/c++             C++ launcher
 /system/cfg/libc/             mlibc runtime configuration
 ```
 
@@ -80,7 +80,7 @@ cc /none/dev/hello-world/hello.c -o /user/tmp/hello
 c++ /none/dev/hello-world/hello.cpp -o /user/tmp/hello-cxx
 /user/tmp/hello-cxx
 
-/devtools/llvm/bin/llvm clang --version
+/user/lib/llvm/bin/llvm clang --version
 ```
 
 Clang's Motor OS toolchain owns the C/C++ startup and runtime link recipe. Plain C

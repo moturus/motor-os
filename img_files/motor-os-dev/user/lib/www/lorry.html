@@ -514,7 +514,7 @@ As None it removes only the None cache. These cache locations are fixed.</p>
 <div class="table-wrap">
 <table>
   <tr><th>Option</th><th>Meaning</th></tr>
-  <tr><td><code>+toolchain</code></td><td>On Linux, a rustup toolchain selector, as with Cargo. On Motor OS the compiler is <code>/devtools/bin/rustc</code>.</td></tr>
+  <tr><td><code>+toolchain</code></td><td>On Linux, a rustup toolchain selector, as with Cargo. On Motor OS the compiler is <code>/user/bin/dev/rustc</code>.</td></tr>
   <tr><td><code>-p NAME</code>, <code>--workspace</code>, <code>--exclude NAME</code></td><td>Select workspace members, as in Cargo. A member's directory selects that member.</td></tr>
   <tr><td><code>--lib</code>, <code>--bin NAME</code>, <code>--test NAME</code>, <code>--example NAME</code>, <code>--all-targets</code>, ...</td><td>Choose targets, as in Cargo. <code>run</code> otherwise takes <code>package.default-run</code> or the sole binary.</td></tr>
   <tr><td><code>--features</code>, <code>--all-features</code>, <code>--no-default-features</code></td><td>Select features, as in Cargo.</td></tr>
@@ -637,9 +637,9 @@ required even when the default action is <code>allow</code>. A workspace member'
 script needs a rule with <code>source = "path"</code> that names the member. A build script
 that needs a C compiler or an archiver finds it through <code>PATH</code> or the caller's
 compiler variables, such as <code>CC</code>, <code>CFLAGS</code>, and <code>AR</code>.
-The current image supplies <code>cc</code> and <code>c++</code> in
-<code>/devtools/bin</code>, and <code>ar</code> in <code>/user/bin/dev</code>.
-Both directories are on <code>PATH</code>. Shared C/C++ target flags and the C++ standard
+The image supplies <code>cc</code>, <code>c++</code>, and <code>ar</code> in
+<code>/user/bin/dev</code>, which is on <code>PATH</code>.
+Shared C/C++ target flags and the C++ standard
 library are ordinary <code>[env]</code> defaults in
 <code>/user/cfg/cargo/config.toml</code>. Both roles use that Cargo home unless
 <code>CARGO_HOME</code> selects another; caller values and workspace configuration

@@ -96,7 +96,7 @@ full-test suites:
   `<filesystem>`, aligned new — with real exceptions via libunwind and
   libc++abi.
 - **A native toolchain**: the on-image clang/clang++/lld multicall behind the
-  `/devtools/bin/cc` and `c++` launchers compiles and links C and C++ on
+  `/user/bin/dev/cc` and `c++` launchers compiles and links C and C++ on
   Motor OS itself. Lua 5.4.8 builds from unmodified sources as the standing
   end-to-end proof.
 
@@ -120,10 +120,10 @@ trees and uses the ownership-based `/devtools` and `/system` trees:
 
 | What | Where |
 | --- | --- |
-| clang/LLVM headers + libraries | `/devtools/llvm/{include,lib}` |
-| clang resource directory | `/devtools/llvm/lib/clang/<N>` |
-| clang `<triple>.cfg` | `/devtools/llvm/cfg` |
-| C/C++ launchers | `/devtools/bin/{cc,c++}` |
+| clang/LLVM headers + libraries | `/user/lib/llvm/{include,lib}` |
+| clang resource directory | `/user/lib/llvm/lib/clang/<N>` |
+| clang `<triple>.cfg` | `/user/lib/llvm/cfg` |
+| C/C++ launchers | `/user/bin/dev/{cc,c++}` |
 | mlibc runtime configuration | `/system/cfg/libc` |
 
 The standard image carries only the mlibc configuration overlay; the LLVM
@@ -133,10 +133,10 @@ Three of these locations are compiled in, which matters when relocating
 anything:
 
 1. the clang driver's Motor OS toolchain paths (`Motor.cpp`, a single
-   `/devtools/llvm` prefix) — baked into both the host cross clang and the
+   `/user/lib/llvm` prefix) — baked into both the host cross clang and the
    native multicall;
 2. the native driver's config-file directory
-   (`-DCLANG_CONFIG_FILE_SYSTEM_DIR=/devtools/llvm/cfg`, a cmake cache
+   (`-DCLANG_CONFIG_FILE_SYSTEM_DIR=/user/lib/llvm/cfg`, a cmake cache
    entry); and
 3. mlibc's `MLIBC_SYSCONFDIR`, injected as `"/system/cfg/libc"` through the
    Motor OS meson cross-file. Every functional config reader in mlibc —

@@ -108,13 +108,12 @@ Interactive-owned locations.
 The initial image policy follows these principles:
 
 - System owns boot services and immutable OS configuration. Image-built
-  executable ELFs are read/execute-only. `/system/bin` temporarily holds
-  read/execute-only copies of rush and sh for the 1.99.1-2 toolchain.
+  executable ELFs are read/execute-only. User commands live in `/user/bin`;
+  images no longer contain `/system/bin` compatibility shells.
 - Interactive may read and run installed programs, but cannot replace content
   in `/system`.
-- `/user` and `/devtools` are Interactive-owned. Interactive may install
-  programs, edit configuration, and create work there; in `/devtools` it may
-  replace the installed toolchain with a newer one.
+- `/user` is Interactive-owned. Interactive may install programs, edit
+  configuration, and replace the toolchain under `/user/lib`.
 - Scripts are writable by Interactive in its trees. Compiled programs there
   remain non-writable, but Interactive may replace them.
 - None may read and execute public installed content, and write its own
@@ -139,7 +138,6 @@ ELF whose type is `ET_EXEC` or `ET_DYN`.
 | Destination tree | Directories | Regular files | Scripts | ELF binaries | Purpose |
 |---|---|---|---|---|---|
 | `/` and otherwise unmatched paths | `rwxr-xr-x` | `rw-r--r--` | `rwxr-xr-x` | `r-xr-xr-x` | System-owned installed content with public read/execute access |
-| `/system/bin` | `rwxr-xr-x` | `rw-r--r--` | `r-xr-xr-x` | `r-xr-xr-x` | Temporary rush and sh compatibility copies |
 | `/system/logs` | `rwxr-x---` | `rw-r-----` | `r-xr-----` | `r-xr-----` | System strobe writes and rotates logs; Interactive may read them and None has no access |
 | `/system/tmp` | `rwx------` | `rw-------` | `rwx------` | `r-x------` | System scratch |
 | `/user` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Interactive-owned programs and work, readable by None by default |
@@ -150,7 +148,7 @@ ELF whose type is `ET_EXEC` or `ET_DYN`.
 | `/none` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | The None role's home; None cannot add entries here |
 | `/none/cfg` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | None-role configuration, which None may write |
 | `/none/tmp` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | None-role scratch |
-| `/devtools` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Transitional compiler trees, compiler launchers, and test fixtures |
+| `/devtools` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Transitional developer-image test fixtures |
 | `/user/dev/lorry` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Interactive Lorry repository and cache, readable by None |
 | `/none/dev` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | Source trees and the None-role Lorry repository and cache |
 
@@ -162,10 +160,11 @@ Interactive traversal without making its scratch files readable. sys-io creates
 Before any other runtime permission changes, the directory modes have these effects:
 
 - Interactive cannot create a new root-level tree or replace `/system`.
-- Interactive can create and replace entries throughout `/user` and
-  `/devtools`, except where a longer tree rule restricts access. A native
-  toolchain archive's `install.sh` relies on this to replace `/devtools/llvm`
-  and `/devtools/rust` ([toolchain.md](toolchain.md)).
+- Interactive can create and replace entries throughout `/user` and the
+  transitional developer-image test tree, except where a longer tree rule
+  restricts access. A native
+  toolchain archive's `install.sh` relies on this to replace `/user/lib/llvm`
+  and `/user/lib/rust` ([toolchain.md](toolchain.md)).
 - Each role can create and replace entries in its own temporary directory
   and in those of lower roles. None can use only `/none/tmp`. Interactive can
   traverse `/system/tmp` and read the DHCP snapshot, but cannot modify either.
@@ -185,10 +184,10 @@ Several installed trees deliberately use the default rule:
   is System-writable and publicly readable. None-role services have not yet
   been audited for configuration reads.
 - Development commands live in `/user/bin/dev`, and their supporting data in
-  `/user/lib`. The 1.99.1-2 compiler trees and tests temporarily stay under
-  `/devtools`; Clang reads `/devtools/llvm/cfg`. `/user/dev/lorry` and `/none/dev/lorry`
-  hold the Interactive and None repositories and caches of the installed
-  Lorry tool; Lorry refuses to run as System. Other guest build and test
+  `/user/lib`; Clang reads `/user/lib/llvm/cfg`. Only the developer image's
+  test programs temporarily stay under `/devtools/tests`. `/user/dev/lorry` and
+  `/none/dev/lorry` hold the Interactive and None repositories and caches of
+  the installed Lorry tool; Lorry refuses to run as System. Other guest build and test
   writes belong under `/none/dev` or the role's temporary directory.
 - Development source trees staged in `/none/dev` are consumed in place;
   project build output belongs under `/none/dev` and scratch output in
@@ -320,20 +319,18 @@ Imager tests cover policy parsing and validation, rule precedence, source
 classification, content overlays, the root mode, and file finalization by
 building and reopening a small Motor OS filesystem image.
 
-Guest acceptance tests check command modes in `/system/bin`, `/user/bin`,
-`/user/bin/dev`, and the transitional `/devtools/bin`:
+Guest acceptance tests check command modes in `/user/bin` and `/user/bin/dev`:
 
-- every `/system/bin/*` compatibility entry is exactly `r-xr-xr-x`;
-- every command in `/user/bin`, `/user/bin/dev`, and `/devtools/bin` is either an ELF at
+- every command in `/user/bin` and `/user/bin/dev` is either an ELF at
   `r-xr-xr-x` or a script at `rwxrwxr-x`; and
 - any regular data file or unexpected mode in those directories fails the
   suite.
 
 With the initial image permissions, the development-image suite proves that
 Interactive can edit `/user/bin/dev/www` in place and rename it, and installs
-a native toolchain into `/devtools`. Functional checks prove that Interactive
-cannot create a root-level directory and can write the appropriate scratch and
-source trees. Tests do not walk and assert the modes of
+a native toolchain into `/user/bin/dev` and `/user/lib`. Functional checks prove
+that Interactive cannot create a root-level directory and can write the
+appropriate scratch and source trees. Tests do not walk and assert the modes of
 every other image file. `test-image-layout.sh` also checks shared configuration,
 private credentials, and replacement through a temporary name. Runtime-installed
 executables use `rwxrwxr-x`, data uses `rwxrw-r--`, and directories use

@@ -107,6 +107,7 @@ descriptions in [`src/imager`](../src/imager), such as `motor-os-base.yaml`,
 | `static_dirs` | Required list of host trees to overlay at guest `/`. Relative source paths are resolved against `REPO ROOT`. Later overlays replace earlier files at the same destination. |
 | `filesystem` | Required; currently `motor-fs`. |
 | `data_partition_size_mb` | Required data-partition size in MiB (1,048,576 bytes), excluding the preceding boot partitions. |
+| `raw_data_partition_size_mb` | Optional size override used with `--raw-output`. The standard image uses 32 GiB for qcow2 and 256 MiB for raw output. |
 | `img_name` | Required output path, resolved against `vm_images/PROFILE/`; normally a filename. |
 | `image_format` | Required; `raw` or `qcow2`, independent of the image name's suffix. |
 | `required_executables` | Optional list of host files that must exist and have an execute bit. Relative paths use `REPO ROOT`. Defaults to an empty list. |

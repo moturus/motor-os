@@ -440,7 +440,7 @@ for initialization and ELF layout requirements.</p>
 
 <h3>Rust</h3>
 <p>The Motor OS toolchain installs as one rustup toolchain named after the Motor OS target and
-the Rust version it is based on, <code>x86_64-unknown-motor-1.99.1</code> today. It
+the Rust version it is based on, <code>x86_64-unknown-motor-1.99.1-3</code> today. It
 contains
 <code>rustc</code> and <code>rustdoc</code>, its own Cargo, Clippy, rustfmt, rust-analyzer
 with a matching host proc-macro server, the
@@ -506,32 +506,32 @@ are cross-built on Linux and staged into the image. Once there, they compile Mot
 programs on Motor OS, with no host involved.</p>
 
 <h3>rustc</h3>
-<p><code>/devtools/rust/bin/rustc</code> is the Rust fork's compiler built with Motor OS as
+<p><code>/user/lib/rust/bin/rustc</code> is the Rust fork's compiler built with Motor OS as
 the host (<code>x.py build --stage 2 compiler --host x86_64-unknown-motor</code>): a single
 static executable of about 100 MB with its own LLVM inside. Its sysroot,
-<code>/devtools/rust/lib/rustlib/x86_64-unknown-motor/lib</code>, is the complete set of
+<code>/user/lib/rust/lib/rustlib/x86_64-unknown-motor/lib</code>, is the complete set of
 prebuilt crates: <code>std</code>, <code>core</code>, <code>alloc</code>,
 <code>proc_macro</code>, <code>test</code>, <code>panic_abort</code>, <code>panic_unwind</code>,
 <code>unwind</code>, <code>unwinding</code>, the compiler builtins,
 <code>moto_rt</code>, and their dependencies, each as an <code>.rlib</code> with its
-metadata. <code>/devtools/bin/rustc</code>, the command on <code>PATH</code>, is a two-line
+metadata. <code>/user/bin/dev/rustc</code>, the command on <code>PATH</code>, is a two-line
 script that runs it.</p>
 <pre><code>rustc -O /none/dev/hello-world/hello.rs -o /user/tmp/hello &amp;&amp; /user/tmp/hello</code></pre>
 <p>No linker option is needed: rustc's default linker driver is <code>cc</code>, which on
-the image is <code>/devtools/bin/cc</code>, the native Clang, which links with lld. There is
+the image is <code>/user/bin/dev/cc</code>, the native Clang, which links with lld. There is
 no Cargo or rustdoc on the image. Packages with dependencies are built with Lorry,
 below. Lorry runs Clippy through the image's <code>clippy-driver</code>, and runs
 procedural macros as separate static executables because Motor OS has no dynamic
 loading.</p>
-<p>The native formatter is <code>/devtools/rust/bin/rustfmt</code>, exposed through
-<code>/devtools/bin/rustfmt</code>. The language server lives at
-<code>/devtools/rust/bin/rust-analyzer</code>, with matching library sources under
-<code>/devtools/rust/lib/rustlib/src/rust/library</code>; it has no separate native
+<p>The native formatter is <code>/user/lib/rust/bin/rustfmt</code>, exposed through
+<code>/user/bin/dev/rustfmt</code>. The language server lives at
+<code>/user/lib/rust/bin/rust-analyzer</code>, with matching library sources under
+<code>/user/lib/rust/lib/rustlib/src/rust/library</code>; it has no separate native
 proc-macro server or shared <code>librustc_driver</code>. Helix uses the native server
 and formatter; see <a href="editors.html">Editors</a>.</p>
 
 <h3>Clang/LLVM</h3>
-<p><code>/devtools/llvm/bin/llvm</code> is one static executable of about 107 MB that
+<p><code>/user/lib/llvm/bin/llvm</code> is one static executable of about 107 MB that
 contains the whole LLVM toolchain as subcommands: <code>clang</code>, <code>clang++</code>,
 <code>lld</code> (and its <code>ld.lld</code> flavor), <code>ar</code>, <code>ranlib</code>,
 <code>nm</code>, <code>objcopy</code>, <code>strip</code>, <code>objdump</code>,
@@ -539,11 +539,11 @@ contains the whole LLVM toolchain as subcommands: <code>clang</code>, <code>clan
 <code>dwp</code>, and more, invoked as <code>llvm clang ...</code> or <code>llvm ar ...</code>.
 It was configured with Motor OS as its host and default target, lld as the default linker,
 compiler-rt as the runtime library, libc++ as the C++ standard library, and
-<code>/devtools/llvm/cfg</code> as its configuration directory, where
+<code>/user/lib/llvm/cfg</code> as its configuration directory, where
 <code>x86_64-unknown-motor.cfg</code> points it at its resource directory,
-<code>/devtools/llvm/lib/clang/23</code>. <code>/devtools/bin/cc</code> and
-<code>/devtools/bin/c++</code> are two-line scripts over it.</p>
-<p>The sysroot is under <code>/devtools/llvm</code>: <code>include</code> holds mlibc's
+<code>/user/lib/llvm/lib/clang/23</code>. <code>/user/bin/dev/cc</code> and
+<code>/user/bin/dev/c++</code> are two-line scripts over it.</p>
+<p>The sysroot is under <code>/user/lib/llvm</code>: <code>include</code> holds mlibc's
 headers, libc++'s <code>c++/v1</code>, and <code>moto_rt.h</code>; <code>lib</code> holds
 <code>crt1.o</code>, <code>libc.a</code>, <code>libc++.a</code>, <code>libc++abi.a</code>,
 <code>libunwind.a</code>, <code>libmoto_rt_cabi.a</code>, the compiler-rt builtins, and empty
@@ -558,7 +558,7 @@ for security-sensitive environments: it takes the same <code>Cargo.toml</code> a
 <code>Cargo.lock</code> and aims for byte-identical binaries, never invokes Cargo, admits
 dependencies once and explicitly with <code>lorry vendor</code>, and then builds, runs, and
 tests packages offline using
-<code>/devtools/bin/rustc</code> and, for crates with C parts, <code>/devtools/bin/cc</code>
+<code>/user/bin/dev/rustc</code> and, for crates with C parts, <code>/user/bin/dev/cc</code>
 and <code>llvm ar</code>. It builds red and itself natively in the developer-image test.
 It has its own page: <a href="lorry.html">Lorry: the package manager</a>.</p>
 <pre><code>lorry new hello && cd hello
@@ -573,18 +573,21 @@ client Lorry fetches with), <code>/user/bin/dev/mdbg</code>, the test suites und
 <a href="devtools.html">Developer image</a>.</p>
 
 <h3>Installing a native toolchain update</h3>
-<p>Copy <code>motor-toolchain-x86_64-unknown-motor-1.99.1.tar.zst</code> into
+<p>Copy <code>motor-toolchain-x86_64-unknown-motor-1.99.1-3.tar.zst</code> into
 <code>/user/</code> on the VM, then extract it into an empty directory and run its
 installer from an ordinary Interactive session:</p>
 <pre><code>mkdir /user/toolchain
 cd /user/toolchain
-tar -x -f /user/motor-toolchain-x86_64-unknown-motor-1.99.1.tar.zst
-motor-toolchain-x86_64-unknown-motor-1.99.1/install.sh</code></pre>
-<p>The installer replaces <code>/devtools/llvm</code> and <code>/devtools/rust</code>,
-copies launchers and examples, and sets permissions so every role can execute the
-programs. Interactive owns <code>/devtools</code>. Installation writes only there;
-mlibc's configuration stays in the image's <code>/system/cfg/libc</code>, with no
-<code>/devtools/cfg/libc</code> override. Lorry binds compiled dependencies to the
+tar -x -f /user/motor-toolchain-x86_64-unknown-motor-1.99.1-3.tar.zst
+motor-toolchain-x86_64-unknown-motor-1.99.1-3/install.sh</code></pre>
+<p>The installer replaces the development tools in <code>/user/bin/dev</code> and
+<code>/user/lib</code>, and installs examples in <code>/none/dev/hello-world</code>.
+It preserves existing configuration, including the shared Cargo defaults in
+<code>/user/cfg/cargo/config.toml</code>, and extends the console and SSH
+<code>PATH</code>. Reboot after installation to activate that path. Interactive
+can replace the installed programs; None can run them. The image still supplies
+mlibc's configuration in <code>/system/cfg/libc</code>.
+Lorry binds compiled dependencies to the
 installed toolchain files' sizes and modification times, so the next native build
 recompiles them.</p>
 
@@ -595,8 +598,9 @@ recompiles them.</p>
 of the branches its <code>versions.sh</code> names, in about an hour. The order matters
 because each layer is built with the one before it:</p>
 <ol>
-  <li>The Rust, mlibc, and motor-os-tar branches are fetched; LLVM and Cargo come in as the
-  Rust checkout's submodules, so one LLVM tree serves every LLVM build.</li>
+  <li>The Rust, mlibc, motor-os-tar, and Motor OS branches are fetched; LLVM and Cargo
+  come in as the Rust checkout's submodules, so one LLVM tree serves every LLVM build.
+  <code>--motor-os PATH</code> selects an existing Motor OS checkout instead.</li>
   <li>The host Clang and lld are built from that LLVM tree.</li>
   <li>One <code>x.py</code> run from the Rust fork builds and installs the cross toolchain:
   rustc, rustdoc, Cargo, Clippy, rustfmt, both standard libraries, and the library
@@ -607,6 +611,8 @@ because each layer is built with the one before it:</p>
   <li>The native LLVM multicall binary is built for Motor OS against that sysroot.</li>
   <li>Rust bootstrap produces native rustc, rustfmt, and clippy-driver from the same
   Rust revision, and rust-analyzer is built for Motor OS with matching library sources.</li>
+  <li>The Motor OS checkout builds the development programs and their overlays with
+  the new host compiler. This step needs no installed Motor toolchain or VM.</li>
   <li>Everything is packaged into two archives, written by motor-os-tar's
   <code>tar</code>: the Linux-host toolchain, and the native toolchain's files for the
   images, each with an <code>install.sh</code>.</li>
@@ -619,22 +625,31 @@ the directory layout, and the test suites are on the
 <a href="build.html">Building Motor OS</a> page.</p>
 <p>Each toolchain build starts from an empty build tree, writes both archives and their
 <code>.sha256</code> files next to its checkout, and removes the build tree on success.
-It normally reads nothing from a Motor OS checkout. The
+The cloned Motor OS checkout lives in that build tree; an explicitly selected
+checkout keeps its incremental build outputs. The
 <a href="https://github.com/moturus/motor-os-toolchain#the-motor-runtime-crates">runtime-crate guide</a>
 describes the published runtime dependencies and local overrides for unpublished work.</p>
 <p>Each archive extracts into one directory with an <code>install.sh</code> and its
 payload: <code>toolchain/</code> in the Linux-host archive and <code>images/</code> in the
-native archive. The native overlays are <code>libc</code>, <code>llvm</code>,
-<code>rustc</code>, and <code>rust-analyzer</code>; the standard and wasm images take the
-libc configuration, and the developer image takes all four overlays.</p>
+native archive. Native overlays carry <code>libc</code>, <code>llvm</code>,
+<code>rustc</code>, <code>rust-analyzer</code>, and the development tools: Lorry,
+gix, mdbg, Helix, sed, Lua, QuickJS, Javy/Wasmi, Wasmtime, the doc site, and the
+Linux host imager. The standard and wasm images take the libc configuration;
+the developer image includes the tools as well. The native installer can add
+the tools to a standard image.</p>
+<p><code>make toolchain-archive BUILD=release</code> repackages the native archive
+with current main-repository payloads and staged external overlays under
+<code>build/toolchain/release</code>. It leaves the original release archive
+unchanged. Tests always repackage with the current payloads and installer,
+including the Linux imager.</p>
 
 <h2 id="versioning">Versioning</h2>
 <p>A toolchain is named like Rust's own, by the Motor OS target and the Rust version it is
-based on: <code>x86_64-unknown-motor-1.99.1</code>. A second release of the same Rust
-version, after a Motor OS-side change, is <code>x86_64-unknown-motor-1.99.1-2</code>, and a
+based on: <code>x86_64-unknown-motor-1.99.1</code>. The release carrying the current
+image layout is <code>x86_64-unknown-motor-1.99.1-3</code>, and a
 local build is <code>x86_64-unknown-motor-1.99.1-dev</code>. The toolchain repository's
-<code>versions.sh</code> is the recipe of a release: the Motor OS Rust, mlibc, and
-motor-os-tar branches. <code>rust-toolchain.toml</code> pins only the version, not a source
+<code>versions.sh</code> is the recipe of a release: the Motor OS Rust, mlibc,
+motor-os-tar, and Motor OS branches. <code>rust-toolchain.toml</code> pins only the version, not a source
 commit or digest. The standard library links the <code>moto-rt</code> release that the
 Rust fork selects; nothing compares it with the <code>moto-rt</code> in this repository,
 and <code>rt.vdso</code> checks compatibility at run time.</p>

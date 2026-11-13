@@ -12,7 +12,7 @@ and `cargo -Vv` report the commits they were built from; do not infer them from
 a branch name or copy a historical revision from documentation.
 
 The fork uses Rust's `dev` channel. Its compiler description is the
-toolchain's name, `x86_64-unknown-motor-1.99.1-2`, and its Cargo reports
+toolchain's name, `x86_64-unknown-motor-1.99.1-3`, and its Cargo reports
 `1.99.1-dev` plus the exact Cargo commit. Rust's downloaded Stage 0 compiler is only a bootstrap input selected
 by that Rust revision's `src/stage0`; repository commands never select Stage 0
 or an independent nightly/stable Cargo.
@@ -20,7 +20,7 @@ or an independent nightly/stable Cargo.
 ## Linux-host toolchain
 
 The Linux-host toolchain is installed from its archive into a directory that
-rustup knows as `x86_64-unknown-motor-1.99.1-2` (see
+rustup knows as `x86_64-unknown-motor-1.99.1-3` (see
 [toolchain.md](toolchain.md)). It contains:
 
 - Linux-host rustc and rustdoc;
@@ -124,8 +124,8 @@ bounded protocol and stderr evidence.
 
 ## Native Motor OS rust-analyzer
 
-The developer image packages `/devtools/rust/bin/rust-analyzer` and matching
-sources below `/devtools/rust/lib/rustlib/src/rust/library`. The standard
+The developer image packages `/user/lib/rust/bin/rust-analyzer` and matching
+sources below `/user/lib/rust/lib/rustlib/src/rust/library`. The standard
 image contains neither. The native server uses `/user/bin/dev/lorry`, not
 Cargo; it does not replace the Linux-host component above.
 
@@ -134,8 +134,8 @@ directory and this environment:
 
 ```text
 CARGO=/user/bin/dev/lorry
-PATH=/user/bin:/user/bin/dev:/devtools/bin
-RUSTFMT=/devtools/rust/bin/rustfmt
+PATH=/user/bin:/user/bin/dev
+RUSTFMT=/user/lib/rust/bin/rustfmt
 ```
 
 An editor that owns a session terminal must additionally pass
@@ -275,23 +275,23 @@ rustfmt and Clippy.
 The development image packages these native Rust files:
 
 ```text
-/devtools/rust/bin/rustc
-/devtools/rust/bin/rustfmt
-/devtools/rust/bin/clippy-driver
-/devtools/rust/lib/rustlib/x86_64-unknown-motor/lib/*.rlib
-/devtools/bin/rustc          PATH launcher
-/devtools/bin/rustfmt        PATH launcher
-/devtools/bin/clippy-driver  PATH launcher
-/devtools/bin/cc             native linker driver supplied by the C toolchain
+/user/lib/rust/bin/rustc
+/user/lib/rust/bin/rustfmt
+/user/lib/rust/bin/clippy-driver
+/user/lib/rust/lib/rustlib/x86_64-unknown-motor/lib/*.rlib
+/user/bin/dev/rustc          PATH launcher
+/user/bin/dev/rustfmt        PATH launcher
+/user/bin/dev/clippy-driver  PATH launcher
+/user/bin/dev/cc             native linker driver supplied by the C toolchain
 ```
 
 Use the launcher for formatting from the native shell; it supplies rustfmt's
 writable temporary directory:
 
 ```sh
-/devtools/bin/rustfmt --version
-/devtools/bin/rustfmt src/main.rs
-/devtools/bin/rustfmt --check src/main.rs
+/user/bin/dev/rustfmt --version
+/user/bin/dev/rustfmt src/main.rs
+/user/bin/dev/rustfmt --check src/main.rs
 ```
 
 rustfmt discovers `rustfmt.toml` from the source path and its ancestors. A
@@ -307,8 +307,8 @@ Run `lorry clippy` in an admitted package to get human diagnostics, or add
 Inside the development VM:
 
 ```sh
-/devtools/bin/rustc --version
-/devtools/bin/rustc /none/dev/hello-world/hello.rs -o /user/tmp/hello
+/user/bin/dev/rustc --version
+/user/bin/dev/rustc /none/dev/hello-world/hello.rs -o /user/tmp/hello
 /user/tmp/hello
 ```
 
@@ -317,7 +317,7 @@ Pure Rust links remain independent of mlibc. The target passes
 entry point. A Rust program that intentionally links C opts into the C runtime:
 
 ```sh
-/devtools/bin/rustc \
+/user/bin/dev/rustc \
   -C link-self-contained=no \
   -C default-linker-libraries=yes \
   foo.rs -o foo
@@ -350,7 +350,7 @@ panic = "abort"
 For a direct native rustc invocation, pass `-C panic=abort` to opt out:
 
 ```sh
-/devtools/bin/rustc -C panic=abort app.rs -o app
+/user/bin/dev/rustc -C panic=abort app.rs -o app
 ```
 
 Motor OS system binaries declare abort profiles explicitly; the kernel, boot

@@ -422,11 +422,15 @@ not spin for the child's lifetime.
 
 ### Which transport a shell picks
 
-`rush` uses the direct route only where the descriptor genuinely belongs to one
-command: a fresh redirect to a regular file, on a single external or background
-command. Anything that can hand one descriptor to several commands stays on the
-pipe-and-pump path, because a shared offset is what the relay exists to
-protect.
+`rush` hands input files directly to external commands so that spawning a
+command does not consume input it never reads. On Motor OS the child receives
+a copy of the current file position: its reads do not advance the shell's
+position. This also applies to the temporary file holding a pipeline stage's
+input. Here-documents are fed through pipes.
+
+For output, Rush uses the direct route for a fresh redirect to a regular file
+on a single external or background command. Output descriptors shared by
+several commands stay on the pipe-and-pump path.
 
 | Form | stdout | stderr |
 | --- | --- | --- |

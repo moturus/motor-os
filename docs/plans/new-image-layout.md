@@ -1,25 +1,27 @@
 # Developing Motor OS on Motor OS: image layout, Lorry as None, native tests
 
-Status: milestones 1-2 implemented; milestone 3 and its review fixes
-implemented and validated locally;
-milestones 4-5 ready, updated 2026-11-11;
+Status: milestones 1-3 implemented and committed; milestone 4 implemented with
+component gates passing, but the main QEMU release gate still reaches its
+900-second limit at the final OOM phase. Source commits and release are outstanding;
+milestone 5 ready, updated 2026-11-12;
 milestone 6 remains conditional. v1 is commit e7d46767, v2 is 3035a48a,
 v3 is 29779e3f, v4 is 98fe39e0.
 Milestone 1 is implemented: kernel command-line access, the System-console
 boot option, network-device omission, and launcher and guest coverage.
 Milestone 2 moves user commands, development tools, configuration, and sources
 to their new paths, and the imager rejects None-writable entries under
-`/system` and `/user`. The 1.99.1-2 compiler trees and test fixtures remain
-under `/devtools`; only the compatibility rush and sh copies remain under
-`/system/bin`. Milestone 3's local implementation passed its complete
+`/system` and `/user`. Milestone 2 kept the 1.99.1-2 compiler trees and test
+fixtures under `/devtools`, with compatibility rush and sh copies under
+`/system/bin`. Milestone 4's local 1.99.1-3 candidate moves the compiler trees
+and removes those shell copies; test fixtures stay until milestone 5.
+Milestone 3's local implementation passed its complete
 Lorry gate with Cargo `[env]` support committed separately in `1d0ff2f9`.
 The subsequent review fixes passed the complete Lorry gate in 1,171 seconds.
 The approved shared defaults live in `/user/cfg/cargo/config.toml`, with
 `/user/cfg/cargo` as Motor's default Cargo home for both roles.
 The updated native Lorry gate, release red/rush/russhd/Helix builds, and release
-developer-source gate pass. Code and tests are staged; no milestone 3 commit
-has been made.
-Milestones 4-6 have not been implemented by this work.
+developer-source gate pass. Milestone 3 is committed in `d555218f`, with
+documentation in `952ebd58`. Milestones 5-6 have not been implemented by this work.
 
 ## The workflow this serves
 
@@ -588,7 +590,10 @@ permission rule above. QuickJS installs `qjs` and `qjsc` in `/user/bin/dev`,
 its headers in `/user/lib/quickjs/include`, and `libqjs.a` in
 `/user/lib/quickjs/lib`, with its license and documentation retained.
 The archive's hello-world examples go to `/none/dev/hello-world`, with
-modes that let None build there.
+modes that let None build there: directories use `rwxrwxrwx` and data files
+use `rwxrw-rw-`. Installation preserves existing configuration and directory
+modes; only newly created directories receive installation defaults. Library
+trees are derived from the overlays, replaced, and given the toolchain modes.
 The archive also carries the imager: the statically linked Linux binary
 that `make` already installs beside the images as
 `vm_images/<profile>/tools/imager` so that it runs on other Linux hosts.
@@ -605,13 +610,12 @@ the result under `build/`. The packaging logic lives in `../motor-os-toolchain`
 
 An archive is identified by its version alone. A repackaged archive keeps
 the version of the one it came from and lives only under `build/`; it is
-never copied to `$MOTORH` or published. `full-test.sh` installs the
-repackaged archive whenever any main-repo-supplied guest payload differs
-from `$MOTORH`'s archive: binaries, libraries, runtimes, launchers,
-configuration, documentation, or installer changes all count, including
-QuickJS and the other staged external tools. Otherwise it installs the
-`$MOTORH` archive. An imager-only change does not trigger guest repackaging,
-since the guest never runs it; host checks test the current imager directly.
+never copied to `$MOTORH` or published. Tests always repackage and install
+the current main-repository payloads and staged external overlays, including
+the host imager. There is no byte comparison with the original release:
+provenance and embedded checkout paths can differ between build locations.
+The shared packager consumes disposable input trees after validating them;
+both the release builder and repackager supply scratch trees.
 Publishing any changed archive payload, including the imager, means a new
 toolchain release with its patch version bumped. The release that
 carries this plan is 1.99.1-3. Its `install.sh` installs into the new layout
@@ -1137,6 +1141,157 @@ so a plain `lorry test` in the Lorry crate fails on Motor until 5b.
 **Milestone 4: the toolchain archive.** Before the tests, because the native
 suite needs lorry on the standard image.
 
+Implementation started 2026-11-12. Changes outside the main repository are
+in `../motor-os-toolchain` (recipe, packaging, and installer), the LLVM fork's
+`clang/lib/Driver/ToolChains/Motor.cpp` and its driver test, and mlibc's Motor
+shell and PATH defaults. The fork checkouts are `../llvm-project`, `../mlibc`,
+and `../rust`; LLVM is edited in its own checkout. The Rust fork
+needs only its LLVM gitlink updated. Per the user's instruction, Motor OS's
+`AGENTS.md` applies to this fork work; upstream Rust's instructions do not.
+No change to Rust std or the main repository's `moto-rt` is planned.
+The toolchain builder clones Motor OS into its build directory alongside the
+compiler sources by default. `--motor-os PATH` uses a local checkout instead.
+After building the compilers, it invokes that checkout's development-overlay
+build with the new host compiler directory; this needs no installed Motor
+toolchain, existing native archive, image construction, or VM.
+The standard-image partition setting is now 32 GiB; `--raw-output` selects
+the configured 256 MiB override. The old compatibility shells have been removed,
+and the compiler paths and developer-image PATH use the new layout. Imager's
+54 unit and 16 integration tests pass, as does its Clippy check. Offline archive
+tests cover every main-repository guest payload class, unconditional repackaging,
+real archive creation, consumption of disposable input trees, and rejection of
+links, obsolete layouts, and obsolete compiled paths. The installer parses under
+Rush. Its
+first standard-image run exposed an installer permission error: copied
+executables retain `Rx`, which cannot be changed directly to the data-file
+mode `Rw`. Separating executable files from data files exposed a preexisting
+Rush bug: Motor's `test -x` returns true for every regular file, so the next
+run misclassified QuickJS's `LICENSE`. The original failures are preserved in
+`build/milestone4/native-install.log` and
+`build/milestone4/native-install-permissions.log`. The Rush fix is committed in
+`bbe1f3d2`, with ordinary Rust integration tests in Rush's crate. The regression
+fails on the old binary and passes on Motor under Interactive and None with the
+fix. Milestone 4 validation has resumed with the updated standard image.
+The next post-reboot gate found rustc still at its copied permissions:
+Rush drained shared input before spawning a child, so the installer's first
+`chmod` skipped subsequent files. The original failure remains in
+`build/milestone4/native-install-rush-fixed.log`. Commits `74645302`,
+`b727c71c`, and `618899e6` fix unused shared input, advancing here-document
+input, and background stdin in Rush alone. The final commit also keeps output
+redirected to that empty stdin from reaching the console. Its host conformance
+and shared-input tests pass; all 11 native shared-input tests pass under
+Interactive and None. Motor still gives an external reader an independent
+file position, a documented limit that does not affect the installer.
+The release install/reinstall/reboot gate now passes, including configuration
+preservation, stale-library removal, shipped-curl replacement, permissions,
+native C/C++/Rust compilation, and Lorry builds as None. Evidence is in
+`build/milestone4/rush-review-native-install.log`; the amended Rush validation
+is in `build/milestone4/rush-amended-*.log`.
+The final repeat against the refreshed image and archive also passes:
+`build/milestone4/final-native-install.log`.
+The release-build wiring is in place and its offline tests pass. A local
+candidate was built from snapshots of the LLVM and mlibc patches; the final
+release build uses committed fork revisions through Rust's LLVM gitlink.
+The rebuilt host Clang passes the Motor C and C++ driver checks for
+`/user/lib/llvm` and the compiled-path scan; the same driver test rejected
+the installed 1.99.1-2 compiler's old paths before the rebuild.
+The rebuilt host rustc and C/C++ runtime archives also pass that path scan.
+The native LLVM, rustc, rustfmt, Clippy, and rust-analyzer builds pass their
+binary checks and the path scan. A clean release standard-image build with
+the new host compiler succeeds; its qcow2 has a 32 GiB data partition and
+uses about 34 MiB on the host.
+The release raw image also builds; its size differs from qcow2's virtual size
+by exactly the difference between 256 MiB and 32 GiB data partitions.
+The refreshed release developer image and `test-dev-sources.sh --release
+--vmm chv` pass with the amended Rush. This covers native C/C++/Rust builds,
+libc's moved shell paths through `system()` and `popen()`, red and Lorry builds,
+None-cache permissions, and all 37 staged library tests. The first image build
+had no `sys-lib-deps` assembly overlay; preparing that missing build input
+resolved the failure without a code change. The logs are
+`build/milestone4/developer-image.log`, `developer-image-prepared.log`, and
+`developer-sources.log`. The analyzer acceptance fixture now lives under
+`/none/tmp`, with its roots writable by None; its host tests and Clippy pass.
+The release `test-candidate-vm.sh --vmm chv` gate also passes: native analyzer
+semantics and resource limits, command formatting, Rust/C++ unwinding, native
+Rust compilation, and rustfmt. Its log is `build/milestone4/native-candidate.log`.
+The initial 1.99.1-3 candidate archive pair was built and checksum-verified;
+the host candidate is installed and `rust-toolchain.toml` now selects it.
+The native archive beside the checkout is an earlier packaging input: its
+installer predates the permission fixes and is not the validated guest artifact.
+Guest validation repackages the archive under `build/toolchain/release`;
+the gate now logs its exact path and SHA-256. The original input is not changed
+by repackaging.
+No release has been published. The release must be rebuilt from the committed
+fork revisions and Rust gitlink before publication.
+
+The subsequent review found a transient SSH-key disclosure in the installer:
+Motor sed's `-i` stages beside the private configuration with None-readable
+permissions. The installer now captures ordinary sed output with `TMPDIR`
+forced to private `/user/tmp`, then writes to the existing `sshd.toml` entry.
+Rush uses a temporary file for command substitution, so overriding a caller's
+shared `TMPDIR` is necessary too. The sed fork itself is unchanged; its staging
+behavior still needs a separate fix. The native install gate checks preservation
+of SSH configuration and observes temporary files from None during installation.
+The observer reads incrementally so deletion cannot discard evidence already
+read; it accounts for Motor's documented invalidation of concurrently removed
+directory entries. A small configuration missed the brief staging window, so
+the regression now uses a large valid configuration. With the old installer,
+None reads private-key data from `/user/cfg/.sed...` and the test fails. The
+fixed install/reinstall/reboot gate passes, including a caller's `TMPDIR=/none/tmp`,
+configuration preservation, and native C/C++/Rust and Lorry builds as None.
+The failing old-installer run and passing fixed-installer run are preserved in
+`build/milestone4/review/privacy-before.log` and `privacy-after.log`.
+The stale rustfmt and analyzer size-test filters now use the new paths, and both
+real image-size checks pass. Javy/Wasmtime provenance uses `rustc --version`
+without the machine-local `RUSTUP_TOOLCHAIN` selector; a contract checks that
+name and path selection of the same compiler produce identical provenance.
+Both overlays were refreshed, and the exact repackaged archive's installer,
+provenance, and checksum were checked. The offline archive contract passes too.
+
+The follow-up simplification removes archive selection and inventory hashing:
+tests always repackage. The shared packager moves its disposable inputs, and
+the overlay build no longer fetches or builds a second host tar. The installer
+discovers library trees from the overlays, preserves existing directory modes,
+and installs None-writable data without Interactive execute permission.
+Offline archive, bootstrap, external-source, and test-driver contracts pass.
+The native regression rejects the previous installer's unnormalized additional
+library; the updated install/reinstall/reboot gate passes, including preservation
+of Cargo and Helix directory modes and of an unrelated library. The real host
+and native payloads pass the simplified compiled-path scan. Evidence is in
+`build/milestone4/simplifications/`, including `native-before.log` and
+`native-after.log`; the initial fixture setup failure is retained separately.
+
+The reviewer then ran the main release suite and found that the logging test
+still filled the root filesystem to below 50 MiB free. With the new 32 GiB
+qcow2 root, that exhausted the 900-second test budget; the 256 MiB raw-image
+run passed. The milestone 4 gates above had not included the complete main
+release suite. The logging test now checks rotation without filling the root.
+Low-space reclamation remains covered by `read_only_root_rotation` on the
+16 MiB logs mount in `test-block-mounts.sh`, which `full-test.sh` invokes.
+An actual `src/tests/full-test.sh --release` run with this change passed
+`logging::rotation`, all systest checks, and Tokio tests. The qcow2 image used
+about 91 MiB on the host. The overall run nevertheless exited 124 at 900 seconds
+in the final OOM-abort phase; that subprocess printed PASS after the timeout,
+but the main suite did not pass and therefore skipped its block-mount phase.
+A separate `test-block-mounts.sh --release` run passed, including both log
+reclamation checks. That run left the overall time-budget issue unresolved;
+no deadline was increased or assertion weakened. Evidence is in
+`build/milestone4/logging-space/full-test-release.log` and
+`block-mounts-release.log`. A preliminary invocation with a global Cargo offline
+override failed to initialize the hermetic file-registry fixture; that invocation
+error is retained in `full-test-offline-override-failure.log`.
+
+The terminal-resize tests subsequently replaced fixed sleeps with bounded
+output and frame checks in commit `9233a125`, preserving all eight resize
+paths. The checks passed in 6.13 seconds on QEMU, 6.06 seconds on Cloud
+Hypervisor, and 5.93 seconds on Firecracker. The exact
+`src/tests/full-test.sh --release` command then passed, including the final
+OOM-abort and block-mount phases, with its existing deadline unchanged.
+The complete invocation took 916.13 seconds including preparation and the
+separately timed block-mount phase; its summary reports 14.4 minutes of testing.
+Evidence is in `build/milestone4/resize-fast/full-test-release.log`,
+`full-test-release.time`, and `full-test-release.status` (exit status 0).
+
 - 4a. `../motor-os-toolchain`: `install.sh` for the new layout, overlays for
   lorry, gix, mdbg, the host imager, Helix, sed, lua, QuickJS, javy, wasmtime,
   and the doc site; the `ar` launcher and shared Cargo configuration in
@@ -1148,7 +1303,7 @@ suite needs lorry on the standard image.
   compiled-in paths. `install.sh` appends `/user/bin/dev` to both PATH
   configurations; remove the developer image's legacy `/devtools/bin` entry.
 - 4b. `make toolchain-archive` in the main repo, covering all current guest
-  payloads when selecting the archive for tests.
+  payloads and always repackaging the archive for tests.
 - 4c. Switch the main repo to 1.99.1-3. `test-native-toolchain-install.sh`
   against the standard image: it installs the archive, installs it again,
   and replaces one shipped `/user/bin` executable through a temporary

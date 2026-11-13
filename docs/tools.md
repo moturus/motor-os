@@ -102,7 +102,7 @@ Motor OS boots into a unix-like shell [rush](https://github.com/moturus/rush).
 The shell is somewhat barebones now (contributions are welcome!).
 
 - `ls /user/bin` shows the standard commands; the development image also
-  places `/user/bin/dev` and the transitional `/devtools/bin` on `PATH`;
+  places `/user/bin/dev` on `PATH`, as does installing the toolchain archive;
 - `free`, `kill`, `ping`, `printenv`, `ps`, `ss`, and `top` are worth mentioning;
 - `mkdir [-p | --parents] [--] DIRECTORY...` creates directories. With `-p`,
   it creates missing parents and accepts directories that already exist;

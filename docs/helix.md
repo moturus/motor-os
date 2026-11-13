@@ -63,9 +63,9 @@ reads `/user/cfg/git/config` besides `~/.gitconfig`. Normal Helix project
 overrides in `.helix/languages.toml` still apply. A custom `XDG_CONFIG_HOME`
 needs the native settings copied into its own `helix/languages.toml`.
 
-Helix starts `/devtools/rust/bin/rust-analyzer` directly over stdio. Its
+Helix starts `/user/lib/rust/bin/rust-analyzer` directly over stdio. Its
 environment selects `/user/bin/dev/lorry` through `CARGO` and
-`/devtools/rust/bin/rustfmt` through `RUSTFMT`, and includes `/devtools/bin`
+`/user/lib/rust/bin/rustfmt` through `RUSTFMT`, and includes `/user/bin/dev`
 in `PATH`. Motor OS gives it the role's `TMPDIR`. These belong in the server's
 own environment: `cargo.extraEnv` only affects its children and cannot select
 the metadata/check executable.
@@ -76,7 +76,7 @@ stream. Motor OS consumes this instruction before the server starts; see
 [foreground forwarding](tui.md#foreground-forwarding).
 
 The server targets `x86_64-unknown-motor`, uses the installed sysroot at
-`/devtools/rust` (discovery would launch rustc on every workspace load), and
+`/user/lib/rust` (discovery would launch rustc on every workspace load), and
 uses Lorry's Cargo-compatible metadata and check commands.
 Build scripts are enabled without a rustc wrapper; procedural-macro
 expansion in the analyzer is disabled. The client reports file changes.
