@@ -520,7 +520,9 @@ out="$(console_since "$at")"
 [ "${out%%$'\033[0m\033[2J'*}" = x ] ||
   fail "a pane keystroke wrote $(printf '%q' "${out%%$'\033[0m\033[2J'*}")"
 at="$(mark "$CONSOLE_LOG")"
-printf '\025exit\r' >&3
+# Retain this session to keep the server alive. Later cases get fresh sessions
+# and panes without repeating the cold server launch already exercised here.
+printf '%b' "\025${RMUX_REFRESH%r}d" >&3
 wait_text "$CONSOLE_LOG" "$at" $'\033[?1049l'
 prompt "$CONSOLE_LOG" "$at"
 exec 4>&-
@@ -569,7 +571,7 @@ printf 'exit\r' >&4
 finish_session
 
 echo "-- rmux over ssh --"
-start_session rmux-ssh pty "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux
+start_session rmux-ssh pty "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux new -s ssh-resize
 RMUX_REFRESH='\001r'
 wait_for rmux_contains "$SESSION_LOG" 30 100 '/user$'
 start_red ssh-rmux >&4
@@ -582,7 +584,7 @@ printf 'exit\r' >&4
 finish_session
 
 echo "-- rmux pane --"
-start_session rmux-pane pipe "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux
+start_session rmux-pane pipe "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux new -s pane-resize
 wait_for rmux_contains "$SESSION_LOG" 24 80 '/user$'
 printf '\014' >&4
 wait_for rmux_contains "$SESSION_LOG" 24 80 '/user$'
@@ -609,7 +611,7 @@ printf 'exit\r' >&4
 finish_session
 
 echo "-- red in an rmux pane --"
-start_session red-pane pipe "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux
+start_session red-pane pipe "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux new -s red-resize
 wait_for rmux_contains "$SESSION_LOG" 24 80 '/user$'
 start_red pane >&4
 rmux_bar "$SESSION_LOG" '22:80'
@@ -629,6 +631,8 @@ wait_for rmux_contains "$SESSION_LOG" 24 80 '/user$'
 printf 'exit\r' >&4
 finish_session
 
+ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 "TMPDIR=$RMUX_TMPDIR" \
+  /user/bin/rmux kill-session -t 0
 save_red_stderr
 remove_test_root
 stop_serial_test_vm
