@@ -1216,13 +1216,25 @@ semantics and resource limits, command formatting, Rust/C++ unwinding, native
 Rust compilation, and rustfmt. Its log is `build/milestone4/native-candidate.log`.
 The initial 1.99.1-3 candidate archive pair was built and checksum-verified;
 the host candidate is installed and `rust-toolchain.toml` now selects it.
-The native archive beside the checkout is an earlier packaging input: its
-installer predates the permission fixes and is not the validated guest artifact.
-Guest validation repackages the archive under `build/toolchain/release`;
-the gate now logs its exact path and SHA-256. The original input is not changed
-by repackaging.
-No release has been published. The release must be rebuilt from the committed
-fork revisions and Rust gitlink before publication.
+The initial native archive beside the checkout predated the installer permission
+fixes. Those guest gates validated a repackaged archive under
+`build/toolchain/release`; the gate logs its exact path and SHA-256. Repackaging
+did not change that original input.
+
+On 2026-11-13, a full rebuild from committed sources replaced both archives
+beside the checkout and passed their SHA-256 checks. It used toolchain builder
+`55b7aea`, LLVM `b3459cf7b`, mlibc `befb138`, Rust `d2e9dd02` (including the
+LLVM gitlink), and Motor OS `35ce6014`. The invocation used `--motor-os` and
+temporary Git URL mappings to the local Rust, LLVM, and mlibc repositories,
+so no source push was needed and no committed repository URL was changed.
+The builder's binary and compiled-path checks passed; the native archive's
+installer matches the committed renderer, and its Javy/Wasmtime provenance
+files contain no builder path. The build took 3496.81 seconds and exited 0.
+Evidence is under `build/milestone4/commit-steps/execution/`: `rebuild.log`,
+`rebuild-sources.txt`, `rebuild.time`, `rebuild.status`, `checksums.log`, and
+`archive-content.log`. These fresh archives have not been installed or guest
+validated; the earlier host installation and guest results used the initial
+candidate. No release has been published.
 
 The subsequent review found a transient SSH-key disclosure in the installer:
 Motor sed's `-i` stages beside the private configuration with None-readable
