@@ -143,6 +143,7 @@ VMM_PID=""
 VM_CHILD_PID=""
 TEST_ROOT_CREATED=0
 SESSION_PID=""
+SSH_CONTROL_STARTED=0
 
 save_red_stderr() {
   if [ -n "$VMM_PID" ] && serial_test_vm_alive; then
@@ -177,6 +178,9 @@ cleanup() {
   fi
   save_red_stderr
   remove_test_root
+  if [ "$SSH_CONTROL_STARTED" = 1 ]; then
+    ssh "${SSH_OPTIONS[@]}" -O exit motor@192.168.4.2 >/dev/null 2>&1 || status=1
+  fi
   exec 3>&- 4>&-
   stop_serial_test_vm || status=1
   rm -rf "$SCRATCH"
@@ -216,6 +220,12 @@ TEST_ROOT_CREATED=1
 test_root_mkdirs | sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes \
   -o BatchMode=yes -o StrictHostKeyChecking=yes \
   -o UserKnownHostsFile="$WD/test-known-hosts" -i "$WD/test.key" motor@192.168.4.2
+
+# Keep each SSH session's terminal state separate while sharing authentication.
+# Connection setup should not consume the wait for the application's paint.
+ssh "${SSH_OPTIONS[@]}" -M -S "$SCRATCH/ssh-control" -fN motor@192.168.4.2
+SSH_CONTROL_STARTED=1
+SSH_OPTIONS+=(-S "$SCRATCH/ssh-control" -o ControlMaster=no)
 
 # A complete status bar records both dimensions as row:width.
 red_bars() {
