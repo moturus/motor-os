@@ -8,6 +8,45 @@ per-operation allocation overhead, were reviewed. Historical timings below
 are not new measurements. An unexplained historical failure stays open
 unless the source establishes that its cause was fixed.
 
+## `sed -i` lets None read a private file while it runs (2026-11-13)
+
+Motor's sed fork stages an in-place edit in a new file beside the original,
+`.sed<hex>` (`NamedTempFile::new_in` in the fork's `src/sed/motor.rs`). A file
+that Interactive creates at run time is readable by None. In a directory None
+may enter, such as `/user/cfg`, a None process can therefore read the whole
+file during the edit, although the original is closed to it and the edited
+file keeps its permissions afterwards. A None process polling `/user/cfg` read
+the SSH host key this way while the toolchain installer ran
+`sed -i ... /user/cfg/sshd.toml`. The installer no longer uses `sed -i`; a
+user who edits `sshd.toml` with it is still exposed.
+
+The fix belongs in the sed fork. Staging in memory, which the fork already
+does when it cannot create a file in the directory, is the one place no other
+role can read. Creating the staging file and then closing its permissions
+leaves a moment in which None can open it. The documentation site's line on
+`sed -i` in `commands.html` says only that the file keeps its permissions.
+
+## A program that starts `rust-analyzer` by name loses its keyboard (2026-11-13)
+
+`/user/bin/dev/rust-analyzer` is a Rush script that runs
+`/user/lib/rust/bin/rust-analyzer`. When a terminal program starts the server
+through it, the program stops receiving keys: the Rush process between the two
+takes the session's terminal input. Exporting `MOTURUS_STDIO_NO_TERMINAL=true`
+inside the script does not help; the parent has to set it, or start the binary
+directly.
+
+Helix started with `hx` is not affected. That launcher sets
+`XDG_CONFIG_HOME=/user/cfg`, and `/user/cfg/helix/languages.toml` starts the
+binary directly with the variable set. `/user/lib/helix/hx` run directly does
+not read that file, finds `rust-analyzer` on `PATH`, and stops reacting to keys
+as soon as it opens a `.rs` file. The Helix check in `src/tests/test-tui.sh`
+runs it that way and fails on the developer image for this reason; setting
+`XDG_CONFIG_HOME=/user/cfg` there restores input. Any other editor that looks
+the server up by name is affected in the same way. Before toolchain 1.99.1-3
+there was no `rust-analyzer` on `PATH`. No fix is chosen: the launcher could
+go, or a Rush script could get a way to run a helper without taking the
+terminal.
+
 ## rt.vdso keeps a closed poll registry's registrations (2026-11-02)
 
 Closing a poll `Registry` does not release its registrations. Each source keeps
