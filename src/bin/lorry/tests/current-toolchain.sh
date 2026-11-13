@@ -30,7 +30,7 @@ lorry_load_current_toolchain() {
     cargo_verbose="$($LORRY_TEST_CARGO -Vv)" || return
 
     LORRY_MOTOR_LINKER="$prefix/lib/rustlib/x86_64-unknown-motor/sysroot/bin/motor-clang"
-    LORRY_MOTOR_SYSROOT="$repository_root/build/assembly/images/rustc/devtools/rust"
+    LORRY_MOTOR_SYSROOT="$repository_root/build/assembly/images/rustc/user/lib/rust"
     [ -x "$LORRY_MOTOR_LINKER" ] ||
         lorry_toolchain_fail "the toolchain's Motor linker is absent" || return
     [ -d "$LORRY_MOTOR_SYSROOT/lib/rustlib/x86_64-unknown-motor" ] ||

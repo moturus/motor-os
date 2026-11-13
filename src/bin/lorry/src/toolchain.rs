@@ -55,7 +55,7 @@ impl Toolchain {
                 .map(PathBuf::from)
                 .map(|rustc| program_path(&rustc).unwrap_or(rustc))
                 .or_else(|| config.rustc.clone())
-                .unwrap_or_else(|| PathBuf::from("/devtools/bin/rustc"))
+                .unwrap_or_else(|| PathBuf::from("/user/bin/dev/rustc"))
         } else if let Some(selector) = selector {
             let rustup = find_program("rustup").ok_or_else(|| {
                 Error::failure(format!(
@@ -266,10 +266,10 @@ fn discover_clippy_driver(
         .with_help("select rustc and clippy-driver from the same toolchain"));
     }
     let mut sha256 = crate::hash::sha256_file(&path)?;
-    if cfg!(target_os = "motor") && path == Path::new("/devtools/bin/clippy-driver") {
+    if cfg!(target_os = "motor") && path == Path::new("/user/bin/dev/clippy-driver") {
         // The shipped sibling is a TMPDIR launcher; bind the compiler payload
         // too, so a driver rebuilt from the same rustc cannot reuse old lints.
-        let payload = crate::hash::sha256_file(Path::new("/devtools/rust/bin/clippy-driver"))?;
+        let payload = crate::hash::sha256_file(Path::new("/user/lib/rust/bin/clippy-driver"))?;
         let mut digest = crate::hash::Sha256::new();
         digest.update(&sha256);
         digest.update(&payload);

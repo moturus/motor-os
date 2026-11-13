@@ -7,7 +7,7 @@ trap 'rm -rf "$temporary"' EXIT
 repository="$temporary/motor-os"
 prefix="$temporary/prefix"
 toolchain=x86_64-unknown-motor-9.9.9
-sysroot="$repository/build/assembly/images/rustc/devtools/rust"
+sysroot="$repository/build/assembly/images/rustc/user/lib/rust"
 linker="$prefix/lib/rustlib/x86_64-unknown-motor/sysroot/bin/motor-clang"
 mkdir -p "$repository" "$prefix/bin" "$(dirname "$linker")" "$temporary/bin"
 printf '[toolchain]\nchannel = "%s"\n' "$toolchain" > "$repository/rust-toolchain.toml"

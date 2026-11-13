@@ -682,8 +682,8 @@ run_native() {
     download_file "$first/target/lorry/release/lorry" "$WORK/lorry-native"
     cmp "$WORK/lorry-cross" "$WORK/lorry-native" ||
         fail "Linux-to-Motor and Motor-native Lorry executables differ"
-    remote_command "/devtools/bin/rustc -vV > $REMOTE_ROOT/clippy-rustc.version"
-    remote_command "/devtools/bin/clippy-driver --rustc -vV > $REMOTE_ROOT/clippy-driver.version"
+    remote_command "/user/bin/dev/rustc -vV > $REMOTE_ROOT/clippy-rustc.version"
+    remote_command "/user/bin/dev/clippy-driver --rustc -vV > $REMOTE_ROOT/clippy-driver.version"
     download_file "$REMOTE_ROOT/clippy-rustc.version" "$WORK/clippy-rustc.version"
     download_file "$REMOTE_ROOT/clippy-driver.version" "$WORK/clippy-driver.version"
     cmp "$WORK/clippy-rustc.version" "$WORK/clippy-driver.version" ||

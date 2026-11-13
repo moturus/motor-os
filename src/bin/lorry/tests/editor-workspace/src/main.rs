@@ -44,7 +44,7 @@ fn toolchain(repo: &Path) -> io::Result<Toolchain> {
 
 #[cfg(target_os = "motor")]
 fn toolchain(_repo: &Path) -> io::Result<Toolchain> {
-    let sysroot = PathBuf::from("/devtools/rust").canonicalize()?;
+    let sysroot = PathBuf::from("/user/lib/rust").canonicalize()?;
     Ok(Toolchain {
         name: sysroot.to_string_lossy().into_owned(),
         sysroot_src: sysroot.join("lib/rustlib/src/rust/library"),
@@ -139,7 +139,7 @@ fn run(
     #[cfg(not(target_os = "motor"))]
     {
         // The installed Motor sysroot has a different location on the host.
-        assert_eq!(options["cargo"]["sysroot"], "/devtools/rust");
+        assert_eq!(options["cargo"]["sysroot"], "/user/lib/rust");
         options["cargo"]["sysroot"] = json!(toolchain.sysroot);
     }
     options["cargo"]["buildScripts"]["overrideCommand"] = json!(override_command);
