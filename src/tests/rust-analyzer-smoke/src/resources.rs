@@ -132,10 +132,10 @@ pub fn check_processes(summary: &Value, server: &str, roots: &[&str]) -> io::Res
         let name = process["debug_name"].as_str().ok_or_else(invalid)?;
         let tool = [
             "/user/bin/dev/lorry ",
-            "/devtools/rust/bin/rustc ",
-            "/devtools/llvm/bin/llvm ",
-            // The 1.99.1-2 compiler launchers still name the compatibility shell.
-            "/system/bin/rush /devtools/bi",
+            "/user/lib/rust/bin/rustc ",
+            "/user/lib/llvm/bin/llvm ",
+            // Compiler launchers are Rush scripts.
+            "/user/bin/rush /user/bin/dev/",
         ]
         .iter()
         .any(|prefix| name.starts_with(prefix));
@@ -223,9 +223,9 @@ mod tests {
         for name in [
             "server",
             "/user/bin/dev/lorry check…",
-            "/devtools/rust/bin/rustc --cr…",
-            "/devtools/llvm/bin/llvm clang…",
-            "/system/bin/rush /devtools/bi…",
+            "/user/lib/rust/bin/rustc --cr…",
+            "/user/lib/llvm/bin/llvm clang…",
+            "/user/bin/rush /user/bin/dev/…",
             "/fixture/target/build-script",
             "/fixture/long-project…",
         ] {
@@ -237,8 +237,8 @@ mod tests {
             .unwrap();
         }
         for name in [
-            "/devtools/bin/cargo check",
-            "/devtools/rust/bin/rust-analyzer-proc-macro-srv",
+            "/user/bin/dev/cargo check",
+            "/user/lib/rust/bin/rust-analyzer-proc-macro-srv",
             "/fixture-unrelated/tool",
             "/user/bin/tool",
         ] {

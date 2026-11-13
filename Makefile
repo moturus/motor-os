@@ -72,6 +72,7 @@ user-dev: user gix lorry mdbg rnetbench crossbench \
 .PHONY: gix lorry curl wg wg-self-test
 .PHONY: mdbg rnetbench crossbench
 .PHONY: clean clippy
+.PHONY: toolchain-payloads toolchain-tar toolchain-archive
 
 mbr.bin:
 	mkdir -p $(BIN_DIR)
@@ -278,6 +279,21 @@ endef
 # that imager never uses.
 BUILD_IMAGER = CARGO_TARGET_DIR="$(IMAGER_TARGET_DIR)" cargo rustc $(CARGO_RELEASE) \
 	--bin imager -- -C target-feature=+crt-static -A linker-messages
+
+# External development overlays are staged by src/build-motor-os.sh. Rebuild
+# this checkout's payloads without rebuilding either compiler or booting a VM.
+toolchain-payloads: lorry gix mdbg
+	mkdir -p "$(BIN_DIR)"
+	cd src/imager && ( flock 9 && $(BUILD_IMAGER) && \
+		install -m 755 $(IMAGER_INSTALL_STRIP) "$(IMAGER_BIN)" "$(BIN_DIR)/imager" ) 9>"$(IMAGER_LOCK)"
+
+toolchain-tar:
+	CARGO_TARGET_DIR="$(ROOT_DIR)/build/assembly/build/motor-os-tar-linux" \
+		cargo build --manifest-path external-sources/motor-os-tar/Cargo.toml \
+		--release --locked --offline --bin tar
+
+toolchain-archive: toolchain-payloads toolchain-tar
+	bash "$(ROOT_DIR)/src/build-scripts/toolchain-archive.sh" "$(IMG_CMD)"
 
 # The standard image adds production networking and user programs to base.
 main.img: boot core sys user

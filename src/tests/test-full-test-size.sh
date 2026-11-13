@@ -15,6 +15,12 @@ for tool in qemu-system-x86_64 cloud-hypervisor-static firecracker; do
   chmod +x "$scratch/bin/$tool"
 done
 export PATH="$scratch/bin:$PATH"
+cat > "$scratch/bin/make" <<'SH'
+#!/bin/bash
+[ "$CARGO_NET_OFFLINE" = true ] || exit 1
+case "$*" in *'BUILD=release main.img toolchain-payloads toolchain-tar') ;; *) exit 1 ;; esac
+SH
+chmod +x "$scratch/bin/make"
 cat > "$scratch/src/tests/full-test-prepare.sh" <<'SH'
 #!/bin/bash
 printf '%s:%s:%s\n' "$MOTO_SMP" "$MOTO_MEMORY_MIB" "$*" > "$MOTO_SIZE_TEST_LOG"

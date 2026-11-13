@@ -26,9 +26,12 @@ select_external_sources() {
 	EXTERNAL_REPOS=()
 	EXTERNAL_WORKSPACES=()
 	if [ "$selection" = all ]; then
-		EXTERNAL_REPOS+=("ripgrep:$RIPGREP_BRANCH" "helix:$HELIX_BRANCH" "sed:$SED_BRANCH"
-			"motor-os-tar:$MOTOR_OS_TAR_BRANCH")
-		EXTERNAL_WORKSPACES+=("$RIPGREP" "$HELIX" "$SED" "$MOTOR_OS_TAR")
+		EXTERNAL_REPOS+=("ripgrep:$RIPGREP_BRANCH" "motor-os-tar:$MOTOR_OS_TAR_BRANCH")
+		EXTERNAL_WORKSPACES+=("$RIPGREP" "$MOTOR_OS_TAR")
+	fi
+	if [ "$selection" = all ] || [ "$selection" = toolchain ]; then
+		EXTERNAL_REPOS+=("helix:$HELIX_BRANCH" "sed:$SED_BRANCH")
+		EXTERNAL_WORKSPACES+=("$HELIX" "$SED")
 	fi
 	if [ "$selection" != wasmtime ]; then
 		EXTERNAL_REPOS+=("${JAVY_SOURCES[@]}")

@@ -7,7 +7,6 @@ input_files:
   - "/system/services/sys-init"
   - "/system/services/sys-tty"
   - "/user/bin/rush"
-  - "/system/bin/rush"
   - "/user/bin/sysbox"
   - "/user/bin/curl"
   - "/user/bin/red"
@@ -19,7 +18,6 @@ input_files:
   - "/user/bin/ssh"
 directories:
   - "/system"
-  - "/system/bin"
   - "/system/cfg"
   - "/system/cfg/libc"
   - "/system/logs"
@@ -50,4 +48,5 @@ ca_bundle: "/etc/ssl/certs/ca-certificates.crt"
 filesystem: "motor-fs"
 img_name: "motor-os.qcow2"
 image_format: "qcow2"
-data_partition_size_mb: 256
+data_partition_size_mb: 32768
+raw_data_partition_size_mb: 256

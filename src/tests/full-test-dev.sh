@@ -110,7 +110,11 @@ MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" MOTO_IMAGE=motor-os-dev.qcow2 \
 MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" FULL_TEST_IMAGE_PREBUILT=1 \
   "$WD/test-dev-sources.sh" "${FORWARDED_ARGS[@]}"
 
-# The native toolchain archive, installed on a copy of the developer image.
+# Prepare the standard image and current first-party payloads before the timed
+# native installer gate. External tool overlays were staged before this suite.
+CARGO_NET_OFFLINE=true make -C "$ROOT_DIR" -j"$(nproc)" BUILD="$([ "$SEEN_RELEASE" = 1 ] && echo release || echo debug)" \
+  main.img toolchain-payloads toolchain-tar
+# The native archive is installed twice on a copy of the standard image.
 MOTO_MEMORY_MIB="$DEV_MEMORY_MIB" \
   "$WD/test-native-toolchain-install.sh" "${FORWARDED_ARGS[@]}"
 

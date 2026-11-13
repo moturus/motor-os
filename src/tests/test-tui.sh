@@ -663,7 +663,7 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
   helix_bin=/user/lib/helix/hx
   # Exercise the shipped configuration before the isolated editor-only cases.
   out="$(vm_ssh 'NO_COLOR=1 hx --health rust')"
-  printf '%s\n' "$out" | grep -Fxq '  ✓ rust-analyzer: /devtools/rust/bin/rust-analyzer' ||
+  printf '%s\n' "$out" | grep -Fxq '  ✓ rust-analyzer: /user/lib/rust/bin/rust-analyzer' ||
     fail "default Rust health did not find the native server: '$out'"
 
   GUEST_HELIX_ROOT="$TEST_TMP/helix-$$"

@@ -331,7 +331,7 @@ printf '8G/rt_version\r' >&"$PTY_IN_FD"
 helix_log_mark
 printf 'gd' >&"$PTY_IN_FD"
 wait_pty_output "RT_VERSION" "Helix Motor std definition"
-helix_log_wait '"uri":"file:///devtools/rust/lib/rustlib/src/rust/library/std/src/os/motor/mod.rs"' "Motor std navigation"
+helix_log_wait '"uri":"file:///user/lib/rust/lib/rustlib/src/rust/library/std/src/os/motor/mod.rs"' "Motor std navigation"
 helix_save_screen std_definition
 
 helix_log_mark
@@ -341,7 +341,7 @@ helix_save_screen exit
 helix_log_wait '"method":"shutdown"' "server shutdown"
 helix_log_wait '"method":"exit"' "server exit"
 vm_ssh ps > "$HELIX_LSP_EVIDENCE/processes-after-exit"
-if grep -Fq '/devtools/rust/bin/rust-analyzer' "$HELIX_LSP_EVIDENCE/processes-after-exit"; then
+if grep -Fq '/user/lib/rust/bin/rust-analyzer' "$HELIX_LSP_EVIDENCE/processes-after-exit"; then
   fail "Helix left a native language server running"
 fi
 echo "Helix native hover/definition/completion/save-diagnostics/shutdown PASS; evidence=$HELIX_LSP_EVIDENCE"

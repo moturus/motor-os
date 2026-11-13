@@ -19,7 +19,7 @@ c_target="$temporary/c-runtime"
 c_environment=(
   "MOTOR_TEST_CXX=$motor_sysroot/bin/motor-clang++"
   "MOTOR_TEST_AR=$llvm_tools/llvm-ar"
-  "MOTOR_TEST_CXX_LIB=$motor_sysroot/devtools/llvm/lib"
+  "MOTOR_TEST_CXX_LIB=$motor_sysroot/user/lib/llvm/lib"
   "CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER=$motor_sysroot/bin/motor-clang"
   "CARGO_TARGET_X86_64_UNKNOWN_MOTOR_RUSTFLAGS=-C link-self-contained=no -C default-linker-libraries=yes"
 )
@@ -107,7 +107,7 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = 1 ]; then
   printf 'put "%s" "%s"\n' "$ROOT_DIR/src/tests/unwind/src/main.rs" "$guest_source" |
     sftp "${ssh_options[@]}" -P 2222 -b - motor@192.168.4.2
   ssh "${ssh_options[@]}" -p 2222 motor@192.168.4.2 \
-    /devtools/bin/rustc --edition=2024 -O "$guest_source" -o "$guest_binary"
+    /user/bin/dev/rustc --edition=2024 -O "$guest_source" -o "$guest_binary"
   printf 'get "%s" "%s"\n' "$guest_binary" "$downloaded" |
     sftp "${ssh_options[@]}" -P 2222 -b - motor@192.168.4.2
   "$ROOT_DIR/src/build-scripts/validate-native-elf.sh" "$downloaded" "$downloaded"

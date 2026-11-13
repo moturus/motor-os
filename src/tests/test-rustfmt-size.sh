@@ -25,30 +25,30 @@ measure_rustfmt() {
   }
   evidence="$(mktemp -d "$root/build/rustfmt-image-growth.XXXXXX")"
   without_assembly="$evidence/without-assembly"
-  binary="$(stat -c %s "$assembly/rustc/devtools/rust/bin/rustfmt")"
-  launcher="$(stat -c %s "$assembly/rustc/devtools/bin/rustfmt")"
+  binary="$(stat -c %s "$assembly/rustc/user/lib/rust/bin/rustfmt")"
+  launcher="$(stat -c %s "$assembly/rustc/user/bin/dev/rustfmt")"
   printf 'assembly_images=%s\nbinary_bytes=%s\nlauncher_bytes=%s\n' \
     "$assembly" "$binary" "$launcher" > "$evidence/sizes"
   check_rustfmt_size rustfmt-binary "$binary" "$RUSTFMT_BINARY_MAX_BYTES"
 
-  [ "$(grep -cxF -- '  - "rustc/devtools/bin/rustfmt"' "$root/src/imager/motor-os-dev.yaml")" = 1 ] ||
+  [ "$(grep -cxF -- '  - "rustc/user/bin/dev/rustfmt"' "$root/src/imager/motor-os-dev.yaml")" = 1 ] ||
     { echo 'developer image must require the rustfmt launcher exactly once' >&2; return 1; }
-  [ "$(grep -cxF -- '  - "rustc/devtools/rust/bin/rustfmt"' "$root/src/imager/motor-os-dev.yaml")" = 1 ] ||
+  [ "$(grep -cxF -- '  - "rustc/user/lib/rust/bin/rustfmt"' "$root/src/imager/motor-os-dev.yaml")" = 1 ] ||
     { echo 'developer image must require the rustfmt binary exactly once' >&2; return 1; }
 
   # Hard links keep every other assembly byte identical without duplicating
   # the multi-gigabyte toolchain. Removing these two links cannot alter it.
   mkdir "$without_assembly"
   cp -al "$assembly/." "$without_assembly"
-  rm "$without_assembly/rustc/devtools/bin/rustfmt"
-  rm "$without_assembly/rustc/devtools/rust/bin/rustfmt"
+  rm "$without_assembly/rustc/user/bin/dev/rustfmt"
+  rm "$without_assembly/rustc/user/lib/rust/bin/rustfmt"
   for variant in without with; do
     awk -v variant="$variant" -v destination="$evidence/$variant.qcow2" \
       -v policy="$root/src/imager/motor-os-permissions.yaml" '
       /^permission_policy:/ {print "permission_policy: \"" policy "\""; next}
       /^img_name:/ {print "img_name: \"" destination "\""; next}
-      variant == "without" && /^  - "rustc\/devtools\/bin\/rustfmt"$/ {next}
-      variant == "without" && /^  - "rustc\/devtools\/rust\/bin\/rustfmt"$/ {next}
+      variant == "without" && /^  - "rustc\/user\/bin\/dev\/rustfmt"$/ {next}
+      variant == "without" && /^  - "rustc\/user\/lib\/rust\/bin\/rustfmt"$/ {next}
       {print}
     ' "$root/src/imager/motor-os-dev.yaml" > "$evidence/$variant.yaml"
     variant_assembly="$assembly"

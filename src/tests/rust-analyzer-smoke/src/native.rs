@@ -17,7 +17,7 @@ mod remote;
 use assertions::{require_completion, require_generated_definition};
 use remote::{Remote, checked, quoted};
 
-const SERVER: &str = "/devtools/rust/bin/rust-analyzer";
+const SERVER: &str = "/user/lib/rust/bin/rust-analyzer";
 const SOURCE: &str = "#![feature(motor_ext)]\n#[path = \"café.rs\"]\nmod café;\npub fn runtime() -> u64 { std::os::motor::rt_version() }\npub fn generated() -> u32 { generated_dependency::GENERATED }\npub fn environment() -> &'static str { generated_dependency::ENVIRONMENT }\npub fn unicode() -> u32 { café::VALUE }\npub fn editable() -> u32 { 7 }\n";
 
 pub fn run(evidence: &Path, sampler_binary: &Path) -> io::Result<()> {
@@ -38,7 +38,7 @@ pub fn run(evidence: &Path, sampler_binary: &Path) -> io::Result<()> {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = PathBuf::from(format!("/user/tmp/ra-{}-{nonce:x}", std::process::id()));
+    let root = PathBuf::from(format!("/none/tmp/ra-{}-{nonce:x}", std::process::id()));
     let second = root.with_file_name(format!("ra-{}-{nonce:x}-second", std::process::id()));
     let version = remote.run(&format!("{SERVER} --version"))?;
     fs::write(evidence.join("version"), &version.stdout)?;
@@ -93,6 +93,12 @@ pub fn run(evidence: &Path, sampler_binary: &Path) -> io::Result<()> {
         format!("put -r {} {}\n", quoted(&fixture)?, quoted(&second)?),
     )?;
     remote.upload(&batch)?;
+    // SFTP creates directories as Interactive; Lorry builds in the None role.
+    remote.run(&format!(
+        "/user/bin/chmod rwxrwxrwx {} {}",
+        root.display(),
+        second.display()
+    ))?;
     let _grants = UserGrants::install(&remote, &evidence, &batch, &root, &[&root, &second])?;
     let mut sampler = ServerProcess::spawn(&mut remote.ssh(&guest_sampler.to_string_lossy())?)?;
     if sampler.read_until(remote.deadline)? != json!({"ready": true}) {
@@ -107,7 +113,7 @@ pub fn run(evidence: &Path, sampler_binary: &Path) -> io::Result<()> {
         "check": {"targets": ["x86_64-unknown-motor"]}, "procMacro": {"enable": false},
         "files": {"watcher": "client"}
     });
-    let command = remote.ssh(&format!("CARGO=/user/bin/dev/lorry PATH=/user/bin:/user/bin/dev:/devtools/bin RA_LOG=project_model=debug,rust_analyzer::flycheck=debug {SERVER}"))?;
+    let command = remote.ssh(&format!("CARGO=/user/bin/dev/lorry PATH=/user/bin:/user/bin/dev RA_LOG=project_model=debug,rust_analyzer::flycheck=debug {SERVER}"))?;
     let start = Instant::now();
     let mut case = SemanticCase::start_command(
         command,
@@ -139,7 +145,7 @@ pub fn run(evidence: &Path, sampler_binary: &Path) -> io::Result<()> {
             .or_else(|| location["targetUri"].as_str())
             .ok_or_else(|| io::Error::other(format!("missing std definition: {definition}")))?;
         if !uri_path(target)?
-            .starts_with("/devtools/rust/lib/rustlib/src/rust/library/std/src/os/motor")
+            .starts_with("/user/lib/rust/lib/rustlib/src/rust/library/std/src/os/motor")
         {
             return Err(io::Error::other(format!(
                 "wrong Motor std definition: {definition}"

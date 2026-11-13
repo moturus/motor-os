@@ -18,11 +18,7 @@ mode() {
   [ "$actual" = "$expected" ] || fail "$path has mode '$actual', expected '$expected'"
 }
 
-# Only the compiler archive's two compatibility shell paths remain here.
-legacy="$(remote /user/bin/ls -l /system/bin | awk 'NF { print $NF }')"
-[ "$legacy" = $'rush\nsh' ] || fail "unexpected /system/bin contents: $legacy"
-remote '/user/bin/diff /user/bin/sh /system/bin/sh'
-remote '/system/bin/sh -c "echo compatibility-shell"' | grep -qx compatibility-shell
+remote '[ ! -e /system/bin ]'
 remote '/user/bin/rush -c "echo migrated-shell"' | grep -qx migrated-shell
 mode /user/bin drwxrwxr-x
 mode /user/bin/rush -r-xr-xr-x

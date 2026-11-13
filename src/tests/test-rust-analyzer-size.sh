@@ -17,23 +17,24 @@ measure() {
   imager="$root/build/obj/release/imager/release/imager"
   [ -x "$imager" ] || { echo 'build a release image before measuring analyzer size' >&2; return 1; }
   evidence="$(mktemp -d "$root/build/ra-image-growth.XXXXXX")"
-  binary="$(stat -c %s "$assembly/rust-analyzer/devtools/rust/bin/rust-analyzer")"
-  sources="$(find "$assembly/rust-analyzer/devtools/rust/lib/rustlib/src/rust/library" \
+  binary="$(stat -c %s "$assembly/rust-analyzer/user/lib/rust/bin/rust-analyzer")"
+  sources="$(find "$assembly/rust-analyzer/user/lib/rust/lib/rustlib/src/rust/library" \
     -type f -printf '%s\n' | awk '{bytes += $1} END {printf "%.0f", bytes}')"
   printf 'binary_bytes=%s\nrust_src_bytes=%s\n' "$binary" "$sources" > "$evidence/sizes"
   check_size binary "$binary" 33554432
   check_size rust-src "$sources" 83886080
   [ "$(grep -cxF -- '  - "rust-analyzer"' "$root/src/imager/motor-os-dev.yaml")" = 1 ]
-  [ "$(grep -cxF -- '  - "rust-analyzer/devtools/rust/bin/rust-analyzer"' "$root/src/imager/motor-os-dev.yaml")" = 1 ]
+  [ "$(grep -cxF -- '  - "rust-analyzer/user/lib/rust/bin/rust-analyzer"' "$root/src/imager/motor-os-dev.yaml")" = 1 ]
   for variant in without with; do
-    # Only remove the analyzer overlay and its required executable; all other
+    # Only remove the analyzer overlay and its required executables; all other
     # inputs, permissions, source snapshots, and virtual capacity remain equal.
     awk -v variant="$variant" -v destination="$evidence/$variant.qcow2" \
       -v policy="$root/src/imager/motor-os-permissions.yaml" '
       /^permission_policy:/ {print "permission_policy: \"" policy "\""; next}
       /^img_name:/ {print "img_name: \"" destination "\""; next}
       variant == "without" && /^  - "rust-analyzer"$/ {next}
-      variant == "without" && /^  - "rust-analyzer\/devtools\/rust\/bin\/rust-analyzer"$/ {next}
+      variant == "without" && /^  - "rust-analyzer\/user\/bin\/dev\/rust-analyzer"$/ {next}
+      variant == "without" && /^  - "rust-analyzer\/user\/lib\/rust\/bin\/rust-analyzer"$/ {next}
       {print}
     ' "$root/src/imager/motor-os-dev.yaml" > "$evidence/$variant.yaml"
     flock "$root/build/imager.lock" env MOTOR_ASSEMBLY_IMAGE_ROOT="$assembly" \

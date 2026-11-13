@@ -188,6 +188,8 @@ test_vm_configure_ssh
 "$WD/test-rust-analyzer-size-contract.sh"
 "$WD/test-rustfmt-size-contract.sh"
 "$WD/test-make-driver.sh"
+bash "$WD/test-toolchain-archive.sh"
+bash "$WD/test-toolchain-bootstrap.sh"
 bash "$WD/test-net-contract.sh"
 python3 "$WD/test-helix-lsp-ready.py"
 if [ "$BUILD" = "release" ]; then
@@ -740,7 +742,6 @@ fi
 
 check_bin_permissions() {
   local directory="$1"
-  local policy="$2"
   local listing
   local mode
   local name
@@ -751,9 +752,8 @@ check_bin_permissions() {
   rows="$(printf '%s\n' "$listing" | awk 'NF { print $1, $NF }')"
   [ -n "$rows" ] || fail "$directory is empty"
   while read -r mode name; do
-    case "$policy:$mode" in
-      system:-r-xr-xr-x) ;;
-      mutable:-r-xr-xr-x|mutable:-rwxrwxr-x|mutable:drwxrwxr-x) ;;
+    case "$mode" in
+      -r-xr-xr-x|-rwxrwxr-x|drwxrwxr-x) ;;
       *) fail "$directory/$name has unexpected mode '$mode'" ;;
     esac
   done <<EOF
@@ -761,12 +761,10 @@ $rows
 EOF
 }
 
-check_bin_permissions /system/bin system
-check_bin_permissions /user/bin mutable
+check_bin_permissions /user/bin
 "$WD/test-image-layout.sh"
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
-  check_bin_permissions /devtools/bin mutable
-  check_bin_permissions /user/bin/dev mutable
+  check_bin_permissions /user/bin/dev
   editable_script=/user/bin/dev/www
   saved_script="$TEST_TMP/fs-permissions-www.saved"
   vm_ssh /user/bin/cp "$editable_script" "$saved_script"
@@ -779,12 +777,12 @@ if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
     /user/bin/mv $editable_script.renamed $editable_script" ||
     fail "Interactive session could not rename $editable_script"
   vm_ssh /user/bin/rm "$saved_script"
-  check_bin_permissions /user/bin/dev mutable
+  check_bin_permissions /user/bin/dev
 fi
 
 EXPECTED_PATH=/user/bin
 if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
-  EXPECTED_PATH=$EXPECTED_PATH:/user/bin/dev:/devtools/bin
+  EXPECTED_PATH=$EXPECTED_PATH:/user/bin/dev
 fi
 [ "$(vm_ssh_stdout /user/bin/printenv PATH)" = "PATH=$EXPECTED_PATH" ] ||
   fail "russhd PATH does not match $EXPECTED_PATH"

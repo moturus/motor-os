@@ -7,13 +7,11 @@ input_files:
   - "/system/services/sys-init"
   - "/system/services/sys-tty"
   - "/user/bin/rush"
-  - "/system/bin/rush"
   - "/user/bin/sysbox"
   - "/user/bin/red"
   - "/user/bin/rmux"
 directories:
   - "/system"
-  - "/system/bin"
   - "/system/cfg"
   - "/system/logs"
   - "/system/services"

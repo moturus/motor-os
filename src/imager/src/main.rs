@@ -61,6 +61,8 @@ struct Config {
     ca_bundle: Option<String>,
     filesystem: String,
     data_partition_size_mb: u64,
+    #[serde(default)]
+    raw_data_partition_size_mb: Option<u64>,
     img_name: String,
     image_format: ImageFormat,
 }
@@ -973,6 +975,9 @@ fn set_raw_output(config: &mut Config, output: &str) -> Result<(), String> {
     }
     config.img_name = output.to_owned();
     config.image_format = ImageFormat::Raw;
+    if let Some(size) = config.raw_data_partition_size_mb {
+        config.data_partition_size_mb = size;
+    }
     Ok(())
 }
 
@@ -982,7 +987,7 @@ mod tests {
     use moto_sdk::async_fs::FileSystem;
 
     #[test]
-    fn every_image_uses_user_commands_and_keeps_only_legacy_shells() {
+    fn every_image_uses_user_commands_without_legacy_shells() {
         for yaml in [
             include_str!("../motor-os-base.yaml"),
             include_str!("../motor-os.yaml"),
@@ -997,24 +1002,16 @@ mod tests {
             for command in ["rush", "sysbox"] {
                 assert!(config.input_files.contains(&format!("/user/bin/{command}")));
             }
-            let legacy: Vec<_> = config
+            assert!(!config.directories.iter().any(|path| path == "/system/bin"));
+            assert!(!config
                 .input_files
                 .iter()
-                .filter(|path| path.starts_with("/system/bin/"))
-                .map(String::as_str)
-                .collect();
-            assert_eq!(legacy, ["/system/bin/rush"]);
+                .any(|path| path.starts_with("/system/bin/")));
             let mut files = BTreeMap::new();
             for overlay in config.static_dirs {
                 add_static_dir(&mut files, Path::new("../..").join(overlay), Path::new("/"));
             }
-            assert_eq!(
-                files
-                    .keys()
-                    .filter(|path| path.starts_with("/system/bin/"))
-                    .collect::<Vec<_>>(),
-                [&"/system/bin/sh".to_owned()]
-            );
+            assert!(!files.keys().any(|path| path.starts_with("/system/bin/")));
             for path in ["/user/cfg/rush.cfg", "/user/cfg/sshd.toml"] {
                 let contents = fs::read_to_string(&files[path]).unwrap();
                 assert!(!contents.contains("/system/bin"));
@@ -1031,7 +1028,8 @@ mod tests {
         assert_eq!(config.permission_policy, "motor-os-permissions.yaml");
         assert_eq!(config.img_name, "motor-os.qcow2");
         assert_eq!(config.image_format, ImageFormat::Qcow2);
-        assert_eq!(config.data_partition_size_mb, 256);
+        assert_eq!(config.data_partition_size_mb, 32768);
+        assert_eq!(config.raw_data_partition_size_mb, Some(256));
         assert_eq!(
             config.static_dirs,
             ["img_files/motor-os-base", "img_files/motor-os"]
@@ -1086,6 +1084,7 @@ mod tests {
 
         assert_eq!(config.img_name, "motor-os.img");
         assert_eq!(config.image_format, ImageFormat::Raw);
+        assert_eq!(config.data_partition_size_mb, 256);
         assert_eq!(config.input_files, input_files);
         assert_eq!(config.static_dirs, static_dirs);
         assert_eq!(config.assembly_dirs, assembly_dirs);
@@ -1095,6 +1094,7 @@ mod tests {
             assert!(set_raw_output(&mut invalid, output).is_err());
             assert_eq!(invalid.img_name, "motor-os.qcow2");
             assert_eq!(invalid.image_format, ImageFormat::Qcow2);
+            assert_eq!(invalid.data_partition_size_mb, 32768);
         }
     }
 
@@ -1147,7 +1147,7 @@ mod tests {
                 "sys-lib-deps"
             ]
         );
-        assert_eq!(config.assembly_required_executables.len(), 21);
+        assert_eq!(config.assembly_required_executables.len(), 23);
         assert!(config
             .assembly_required_executables
             .iter()
@@ -1159,7 +1159,7 @@ mod tests {
         assert!(config
             .assembly_required_executables
             .iter()
-            .any(|path| path == "rust-analyzer/devtools/rust/bin/rust-analyzer"));
+            .any(|path| path == "rust-analyzer/user/lib/rust/bin/rust-analyzer"));
         assert!(!config
             .assembly_required_executables
             .iter()
@@ -1169,10 +1169,12 @@ mod tests {
             .iter()
             .any(|path| path.ends_with("/rustc")));
         for path in [
-            "rustc/devtools/bin/rustfmt",
-            "rustc/devtools/rust/bin/rustfmt",
-            "rustc/devtools/bin/clippy-driver",
-            "rustc/devtools/rust/bin/clippy-driver",
+            "llvm/user/bin/dev/ar",
+            "rust-analyzer/user/bin/dev/rust-analyzer",
+            "rustc/user/bin/dev/rustfmt",
+            "rustc/user/lib/rust/bin/rustfmt",
+            "rustc/user/bin/dev/clippy-driver",
+            "rustc/user/lib/rust/bin/clippy-driver",
         ] {
             assert!(config
                 .assembly_required_executables
@@ -1195,7 +1197,7 @@ mod tests {
         for path in ["/devtools/tmp", "/devtools/cfg"] {
             assert!(!config.directories.iter().any(|candidate| candidate == path));
         }
-        for path in ["/none/tmp", "/devtools/llvm/cfg"] {
+        for path in ["/none/tmp", "/user/lib/llvm/cfg"] {
             assert!(config.directories.iter().any(|candidate| candidate == path));
         }
         // Each role has its own Lorry repository and cache.
@@ -1277,7 +1279,7 @@ mod tests {
             .iter()
             .all(|path| !path.starts_with("/devtools/cfg")));
         assert!(config.directories.iter().all(|path| {
-            !path.starts_with("/devtools/llvm") && !path.starts_with("/devtools/rust")
+            !path.starts_with("/user/lib/llvm") && !path.starts_with("/user/lib/rust")
         }));
         assert!(config
             .input_files
@@ -1452,7 +1454,7 @@ mod tests {
         assert!(config
             .required_executables
             .iter()
-            .any(|path| path == "/assemblies/exact/images/llvm/devtools/bin/cc"));
+            .any(|path| path == "/assemblies/exact/images/llvm/user/bin/dev/cc"));
         assert!(config
             .static_dirs
             .iter()
@@ -1569,7 +1571,7 @@ trees:
     file: "rw-rw-r--"
     script: "rwxrwxr-x"
     elf: "r-xr-xr-x"
-  - path: "/devtools/bin"
+  - path: "/user/bin/dev"
     directory: "rwxr-xr-x"
     file: "rw-r--r--"
     script: "rwxrwxr-x"
@@ -1602,12 +1604,12 @@ entries: []
         let raw_files = BTreeMap::from([
             ("/system/bin/sh".to_owned(), system_script),
             ("/user/bin/elf".to_owned(), user_elf),
-            ("/devtools/bin/script".to_owned(), dev_script),
+            ("/user/bin/dev/script".to_owned(), dev_script),
         ]);
         let directories = vec![
             "/system/bin".to_owned(),
             "/user/bin".to_owned(),
-            "/devtools/bin".to_owned(),
+            "/user/bin/dev".to_owned(),
         ];
         let files = resolve_image_files(&raw_files, &directories, &policy).unwrap();
         let partition = root.join("partition");
@@ -1646,7 +1648,7 @@ entries: []
                     ("/", "rwxr-xr-x"),
                     ("/system/bin/sh", "r-xr-xr-x"),
                     ("/user/bin/elf", "r-xr-xr-x"),
-                    ("/devtools/bin/script", "rwxrwxr-x"),
+                    ("/user/bin/dev/script", "rwxrwxr-x"),
                 ] {
                     let id = entry(&fs, Path::new(path)).await?;
                     let mode = fs

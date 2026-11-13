@@ -536,10 +536,10 @@ trees:
                 mode
             );
         }
-        // Interactive owns /devtools, so a user can install a toolchain there.
+        // Installed tools belong to Interactive; each role can populate its cache.
         for (path, mode) in [
             ("/devtools", "rwxrwxr-x"),
-            ("/devtools/llvm/bin", "rwxrwxr-x"),
+            ("/user/lib/llvm/bin", "rwxrwxr-x"),
             ("/user/dev/lorry", "rwxrwxr-x"),
             ("/user/dev/lorry/cache", "rwxrwxr-x"),
             ("/none/dev/lorry/cache", "rwxrwxrwx"),

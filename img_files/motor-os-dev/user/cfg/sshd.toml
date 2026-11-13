@@ -8,7 +8,7 @@
 
 version = 2
 listen_on = '0.0.0.0:2222'
-path = "/user/bin:/user/bin/dev:/devtools/bin"
+path = "/user/bin:/user/bin/dev"
 allow_tcp_forwarding = true
 gateway_ports = false
 

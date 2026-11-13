@@ -28,7 +28,6 @@ wasm_source_manifest() (
 	local sources="$1" spec repo branch revision
 	shift
 	cd "$MOTOR"
-	printf 'toolchain=%s\n' "$RUSTUP_TOOLCHAIN"
 	printf 'rustc=%s\n' "$(rustc --version)"
 	printf 'target=x86_64-unknown-motor\nprofile=release\n'
 	for spec in $sources; do

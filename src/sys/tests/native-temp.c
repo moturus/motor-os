@@ -21,16 +21,15 @@ static void check_tmp(const char *expected) {
 
 int main(void) {
 	assert(strcmp(P_tmpdir, "/user/tmp") == 0);
-	/* The 1.99.1-2 libc keeps its legacy paths until the milestone 4 rebuild. */
-	assert(strcmp(_PATH_DEFPATH, "/system/bin:/user/bin") == 0);
-	assert(strcmp(_PATH_STDPATH, "/system/bin:/user/bin") == 0);
-	assert(strcmp(_PATH_BSHELL, "/system/bin/sh") == 0);
+	assert(strcmp(_PATH_DEFPATH, "/user/bin") == 0);
+	assert(strcmp(_PATH_STDPATH, "/user/bin") == 0);
+	assert(strcmp(_PATH_BSHELL, "/user/bin/sh") == 0);
 	assert(strcmp(_PATH_TMP, "/user/tmp/") == 0);
 
 	char path[64];
 	size_t path_len = confstr(_CS_PATH, path, sizeof(path));
-	assert(path_len == strlen("/system/bin:/user/bin") + 1);
-	assert(strcmp(path, "/system/bin:/user/bin") == 0);
+	assert(path_len == strlen("/user/bin") + 1);
+	assert(strcmp(path, "/user/bin") == 0);
 
 	assert(unsetenv("TMPDIR") == 0);
 	check_tmp("/user/tmp/");
@@ -38,12 +37,21 @@ int main(void) {
 	check_tmp("/none/tmp/");
 
 	setusershell();
-	assert(strcmp(getusershell(), "/system/bin/sh") == 0);
-	assert(strcmp(getusershell(), "/system/bin/rush") == 0);
+	assert(strcmp(getusershell(), "/user/bin/sh") == 0);
+	assert(strcmp(getusershell(), "/user/bin/rush") == 0);
 	assert(getusershell() == NULL);
 	endusershell();
 
 	int status = system("true");
+	assert(WIFEXITED(status));
+	assert(WEXITSTATUS(status) == 0);
+
+	FILE *pipe = popen("printf native-popen", "r");
+	assert(pipe);
+	char output[32];
+	assert(fgets(output, sizeof(output), pipe) == output);
+	assert(strcmp(output, "native-popen") == 0);
+	status = pclose(pipe);
 	assert(WIFEXITED(status));
 	assert(WEXITSTATUS(status) == 0);
 

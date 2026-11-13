@@ -31,6 +31,7 @@ usage() {
 Usage: src/build-motor-os.sh
        src/build-motor-os.sh [--javy-only] [--wasmtime-only]
        src/build-motor-os.sh --sys-lib-deps-only
+       src/build-motor-os.sh --toolchain-overlays TOOLCHAIN_PREFIX OUTPUT
 
 Build the external sources and all four images with the Motor toolchain that
 rust-toolchain.toml names, which must be installed in rustup, and whose
@@ -52,6 +53,10 @@ native archive must be $MOTORH/motor-toolchain-<version>.tar.zst:
 they skip host provisioning and image construction.
 --sys-lib-deps-only likewise fetches only the dependencies of the development
 image's library sources.
+--toolchain-overlays builds the development programs with a freshly built
+Linux-host toolchain and copies their overlays into OUTPUT. This is the
+toolchain release builder's entry point; it needs neither an installed Motor
+toolchain nor a native archive, and does not provision the host or build images.
 
 Environment:
   MOTORH  The directory with the native toolchain archive. Defaults to the
@@ -73,15 +78,28 @@ parse_options() {
 	JAVY_ONLY=false
 	WASMTIME_ONLY=false
 	SYS_LIB_DEPS_ONLY=false
+	BOOTSTRAP_TOOLCHAIN=
+	TOOLCHAIN_OVERLAY_OUTPUT=
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
 			-h|--help) usage; return 2 ;;
 			--javy-only) JAVY_ONLY=true; shift ;;
 			--wasmtime-only) WASMTIME_ONLY=true; shift ;;
 			--sys-lib-deps-only) SYS_LIB_DEPS_ONLY=true; shift ;;
+			--toolchain-overlays)
+				[ "$#" -ge 3 ] || die '--toolchain-overlays requires TOOLCHAIN_PREFIX and OUTPUT'
+				BOOTSTRAP_TOOLCHAIN="$(realpath -e "$2")" || die "toolchain directory is missing: $2"
+				TOOLCHAIN_OVERLAY_OUTPUT="$(realpath -m "$3")" || die "invalid overlay directory: $3"
+				[ -x "$BOOTSTRAP_TOOLCHAIN/bin/rustc" ] && [ -x "$BOOTSTRAP_TOOLCHAIN/bin/cargo" ] ||
+					die "not a Linux-host toolchain: $BOOTSTRAP_TOOLCHAIN"
+				shift 3 ;;
 			*) usage >&2; die "unknown argument: $1" ;;
 		esac
 	done
+	if [ -n "$BOOTSTRAP_TOOLCHAIN" ]; then
+		[ "$JAVY_ONLY" = false ] && [ "$WASMTIME_ONLY" = false ] && [ "$SYS_LIB_DEPS_ONLY" = false ] ||
+			die '--toolchain-overlays cannot be combined with other build modes'
+	fi
 }
 
 # --- paths ------------------------------------------------------------------------
@@ -384,18 +402,34 @@ ensure_wasi_sdk() {
 	mv "$WASI_SDK.part" "$WASI_SDK"
 }
 
-build_external_sources() {
+build_development_sources() {
 	build_external_source lua "$LUA_IMG" user/bin/dev/lua build_lua
 	build_external_source quickjs "$QUICKJS_IMG" user/bin/dev/qjs build_quickjs
-	build_external_source ripgrep "$RG_IMG" user/bin/rg build_ripgrep
 	build_external_source helix "$HELIX_IMG" user/lib/helix/hx build_helix
 	build_external_source sed "$SED_IMG" user/bin/dev/sed build_sed
-	build_external_source tar "$TAR_IMG" user/bin/tar build_tar
 	ensure_wasm_guest_toolchain
 	ensure_wasi_sdk
 	build_external_source javy "$JAVY_IMG" user/bin/dev/javy build_javy
 	build_external_source wasmtime "$WASMTIME_IMG" user/bin/dev/wasmtime-rt build_wasmtime
+}
+
+build_external_sources() {
+	build_development_sources
+	build_external_source ripgrep "$RG_IMG" user/bin/rg build_ripgrep
+	build_external_source tar "$TAR_IMG" user/bin/tar build_tar
 	fetch_sys_lib_deps
+}
+
+build_toolchain_overlays() {
+	select_external_sources toolchain
+	prepare_external_sources
+	check_external_lockfiles ||
+		die "external source preflight failed; see $MOTOR/build/external-lockfiles.log"
+	build_development_sources
+	make -C "$MOTOR" -j"$(nproc)" BUILD=release toolchain-payloads
+	. "$SCRIPT_DIR/build-scripts/toolchain-overlays.sh"
+	toolchain_collect_overlays "$MOTOR" "$MOTOR/build/bin/release" \
+		"$ASSEMBLY_IMAGE_ROOT" "$MOTOR/build/bin/release/imager" "$TOOLCHAIN_OVERLAY_OUTPUT"
 }
 
 # --- external source: tar and zstd ---------------------------------------------
@@ -493,12 +527,6 @@ unpack_native_toolchain() {
 	for overlay in llvm rustc rust-analyzer libc; do
 		rm -rf "${ASSEMBLY_IMAGE_ROOT:?}/$overlay"
 		mv "$unpacked/$top/images/$overlay" "$ASSEMBLY_IMAGE_ROOT/$overlay"
-		# The 1.99.1-2 compiler trees stay in /devtools until milestone 4;
-		# their example sources already belong in None's development tree.
-		if [ -d "$ASSEMBLY_IMAGE_ROOT/$overlay/devtools/src" ]; then
-			mkdir -p "$ASSEMBLY_IMAGE_ROOT/$overlay/none"
-			mv "$ASSEMBLY_IMAGE_ROOT/$overlay/devtools/src" "$ASSEMBLY_IMAGE_ROOT/$overlay/none/dev"
-		fi
 	done
 	rm -rf "$unpacked"
 }
@@ -511,7 +539,8 @@ main() {
 		return "$parse_status"
 	}
 	local complete=true caller_has_rustup=true
-	if [ "$JAVY_ONLY" = true ] || [ "$WASMTIME_ONLY" = true ] || [ "$SYS_LIB_DEPS_ONLY" = true ]; then
+	if [ "$JAVY_ONLY" = true ] || [ "$WASMTIME_ONLY" = true ] || \
+		[ "$SYS_LIB_DEPS_ONLY" = true ] || [ -n "$BOOTSTRAP_TOOLCHAIN" ]; then
 		complete=false
 	else
 		log "complete Motor OS build starting"
@@ -534,11 +563,15 @@ main() {
 		command -v rustup >/dev/null || die "rustup is unavailable after host provisioning"
 	fi
 	# Helix and Javy pin toolchains of their own; the exported name overrides them.
-	export RUSTUP_TOOLCHAIN="$TOOLCHAIN"
+	export RUSTUP_TOOLCHAIN="${BOOTSTRAP_TOOLCHAIN:-$TOOLCHAIN}"
 	local toolchain_sysroot
 	toolchain_sysroot="$(rustc --print sysroot)"
 	SYSROOT="$toolchain_sysroot/lib/rustlib/$TARGET/sysroot"
 	LLVM_TOOLS="$toolchain_sysroot/lib/rustlib/x86_64-unknown-linux-gnu/bin"
+	if [ -n "$BOOTSTRAP_TOOLCHAIN" ]; then
+		build_toolchain_overlays
+		return
+	fi
 
 	if [ "$complete" = false ]; then
 		local wasm=false
@@ -574,11 +607,11 @@ main() {
 	build_images
 
 	local required_outputs=(
-		"$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm"
-		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc"
-		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt"
-		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/clippy-driver"
-		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer"
+		"$ASSEMBLY_IMAGE_ROOT/llvm/user/lib/llvm/bin/llvm"
+		"$ASSEMBLY_IMAGE_ROOT/rustc/user/lib/rust/bin/rustc"
+		"$ASSEMBLY_IMAGE_ROOT/rustc/user/lib/rust/bin/rustfmt"
+		"$ASSEMBLY_IMAGE_ROOT/rustc/user/lib/rust/bin/clippy-driver"
+		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/user/lib/rust/bin/rust-analyzer"
 		"$RG_IMG/user/bin/rg"
 		"$TAR_IMG/user/bin/tar"
 		"$TAR_IMG/user/bin/zstd"

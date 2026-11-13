@@ -35,7 +35,7 @@ trap cleanup EXIT
 
 # The native rustfmt is built from the same sources as the host toolchain's.
 expected_version="$("$(cd "$ROOT_DIR" && rustc --print sysroot)/bin/rustfmt" --version)"
-actual_version="$(remote /devtools/bin/rustfmt --version)"
+actual_version="$(remote /user/bin/dev/rustfmt --version)"
 [ "$actual_version" = "$expected_version" ] ||
   fail "native version is '$actual_version', expected '$expected_version'"
 
@@ -75,22 +75,22 @@ for path in "$user_home_toml" "$user_config_dir"; do
 done
 
 started_ns="$(date +%s%N)"
-remote /devtools/bin/rustfmt --edition 2024 < "$FIXTURES/stdin.in.rs" \
+remote /user/bin/dev/rustfmt --edition 2024 < "$FIXTURES/stdin.in.rs" \
   > "$temporary/stdin.rs" 2> "$temporary/stdin.stderr"
 cmp "$FIXTURES/stdin.expected.rs" "$temporary/stdin.rs" ||
   fail 'stdin formatting differs from the checked-in output'
 [ ! -s "$temporary/stdin.stderr" ] || fail 'stdin formatting wrote to stderr'
 
-remote "/devtools/bin/rustfmt --edition 2024 '$in_place_dir/input.rs'"
+remote "/user/bin/dev/rustfmt --edition 2024 '$in_place_dir/input.rs'"
 download "$in_place_dir/input.rs" "$temporary/in-place-first.rs"
 cmp "$FIXTURES/in-place.expected.rs" "$temporary/in-place-first.rs" ||
   fail 'in-place formatting in a spaced directory differs'
-remote "/devtools/bin/rustfmt --edition 2024 '$in_place_dir/input.rs'"
+remote "/user/bin/dev/rustfmt --edition 2024 '$in_place_dir/input.rs'"
 download "$in_place_dir/input.rs" "$temporary/in-place-second.rs"
 cmp "$temporary/in-place-first.rs" "$temporary/in-place-second.rs" ||
   fail 'a second in-place run changed the file'
 
-remote "/devtools/rust/bin/rustfmt --edition 2024 '$project_dir/input.rs'"
+remote "/user/lib/rust/bin/rustfmt --edition 2024 '$project_dir/input.rs'"
 download "$project_dir/input.rs" "$temporary/project-width.rs"
 cmp "$FIXTURES/width.expected.rs" "$temporary/project-width.rs" ||
   fail 'project rustfmt.toml was not honored'
@@ -100,7 +100,7 @@ cmp "$FIXTURES/width.expected.rs" "$temporary/project-width.rs" ||
 printf 'mkdir "%s"\nput "%s" "%s"\n' "$user_config_dir" "$FIXTURES/width.toml" \
   "$user_config_dir/rustfmt.toml" | sftp_batch
 guest_user_paths=("$user_config_dir")
-remote "/devtools/bin/rustfmt --edition 2024 '$user_case_dir/config-dir.rs'"
+remote "/user/bin/dev/rustfmt --edition 2024 '$user_case_dir/config-dir.rs'"
 download "$user_case_dir/config-dir.rs" "$temporary/config-dir-width.rs"
 cmp "$FIXTURES/width.expected.rs" "$temporary/config-dir-width.rs" ||
   fail '/user/cfg/rustfmt/rustfmt.toml was not honored'
@@ -109,29 +109,29 @@ guest_user_paths=()
 
 printf 'put "%s" "%s"\n' "$FIXTURES/width.toml" "$user_home_toml" | sftp_batch
 guest_user_paths=("$user_home_toml")
-remote "/devtools/bin/rustfmt --edition 2024 '$user_case_dir/home.rs'"
+remote "/user/bin/dev/rustfmt --edition 2024 '$user_case_dir/home.rs'"
 download "$user_case_dir/home.rs" "$temporary/home-width.rs"
 cmp "$FIXTURES/width.expected.rs" "$temporary/home-width.rs" ||
   fail '/user/rustfmt.toml was not honored'
 remote "/user/bin/rm '$user_home_toml'"
 guest_user_paths=()
 
-remote "HOME='$env_case_dir/home' XDG_CONFIG_HOME='$env_case_dir/xdg' /devtools/rust/bin/rustfmt --edition 2024 '$env_case_dir/input.rs'"
+remote "HOME='$env_case_dir/home' XDG_CONFIG_HOME='$env_case_dir/xdg' /user/lib/rust/bin/rustfmt --edition 2024 '$env_case_dir/input.rs'"
 download "$env_case_dir/input.rs" "$temporary/env-width.rs"
 cmp "$FIXTURES/width.default.expected.rs" "$temporary/env-width.rs" ||
   fail 'HOME or XDG_CONFIG_HOME changed configuration discovery'
 
 edition_status=0
-remote "/devtools/bin/rustfmt --edition 2015 '$guest_root/edition.rs'" \
+remote "/user/bin/dev/rustfmt --edition 2015 '$guest_root/edition.rs'" \
   > "$temporary/edition-2015.stdout" 2> "$temporary/edition-2015.stderr" || edition_status="$?"
 [ "$edition_status" -eq 1 ] || fail "edition 2015 returned $edition_status instead of 1"
 grep -qi error "$temporary/edition-2015.stderr" || fail 'edition 2015 emitted no error'
-remote "/devtools/bin/rustfmt --edition 2024 '$guest_root/edition.rs'"
+remote "/user/bin/dev/rustfmt --edition 2024 '$guest_root/edition.rs'"
 download "$guest_root/edition.rs" "$temporary/edition.rs"
 cmp "$FIXTURES/edition.expected.rs" "$temporary/edition.rs" ||
   fail 'edition 2024 formatting differs'
 
-remote "/devtools/bin/rustfmt --edition 2024 '$guest_root/macro.rs'"
+remote "/user/bin/dev/rustfmt --edition 2024 '$guest_root/macro.rs'"
 download "$guest_root/macro.rs" "$temporary/macro.rs"
 cmp "$FIXTURES/macro.expected.rs" "$temporary/macro.rs" ||
   fail 'speculatively parsed macro formatting differs'
@@ -140,7 +140,7 @@ for kind in lexer parser; do
   expected_status=1
   [ "$kind" = lexer ] && expected_status=101
   status=0
-  remote "/devtools/bin/rustfmt --edition 2024 '$guest_root/$kind-error.rs'" \
+  remote "/user/bin/dev/rustfmt --edition 2024 '$guest_root/$kind-error.rs'" \
     > "$temporary/$kind.stdout" 2> "$temporary/$kind.stderr" || status="$?"
   [ "$status" -eq "$expected_status" ] ||
     fail "$kind error returned $status instead of $expected_status"
@@ -148,7 +148,7 @@ for kind in lexer parser; do
   download "$guest_root/$kind-error.rs" "$temporary/$kind-after.rs"
   cmp "$FIXTURES/$kind-error.rs" "$temporary/$kind-after.rs" ||
     fail "$kind error changed its input file"
-  remote /devtools/bin/rustfmt --edition 2024 < "$FIXTURES/stdin.in.rs" \
+  remote /user/bin/dev/rustfmt --edition 2024 < "$FIXTURES/stdin.in.rs" \
     > "$temporary/$kind-recovery.rs"
   cmp "$FIXTURES/stdin.expected.rs" "$temporary/$kind-recovery.rs" ||
     fail "valid formatting did not recover after $kind error"

@@ -1,12 +1,12 @@
 # Native Cargo compatibility is provided by Lorry. Select it in the server's
 # own environment: cargo.extraEnv only affects the server's children.
 [language-server.rust-analyzer]
-command = "/devtools/rust/bin/rust-analyzer"
+command = "/user/lib/rust/bin/rust-analyzer"
 
 [language-server.rust-analyzer.environment]
 CARGO = "/user/bin/dev/lorry"
-RUSTFMT = "/devtools/rust/bin/rustfmt"
-PATH = "/user/bin:/user/bin/dev:/devtools/bin"
+RUSTFMT = "/user/lib/rust/bin/rustfmt"
+PATH = "/user/bin:/user/bin/dev"
 # The background server must not take the editor's session terminal stream.
 MOTURUS_STDIO_NO_TERMINAL = "true"
 
@@ -14,7 +14,7 @@ MOTURUS_STDIO_NO_TERMINAL = "true"
 cargo.target = "x86_64-unknown-motor"
 cargo.targetDir = true
 # The installed sysroot; "discover" costs a rustc launch per workspace load.
-cargo.sysroot = "/devtools/rust"
+cargo.sysroot = "/user/lib/rust"
 cargo.buildScripts.enable = true
 cargo.buildScripts.useRustcWrapper = false
 # Overrides run literally; project feature/target changes need a complete override.

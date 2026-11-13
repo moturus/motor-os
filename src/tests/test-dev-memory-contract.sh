@@ -21,6 +21,12 @@ chmod +x "$temporary/src/tests/test-wasm.sh"
 printf '%s\n' '#!/bin/bash' 'exit 0' > "$temporary/bin/python3"
 cp "$temporary/bin/python3" "$temporary/src/bin/lorry/tests/test-all.sh"
 chmod +x "$temporary/bin/python3" "$temporary/src/bin/lorry/tests/test-all.sh"
+cat > "$temporary/bin/make" <<'EOF'
+#!/bin/bash
+[ "$CARGO_NET_OFFLINE" = true ] || exit 1
+case "$*" in *'BUILD=release main.img toolchain-payloads toolchain-tar') ;; *) exit 1 ;; esac
+EOF
+chmod +x "$temporary/bin/make"
 cat > "$temporary/src/bin/httpd-axum/tests/run.sh" <<'EOF'
 #!/bin/bash
 printf 'httpd-axum %s %s %s\n' "${MOTO_MEMORY_MIB:-unset}" "${MOTO_IMAGE:-unset}" "$*" >> "$MEMORY_TEST_LOG"

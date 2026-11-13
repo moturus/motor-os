@@ -190,11 +190,15 @@ case "$(declare -f main)" in
 	*'unpack_native_toolchain'*'build_external_sources'*'build_images'*) ;;
 	*) fail "the images are not built after the native toolchain and the external sources" ;;
 esac
-case "$(declare -f build_external_sources)" in
-	*'build_external_source lua'*'build_external_source ripgrep'*'build_external_source helix'*\
-*'build_external_source sed'*'build_external_source tar'*) ;;
-	*) fail "Lua, ripgrep, Helix, sed, and tar are not all external sources" ;;
-esac
+sources="$(
+	build_external_source() { echo "$1"; }
+	ensure_wasm_guest_toolchain() { :; }
+	ensure_wasi_sdk() { :; }
+	fetch_sys_lib_deps() { :; }
+	build_external_sources
+)"
+[ "$sources" = $'lua\nquickjs\nhelix\nsed\njavy\nwasmtime\nripgrep\ntar' ] ||
+	fail 'the image build does not include all external sources'
 # The developer image's library sources take their dependencies from an
 # overlay of every package their workspace locks, fetched with Lorry.
 case "$(declare -f build_external_sources)" in
@@ -246,7 +250,7 @@ fi
 
 # Javy and Wasmtime build with the selected toolchain, which their provenance
 # records.
-case "$(declare -f build_external_sources)" in
+case "$(declare -f build_development_sources)" in
 	*'build_external_source javy'*'build_external_source wasmtime'*) ;;
 	*) fail "Javy/Wasmi and Wasmtime are not both external sources" ;;
 esac
@@ -300,7 +304,7 @@ case "$(declare -f build_wasmtime_fixtures)" in
 *'--target wasm32-wasip2 -p test-programs --features motor'*) ;;
 	*) fail "the Wasmtime fixtures are not built with the expected toolchains" ;;
 esac
-case "$(declare -f build_external_sources)" in
+case "$(declare -f build_development_sources)" in
 	*'ensure_wasm_guest_toolchain'*'ensure_wasi_sdk'*'build_external_source javy'*\
 *'build_external_source wasmtime'*) ;;
 	*) fail "the guest toolchain and wasi-sdk are not provided before Javy and Wasmtime" ;;
@@ -318,7 +322,14 @@ case "$(declare -f ensure_wasi_sdk)" in
 esac
 javy_manifest() (
 	RUSTUP_TOOLCHAIN="$1"
-	rustc() { printf 'rustc for %s\n' "$RUSTUP_TOOLCHAIN"; }
+	local selected="$1" reported="${2:-$1}"
+	rustc() {
+		if [ "$RUSTUP_TOOLCHAIN" = "$selected" ]; then
+			printf 'rustc for %s\n' "$reported"
+		else
+			printf 'rustc for %s\n' "$RUSTUP_TOOLCHAIN"
+		fi
+	}
 	JAVY_SOURCES=()
 	JAVY_PLUGIN_SHA=plugin
 	JAVY_TYPESCRIPT_SHA=typescript
@@ -327,9 +338,11 @@ javy_manifest() (
 first_manifest="$(javy_manifest first-probe)"
 second_manifest="$(javy_manifest second-probe)"
 case "$second_manifest" in
-	*'toolchain=second-probe'*'rustc=rustc for second-probe'*) ;;
+	*'rustc=rustc for second-probe'*) ;;
 	*) fail "the Javy manifest does not name the selected toolchain" ;;
 esac
+[ "$(javy_manifest "$temporary/compiler build" second-probe)" = "$second_manifest" ] ||
+	fail "selecting the same compiler by path changes the shipped provenance"
 # The Linux reference digests come from the pinned Linux Javy and the fixtures
 # javy-smoke compiles, so the Javy provenance names each.
 case "$first_manifest" in

@@ -306,7 +306,7 @@ CONFIG_SAVED=1
 printf '\n[network]\ncurl = "%s/curl"\n' "$DEPENDENCIES" |
   vm_ssh "/user/bin/rush -c 'cat >> /user/cfg/lorry.toml'"
 
-cc_version="$(vm_ssh /devtools/bin/cc --version 2>&1)" ||
+cc_version="$(vm_ssh /user/bin/dev/cc --version 2>&1)" ||
   fail "native cc --version failed: $cc_version"
 case "$cc_version" in
   *"clang version"*) ;;
@@ -323,14 +323,14 @@ for source in "${NATIVE_FIXTURES[@]}"; do
     "motor@192.168.4.2:$NATIVE_FIXTURE_DIR/$source" ||
     fail "cannot upload src/sys/tests/$source"
 done
-vm_ssh "/devtools/bin/cc $NATIVE_FIXTURE_DIR/native-fstat.c -o $DEV_TMP/native-fstat"
-vm_ssh "/devtools/bin/cc /none/dev/hello-world/hello.c -o $DEV_TMP/hello-c"
+vm_ssh "/user/bin/dev/cc $NATIVE_FIXTURE_DIR/native-fstat.c -o $DEV_TMP/native-fstat"
+vm_ssh "/user/bin/dev/cc /none/dev/hello-world/hello.c -o $DEV_TMP/hello-c"
 expect_guest_mode $DEV_TMP native-fstat -rwxr-xr-- "freshly linked native-fstat"
 expect_guest_mode $DEV_TMP hello-c -rwxr-xr-- "freshly linked hello-c"
 vm_ssh $DEV_TMP/hello-c
-vm_ssh "/devtools/bin/c++ /none/dev/hello-world/hello.cpp -o $DEV_TMP/hello-cpp"
+vm_ssh "/user/bin/dev/c++ /none/dev/hello-world/hello.cpp -o $DEV_TMP/hello-cpp"
 vm_ssh $DEV_TMP/hello-cpp
-vm_ssh "/devtools/bin/rustc /none/dev/hello-world/hello.rs -o $DEV_TMP/hello-rust"
+vm_ssh "/user/bin/dev/rustc /none/dev/hello-world/hello.rs -o $DEV_TMP/hello-rust"
 vm_ssh $DEV_TMP/hello-rust
 [ "$(vm_ssh $DEV_TMP/native-fstat)" = "native-fstat PASS" ] ||
   fail "native non-PTY fstat fixture failed"
@@ -341,24 +341,24 @@ case "$pty_fstat" in
   *"native-fstat PASS"*) ;;
   *) fail "native PTY fstat fixture returned unexpected output: $pty_fstat" ;;
 esac
-if bad_cc="$(vm_ssh /devtools/bin/cc --definitely-invalid-motor-test-option 2>&1)"; then
+if bad_cc="$(vm_ssh /user/bin/dev/cc --definitely-invalid-motor-test-option 2>&1)"; then
   fail "native cc accepted an intentionally invalid option"
 fi
 case "$bad_cc" in
   *"error:"*) ;;
   *) fail "native cc failure lost its diagnostic: $bad_cc" ;;
 esac
-vm_ssh "/devtools/bin/cc $NATIVE_FIXTURE_DIR/native-temp.c -o $DEV_TMP/native-temp"
+vm_ssh "/user/bin/dev/cc $NATIVE_FIXTURE_DIR/native-temp.c -o $DEV_TMP/native-temp"
 [ "$(vm_ssh $DEV_TMP/native-temp)" = "native-temp PASS" ] ||
   fail "native libc PATH, shell, or temporary-directory contract failed"
-vm_ssh "/devtools/bin/c++ $NATIVE_FIXTURE_DIR/native-temp.cpp -o $DEV_TMP/native-temp-cpp"
+vm_ssh "/user/bin/dev/c++ $NATIVE_FIXTURE_DIR/native-temp.cpp -o $DEV_TMP/native-temp-cpp"
 [ "$(vm_ssh $DEV_TMP/native-temp-cpp)" = "native-temp-cpp PASS" ] ||
   fail "native libc++ temporary-directory contract failed"
 vm_ssh "/user/bin/rm -r $NATIVE_FIXTURE_DIR"
 
 rust_temp='use std::env; fn main() { println!("{}", env::temp_dir().display()); }'
 printf '%s\n' "$rust_temp" | vm_ssh "/user/bin/rush -c 'cat >$DEV_TMP/temp-contract.rs'"
-vm_ssh "/devtools/bin/rustc $DEV_TMP/temp-contract.rs -o $DEV_TMP/temp-contract"
+vm_ssh "/user/bin/dev/rustc $DEV_TMP/temp-contract.rs -o $DEV_TMP/temp-contract"
 [ "$(vm_ssh "/user/bin/rush -c 'unset TMPDIR; $DEV_TMP/temp-contract'")" = /user/tmp ] ||
   fail "Rust std did not use the Motor temp fallback"
 [ "$(vm_ssh "TMPDIR=/none/tmp $DEV_TMP/temp-contract")" = /none/tmp ] ||

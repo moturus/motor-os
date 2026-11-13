@@ -5,11 +5,6 @@ default:
   elf: "r-xr-xr-x"
 
 trees:
-  - path: "/system/bin"
-    directory: "rwxr-xr-x"
-    file: "rw-r--r--"
-    script: "r-xr-xr-x"
-    elf: "r-xr-xr-x"
   - path: "/system/logs"
     directory: "rwxr-x---"
     file: "rw-r-----"
