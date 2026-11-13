@@ -27,11 +27,10 @@
 #
 # Each check is written so that only the resize can have produced what it
 # matches: a key would repaint too, so every assertion is made against the bytes
-# that arrived before the next one was sent. Behind rmux that is a screen rather
-# than a span of bytes, for the reason `settled_bar` is about.
+# that arrived before the next one was sent. Behind rmux, read completed frames.
 #
 # Since the console VM is here anyway, it also checks what rush's and rmux's
-# host pty tests cannot: their line editing, byte costs, and panes on the
+# host pty tests cannot: line discipline, byte costs, and panes on the
 # serial console itself, where Enter arrives as CR and LF.
 
 if [ "${TEST_TERMINAL_SIZE_TIMEOUT_ACTIVE:-0}" != "1" ]; then
@@ -143,6 +142,7 @@ export MOTO_FC_VSOCK_UDS=''
 VMM_PID=""
 VM_CHILD_PID=""
 TEST_ROOT_CREATED=0
+SESSION_PID=""
 
 save_red_stderr() {
   if [ -n "$VMM_PID" ] && serial_test_vm_alive; then
@@ -171,6 +171,10 @@ cleanup() {
   local status=$?
   trap - EXIT
   set +e
+  if [ -n "$SESSION_PID" ]; then
+    kill "$SESSION_PID" 2>/dev/null
+    wait "$SESSION_PID" 2>/dev/null
+  fi
   save_red_stderr
   remove_test_root
   exec 3>&- 4>&-
@@ -213,55 +217,7 @@ test_root_mkdirs | sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes \
   -o BatchMode=yes -o StrictHostKeyChecking=yes \
   -o UserKnownHostsFile="$WD/test-known-hosts" -i "$WD/test.key" motor@192.168.4.2
 
-wait_console() {
-  for _ in $(seq 1 120); do
-    if grep -aq "$1" "$CONSOLE_LOG"; then
-      return
-    fi
-    sleep 0.5
-  done
-  fail "the console never wrote '$1' (log: $CONSOLE_LOG)"
-}
-
-# Rush synchronizes `$COLUMNS` from the editor's current width immediately
-# after Enter, before it expands the command. Printing it therefore records the
-# width of the prompt where that command was typed without depending on a
-# particular paint strategy. Reads the recording on stdin and prints each
-# recorded width.
-prompt_widths() {
-  LC_ALL=C grep -ao 'PROMPT_WIDTH=[0-9][0-9]*' |
-    sed 's/PROMPT_WIDTH=//' |
-    tr '\n' ' '
-}
-
-# Everything the console has said since byte $1.
-console_since() {
-  tail -c "+$(($1 + 1))" "$CONSOLE_LOG"
-}
-
-# The same as wait_console, counting only what the console has said since byte
-# $1: every program that reaches the console subscribes, so the handshake worth
-# waiting for is the next one and not the one already in the log.
-wait_console_since() {
-  for _ in $(seq 1 120); do
-    if console_since "$1" | LC_ALL=C grep -aq "$2"; then
-      return
-    fi
-    sleep 0.5
-  done
-  fail "the console never wrote '$2' after byte $1 (log: $CONSOLE_LOG)"
-}
-
-# Every status bar red painted, as `row:width`, from a recording on stdin.
-#
-# `render_status_bar` pads the bar to exactly the terminal's width and `draw`
-# puts it on the row above the message bar, so one bar says both how wide red
-# thinks the terminal is and how tall. Only a bar repainted from column 1 is
-# counted, which a resize produces and a keystroke -- rewriting the columns it
-# changed -- does not. Match through red's right-hand status too: diagnostics
-# share a PTY with the program and may arrive before the next escape sequence,
-# but are not part of the bar's width. $1 is the SGR the amber ground arrives
-# as.
+# A complete status bar records both dimensions as row:width.
 red_bars() {
   LC_ALL=C grep -ao $'\033\\[[0-9]*;1H'"$1"$' \\[1\\] \\[No Name\\][^\033]*NORMAL | [0-9][0-9]*:[0-9][0-9]* ' |
     LC_ALL=C awk -F$'\033' '{
@@ -270,16 +226,9 @@ red_bars() {
       printf "%s:%s ", row, length(bar)
     }'
 }
-
-# How red spells its amber ground (`editor.rs`'s `paint_style`), and how rmux
-# respells the same style when it repaints a pane from its own grid
-# (`screen.rs`'s `sgr`) rather than forwarding the editor's bytes.
 RED_GROUND=$'\033\\[0m\033\\[38;5;233m\033\\[48;5;222m'
 RMUX_GROUND=$'\033\\[0;38;5;233;48;5;222m'
 
-# The last completed full repaint in a recording on stdin, or nothing if there
-# has not been one. `ESC[2J` reaches a console only from `screen.rs`; what a
-# program inside a pane clears is its pane.
 completed_last_repaint() {
   # A full rmux repaint ends by restoring the cursor visibility. Do not expose
   # its status bar until that marker arrives: the SSH log can be read mid-write.
@@ -297,99 +246,7 @@ completed_last_repaint() {
         printf "%s", substr(last, 1, end + 5)
     }'
 }
-
-# The bar red has on rmux's screen, as `row:width`, once it is no longer $2 --
-# the reading taken before whatever this is measuring, or "" for the first one
-# of a session. "none" if it never settles.
-#
-# What rmux sends cannot be read as a screen. It repaints a pane from its own
-# grid whenever it next draws, and that can fall in the middle of the editor's
-# frame: the bar then arrives as two runs, the first from column 1 carrying no
-# style and the rest from wherever it stopped, and no pattern matches it. So
-# this asks for a screen rather than reading the difference between two of
-# them. `refresh-client` makes rmux forget what is on the console (`screen.rs`'s
-# `invalidate`), and the frame after it is a full one: every row from column 1,
-# each style run whole.
-#
-# A refresh is idempotent and costs one frame, which is why waiting for the
-# resize to arrive is a refresh rather than a sleep long enough to be sure. What
-# an editor that never heard about it leaves behind is not the row it used to be
-# on: a grid that shrank dropped the rows off the bottom -- `grid.rs`'s
-# `reshape` clips and never reflows -- so the bar is gone from the screen
-# altogether and the reading is "none".
-#
-# The refresh goes out on fd 4 as $RMUX_REFRESH, both of which each section sets
-# for the keyboard it is driving. The fd, because the readings are taken inside
-# command substitutions, where fd 1 is the substitution and not the terminal.
-# The bytes, because rmux's prefix is `C-a` and so is qemu's: `-nographic`
-# multiplexes the monitor onto the same stdio, and a lone `C-a` there is eaten
-# by the emulator -- `C-a c` does not reach the guest at all, it switches to the
-# qemu monitor. Doubling it is how qemu is told to pass its escape through.
-settled_bar() {
-  local log="$1" was="$2" since bar seen="none"
-  for _ in $(seq 1 20); do
-    since="$(wc -c < "$log")"
-    printf '%b' "$RMUX_REFRESH" >&4
-    for _ in $(seq 1 8); do
-      sleep 0.3
-      bar="$(tail -c "+$((since + 1))" "$log" |
-        completed_last_repaint | red_bars "$RMUX_GROUND")"
-      bar="${bar% }"
-      [ -n "$bar" ] && break
-    done
-    if [ -n "$bar" ]; then
-      seen="$bar"
-      if [ "$bar" != "$was" ]; then
-        break
-      fi
-    fi
-  done
-  printf '%s' "$seen"
-}
-
-# How many times red's stable bar text appears in $1 -- the plainest ASCII proof
-# that the editor painted, usable from inside the `script -qc` shells below,
-# where the console log's byte offsets are not available and escape sequences
-# are awkward to quote. Rmux may splice a cursor-visibility sequence into the
-# leading `[1]`, but it does not split `[No Name]`. Occurrences, not lines: red
-# writes no newlines, so a whole session can be one line.
-bar_count_cmd() {
-  printf "grep -ao '\\[No Name\\]' %s 2>/dev/null | wc -l" "$1"
-}
-
-# The same count, for this shell rather than an inner one.
-bar_count() {
-  eval "$(bar_count_cmd "$1")"
-}
-
-# A command that succeeds once $2 holds red's bar on 1-based row $1, its ground
-# spelled $3 -- how the ssh section waits for the repaint before closing the
-# window it reads. Nothing composites there, so red's own frame is on the wire
-# whole. The whole bar has to be matched and not just the cursor move in front
-# of it: `ESC[{row};1H` alone is also what an erase writes on its way down the
-# screen, and a wait that took one of those for the repaint would let the next
-# key through before the frame it is there to wait for.
-bar_at_row_cmd() {
-  printf "grep -aq '%s\\[%s;1H%s \\[1\\] \\[No Name\\]' %s 2>/dev/null" \
-    "$(printf '\033')" "$1" "$3" "$2"
-}
-
-# Wait until red has painted at all into the recording $1.
-wait_bar() {
-  for _ in $(seq 1 120); do
-    if [ "$(bar_count "$1")" -gt 0 ]; then
-      return
-    fi
-    sleep 0.5
-  done
-  fail "red never painted anything (log: $1)"
-}
-
-# The screen a terminal would show after the recording on stdin, one line per
-# row: $1 rows (0 for as many as the recording reaches) of $2 columns. Enough of
-# a terminal to follow rush's relative repaints and rmux's absolute ones: the
-# cursor moves, the erases, the alternate screen, and DECSC/DECRC. Styles are
-# dropped; the checks are about the picture.
+# Replay cursor moves and erases into the picture seen by the terminal.
 screen_rows() {
   LC_ALL=C.UTF-8 awk -v rows="$1" -v cols="$2" '
     function down() { r++; if (rows && r >= rows) r = rows - 1 }
@@ -451,651 +308,318 @@ screen_rows() {
     }'
 }
 
-# Type $1 (printf %b escapes) at the console and give it $2 seconds to paint.
-console_keys() {
-  printf '%b' "$1" >&3
-  sleep "${2:-1}"
-}
-
-# Wait until red has painted $2 frames on the console since byte $1, its ground
-# spelled $3.
-#
-# Every check below reads red's frames after making something happen, and the
-# two have to be ordered: a resize sent before the editor has painted once is a
-# resize the editor was simply started at, and proves nothing about resizing.
-# Waiting for the frame rather than sleeping a guessed interval is what makes
-# that ordering a fact -- and a red that never paints fails here, loudly, rather
-# than turning into a confusing count later.
-wait_red_bars() {
-  local since="$1" want="$2" seen=0
-  for _ in $(seq 1 60); do
-    seen="$(console_since "$since" | red_bars "$RED_GROUND" | wc -w)"
-    if [ "$seen" -ge "$want" ]; then
-      return
-    fi
-    sleep 0.5
+# Poll only while the expected output is absent. A deadline diagnoses a missing
+# event; successful steps advance as soon as their output arrives.
+wait_for() {
+  local deadline=$((SECONDS + 5))
+  until "$@"; do
+    [ "$SECONDS" -lt "$deadline" ] || fail "timed out: $*"
+    sleep 0.01
   done
-  fail "red painted $seen of $want frames (log: $CONSOLE_LOG)"
 }
 
-# ---- the serial console, in front of a terminal that implements mode 2048 ----
-#
-# The console is the one terminal whose size nobody in Motor OS knows: sys-tty
-# is a byte pump with no opinion (plan §5), so the first prompt is painted at
-# crossterm's non-blocking 80x24 fallback and the real size arrives afterwards.
-# That is decision 8's deliberate asymmetry, and the point of this check is what
-# happens *after* it -- that the size arrives at all without anyone pressing a
-# key, and that it keeps arriving.
+since() { tail -c "+$(($2 + 1))" "$1"; }
+mark() { wc -c < "$1"; }
+has() { since "$1" "$2" | LC_ALL=C grep -aFq -- "$3"; }
+wait_text() { wait_for has "$@"; }
+prompt() { wait_text "$1" "$2" $'\033[?25h'; }
+console_since() { since "$CONSOLE_LOG" "$1"; }
+
+console_command() {
+  local at
+  at="$(mark "$CONSOLE_LOG")"
+  printf '%s\r' "$1" >&3
+  wait_text "$CONSOLE_LOG" "$at" "$2"
+  wait_text "$CONSOLE_LOG" "$at" $'\033[?2048h'
+  prompt "$CONSOLE_LOG" "$at"
+}
+
+bars_are() {
+  [ "$(since "$1" "$2" | red_bars "$RED_GROUND")" = "$3 " ]
+}
+wait_bars() { wait_for bars_are "$@"; }
+
+# A refresh is consumed by rmux, never by its pane. Read the completed full
+# frame so partial diffs cannot look like a missing or incorrectly sized bar.
+frame_complete() {
+  [ -n "$(since "$1" "$2" | completed_last_repaint)" ]
+}
+rmux_frame() {
+  local at
+  at="$(mark "$1")"
+  printf '%b' "$RMUX_REFRESH" >&4
+  wait_for frame_complete "$1" "$at"
+  since "$1" "$at" | completed_last_repaint
+}
+rmux_bar() {
+  local deadline=$((SECONDS + 5)) bar
+  while :; do
+    bar="$(rmux_frame "$1" | red_bars "$RMUX_GROUND")"
+    [ "$bar" = "$2 " ] && return
+    [ "$SECONDS" -lt "$deadline" ] || fail "rmux bar '$bar', want '$2' ($1)"
+  done
+}
+rmux_row() {
+  rmux_frame "$1" | screen_rows "$2" "$3" | grep -Fxq -- "$4"
+}
+rmux_contains() {
+  rmux_frame "$1" | screen_rows "$2" "$3" | grep -Fq -- "$4"
+}
+rmux_row_contains() {
+  rmux_frame "$1" | screen_rows "$2" "$3" | sed -n "${4}p" | grep -Fq -- "$5"
+}
+rmux_lacks() {
+  local frame
+  frame="$(rmux_frame "$1")" || return
+  ! printf '%s' "$frame" | screen_rows "$2" "$3" | grep -Fq -- "$4"
+}
+rmux_status() {
+  rmux_frame "$1" | screen_rows "$2" "$3" | tail -n 1 | grep -Fq -- "$4"
+}
+rmux_window_closed() {
+  local frame
+  frame="$(rmux_frame "$1")" || return
+  ! printf '%s' "$frame" | screen_rows "$2" "$3" | tail -n 1 | grep -Fq '1:'
+}
+
+# A persistent input FIFO keeps script(1) from injecting EOF. The controller
+# resizes its actual PTY; there is no second script coordinating by sleeps.
+start_session() {
+  local name="$1" terminal="$2" command tty_path
+  shift 2
+  SESSION_LOG="/tmp/test-terminal-size-$name.log"
+  : > "$SESSION_LOG"
+  rm -f "$SCRATCH/session-in" "$SCRATCH/session-tty"
+  mkfifo "$SCRATCH/session-in"
+  exec 4<> "$SCRATCH/session-in"
+  if [ "$terminal" = pty ]; then
+    printf -v command '%q ' ssh "${SSH_OPTIONS[@]}" -e none -tt motor@192.168.4.2 "$@"
+    printf -v tty_path '%q' "$SCRATCH/session-tty"
+    script -qef -E never -c "stty rows 30 cols 100; tty > $tty_path; exec $command" \
+      "$SESSION_LOG" < "$SCRATCH/session-in" > /dev/null 2>> "$RMUX_STDERR_LOG" &
+  else
+    ssh "${SSH_OPTIONS[@]}" -e none motor@192.168.4.2 "$@" \
+      < "$SCRATCH/session-in" > "$SESSION_LOG" 2>> "$RMUX_STDERR_LOG" &
+  fi
+  SESSION_PID="$!"
+}
+resize_session() {
+  stty -F "$(cat "$SCRATCH/session-tty")" rows "$1" cols "$2"
+}
+finish_session() {
+  wait_for session_finished
+  wait "$SESSION_PID" || fail "terminal session failed ($SESSION_LOG)"
+  SESSION_PID=""
+  exec 4>&-
+}
+session_finished() { ! kill -0 "$SESSION_PID" 2>/dev/null; }
+shell_exit() {
+  local at
+  at="$(mark "$1")"
+  printf ':q\r' >&"$2"
+  wait_text "$1" "$at" $'\033[?1049l'
+  prompt "$1" "$at"
+}
+
+# Coverage kept in the component tests reached by full-test.sh:
+# - Rush phase8.rs: editing, history, completion, wrapping, incremental output.
+#   systest stdio_terminal.rs retains Motor's type-ahead and delayed CR/LF cases.
+# - Crossterm motor/probe.rs: polling cadence and silence after subscription,
+#   tested with supplied Instants rather than ten seconds of wall-clock time.
+# - rmux pane.rs: unsubscribed children receive no resize bytes, checked with
+#   an ordered output marker rather than waiting for top's next repaint.
+# This driver retains first paint, resize without keys, size inheritance,
+# serial CR/LF, and the console/SSH/pane paths that need the actual guest.
 echo "-- serial console --"
-wait_console $'\033\\[?2048h'
-
-# Record the first prompt's non-blocking fallback before giving the terminal a
-# real size. The command returns to a fresh prompt and subscription.
-fallback_at="$(wc -c < "$CONSOLE_LOG")"
-printf 'echo PROMPT_WIDTH=$COLUMNS\r' >&3
-wait_console_since "$fallback_at" 'PROMPT_WIDTH=80'
-wait_console_since "$fallback_at" $'\033\\[?2048h'
-
-# The terminal's side of the handshake: DECRPM says the mode is set, and an
-# enable is answered with the size straight away. The wait is for the client to
-# have read it, so that the byte the quiet window starts at is one no probe
-# still in flight from before the answer can land past.
+prompt "$CONSOLE_LOG" 0
+console_command 'echo PROMPT_WIDTH=$COLUMNS' 'PROMPT_WIDTH=80'
+at="$(mark "$CONSOLE_LOG")"
 printf '\033[?2048;1$y\033[48;30;100;0;0t' >&3
-sleep 3
-answered_at="$(wc -c < "$CONSOLE_LOG")"
-
-# Record a prompt laid out after the report landed, then begin a line at that
-# same width for the resize-redraw check.
-printf 'echo PROMPT_WIDTH=$COLUMNS\r' >&3
-sleep 3
+prompt "$CONSOLE_LOG" "$at"
+console_command 'echo PROMPT_WIDTH=$COLUMNS' 'PROMPT_WIDTH=100'
+at="$(mark "$CONSOLE_LOG")"
 printf 'echo RESIZE-ME' >&3
-sleep 3
-
-# The resize, and nothing else: no key is sent until this window is read, so
-# whatever repaints the line here did it on the report alone.
-resize_at="$(wc -c < "$CONSOLE_LOG")"
+wait_text "$CONSOLE_LOG" "$at" 'echo RESIZE-ME'
+at="$(mark "$CONSOLE_LOG")"
 printf '\033[48;20;60;0;0t' >&3
-sleep 3
-console_since "$resize_at" | LC_ALL=C grep -aq 'echo RESIZE-ME' ||
-  fail "the console's editor did not redraw its line for the new size"
+wait_text "$CONSOLE_LOG" "$at" 'echo RESIZE-ME'
+prompt "$CONSOLE_LOG" "$at"
+console_command '' $'\r\n'
+console_command 'echo PROMPT_WIDTH=$COLUMNS; echo COLS=$COLUMNS,$LINES' 'COLS=60,20'
+console_command 'echo PROMPT_WIDTH=$COLUMNS' 'PROMPT_WIDTH=60'
+widths="$(grep -aoE 'PROMPT_WIDTH=[0-9]+' "$CONSOLE_LOG" | tr '\n' ' ')"
+[ "$widths" = 'PROMPT_WIDTH=80 PROMPT_WIDTH=100 PROMPT_WIDTH=60 PROMPT_WIDTH=60 ' ] ||
+  fail "console widths: $widths"
 
-printf '\r' >&3
-sleep 3
-
-# What the shell knows, the command it runs is told. Nothing set `$COLUMNS` for
-# the console -- sys-tty has no opinion about the size -- so here the shell
-# keeps it as a variable of its own rather than starting to export one nobody
-# asked it to pass on, which is bash's rule and the one `Shell::set` follows.
-printf 'echo PROMPT_WIDTH=$COLUMNS; echo COLS=$COLUMNS,$LINES\r' >&3
-sleep 3
-LC_ALL=C grep -aq 'COLS=60,20' "$CONSOLE_LOG" ||
-  fail "the console ran a command at the old size (log: $CONSOLE_LOG)"
-
-# The preceding command returned to one more prompt at the settled size.
-printf 'echo PROMPT_WIDTH=$COLUMNS\r' >&3
-sleep 3
-
-widths="$(prompt_widths < "$CONSOLE_LOG")"
-[ "$widths" = "80 100 60 60 " ] ||
-  fail "console prompt widths were '$widths', want '80 100 60 60 '"
-
-# A client that has been answered stops asking, and the quiet is measured over
-# everything since -- twelve seconds, comfortably more than the ten a probe
-# would next have been due in. Both fallback rungs are gone: the cursor-free
-# `CSI 18 t` and the corner probe alike, which is what a subscription is for
-# (plan §1).
-probes="$(console_since "$answered_at" |
-  LC_ALL=C grep -ao $'\033\\[18t\|\033\\[9999;9999H' | wc -l)"
-[ "$probes" = "0" ] ||
-  fail "the console kept probing a terminal that had answered ($probes times)"
-
-# ---- red on the serial console ----------------------------------------------
-#
-# The editor is the other kind of client, and the harder one: it owns every row
-# on the screen, so what it believes the size to be is on the wire in full, and
-# it has no prompt to re-read a width at. On the console it starts out not
-# knowing -- nobody set `$COLUMNS` here, which is what the check above is
-# about -- so its first frame is crossterm's 80x24 fallback, painted without
-# asking anyone and without waiting for an answer. That is decision 8's
-# asymmetry; the point of the checks below is everything that comes after it.
 echo "-- red on the serial console --"
-red_at="$(wc -c < "$CONSOLE_LOG")"
+red_at="$(mark "$CONSOLE_LOG")"
 start_red console >&3
-wait_console_since "$red_at" $'\033\\[?2048h'
-[ "$(console_since "$red_at" | red_bars "$RED_GROUND")" = "23:80 " ] ||
-  fail "red's first console frame was not the 80x24 fallback (log: $CONSOLE_LOG)"
-
-# The subscription, answered. Nothing has been typed since red started, so the
-# frame that follows is the report's doing and can be nothing else's.
+wait_bars "$CONSOLE_LOG" "$red_at" '23:80'
 printf '\033[?2048;1$y\033[48;20;60;0;0t' >&3
-wait_red_bars "$red_at" 2
-bars="$(console_since "$red_at" | red_bars "$RED_GROUND")"
-[ "$bars" = "23:80 19:60 " ] ||
-  fail "red's console frames were '$bars', want '23:80 19:60 '"
-
-# And it keeps arriving: a subscription is not a question answered once, which
-# is the whole difference between it and the probe it replaced.
-resize_at="$(wc -c < "$CONSOLE_LOG")"
+wait_bars "$CONSOLE_LOG" "$red_at" '23:80 19:60'
 printf '\033[48;30;100;0;0t' >&3
-wait_red_bars "$resize_at" 1
-bars="$(console_since "$resize_at" | red_bars "$RED_GROUND")"
-[ "$bars" = "29:100 " ] ||
-  fail "red did not repaint the console for the second resize: '$bars'"
+wait_bars "$CONSOLE_LOG" "$red_at" '23:80 19:60 29:100'
+shell_exit "$CONSOLE_LOG" 3
 
-printf ':q\r' >&3
-sleep 3
-
-# ---- rush's editor on the serial console ------------------------------------
-#
-# rush's host tests (tests/phase8.rs) make these claims through a Linux pty.
-# Here they are made on the console: keys arrive through sys-tty, which turns
-# one press of Enter into CR and LF, and every byte the editor writes goes down
-# a serial line slow enough to show a flicker. A nested rush with a plain
-# prompt keeps the checks about the editor rather than the login prompt, and
-# the replay starts with it, on a fresh line.
-echo "-- rush's editor on the serial console --"
-edit_at="$(wc -c < "$CONSOLE_LOG")"
-printf "PS1='\$ ' /user/bin/rush -i\r" >&3
-wait_console_since "$edit_at" $'\\$ \033\\[?25h'
-printf '\033[?2048;1$y\033[48;30;100;0;0t' >&3
-sleep 2
-
-rush_rows() { console_since "$edit_at" | screen_rows 0 100; }
-prompt_line() { rush_rows | awk '/^\$( |$)/ { line = $0 } END { print line }'; }
-# Move to the end before ^U, which only erases text before the cursor.
-# Enter then runs an empty line, leaving a fresh prompt on its own row.
-rush_settle() { console_keys '\005\025' 0.3; console_keys '\r'; }
-
-rush_settle
-# rush paints exactly one prompt per line it reads, so the prompts are the count.
-m="$(wc -c < "$CONSOLE_LOG")"
-console_keys '\r' 1.5
-prompts="$(console_since "$m" | LC_ALL=C grep -ao $'\\$ \033\\[?25h' | wc -l)"
-[ "$prompts" = 1 ] || fail "one Enter on the console gave $prompts prompts"
-
-# What a key costs: only what changed is painted.
-console_keys 'echo'
-m="$(wc -c < "$CONSOLE_LOG")"
-console_keys 'x'
-out="$(console_since "$m")"
-[ "$out" = x ] || fail "typing at the end of the line wrote $(printf '%q' "$out")"
-m="$(wc -c < "$CONSOLE_LOG")"
-console_keys '\033[D'
-out="$(console_since "$m")"
-case "$out" in *echo*) fail "moving the cursor repainted the line: $(printf '%q' "$out")" ;; esac
-[ "${#out}" -lt 8 ] || fail "moving the cursor wrote ${#out} bytes: $(printf '%q' "$out")"
-m="$(wc -c < "$CONSOLE_LOG")"
-console_keys '\177'
-out="$(console_since "$m")"
-case "$out" in *echo*) fail "a backspace repainted the line: $(printf '%q' "$out")" ;; esac
-console_keys '\033[H'    # Home: ^A would be qemu's
-m="$(wc -c < "$CONSOLE_LOG")"
-console_keys 'X'
-out="$(console_since "$m")"
-case "$out" in
-  *'$'*) fail "an edit in the middle repainted the prompt: $(printf '%q' "$out")" ;;
-  *Xech*) ;;
-  *) fail "an edit in the middle did not redraw the tail: $(printf '%q' "$out")" ;;
-esac
-[ "$(prompt_line)" = '$ Xechx' ] ||
-  fail "the edits left '$(prompt_line)' on the screen, want '\$ Xechx'"
-
-# And the picture all those differences add up to, then the line it runs.
-rush_settle
-console_keys 'echo abc'
-console_keys '\033[H'
-console_keys '\033[C\033[C\033[C\033[C\033[C'
-console_keys 'Z'
-console_keys '\005'      # ^E: to the end
-console_keys '\177'
-[ "$(prompt_line)" = '$ echo Zab' ] ||
-  fail "the edits left '$(prompt_line)' on the screen, want '\$ echo Zab'"
-console_keys '\r' 1.5
-rush_rows | tail -n 4 | grep -qx Zab || fail "the edited line did not run"
-
-# A line that wraps, painted a character at a time; then ^K from Home has to
-# erase the row the wrapped tail was on.
-rush_settle
-long="echo $(printf 'a%.0s' $(seq 1 110))"
-m="$(wc -c < "$CONSOLE_LOG")"
-console_keys "$long" 2
-mapfile -t rows < <(rush_rows)
-full="\$ $long"
-[ "${rows[-2]}" = "${full:0:100}" ] && [ "${rows[-1]}" = "${full:100}" ] ||
-  fail "the wrapped line was painted as '${rows[-2]}' / '${rows[-1]}'"
-cost="$(console_since "$m" | wc -c)"
-[ "$cost" -lt $((3 * ${#long})) ] ||
-  fail "typing ${#long} characters wrote $cost bytes"
-console_keys '\033[H\013'
-[ "$(rush_rows | tail -n 1)" = '$' ] ||
-  fail "^K left '$(rush_rows | tail -n 1)' on the wrapped row"
-
-# History replaces the whole line at once.
-console_keys 'echo one\r' 1.5
-console_keys 'echo two\r' 1.5
-console_keys '\033[A'
-[ "$(prompt_line)" = '$ echo two' ] || fail "history Up showed '$(prompt_line)'"
-console_keys '\033[A'
-[ "$(prompt_line)" = '$ echo one' ] || fail "history Up again showed '$(prompt_line)'"
-console_keys '\033[B\033[B'
-[ "$(prompt_line)" = '$' ] || fail "history Down to the end showed '$(prompt_line)'"
-
-# Output without a trailing newline keeps its row: the prompt follows it.
-rush_settle
-console_keys "printf h''i\r" 1.5
-rush_rows | tail -n 4 | grep -q hi || fail "the next prompt painted over partial output"
-
-# Last, because on a debug image completion's stats are logged to this console.
-# So the completed command's output is checked rather than the screen around it.
-rush_settle
-console_keys 'ec\t' 1.5
-console_keys 'RUSHTAB\r' 1.5
-rush_rows | tail -n 4 | grep -qx RUSHTAB || fail "Tab did not complete 'ec' to echo"
-console_keys '\003'
-console_keys 'exit\r' 2
-
-# ---- rmux on the serial console ---------------------------------------------
-#
-# The whole design in one measurement, from the outside in: the terminal
-# changes shape, crossterm turns the report into a resize, the client tells the
-# server, the server relays out, the pane resizes, and the pane's own emulator
-# reports the new size to the program subscribed inside it. That program is red
-# again, because its status bar reads the same through two nested terminals as
-# through one -- rmux is a terminal to the editor exactly as this script is a
-# terminal to rmux.
-#
-# The client opens at 80x24 here and converges, which is the far side of its
-# settlement window (`client.rs`'s `settle_size`): 200ms is a window and not a
-# wait, and a terminal driven from a shell script over a serial line is nowhere
-# near that fast. What the window promises is that nothing hangs when the
-# answer is slow or never comes, which is this case; the case where it does
-# arrive in time is `client.rs`'s own unit tests, a 200ms race being not
-# something a shell script can win on purpose.
 echo "-- rmux on the serial console --"
-# rush re-asserts the mode whenever it takes the console back from a child.
-# Answering keeps the shell that launches rmux from falling back to probing.
+at="$(mark "$CONSOLE_LOG")"
 printf '\033[?2048;1$y\033[48;30;100;0;0t' >&3
-sleep 2
-
-rmux_at="$(wc -c < "$CONSOLE_LOG")"
-# Keep the outer client's runtime diagnostics out of the screen measurement,
-# using the same inherited stderr pipe as start_red above. Preserve the
-# console rmux grant (CAP_SPAWN, CAP_LOG, CAP_SPAWN_DETACHED, CAP_INTERACTIVE,
-# CAP_VSOCK, CAP_NET, CAP_FS_WRITE) in the wrapper.
+prompt "$CONSOLE_LOG" "$at"
+rmux_at="$(mark "$CONSOLE_LOG")"
 RMUX_CONSOLE_STARTED=1
 printf 'TMPDIR=%s MOTOR_OS_CAPS=0x3ec /user/bin/rush -c rmux 2>%s/rmux-console.stderr\r' "$RMUX_TMPDIR" "$TEST_TMP" >&3
-wait_console_since "$rmux_at" $'\033\\[?2048h'
-answered_rmux_at="$(wc -c < "$CONSOLE_LOG")"
+wait_text "$CONSOLE_LOG" "$rmux_at" $'\033[?2048h'
 printf '\033[?2048;1$y\033[48;30;100;0;0t' >&3
-# The client relayed it and the server laid out again: a screen that changed
-# shape is repainted whole (`screen.rs`'s `draw`), so the clear is the report
-# having gone all the way through and come back.
-wait_console_since "$answered_rmux_at" $'\033\\[2J'
-sleep 2
-
-# red in the pane rmux has laid out: 29 rows of the console's 30, the last one
-# being rmux's own status line. The pane's shell was spawned before the console
-# answered and so was told 80x24 -- it is the report reaching *it* that makes
-# `$COLUMNS` right for the editor it launches, one hop further in.
 exec 4>&3
 RMUX_REFRESH='\001r'
-if [ "$VMM" = qemu ]; then
-  RMUX_REFRESH='\001\001r'  # doubled past QEMU's monitor, see `settled_bar`
-fi
+[ "$VMM" != qemu ] || RMUX_REFRESH='\001\001r'
+wait_for rmux_contains "$CONSOLE_LOG" 30 100 '/user$'
 start_red console-rmux >&3
-first="$(settled_bar "$CONSOLE_LOG" "")"
-
-# The resize, sent only once the editor has painted once, so that what follows
-# is a resize and not a size the editor was started at. Nothing is typed between
-# here and the reading below except the refreshes it is taken with, which the
-# pane never hears of.
+rmux_bar "$CONSOLE_LOG" '28:100'
 printf '\033[48;20;60;0;0t' >&3
-# 29 rows of pane in a 30-row console, then 19 in a 20-row one, each as wide as
-# the console said it was.
-bars="$first $(settled_bar "$CONSOLE_LOG" "$first")"
-[ "$bars" = "28:100 18:60" ] ||
-  fail "the console resize did not reach red inside rmux: '$bars', want '28:100 18:60'"
-
+rmux_bar "$CONSOLE_LOG" '18:60'
 printf ':q\r' >&3
-sleep 3
-
-# The rest is what rmux's host tests (tests/host.rs) cannot see, because there
-# both the console and a pane are ptys. Here Enter arrives as CR and LF, a pane
-# is a pipe with no line discipline, and every byte rmux paints goes down the
-# serial line. First the console grows back: the status line must leave the
-# row it had at 20 rows for the last row of 30.
-console_rows() { console_since "$rmux_at" | screen_rows 30 100; }
-back_at="$(wc -c < "$CONSOLE_LOG")"
+wait_for rmux_contains "$CONSOLE_LOG" 20 60 '/user$'
 printf '\033[48;30;100;0;0t' >&3
-wait_console_since "$back_at" $'\033\\[2J'
-sleep 2
-mapfile -t rows < <(console_rows)
-case "${rows[29]}" in *'[0] '*) ;; *) fail "rmux's status line is not on the last row: '${rows[29]}'" ;; esac
-case "${rows[19]}" in *'[0] '*) fail "rmux left its status line on row 20 after the console grew" ;; esac
+wait_for rmux_status "$CONSOLE_LOG" 30 100 '[0] '
+mapfile -t rows < <(rmux_frame "$CONSOLE_LOG" | screen_rows 30 100)
+[[ "${rows[29]}" == *'[0] '* ]] || fail "rmux status did not move to row 30"
+[[ "${rows[19]}" != *'[0] '* ]] || fail "rmux status remained on row 20"
 
-console_keys '\014' 1.5    # ^L: the pane's shell clears its screen
-before="$(console_rows | grep -c '\$')"
-console_keys "echo o''ne\r" 2
-mapfile -t rows < <(console_rows)
-printf '%s\n' "${rows[@]}" | grep -qx one || fail "the pane did not run its command"
-after="$(printf '%s\n' "${rows[@]}" | grep -c '\$')"
-[ "$after" = $((before + 1)) ] ||
-  fail "one Enter in a pane gave $((after - before)) prompts"
+# Preserve the Motor-only line discipline and serial rendering assertions.
+printf '\014' >&3
+wait_for rmux_row_contains "$CONSOLE_LOG" 30 100 1 '/user$'
+before="$(rmux_frame "$CONSOLE_LOG" | screen_rows 30 100 | grep -c '\$')"
+printf "echo o''ne\r" >&3
+wait_for rmux_row "$CONSOLE_LOG" 30 100 one
+wait_for rmux_row_contains "$CONSOLE_LOG" 30 100 3 '/user$'
+after="$(rmux_frame "$CONSOLE_LOG" | screen_rows 30 100 | grep -c '\$')"
+[ "$after" = $((before + 1)) ] || fail "one Enter gave $((after - before)) prompts"
+printf "echo a''aa; echo b''bb\r" >&3
+wait_for rmux_row "$CONSOLE_LOG" 30 100 aaa
+wait_for rmux_row "$CONSOLE_LOG" 30 100 bbb
+wait_for rmux_row_contains "$CONSOLE_LOG" 30 100 6 '/user$'
+at="$(mark "$CONSOLE_LOG")"
+printf e >&3
+wait_text "$CONSOLE_LOG" "$at" e
+at="$(mark "$CONSOLE_LOG")"
+printf x >&3
+wait_text "$CONSOLE_LOG" "$at" x
+rmux_frame "$CONSOLE_LOG" > /dev/null
+out="$(console_since "$at")"
+[ "${out%%$'\033[0m\033[2J'*}" = x ] ||
+  fail "a pane keystroke wrote $(printf '%q' "${out%%$'\033[0m\033[2J'*}")"
+at="$(mark "$CONSOLE_LOG")"
+printf '\025exit\r' >&3
+wait_text "$CONSOLE_LOG" "$at" $'\033[?1049l'
+prompt "$CONSOLE_LOG" "$at"
+exec 4>&-
 
-# A pane turns `\n` into a new line itself; without that, the second line
-# starts where the first ended.
-console_keys "echo a''aa; echo b''bb\r" 2
-starts="$(console_rows | grep -c -E '^(aaa|bbb)')"
-[ "$starts" = 2 ] || fail "a pane's output lines did not each start at column one"
-
-# The key before it leaves the console's style where the pane's text needs it.
-console_keys 'e'
-m="$(wc -c < "$CONSOLE_LOG")"
-console_keys 'x'
-out="$(console_since "$m")"
-[ "$out" = x ] || fail "a keystroke in a pane wrote $(printf '%q' "$out")"
-console_keys '\025'
-
-# A program that never subscribed to resizes is not sent one: top reads an ESC
-# as "quit". A live top repaints every second; a dead one leaves a quiet shell.
-m="$(wc -c < "$CONSOLE_LOG")"
-console_keys '/user/bin/top\r' 3
-console_since "$m" | LC_ALL=C grep -aq 'uptime:' || fail "top did not paint in a pane"
-printf '\033[48;20;60;0;0t' >&3
-sleep 3
-m="$(wc -c < "$CONSOLE_LOG")"
-sleep 3
-[ -n "$(console_since "$m")" ] || fail "a console resize ended top in a pane"
-console_keys 'q' 1.5
-printf 'exit\r' >&3    # the pane, and with it rmux
-sleep 4
-
-# ---- a russhd pty session ---------------------------------------------------
-#
-# Here the size is known before the child is spawned, so unlike the console
-# there is nothing to converge on: the very first prompt is laid out for the
-# `pty-req` geometry. `script` is what gives the ssh client a terminal to read a
-# size from, `stty` resizes it under the running client, and the `SIGWINCH` that
-# raises becomes the `window-change` russhd turns into a report.
 echo "-- russhd pty session --"
-until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-  motor@192.168.4.2 /user/bin/rush -c true > /dev/null; do
-  if ! serial_test_vm_alive; then
-    fail "$TEST_VM_LABEL exited before SSH became ready (log: $CONSOLE_LOG)"
-  fi
-  sleep 1
-done
+start_session rush-ssh pty
+prompt "$SESSION_LOG" 0
+at="$(mark "$SESSION_LOG")"
+printf 'echo PROMPT_WIDTH=$COLUMNS\r' >&4
+wait_text "$SESSION_LOG" "$at" 'PROMPT_WIDTH=100'
+prompt "$SESSION_LOG" "$at"
+at="$(mark "$SESSION_LOG")"
+printf 'echo RESIZE-ME' >&4
+wait_text "$SESSION_LOG" "$at" 'echo RESIZE-ME'
+at="$(mark "$SESSION_LOG")"
+resize_session 20 60
+wait_text "$SESSION_LOG" "$at" 'echo RESIZE-ME'
+prompt "$SESSION_LOG" "$at"
+at="$(mark "$SESSION_LOG")"
+printf '\r' >&4
+prompt "$SESSION_LOG" "$at"
+at="$(mark "$SESSION_LOG")"
+printf 'echo PROMPT_WIDTH=$COLUMNS; echo COLS=$COLUMNS,$LINES\r' >&4
+wait_text "$SESSION_LOG" "$at" 'COLS=60,20'
+prompt "$SESSION_LOG" "$at"
+at="$(mark "$SESSION_LOG")"
+printf 'echo PROMPT_WIDTH=$COLUMNS\r' >&4
+wait_text "$SESSION_LOG" "$at" 'PROMPT_WIDTH=60'
+prompt "$SESSION_LOG" "$at"
+printf 'exit\r' >&4
+finish_session
+widths="$(grep -aoE 'PROMPT_WIDTH=[0-9]+' "$SESSION_LOG" | tr '\n' ' ')"
+[ "$widths" = 'PROMPT_WIDTH=100 PROMPT_WIDTH=60 PROMPT_WIDTH=60 ' ] ||
+  fail "SSH widths: $widths"
 
-# `RESIZED` is written to this side's terminal, not into the session: it is a
-# timestamp in the recording, marking the moment after which keys were typed
-# again. Everything the editor did before it, it did unprompted.
-ssh_login="$(printf '%q ' ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2)"
-ssh_keys() {
-  sleep 6
-  printf 'echo PROMPT_WIDTH=$COLUMNS\r'
-  sleep 3
-  printf 'echo RESIZE-ME'
-  sleep 13
-  printf '\r'
-  sleep 4
-  printf 'echo PROMPT_WIDTH=$COLUMNS; echo COLS=$COLUMNS,$LINES\r'
-  sleep 4
-  printf 'echo PROMPT_WIDTH=$COLUMNS\r'
-  sleep 4
-  printf 'exit\r'
-  sleep 3
-}
-out="$(ssh_keys | script -qc "stty rows 30 cols 100
-$ssh_login </dev/tty 2>/dev/null &
-sshpid=\$!
-sleep 13
-stty rows 20 cols 60
-sleep 4
-printf RESIZED > /dev/tty
-wait \$sshpid" /dev/null)"
-
-before="${out%%RESIZED*}"
-[ "$before" != "$out" ] || fail "the pty harness never reached its resize"
-case "$before" in
-  *"echo RESIZE-ME"*"echo RESIZE-ME"*) ;;
-  *) fail "the ssh session's editor did not redraw its line for the new size" ;;
-esac
-widths="$(printf '%s' "$out" | prompt_widths)"
-[ "$widths" = "100 60 60 " ] ||
-  fail "ssh pty prompt widths were '$widths', want '100 60 60 '"
-
-# The shell knowing the size is only half of it: the program it launches is
-# handed one too, in `$COLUMNS`/`$LINES`, and it is handed that one before it
-# can ask for itself. A shell that let those go stale after a resize would give
-# every command it ran the size the terminal used to be.
-case "$out" in
-  *"COLS=60,20"*) ;;
-  *) fail "the ssh session ran a command at the old size: '$out'" ;;
-esac
-
-# ---- red in a russhd pty session --------------------------------------------
-#
-# The editor's *first* frame is the whole of what this environment has to say.
-# russhd knew the size before rush existed and rush passed it on, so red paints
-# 100x30 straight away: there is no fallback frame here at all, which is the
-# half of decision 8 the console cannot show. `REDRESIZED` marks the moment
-# keys started again, exactly as `RESIZED` does above.
 echo "-- red in a russhd pty session --"
-red_ssh_log=/tmp/test-terminal-size-red-ssh.log
-# script(1) truncates only after it forks, and the waits below must not match
-# the last run's recording.
-: > "$red_ssh_log"
-count="$(bar_count_cmd "$red_ssh_log")"
-red_ssh_keys() {
-  sleep 7
-  start_red ssh
-  # The mark below is written once the resize has been repainted, and no key
-  # goes in before it: the frames this check reads have to be the resize's and
-  # nothing else's, which a guessed interval cannot promise on a slow VM.
-  for _ in $(seq 1 120); do
-    grep -aq REDRESIZED "$red_ssh_log" && break
-    sleep 0.5
-  done
-  sleep 2
-  printf ':q\r'
-  sleep 4
-  printf 'exit\r'
-  sleep 3
-}
-# `-f` is what makes the recording readable while it is being written: without
-# it `script` holds the typescript in a buffer until the session ends, and every
-# wait on it below silently falls through to its own timeout instead.
-out="$(red_ssh_keys | script -qfc "stty rows 30 cols 100
-$ssh_login </dev/tty 2>/dev/null &
-sshpid=\$!
-for _ in \$(seq 1 60); do
-  [ \$($count) -gt 0 ] && break
-  sleep 0.5
-done
-stty rows 20 cols 60
-for _ in \$(seq 1 60); do
-  $(bar_at_row_cmd 19 "$red_ssh_log" "$RED_GROUND") && break
-  sleep 0.5
-done
-printf REDRESIZED > /dev/tty
-wait \$sshpid" "$red_ssh_log")"
+start_session red-ssh pty
+prompt "$SESSION_LOG" 0
+red_at="$(mark "$SESSION_LOG")"
+start_red ssh >&4
+wait_bars "$SESSION_LOG" "$red_at" '29:100'
+resize_session 20 60
+wait_bars "$SESSION_LOG" "$red_at" '29:100 19:60'
+shell_exit "$SESSION_LOG" 4
+printf 'exit\r' >&4
+finish_session
 
-before="${out%%REDRESIZED*}"
-[ "$before" != "$out" ] || fail "the pty harness never reached its resize"
-bars="$(printf '%s' "$before" | red_bars "$RED_GROUND")"
-[ "$bars" = "29:100 19:60 " ] ||
-  fail "ssh pty red frames were '$bars', want '29:100 19:60 '"
-
-# ---- rmux over ssh, with a terminal of its own ------------------------------
-#
-# The same chain as on the console with one more hop in front of it: the resize
-# starts as a `SIGWINCH` on this host, becomes an SSH `window-change`, becomes
-# russhd's report to the client, and goes on from there. Every link the design
-# has is in this one measurement, and it is the only place they are all
-# exercised at once.
-#
-# `script` can propagate its host terminal size after the command's first
-# `stty`. Restate 100x30 after SSH starts, but before red is launched, so that
-# delayed propagation cannot win while a debug rmux is starting.
 echo "-- rmux over ssh --"
-rmux_login="$(printf '%q ' ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-  "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux)"
-rmux_ssh_log=/tmp/test-terminal-size-rmux-ssh.log
-: > "$rmux_ssh_log"
-: > "$SCRATCH/rmux-ssh-bars"
-# The recording is kept rather than thrown at /dev/null, because everything this
-# check does is timed off it: the resize has to come after the editor's first
-# frame -- the same ordering the console section waits for -- and the readings
-# are taken from it as it is written.
-rmux_ssh_keys() {
-  exec 4>&1
-  RMUX_REFRESH='\001r'    # no qemu in this path: ssh carries the prefix as it is
-  sleep 8
-  start_red ssh-rmux
-  wait_bar "$rmux_ssh_log"
-  first="$(settled_bar "$rmux_ssh_log" "")"
-  # The `stty` under the running client, which is what raises the `SIGWINCH`
-  # that becomes the SSH `window-change`.
-  : > "$SCRATCH/rmux-ssh-resize"
-  printf '%s %s' "$first" "$(settled_bar "$rmux_ssh_log" "$first")" \
-    > "$SCRATCH/rmux-ssh-bars"
-  printf ':q\r'
-  sleep 4
-  printf 'exit\r'
-  sleep 4
-}
-# The wait for the flag is bounded so that a reading which gives up ends the
-# session rather than leaving it here: the keys are on the other end of this
-# pipe, and a side that stops typing must not become a harness that hangs.
-rmux_ssh_keys | script -qfc "stty rows 30 cols 100
-$rmux_login </dev/tty 2>/dev/null &
-sshpid=\$!
-sleep 2
-stty rows 30 cols 100
-for _ in \$(seq 1 600); do
-  [ -e $SCRATCH/rmux-ssh-resize ] && break
-  sleep 0.2
-done
-stty rows 20 cols 60
-wait \$sshpid" "$rmux_ssh_log" > /dev/null
+start_session rmux-ssh pty "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux
+RMUX_REFRESH='\001r'
+wait_for rmux_contains "$SESSION_LOG" 30 100 '/user$'
+start_red ssh-rmux >&4
+rmux_bar "$SESSION_LOG" '28:100'
+resize_session 20 60
+rmux_bar "$SESSION_LOG" '18:60'
+printf ':q\r' >&4
+wait_for rmux_contains "$SESSION_LOG" 20 60 '/user$'
+printf 'exit\r' >&4
+finish_session
 
-bars="$(cat "$SCRATCH/rmux-ssh-bars")"
-[ "$bars" = "28:100 18:60" ] ||
-  fail "the ssh resize did not reach red inside rmux: '$bars', want '28:100 18:60'"
-
-# ---- an rmux pane -----------------------------------------------------------
-#
-# A split halves the pane under the shell in it, which is the resize rmux's
-# details.md §3.2 is written about. The line typed before the split fits one row
-# of an 80-column pane and needs two rows of the ~40 it is left with, so the
-# tail of it appearing on the pane's second row is the editor having been told.
-#
-# `C-a c` opens a second window: an rmux command, which never reaches the pane,
-# and the `1:` it adds to the status line is the mark that the checked bytes
-# came before any key the shell could have seen.
 echo "-- rmux pane --"
-rmux_keys() {
-  sleep 3
-  # Debug rt.vdso diagnostics intentionally share stderr with the terminal.
-  # Clear the completed startup records so this geometry check starts its
-  # half-typed line at row 1, as it does in a release build.
-  printf '\014'
-  sleep 1
-  printf 'echo %s' "$(printf 'x%.0s' $(seq 1 45))"
-  sleep 4
-  printf '\001|'    # the split, and the last key the pane's shell may see
-  sleep 5
-  printf '\001c'    # the mark: a second window, which the pane never hears of
-  sleep 4
-  printf 'exit\r'   # the second window
-  sleep 3
-  printf '\001o'    # back to the pane that was split, and shrank
-  sleep 2
-  printf '\003'     # drop the half-typed line
-  sleep 2
-  printf 'echo COLS=$COLUMNS,$LINES\r'
-  sleep 4
-  printf 'exit\r'   # the pane it was split from
-  sleep 3
-  printf 'exit\r'   # and the one the split made
-  sleep 3
-}
-# Keep the client's diagnostics separate from its screen stream: a TCP debug
-# record can split the very row this assertion measures. Retain stderr for
-# diagnosis; pane output and all geometry assertions remain unchanged.
-out="$(rmux_keys | ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 \
-  "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux 2>> "$RMUX_STDERR_LOG")"
-before="${out%%1:sh*}"
-[ "$before" != "$out" ] || fail "rmux never opened the second window: '$out'"
-printf '%s' "$before" |
-  LC_ALL=C grep -aq $'\033\\[2;1H\\(\033\\[[0-9;]*m\\)\\{0,1\\}x\\{20,\\}' ||
-  fail "the split did not reach the pane's editor: '$before'"
+start_session rmux-pane pipe "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux
+wait_for rmux_contains "$SESSION_LOG" 24 80 '/user$'
+printf '\014' >&4
+wait_for rmux_contains "$SESSION_LOG" 24 80 '/user$'
+printf 'echo %s' "$(printf 'x%.0s' $(seq 1 45))" >&4
+wait_for rmux_contains "$SESSION_LOG" 24 80 "$(printf 'x%.0s' $(seq 1 45))"
+printf '\001|' >&4
+wait_for rmux_row_contains "$SESSION_LOG" 24 80 2 "$(printf 'x%.0s' $(seq 1 20))"
+# The tail must be on the next row, before any key reaches the resized shell.
+mapfile -t rows < <(rmux_frame "$SESSION_LOG" | screen_rows 24 80)
+[[ "${rows[1]}" == "$(printf 'x%.0s' $(seq 1 20))"* ]] ||
+  fail "the split did not rewrap the half-typed line"
+printf '\001c' >&4
+wait_for rmux_status "$SESSION_LOG" 24 80 '1:'
+printf 'exit\r' >&4
+wait_for rmux_window_closed "$SESSION_LOG" 24 80
+printf '\001o\003' >&4
+wait_for rmux_contains "$SESSION_LOG" 24 80 '/user$'
+printf 'echo COLS=$COLUMNS,$LINES\r' >&4
+wait_for rmux_contains "$SESSION_LOG" 24 80 'COLS=40,23'
+printf 'exit\r' >&4
+wait_for rmux_lacks "$SESSION_LOG" 24 80 '│'
+wait_for rmux_contains "$SESSION_LOG" 24 80 '/user$'
+printf 'exit\r' >&4
+finish_session
 
-# A vertical rule at column 41 leaves the left pane 40 columns of the 80 it had
-# and all 23 of its rows, and that is the size the command run in it is given.
-case "$out" in
-  *"COLS=40,23"*) ;;
-  *) fail "the pane ran a command at the size before the split: '$out'" ;;
-esac
-
-# ---- red in an rmux pane ----------------------------------------------------
-#
-# The same pane and the other axis: `C-a -` stacks the panes, so what changes
-# here is the row count, and the pane keeps every column it had.
 echo "-- red in an rmux pane --"
-# Recorded as it arrives, so the keys can wait on the editor rather than on a
-# clock: the split must come after its first frame, or what is read afterwards
-# is a size red was started at.
-red_rmux_log=/tmp/test-terminal-size-rmux-pane.log
-: > "$red_rmux_log"
-: > "$SCRATCH/rmux-pane-bars"
-red_rmux_keys() {
-  exec 4>&1
-  RMUX_REFRESH='\001r'
-  sleep 4
-  start_red pane
-  wait_bar "$red_rmux_log"
-  first="$(settled_bar "$red_rmux_log" "")"
-
-  printf '\001-'    # the split, and the last key the pane may see
-  printf '%s %s' "$first" "$(settled_bar "$red_rmux_log" "$first")" \
-    > "$SCRATCH/rmux-pane-bars"
-
-  printf '\001c'    # the mark: a second window, which the pane never hears of
-  sleep 4
-  printf 'exit\r'   # the second window
-  sleep 3
-  printf '\001o'    # back to the pane that shrank
-  sleep 2
-  printf ':q\r'     # and out of the editor in it
-  sleep 3
-  printf 'exit\r'   # the pane it was split from
-  sleep 3
-  printf 'exit\r'   # and the one the split made
-  sleep 3
-}
-out="$(red_rmux_keys |
-  ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 \
-    "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux 2>> "$RMUX_STDERR_LOG" |
-  tee "$red_rmux_log")"
-before="${out%%1:sh*}"
-[ "$before" != "$out" ] || fail "rmux never opened the second window: '$out'"
-
-# 23 rows of pane, not the 24 a client that had to guess would take, and then
-# the 11 a stacked split leaves the top one. The width does not change, a
-# stacked split being the other axis. The second reading is the one this check
-# is for: a build with `get_terminal_size` pinned to the fallback still produces
-# the first, because rmux settles before it paints its pane (decision 8) and a
-# frame the compositor never sent is a frame nothing can observe. So what the
-# pair says here is that nothing wrong ever reaches the screen and that the
-# split reaches the editor; that red is laid out from `$COLUMNS` rather than
-# corrected afterwards is shown over ssh, where it is visible.
-bars="$(cat "$SCRATCH/rmux-pane-bars")"
-[ "$bars" = "22:80 10:80" ] ||
-  fail "rmux pane red frames were '$bars', want '22:80 10:80'"
+start_session red-pane pipe "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux
+wait_for rmux_contains "$SESSION_LOG" 24 80 '/user$'
+start_red pane >&4
+rmux_bar "$SESSION_LOG" '22:80'
+printf '\001-' >&4
+rmux_bar "$SESSION_LOG" '10:80'
+printf '\001c' >&4
+wait_for rmux_status "$SESSION_LOG" 24 80 '1:'
+printf 'exit\r' >&4
+wait_for rmux_window_closed "$SESSION_LOG" 24 80
+printf '\001o' >&4
+printf ':q\r' >&4
+wait_for rmux_lacks "$SESSION_LOG" 24 80 '[No Name]'
+wait_for rmux_contains "$SESSION_LOG" 24 80 '/user$'
+printf 'exit\r' >&4
+wait_for rmux_lacks "$SESSION_LOG" 24 80 '─'
+wait_for rmux_contains "$SESSION_LOG" 24 80 '/user$'
+printf 'exit\r' >&4
+finish_session
 
 save_red_stderr
 remove_test_root
 stop_serial_test_vm
-
 echo "-------- TEST-TERMINAL-SIZE PASS ---------"
