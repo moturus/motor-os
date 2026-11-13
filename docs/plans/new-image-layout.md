@@ -1,9 +1,10 @@
 # Developing Motor OS on Motor OS: image layout, Lorry as None, native tests
 
-Status: milestones 1-3 implemented and committed; milestone 4 implemented with
-component gates passing, but the main QEMU release gate still reaches its
-900-second limit at the final OOM phase. Source commits and release are outstanding;
-milestone 5 ready, updated 2026-11-12;
+Status: milestones 1-4 implemented and committed. The fresh 1.99.1-3 archives
+have passed host installation, a clean rebuild, exact-archive native installation,
+three main release and three main debug runs, and the full release developer-image
+gate after separately committed test fixture corrections.
+The release is unpublished. Milestone 5 is ready, updated 2026-11-13;
 milestone 6 remains conditional. v1 is commit e7d46767, v2 is 3035a48a,
 v3 is 29779e3f, v4 is 98fe39e0.
 Milestone 1 is implemented: kernel command-line access, the System-console
@@ -1232,9 +1233,77 @@ installer matches the committed renderer, and its Javy/Wasmtime provenance
 files contain no builder path. The build took 3496.81 seconds and exited 0.
 Evidence is under `build/milestone4/commit-steps/execution/`: `rebuild.log`,
 `rebuild-sources.txt`, `rebuild.time`, `rebuild.status`, `checksums.log`, and
-`archive-content.log`. These fresh archives have not been installed or guest
-validated; the earlier host installation and guest results used the initial
-candidate. No release has been published.
+`archive-content.log`. The subsequent validation below uses these fresh
+archives; the earlier results above used the initial candidate.
+No release has been published.
+
+Fresh-archive validation installed the host archive at a separate custom
+prefix, preserving the initial installation, then ran `make clean` and
+`src/build-motor-os.sh` successfully (1583.47 seconds). The exact native archive
+beside the checkout passed the install/reinstall/reboot gate on Cloud Hypervisor
+(75.97 seconds), including the SSH-key privacy observer, configuration and mode
+preservation, and native C/C++/Rust and Lorry builds. The gate's `--archive PATH`
+option installs that artifact unchanged; ordinary suite runs still repackage.
+Both release archive checksums remain unchanged, verified after the final gate.
+
+Three complete `src/tests/full-test.sh --release` runs passed, including
+OOM-abort and block-mount checks (926.43, 921.62, and 900.52 seconds overall).
+The first attempt exposed a test-only custom-prefix assumption in analyzer
+discovery: the canonical installation directory's basename was treated as a
+rustup alias. Commit `398dbe97` resolves the analyzer through the repository's
+toolchain selection and uses the absolute sysroot for fixture subprocesses.
+The focused analyzer test then passed. The second release run lost one external
+`google.com` ping; the single retry permitted by AGENTS.md passed. Both original
+failures are retained, rather than overwritten by successful runs.
+
+Debug run 1 failed while the resize test waited for the initial rmux-over-SSH
+prompt. The recording contained startup output but no prompt. Commit `72c02a5f`
+shares one SSH connection across independent session channels and PTYs, with
+all resize assertions and deadlines unchanged. Focused release checks pass on
+QEMU, CHV, and Firecracker in 5.73-6.17 seconds. Matching debug traces improve
+rmux startup from 2.57 to 0.69 seconds and the complete driver from 46.74 to
+14.10 seconds. However, the subsequent full debug run still failed at the next
+rmux startup, so that optimization alone did not resolve the full-suite failure.
+Standalone checks, including one immediately after the TUI gate, pass. A full
+instrumented debug run also passed (1533.77 seconds), without explaining the
+earlier failures. Commit `77c999af` retains the console's rmux server and gives
+each later case a fresh named session, removing repeated cold server launches
+from the paint waits. It keeps the cold-start coverage once and preserves all
+resize assertions and deadlines. Focused checks pass in 14.21 seconds in debug
+and 5.42-5.95 seconds across the three release VM runners. Temporary diagnostics
+have been removed. Three normal full debug runs pass in 1505.33, 2186.20, and
+1494.25 seconds, including OOM-abort and block-mount checks. The second run
+experienced high host I/O pressure during image construction but passed with
+all original deadlines.
+
+The full release developer-image gate stopped at Helix's insert-mode check
+(1222.81 seconds overall). A focused diagnostic reproduced the failure and
+captured the documented `Helix -> Rush -> rust-analyzer` process chain:
+the fixture launched `/user/lib/helix/hx` directly, bypassing the shared native
+configuration and its server input isolation. The next checks exposed workspaces
+still under `/user/tmp` and a copied project carrying prior build state whose
+permissions prevented None from updating it. Commit `8ff5b23a` uses the shipped
+`/user/bin/dev/hx` launcher, places fixtures under the existing None test root,
+shares their directories, and starts the independent project from sources.
+The complete developer TUI/LSP gate passes in 42.49 seconds with all assertions
+and deadlines unchanged. The generic rust-analyzer launcher issue remains in
+`future-work.md`.
+
+The next complete developer run passed the repository, native source, and
+toolchain installation phases, then stopped at Lorry's native editor-helper
+build (2194.29 seconds overall). The custom-prefix correction had removed
+`Toolchain.name` but missed this Motor-only initializer. Commit `2194b8f0`
+removes that stale field; the helper then cross-compiles without warnings.
+The final `src/tests/full-test-dev.sh --release` run passed in 3651.74 seconds.
+It includes the repository gate, native HTTP and source builds, toolchain
+installation, and the complete Lorry product suite (944 seconds). Lorry's native
+editor checks and ring build pass. Javy/Wasmtime pass on both 256 MiB images,
+including Linux output identity and service checks; QuickJS Test262 matches
+the pinned Linux baseline in 313 seconds. All test deadlines are unchanged.
+Evidence is under `build/milestone4/archive-validation/`, including the original
+failing logs, terminal recordings, command lines, timings, and exit statuses.
+`completed-gates.tsv` lists the final gates; `final-checksums.log` records the
+unchanged host and native release archives.
 
 The subsequent review found a transient SSH-key disclosure in the installer:
 Motor sed's `-i` stages beside the private configuration with None-readable
@@ -1260,11 +1329,13 @@ name and path selection of the same compiler produce identical provenance.
 Both overlays were refreshed, and the exact repackaged archive's installer,
 provenance, and checksum were checked. The offline archive contract passes too.
 
-The follow-up simplification removes archive selection and inventory hashing:
-tests always repackage. The shared packager moves its disposable inputs, and
-the overlay build no longer fetches or builds a second host tar. The installer
-discovers library trees from the overlays, preserves existing directory modes,
-and installs None-writable data without Interactive execute permission.
+The follow-up simplification removes automatic archive selection and inventory
+hashing: ordinary suite runs always repackage. Explicit release-artifact
+validation uses `--archive PATH`. The shared packager moves its disposable
+inputs, and the overlay build no longer fetches or builds a second host tar.
+The installer discovers library trees from the overlays, preserves existing
+directory modes, and installs None-writable data without Interactive execute
+permission.
 Offline archive, bootstrap, external-source, and test-driver contracts pass.
 The native regression rejects the previous installer's unnormalized additional
 library; the updated install/reinstall/reboot gate passes, including preservation
@@ -1315,7 +1386,8 @@ Evidence is in `build/milestone4/resize-fast/full-test-release.log`,
   compiled-in paths. `install.sh` appends `/user/bin/dev` to both PATH
   configurations; remove the developer image's legacy `/devtools/bin` entry.
 - 4b. `make toolchain-archive` in the main repo, covering all current guest
-  payloads and always repackaging the archive for tests.
+  payloads and always repackaging for ordinary suite runs; `--archive PATH`
+  validates an exact release artifact without repackaging.
 - 4c. Switch the main repo to 1.99.1-3. `test-native-toolchain-install.sh`
   against the standard image: it installs the archive, installs it again,
   and replaces one shipped `/user/bin` executable through a temporary

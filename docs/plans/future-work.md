@@ -40,12 +40,12 @@ Helix started with `hx` is not affected. That launcher sets
 binary directly with the variable set. `/user/lib/helix/hx` run directly does
 not read that file, finds `rust-analyzer` on `PATH`, and stops reacting to keys
 as soon as it opens a `.rs` file. The Helix check in `src/tests/test-tui.sh`
-runs it that way and fails on the developer image for this reason; setting
-`XDG_CONFIG_HOME=/user/cfg` there restores input. Any other editor that looks
-the server up by name is affected in the same way. Before toolchain 1.99.1-3
-there was no `rust-analyzer` on `PATH`. No fix is chosen: the launcher could
-go, or a Rush script could get a way to run a helper without taking the
-terminal.
+previously bypassed the launcher too; it now uses `/user/bin/dev/hx` to exercise
+the shipped configuration. This test correction does not fix the generic
+rust-analyzer launcher. Any other editor that looks the server up by name is
+affected in the same way. Before toolchain 1.99.1-3 there was no `rust-analyzer`
+on `PATH`. No fix is chosen: the launcher could go, or a Rush script could get
+a way to run a helper without taking the terminal.
 
 ## rt.vdso keeps a closed poll registry's registrations (2026-11-02)
 

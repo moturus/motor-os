@@ -158,8 +158,18 @@ the staged external development overlays. It calls the packaging helper in
 `../motor-os-toolchain` (`MOTOR_TOOLCHAIN_SOURCE` selects another checkout).
 Outputs and scratch files stay under `build/toolchain/release`; the original
 archive in `$MOTORH` is unchanged. Run `src/build-motor-os.sh` to rebuild the
-external overlays when their sources change. Tests always repackage with the
-current payloads and installer, including the Linux imager.
+external overlays when their sources change. Ordinary suite runs always
+repackage with the current payloads and installer, including the Linux imager.
+To validate a release archive itself, pass its path explicitly to the same
+install/reinstall/reboot gate:
+
+```sh
+src/tests/test-native-toolchain-install.sh --release \
+  --archive ../motor-toolchain-x86_64-unknown-motor-1.99.1-3.tar.zst
+```
+
+The explicit archive is installed without repackaging; the gate prints its
+absolute path and SHA-256 before starting the VM.
 
 There is no native Cargo, rustdoc, separate proc-macro server, or shared
 `librustc_driver`; Lorry is the native build driver. The host cross wrappers,
