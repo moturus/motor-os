@@ -1715,6 +1715,14 @@ fn main() {
         fs::concurrent_flush_stress_test();
         return;
     }
+    if args.len() == 2 && args[1] == "test-fs" {
+        fs::run_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-fs-create" {
+        fs::concurrent_create_test();
+        return;
+    }
     if args.len() == 2 && args[1] == "test-fs-service-progress" {
         fs::service_progress_test();
         return;

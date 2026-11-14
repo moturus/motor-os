@@ -1698,8 +1698,55 @@ pub fn metadata_page_pressure_test() {
     println!("    ---- FS: metadata_page_pressure_test PASS");
 }
 
+pub fn concurrent_create_test() {
+    use std::fs::{self, OpenOptions};
+    use std::sync::{Arc, Barrier};
+
+    const WRITERS: usize = 16;
+    let name = format!("create-race-{}", std::process::id());
+    for root in [crate::temp_path(&name), crate::disk_temp_path(&name)] {
+        for exclusive in [false, true] {
+            let path = root.with_extension(if exclusive { "exclusive" } else { "shared" });
+            assert!(!path.exists(), "stale create-race input: {path:?}");
+            let barrier = Arc::new(Barrier::new(WRITERS));
+            let threads = (0..WRITERS)
+                .map(|_| {
+                    let path = path.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .create(!exclusive)
+                            .create_new(exclusive)
+                            .open(path)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut created = 0;
+            for thread in threads {
+                match thread.join().unwrap() {
+                    Ok(file) => {
+                        assert!(file.metadata().unwrap().is_file());
+                        created += 1;
+                    }
+                    Err(error) if exclusive => {
+                        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+                    }
+                    Err(error) => panic!("non-exclusive create failed: {error}"),
+                }
+            }
+            assert_eq!(created, if exclusive { 1 } else { WRITERS });
+            fs::remove_file(path).unwrap();
+        }
+    }
+    println!("concurrent_create_test PASS");
+}
+
 pub fn run_tests() {
     println!("running FS tests ...");
+    concurrent_create_test();
     concurrent_client_progress_test();
     service_progress_test();
     metadata_page_pressure_test();
