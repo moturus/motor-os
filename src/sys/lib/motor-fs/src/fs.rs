@@ -577,7 +577,6 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         self.check_err()?;
         // Note: parent is required here, so "/" is always invalid.
         validate_filename(filename)?;
-        log::debug!("stat: {parent_id:x} '{filename}'");
 
         let id = self.internal_id(parent_id)?;
         {
