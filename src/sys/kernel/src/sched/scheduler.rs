@@ -172,7 +172,7 @@ impl Scheduler {
             #[cfg(debug_assertions)]
             die_on_next_wake: AtomicBool::new(false),
             #[cfg(debug_assertions)]
-            last_alive_check: AtomicU64::new(0),
+            last_alive_check: AtomicU64::new(Instant::now().as_u64()),
         }
     }
 
