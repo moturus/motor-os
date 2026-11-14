@@ -121,8 +121,13 @@ impl Scheduler {
         }
         if now >= self.deadline {
             // Preserve the original cadence, without replaying missed ticks.
-            let remainder = (now - self.deadline).as_nanos() % TICK.as_nanos();
-            self.deadline = now + TICK - Duration::from_nanos(remainder as u64);
+            let elapsed = now - self.deadline;
+            let remainder = Duration::from_nanos((elapsed.as_nanos() % TICK.as_nanos()) as u64);
+            self.deadline += elapsed - remainder + TICK;
+            // Instant-to-Duration conversion can round down at an exact tick.
+            if self.deadline <= now {
+                self.deadline += TICK;
+            }
             self.crypto.begin_timer_tick();
             self.counters.timer_ticks += 1;
             for peer in 0..self.crypto.peer_count() {

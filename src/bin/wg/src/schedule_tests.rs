@@ -129,6 +129,14 @@ fn bounded_fair_batches_preserve_deadlines_under_flood() {
     assert_eq!(scheduler.counters.timer_ticks, 2);
     assert_eq!(scheduler.deadline(), start + 5 * TICK);
     assert_eq!(scheduler.counters.batches, 3);
+    assert!(
+        scheduler
+            .poll(&mut cx, &mut io, start + 8 * TICK)
+            .is_pending()
+    );
+    assert_eq!(scheduler.counters.timer_ticks, 3);
+    assert_eq!(scheduler.deadline(), start + 9 * TICK);
+    assert_eq!(scheduler.counters.batches, 4);
 }
 
 #[test]
