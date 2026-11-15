@@ -496,7 +496,13 @@ mod tests {
     fn store(temp: &TempDir, workspace: &str) -> Store {
         let environment =
             BTreeMap::from([("HOME".to_owned(), temp.0.to_string_lossy().into_owned())]);
-        Store::for_workspace(Path::new(workspace), &environment).unwrap()
+        let mut store = Store::for_workspace(Path::new(workspace), &environment).unwrap();
+        if cfg!(target_os = "motor") {
+            // Motor ignores HOME in favor of the role's persistent config.
+            // Keep the workspace-derived filename inside this test's scratch.
+            store.path = temp.0.join(store.path.file_name().unwrap());
+        }
+        store
     }
 
     #[test]

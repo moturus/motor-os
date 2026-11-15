@@ -2639,6 +2639,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn layers_lorry_and_cargo_configuration() {
         let temp = TempDir::new();
         let home = temp.0.join("home");
@@ -2860,10 +2861,23 @@ mod tests {
         );
 
         let mut config = Config::default();
-        merge_lorry_file(&path, LayerKind::LinuxBase, None, &mut config).unwrap();
-        config.repositories.user = Some(temp.0.join("cache/repository"));
-        let environment = BTreeMap::from([("HOME".to_owned(), temp.0.display().to_string())]);
-        assert!(validate_storage_layout(&config, &environment).is_err());
+        #[cfg(unix)]
+        {
+            merge_lorry_file(&path, LayerKind::LinuxBase, None, &mut config).unwrap();
+            config.repositories.user = Some(temp.0.join("cache/repository"));
+            let environment = BTreeMap::from([("HOME".to_owned(), temp.0.display().to_string())]);
+            assert!(validate_storage_layout(&config, &environment).is_err());
+        }
+        #[cfg(target_os = "motor")]
+        {
+            let error =
+                merge_lorry_file(&path, LayerKind::MotorUser, None, &mut config).unwrap_err();
+            assert!(
+                error
+                    .render()
+                    .contains("`cache.directory` is not supported on Motor")
+            );
+        }
     }
 
     #[test]

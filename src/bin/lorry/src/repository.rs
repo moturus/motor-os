@@ -1961,7 +1961,11 @@ mod tests {
             archive_limits(),
         )
         .unwrap_err();
-        assert!(error.to_string().contains("writable Lorry repository"));
+        let expected = match crate::role::Role::current() {
+            crate::role::Role::None => "None vendoring requires repositories.none",
+            crate::role::Role::Interactive => "writable Lorry repository",
+        };
+        assert!(error.to_string().contains(expected), "{error}");
     }
 
     #[test]

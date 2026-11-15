@@ -2558,7 +2558,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_path_identity_uses_size_and_mtime_not_contents() {
+    fn ordinary_path_identity_tracks_size_and_mtime() {
         let fixture = Fixture::new();
         let source = fixture.0.join("source");
         fs::create_dir(&source).unwrap();
@@ -2579,13 +2579,23 @@ mod tests {
         let original = fingerprint();
 
         fs::write(&file, b"other").unwrap();
-        File::options()
-            .write(true)
-            .open(&file)
-            .unwrap()
-            .set_times(fs::FileTimes::new().set_modified(modified))
-            .unwrap();
-        assert_eq!(fingerprint(), original);
+        #[cfg(unix)]
+        {
+            File::options()
+                .write(true)
+                .open(&file)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(modified))
+                .unwrap();
+            assert_eq!(fingerprint(), original);
+        }
+        #[cfg(target_os = "motor")]
+        {
+            // Motor does not expose timestamp setters. A same-length edit
+            // must invalidate the fingerprint through its modification time.
+            assert_ne!(fs::metadata(&file).unwrap().modified().unwrap(), modified);
+            assert_ne!(fingerprint(), original);
+        }
 
         fs::write(file, b"longer").unwrap();
         assert_ne!(fingerprint(), original);

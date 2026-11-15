@@ -132,61 +132,61 @@ fn tamper(workspace: &Path) {
 
 #[test]
 fn git_source_modes() {
-    let supplied = std::env::var_os("LORRY_MODE_WORKSPACE");
+    let temporary = if cfg!(target_os = "motor") {
+        PathBuf::from("/none/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    let workspace = temporary.join(format!("lorry-source-modes-{}", std::process::id()));
+    materialize(&workspace);
+    verify(&workspace);
+    tamper(&workspace);
     #[cfg(target_os = "motor")]
-    assert!(
-        supplied.is_some(),
-        "native driver must supply a shared fixture root"
-    );
-    let workspace = supplied.map(PathBuf::from).unwrap_or_else(|| {
-        std::env::temp_dir().join(format!("lorry-source-modes-{}", std::process::id()))
-    });
-    match std::env::var("LORRY_MODE_ACTION").as_deref() {
-        Ok("verify") => verify(&workspace),
-        Ok("tamper") => tamper(&workspace),
-        _ => {
-            materialize(&workspace);
-            verify(&workspace);
-            #[cfg(not(target_os = "motor"))]
-            {
-                tamper(&workspace);
-                fs::remove_dir_all(workspace).unwrap();
-            }
-        }
+    if crate::role::Role::current() == crate::role::Role::Interactive {
+        let child = |path: &Path, action: &str| {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "git::direct::source_mode_tests::source_modes_child",
+                    "--nocapture",
+                ])
+                .env("LORRY_MODE_WORKSPACE", path)
+                .env("LORRY_MODE_ACTION", action)
+                .env(
+                    "MOTOR_OS_CAPS",
+                    format!(
+                        "{:#x}",
+                        moto_sdk::sys::ProcessStaticPage::get().capabilities
+                            & !moto_sdk::sys::caps::CAP_INTERACTIVE
+                    ),
+                )
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{action}: {output:?}");
+        };
+        child(&workspace, "verify");
+        child(&workspace, "tamper");
+        verify(&workspace);
+        let none = workspace.join("none-created");
+        child(&none, "materialize");
+        verify(&none);
+        tamper(&none);
+        child(&none, "verify");
     }
+    fs::remove_dir_all(workspace).unwrap();
 }
 
 #[cfg(target_os = "motor")]
 #[test]
-fn final_executable_modes() {
-    use moto_sdk::io::fs::{AccessPermissions, FsClient, Role};
-    let root = PathBuf::from(std::env::var_os("LORRY_MODE_WORKSPACE").unwrap());
-    let binary = root.join("target/lorry/debug/role-fixture");
-    let mut runtime = moto_sdk::async_runtime::LocalRuntime::new();
-    runtime.block_on(async {
-        let client = FsClient::connect().unwrap();
-        for (path, expected) in [
-            (binary, AccessPermissions::Rx),
-            (root.join("target"), AccessPermissions::Rwx),
-            (root.join("target/lorry"), AccessPermissions::Rwx),
-            (root.join("Cargo.lock"), AccessPermissions::Rw),
-            (
-                root.join(".lorry/dependencies-v2.toml"),
-                AccessPermissions::Rw,
-            ),
-        ] {
-            let (id, _) = client.stat(path.to_str().unwrap()).await.unwrap();
-            assert_eq!(
-                client
-                    .metadata(id)
-                    .await
-                    .unwrap()
-                    .access(Role::None)
-                    .unwrap(),
-                expected,
-                "{}",
-                path.display()
-            );
-        }
-    });
+fn source_modes_child() {
+    let Some(workspace) = std::env::var_os("LORRY_MODE_WORKSPACE") else {
+        return;
+    };
+    let workspace = PathBuf::from(workspace);
+    match std::env::var("LORRY_MODE_ACTION").as_deref() {
+        Ok("verify") => verify(&workspace),
+        Ok("tamper") => tamper(&workspace),
+        Ok("materialize") => materialize(&workspace),
+        action => panic!("unknown source mode action: {action:?}"),
+    }
 }

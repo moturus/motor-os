@@ -1,3 +1,6 @@
+#[cfg(target_os = "motor")]
+mod support;
+
 use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
@@ -47,12 +50,19 @@ impl Fixture {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
+        let scratch = if cfg!(target_os = "motor") {
+            PathBuf::from("/none/tmp")
+        } else {
+            std::env::temp_dir()
+        };
+        let root = scratch.join(format!(
             "lorry-own-messages-{}-{unique}",
             std::process::id()
         ));
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        #[cfg(target_os = "motor")]
+        support::share(&root, true);
         Self(root)
     }
 

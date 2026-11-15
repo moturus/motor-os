@@ -163,7 +163,7 @@ mod tests {
         let fixture = AtomicDirectory::new(&std::env::temp_dir(), "lorry-index-record").unwrap();
         let root = fixture.path().join("repository");
         let repositories = Repositories {
-            user: Some(root.clone()),
+            local: Some(root.clone()),
             ..Repositories::default()
         };
         let record = SparseRecord::parse(Path::new("/index.json"), format!(

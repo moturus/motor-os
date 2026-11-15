@@ -1,4 +1,25 @@
 #[test]
+fn motor_global_configuration_uses_the_caller_role_instead_of_home() {
+    let temp = TempDir::new();
+    fs::create_dir_all(temp.0.join(".config/lorry")).unwrap();
+    fs::write(temp.0.join(".config/lorry/lorry.toml"), "invalid TOML [").unwrap();
+    let environment = BTreeMap::from([("HOME".into(), temp.0.display().to_string())]);
+    let config = Config::load_global_with_environment(&environment).unwrap();
+    assert_eq!(
+        global_lorry_layers(&environment),
+        vec![(Role::current().config_file(), LayerKind::MotorUser)]
+    );
+    assert_eq!(
+        config,
+        Config::load_global_with_environment(&BTreeMap::new()).unwrap()
+    );
+    assert_eq!(
+        config.cache_directory_with_environment(&environment).unwrap(),
+        Role::current().cache_directory()
+    );
+}
+
+#[test]
 fn motor_cache_roots_are_disjoint_from_repositories_in_both_roles() {
     let mut config = Config::default();
     for role in [Role::None, Role::Interactive] {

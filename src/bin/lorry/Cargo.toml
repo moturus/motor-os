@@ -4,6 +4,26 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
+[[test]]
+name = "native_roles"
+harness = false
+
+[[test]]
+name = "process_control"
+harness = false
+
+[[test]]
+name = "source_contracts"
+harness = false
+
+[[test]]
+name = "analyzer"
+harness = false
+
+[[test]]
+name = "compiler_contracts"
+harness = false
+
 [dependencies]
 clap = { version = "=4.6.0", default-features = false, features = [
     "error-context",
@@ -46,6 +66,10 @@ moto-rt = "0.17.6"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { version = "=0.2.186", default-features = false }
+
+[dev-dependencies]
+motor-analyzer-tests = { path = "../../sys/tests/rust-analyzer" }
+cargo_metadata = "=0.23.1"
 
 [profile.dev]
 panic = "abort"
