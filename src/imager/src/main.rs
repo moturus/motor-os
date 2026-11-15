@@ -442,22 +442,6 @@ fn add_static_dir(files: &mut BTreeMap<String, PathBuf>, dir_to_add: PathBuf, de
     add_dir(files, dir_to_add, dest_path, &[]);
 }
 
-fn static_overlay_exclusions(directories: &[String]) -> &'static [&'static str] {
-    const NONE: &[&str] = &[];
-    const DEVTOOLS: &[&str] = &["devtools"];
-
-    let devtools = Path::new("/devtools");
-    if directories
-        .iter()
-        .map(Path::new)
-        .any(|path| path == devtools || path.starts_with(devtools))
-    {
-        NONE
-    } else {
-        DEVTOOLS
-    }
-}
-
 fn add_source_dir(files: &mut BTreeMap<String, PathBuf>, dir_to_add: PathBuf, dest_path: &Path) {
     add_dir(files, dir_to_add, dest_path, &SOURCE_TREE_EXCLUDED_DIRS);
 }
@@ -884,10 +868,9 @@ fn main() {
         files.insert((*prog).clone(), bin_dir.join(filename));
     }
 
-    let static_exclusions = static_overlay_exclusions(&config.directories);
     for dir in &config.static_dirs {
         let path = motorh.join(dir);
-        add_dir(&mut files, path, Path::new("/"), static_exclusions);
+        add_dir(&mut files, path, Path::new("/"), &[]);
     }
     for dir in &config.source_dirs {
         let path = motorh.join(&dir.source);
@@ -991,11 +974,6 @@ mod tests {
         for yaml in [
             include_str!("../motor-os-base.yaml"),
             include_str!("../motor-os.yaml"),
-            include_str!("../motor-os-dev.yaml"),
-            include_str!("../motor-os-wasm.yaml"),
-            include_str!("../motor-os-system-tty.yaml"),
-            include_str!("../motor-os-vsock-test.yaml"),
-            include_str!("../motor-os-ro-root.yaml"),
         ] {
             let config: Config = serde_yaml::from_str(yaml).unwrap();
             assert!(config.directories.contains(&"/none/dev".to_owned()));
@@ -1018,6 +996,29 @@ mod tests {
             }
             assert!(!files.contains_key("/system/cfg/rush.cfg"));
             assert!(!files.contains_key("/system/cfg/sshd.toml"));
+            assert!(config.source_dirs.is_empty());
+            let paths = config
+                .directories
+                .iter()
+                .chain(config.input_files.iter())
+                .chain(files.keys());
+            let mut roots = std::collections::BTreeSet::new();
+            for path in paths {
+                roots.insert(path.split('/').nth(1).unwrap());
+                assert!(
+                    !path.contains("/tests/") && !path.contains("/test-tmp"),
+                    "{path}"
+                );
+                assert!(
+                    !path.contains("stress-soak") && !path.contains("systest"),
+                    "{path}"
+                );
+                assert!(!path.starts_with("/user/bin/dev/"), "{path}");
+            }
+            assert_eq!(
+                roots,
+                std::collections::BTreeSet::from(["none", "system", "user"])
+            );
         }
     }
 
@@ -1099,196 +1100,6 @@ mod tests {
     }
 
     #[test]
-    fn dev_image_requires_the_native_toolchain() {
-        let config: Config = serde_yaml::from_str(include_str!("../motor-os-dev.yaml")).unwrap();
-
-        assert_eq!(config.permission_policy, "motor-os-permissions.yaml");
-        assert_eq!(config.img_name, "motor-os-dev.qcow2");
-        assert_eq!(config.image_format, ImageFormat::Qcow2);
-        assert!(config
-            .input_files
-            .iter()
-            .any(|path| path == "/user/bin/dev/lorry"));
-        assert!(config
-            .input_files
-            .iter()
-            .any(|path| path == "/user/bin/curl"));
-        assert!(config
-            .input_files
-            .iter()
-            .any(|path| path == "/user/bin/ssh"));
-        assert!(config
-            .directories
-            .iter()
-            .any(|path| path == "/user/cfg/ssh"));
-        assert_eq!(
-            config.static_dirs,
-            [
-                "img_files/motor-os-base",
-                "img_files/motor-os",
-                "img_files/motor-os-dev"
-            ]
-        );
-        assert_eq!(
-            config.assembly_dirs,
-            [
-                "libc",
-                "rg",
-                "tar",
-                "llvm",
-                "rustc",
-                "helix",
-                "lua",
-                "quickjs",
-                "sed",
-                "rust-analyzer",
-                "javy",
-                "wasmtime",
-                "sys-lib-deps"
-            ]
-        );
-        assert_eq!(config.assembly_required_executables.len(), 23);
-        assert!(config
-            .assembly_required_executables
-            .iter()
-            .any(|path| path == "wasmtime/user/bin/dev/wasmtime"));
-        assert!(config
-            .assembly_required_executables
-            .iter()
-            .any(|path| path == "wasmtime/user/bin/dev/wasmtime-rt"));
-        assert!(config
-            .assembly_required_executables
-            .iter()
-            .any(|path| path == "rust-analyzer/user/lib/rust/bin/rust-analyzer"));
-        assert!(!config
-            .assembly_required_executables
-            .iter()
-            .any(|path| path.ends_with("/cargo")));
-        assert!(config
-            .assembly_required_executables
-            .iter()
-            .any(|path| path.ends_with("/rustc")));
-        for path in [
-            "llvm/user/bin/dev/ar",
-            "rust-analyzer/user/bin/dev/rust-analyzer",
-            "rustc/user/bin/dev/rustfmt",
-            "rustc/user/lib/rust/bin/rustfmt",
-            "rustc/user/bin/dev/clippy-driver",
-            "rustc/user/lib/rust/bin/clippy-driver",
-        ] {
-            assert!(config
-                .assembly_required_executables
-                .iter()
-                .any(|candidate| candidate == path));
-        }
-        assert!(config
-            .assembly_required_executables
-            .iter()
-            .any(|path| path.ends_with("/rg")));
-        assert!(config
-            .assembly_required_executables
-            .iter()
-            .any(|path| path == "helix/user/lib/helix/hx"));
-        assert!(config
-            .assembly_required_executables
-            .iter()
-            .any(|path| path == "sed/user/bin/dev/sed"));
-        // Scratch and configuration belong to the roles, not to /devtools.
-        for path in ["/devtools/tmp", "/devtools/cfg"] {
-            assert!(!config.directories.iter().any(|candidate| candidate == path));
-        }
-        for path in ["/none/tmp", "/user/lib/llvm/cfg"] {
-            assert!(config.directories.iter().any(|candidate| candidate == path));
-        }
-        // Each role has its own Lorry repository and cache.
-        for role in ["user", "none"] {
-            for path in ["cache", "vendor", "vendor/.staging"] {
-                let path = format!("/{role}/dev/lorry/{path}");
-                assert!(config.directories.contains(&path));
-            }
-        }
-        for path in ["/devtools/lorry/cache", "/devtools/lorry/vendor"] {
-            assert!(!config.directories.iter().any(|candidate| candidate == path));
-        }
-        assert!(!config
-            .directories
-            .iter()
-            .any(|path| path == "/user/cfg/lorry" || path.starts_with("/user/cfg/lorry/")));
-        assert_eq!(config.source_dirs.len(), 5);
-        for (source, destination) in [
-            ("src/bin/red", "/none/dev/motor-os/bin/red"),
-            ("src/bin/lorry", "/none/dev/motor-os/bin/lorry"),
-        ] {
-            assert!(config
-                .source_dirs
-                .iter()
-                .any(|dir| dir.source == source && dir.destination == destination));
-        }
-        // Library sources for native tests mirror the tree below sys/lib, so
-        // their `../moto-rt` path dependencies resolve on the image.
-        let mut library_sources: Vec<_> = config
-            .source_dirs
-            .iter()
-            .filter(|dir| dir.destination.starts_with("/none/dev/motor-os/sys/"))
-            .map(|dir| {
-                let name = dir.source.strip_prefix("src/sys/lib/").unwrap();
-                assert_eq!(
-                    dir.destination,
-                    format!("/none/dev/motor-os/sys/lib/{name}")
-                );
-                name
-            })
-            .collect();
-        library_sources.sort_unstable();
-        assert_eq!(library_sources, ["moto-rt", "moto-sdk", "moto-sys"]);
-    }
-
-    #[test]
-    fn wasm_image_has_the_wasm_tools_and_no_native_toolchain() {
-        let config: Config = serde_yaml::from_str(include_str!("../motor-os-wasm.yaml")).unwrap();
-
-        assert_eq!(config.permission_policy, "motor-os-permissions.yaml");
-        assert_eq!(config.img_name, "motor-os-wasm.qcow2");
-        assert_eq!(config.image_format, ImageFormat::Qcow2);
-        assert_eq!(config.data_partition_size_mb, 1024);
-        assert_eq!(
-            config.static_dirs,
-            ["img_files/motor-os-base", "img_files/motor-os"]
-        );
-        assert_eq!(config.assembly_dirs, ["libc", "rg", "javy", "wasmtime"]);
-        assert_eq!(
-            config.assembly_required_executables,
-            [
-                "rg/user/bin/rg",
-                "javy/user/bin/dev/javy",
-                "javy/user/bin/dev/wasmi",
-                "wasmtime/user/bin/dev/wasmtime",
-                "wasmtime/user/bin/dev/wasmtime-rt"
-            ]
-        );
-        for path in [
-            "/user/lib/javy",
-            "/user/lib/javy/plugins",
-            "/user/lib/wasmtime",
-            "/user/tmp",
-        ] {
-            assert!(config.directories.iter().any(|candidate| candidate == path));
-        }
-        assert!(config
-            .directories
-            .iter()
-            .all(|path| !path.starts_with("/devtools/cfg")));
-        assert!(config.directories.iter().all(|path| {
-            !path.starts_with("/user/lib/llvm") && !path.starts_with("/user/lib/rust")
-        }));
-        assert!(config
-            .input_files
-            .iter()
-            .all(|path| !path.starts_with("/devtools") && !path.contains("/tests/")));
-        assert!(config.source_dirs.is_empty());
-    }
-
-    #[test]
     fn base_image_has_no_dns_or_dev_content() {
         let config: Config = serde_yaml::from_str(include_str!("../motor-os-base.yaml")).unwrap();
 
@@ -1316,13 +1127,9 @@ mod tests {
             .any(|path| path == "/user/cfg/ssh"));
     }
 
-    const IMAGE_CONFIGS: [&str; 6] = [
+    const IMAGE_CONFIGS: [&str; 2] = [
         include_str!("../motor-os-base.yaml"),
         include_str!("../motor-os.yaml"),
-        include_str!("../motor-os-dev.yaml"),
-        include_str!("../motor-os-wasm.yaml"),
-        include_str!("../motor-os-system-tty.yaml"),
-        include_str!("../motor-os-vsock-test.yaml"),
     ];
 
     const TEST_CERTIFICATE: &str =
@@ -1443,22 +1250,21 @@ mod tests {
 
     #[test]
     fn assembly_image_root_resolves_only_assembly_inputs() {
-        let mut config: Config =
-            serde_yaml::from_str(include_str!("../motor-os-dev.yaml")).unwrap();
+        let mut config: Config = serde_yaml::from_str(include_str!("../motor-os.yaml")).unwrap();
         use_assembly_image_root(&mut config, Some(Path::new("/assemblies/exact/images"))).unwrap();
 
         assert!(config
             .static_dirs
             .iter()
-            .any(|path| path == "/assemblies/exact/images/rustc"));
+            .any(|path| path == "/assemblies/exact/images/rg"));
         assert!(config
             .required_executables
             .iter()
-            .any(|path| path == "/assemblies/exact/images/llvm/user/bin/dev/cc"));
+            .any(|path| path == "/assemblies/exact/images/rg/user/bin/rg"));
         assert!(config
             .static_dirs
             .iter()
-            .any(|path| path == "img_files/motor-os-dev"));
+            .any(|path| path == "img_files/motor-os"));
         assert!(use_assembly_image_root(&mut config, Some(Path::new("relative/images"))).is_err());
         assert!(use_assembly_image_root(&mut config, Some(Path::new("/images/../other"))).is_err());
     }
@@ -1530,15 +1336,6 @@ entries: []
             "rw-r--r--"
         );
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn static_overlays_cannot_introduce_undeclared_devtools() {
-        assert_eq!(static_overlay_exclusions(&[]), ["devtools"]);
-        assert_eq!(
-            static_overlay_exclusions(&["/devtools/bin".to_owned()]),
-            [] as [&str; 0]
-        );
     }
 
     #[test]

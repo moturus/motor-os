@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Motor OS filesystem, the journaling filesystem of Motor OS; the image layout; and per-role permissions.">
+<meta name="theme-color" content="#0a0a0a">
+<title>Filesystem | Motor OS</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
+<style>
+@font-face {
+  font-family: 'RobotoMono';
+  src: url('fonts/roboto-mono-latin-400-normal.woff2') format('woff2'),
+       url('fonts/roboto-mono-latin-400-normal.woff') format('woff');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'RobotoMono';
+  src: url('fonts/roboto-mono-latin-500-normal.woff2') format('woff2'),
+       url('fonts/roboto-mono-latin-500-normal.woff') format('woff');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --bg: #0a0a0a;
+  --bg-2: #141414;
+  --bg-3: #1e1e1e;
+  --line: #2b2b2b;
+  --fg: #ededed;
+  --fg-2: #a9a9a9;
+  --accent: #ffaf00;
+  --accent-2: #ffd787;
+  --ink: #121212;
+  --mono: "RobotoMono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --wrap: 1120px;
+  --measure: 46rem;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 16px;
+  line-height: 1.65;
+}
+img { max-width: 100%; height: auto; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-2); text-decoration: underline; }
+.skip {
+  position: absolute; left: -999px; top: 0;
+  background: var(--accent); color: var(--ink); padding: .5rem 1rem;
+}
+.skip:focus { left: .5rem; top: .5rem; z-index: 10; }
+
+.wrap {
+  max-width: var(--wrap);
+  margin: 0 auto;
+  padding: 0 1.25rem;
+}
+
+/* Header */
+.top {
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+.top .wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .5rem 1.5rem;
+  min-height: 3.75rem;
+  padding-top: .5rem;
+  padding-bottom: .5rem;
+}
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: .6rem;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: 1.05rem;
+  letter-spacing: .01em;
+}
+.brand:hover { color: var(--fg); text-decoration: none; }
+.mark {
+  display: inline-grid;
+  place-items: center;
+  width: 1.7rem; height: 1.7rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  font-weight: 500;
+  font-size: 1rem;
+}
+.top-nav { display: flex; flex-wrap: wrap; gap: .25rem 1.25rem; font-family: var(--mono); font-size: .9rem; }
+.top-nav a { color: var(--fg-2); padding: .25rem 0; border-bottom: 2px solid transparent; }
+.top-nav a:hover { color: var(--fg); text-decoration: none; }
+.top-nav a.current { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Layout */
+main.wrap { padding-top: 2rem; padding-bottom: 3rem; }
+.with-sidebar { display: grid; grid-template-columns: 15rem minmax(0, 1fr); gap: 3rem; }
+.sidebar { font-size: .92rem; }
+.sidebar nav { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow-y: auto; padding-right: .5rem; }
+.nav-group { margin-bottom: 1.25rem; }
+.nav-title {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--fg-2);
+  margin-bottom: .35rem;
+}
+.sidebar ul { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--line); }
+.sidebar li a {
+  display: block;
+  color: var(--fg-2);
+  padding: .22rem .75rem;
+  margin-left: -1px;
+  border-left: 1px solid transparent;
+}
+.sidebar li a:hover { color: var(--fg); text-decoration: none; border-left-color: var(--fg-2); }
+.sidebar li a.current { color: var(--accent); border-left-color: var(--accent); }
+
+.content { min-width: 0; max-width: var(--measure); }
+.home .content, .plain .content { max-width: none; }
+
+/* Type */
+h1, h2, h3, h4 { line-height: 1.25; font-weight: 600; color: var(--accent); }
+h1 { font-size: 2.1rem; margin: 0 0 1rem; letter-spacing: -.01em; }
+h2 { font-size: 1.45rem; margin: 2.6rem 0 .8rem; padding-top: 1.2rem; border-top: 1px solid var(--line); }
+h3 { font-size: 1.12rem; margin: 1.8rem 0 .5rem; }
+h4 { font-size: 1rem; margin: 1.4rem 0 .4rem; }
+h2 a, h3 a { color: inherit; }
+p, ul, ol, table, pre, blockquote { margin: 0 0 1rem; }
+ul, ol { padding-left: 1.4rem; }
+li { margin: .25rem 0; }
+li > ul, li > ol { margin-bottom: .25rem; }
+hr { border: 0; border-top: 1px solid var(--line); margin: 2rem 0; }
+strong { color: #fff; }
+.lead { font-size: 1.15rem; color: var(--fg); }
+.muted { color: var(--fg-2); }
+.eyebrow {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .6rem;
+}
+blockquote {
+  border-left: 3px solid var(--line);
+  margin-left: 0;
+  padding: .1rem 1rem;
+  color: var(--fg-2);
+}
+
+/* Code */
+code, kbd, pre { font-family: var(--mono); }
+code {
+  background: var(--bg-3);
+  padding: .08em .35em;
+  border-radius: 4px;
+  font-size: .88em;
+  color: var(--accent-2);
+}
+pre {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: .9rem 1.1rem;
+  overflow-x: auto;
+  font-size: .86rem;
+  line-height: 1.55;
+}
+pre code { background: none; padding: 0; font-size: inherit; color: var(--fg); }
+kbd {
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 .35em;
+  font-size: .85em;
+}
+
+/* Tables */
+.table-wrap { overflow-x: auto; margin-bottom: 1rem; }
+table { border-collapse: collapse; width: 100%; font-size: .93rem; }
+th, td { text-align: left; vertical-align: top; padding: .5rem .7rem; border-bottom: 1px solid var(--line); }
+th {
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .78rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+td code { white-space: nowrap; }
+table.plain td code { white-space: normal; }
+
+/* Callouts */
+.note, .tbd, .warn {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: .8rem 1rem;
+  margin: 0 0 1.2rem;
+}
+.note p:last-child, .tbd p:last-child, .warn p:last-child { margin-bottom: 0; }
+.tbd { border-left-style: dashed; }
+.warn { border-left-color: var(--accent-2); }
+.callout-title {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .3rem;
+}
+
+/* Cards and pills */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 1rem;
+  margin: 1.2rem 0 1.5rem;
+}
+.card {
+  display: block;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1.1rem 1.2rem;
+  color: var(--fg);
+}
+a.card:hover { border-color: var(--accent); color: var(--fg); text-decoration: none; }
+.card h3 { margin: 0 0 .4rem; font-size: 1.02rem; }
+a.card h3 { color: var(--accent); }
+.card p { margin: 0; color: var(--fg-2); font-size: .94rem; }
+.card .tag { font-family: var(--mono); font-size: .72rem; color: var(--fg-2); letter-spacing: .1em; text-transform: uppercase; }
+.pill {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: .74rem;
+  letter-spacing: .06em;
+  padding: .1rem .55rem;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  vertical-align: middle;
+}
+.pill.dim { border-color: var(--line); color: var(--fg-2); }
+
+/* Buttons */
+.btn {
+  display: inline-block;
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .95rem;
+  padding: .6rem 1.15rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  border: 1px solid var(--accent);
+}
+.btn:hover { background: var(--accent-2); border-color: var(--accent-2); color: var(--ink); text-decoration: none; }
+.btn.ghost { background: transparent; color: var(--accent); }
+.btn.ghost:hover { background: rgba(255, 175, 0, .1); color: var(--accent-2); }
+.actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
+
+/* Home page */
+.hero { padding: 1.5rem 0 2.5rem; }
+.hero h1 { font-size: 3rem; margin-bottom: .75rem; }
+.hero .lead { max-width: 40rem; font-size: 1.2rem; }
+.hero-tag {
+  font-family: var(--mono);
+  color: var(--accent);
+  font-size: .85rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  margin-bottom: 1rem;
+}
+.home h2 { border-top: 0; padding-top: 0; margin-top: 2.5rem; }
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0 2rem;
+}
+.fact { border-top: 2px solid var(--accent); padding-top: .6rem; }
+.fact b { display: block; font-family: var(--mono); font-size: 1.35rem; color: #fff; font-weight: 500; }
+.fact span { color: var(--fg-2); font-size: .9rem; }
+.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem 3rem; }
+.two-col h3 { margin-top: .5rem; }
+.terminal {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 1.2rem 0 1.5rem;
+}
+.terminal .bar {
+  background: var(--accent);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: .8rem;
+  padding: .3rem .8rem;
+}
+.terminal pre { border: 0; border-radius: 0; margin: 0; }
+
+/* Pager and footer */
+.pager {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 3rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--line);
+  font-size: .95rem;
+}
+.pager a { display: block; }
+.pager a span { display: block; font-family: var(--mono); font-size: .72rem; letter-spacing: .12em; text-transform: uppercase; color: var(--fg-2); }
+.pager-next { text-align: right; }
+.foot {
+  border-top: 1px solid var(--line);
+  color: var(--fg-2);
+  font-size: .85rem;
+  padding: 1.5rem 0 2.5rem;
+}
+.foot p { margin: 0 0 .5rem; }
+
+/* Small screens */
+@media (max-width: 860px) {
+  main.wrap { padding-top: 1.25rem; }
+  .with-sidebar { display: block; }
+  .sidebar { margin-bottom: 1.5rem; }
+  .sidebar nav {
+    position: static;
+    max-height: none;
+    display: flex;
+    gap: .5rem;
+    overflow-x: auto;
+    padding: 0 0 .6rem;
+    border-bottom: 1px solid var(--line);
+    scrollbar-width: thin;
+  }
+  .nav-group { margin: 0; flex: 0 0 auto; }
+  .nav-title { display: none; }
+  .sidebar ul { border: 0; display: flex; gap: .4rem; }
+  .sidebar li { margin: 0; }
+  .sidebar li a {
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: .25rem .75rem;
+    margin: 0;
+    white-space: nowrap;
+    font-size: .85rem;
+  }
+  .sidebar li a.current { border-color: var(--accent); }
+  .hero { padding-bottom: 1.5rem; }
+  .hero h1 { font-size: 2.3rem; }
+  h1 { font-size: 1.75rem; }
+  h2 { font-size: 1.3rem; }
+  pre { font-size: .82rem; }
+}
+</style>
+<script src="sidebar.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
+    <nav class="top-nav" aria-label="Site">
+      <a href="what.html">What</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
+      <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </div>
+</header>
+<div id="content"></div>
+<main class="wrap with-sidebar">
+<aside class="sidebar">
+<nav aria-label="Documentation"><a href="docs.html">Documentation</a></nav>
+</aside>
+<article class="content">
+<div class="eyebrow">System</div>
+<h1>Filesystem</h1>
+<p class="lead">The Motor OS filesystem is the default filesystem since June 2026. It is a journaling
+filesystem served by sys-io, with three-role permissions on every entry, advisory locks,
+and no notion of users, links, or numeric Unix modes.</p>
+
+<h2>Motor OS filesystem</h2>
+<ul>
+  <li><strong>Journaling.</strong> Writes are batched into transactions, committed to an
+  on-disk redo log, and then checkpointed into the main block area. The design assumes
+  that a block write is atomic and defends against power loss, not against on-disk
+  corruption.</li>
+  <li><strong>On-disk structures.</strong> 4 KiB blocks, B+ trees for directories and
+  file data, and inline data for small files (up to 3,640 bytes live in the entry
+  itself). The partition type is <code>0x2e</code>.</li>
+  <li><strong>Block cache</strong> of 4,096 blocks (16 MiB) for root, less on guests below
+  256 MiB, with readahead and a
+  hit/miss/dedup-wait counter set exposed as metrics.</li>
+  <li><strong>Operations.</strong> stat, create (optionally with an explicit permission
+  set), delete, read, write, resize and truncate, rename with and without replacing the
+  target, directory iteration, parent lookup, permission changes, copy-file-range,
+  flush, and shared or exclusive advisory file locks with per-connection queueing.
+  Entries carry created, modified, and accessed timestamps.</li>
+  <li><strong>Limits.</strong> File names up to 255 bytes; paths up to 1,024 bytes. File
+  sizes are 64-bit.</li>
+  <li><strong>Not there.</strong> Symbolic links, hard links, users, groups, ownership,
+  ACLs, sticky directories, numeric modes, and recursive chmod.</li>
+</ul>
+<p>The implementation is <code>src/sys/lib/motor-fs</code> (about 10,000 lines) on top
+of moto-sdk's <code>async_fs</code>, an abstraction that also runs on a Linux host so that images
+can be built and tested there. Rust's <code>std::fs</code> works as expected on top of it,
+with the permission model below showing through <code>Permissions</code>.</p>
+
+<h2 id="mounts">Mounts</h2>
+<p>sys-io mounts root from the first block device, then applies
+<code>/system/cfg/sys-fs.toml</code> in file order. The shipped file mounts memfs, an
+in-memory filesystem, over <code>/system/tmp</code>, <code>/user/tmp</code>, and
+<code>/none/tmp</code>, so every role's scratch directory is empty after each boot. Memfs
+capacity defaults to guest RAM less 16 MiB (at least 8 MiB), and writes return
+<code>StorageFull</code> when free memory runs low.</p>
+<p>Existing Motor OS filesystems on other MBR slots or virtio-block devices can be mounted
+at boot too:</p>
+<pre><code>[[mount]]
+path = "/user/data"   # an existing directory
+type = "motor-fs"
+device = 1            # PCI scan order, logged at boot; root is device 0
+partition = 2         # MBR slot 1-4; omit for a disk holding one bare Motor OS filesystem
+# read_only = true
+# cache_mb = 8        # this mount's block cache; at least 1 MiB</code></pre>
+<p>Failed devices keep their numbers, and nothing is formatted, partitioned, or resized at
+mount time. On the host, <code>imager mkfs</code> creates a bare filesystem image, and
+<code>imager mkdir</code> and <code>put</code> add a mount target and configuration to an image
+(see <a href="imager.html#create-a-data-filesystem">Imager</a>). A later mount may sit inside an earlier one, and mounted filesystems keep
+their stored permissions. Additional mounts share a cache budget equal to root's unless
+<code>cache_mb</code> sets one. Any invalid entry or missing source stops boot before the
+filesystem service starts. GPT, hotplug, and mounting or unmounting at run time are not
+supported.</p>
+<p>With <code>read_only = true</code>, every modifying request on that mount fails with
+<code>PermissionDenied</code> for every role, System included; reads, execution, locks,
+and copies out still work. A <code>[root]</code> table with <code>read_only = true</code>
+makes root read-only; it requires a writable mount at <code>/system/logs</code>, where
+strobe rotates logs against that mount's capacity, and networking needs the writable
+<code>/system/tmp</code>. Opening a mount may first replay its journal; on a disk the VMM
+attaches read-only, the journal must be clean and the mount configured read-only. The
+launchers attach such disks with <code>--root-read-only</code> and
+<code>--extra-disk-ro</code> (see <a href="running.html">Running</a>).</p>
+<p>Copies between mounts work; renames between them fail with
+<code>CrossesDevices</code> (<code>EXDEV</code> in C), so <code>mv</code> across mounts
+fails too: copy, then delete. A mount root cannot be moved, deleted, or replaced.
+<code>findmnt</code> (or <code>df</code>) lists the mounts with their source
+(<code>virtio1p2</code>, <code>virtio1</code>, or <code>-</code> for memfs), state
+(<code>rw</code>, <code>ro</code>, or <code>quarantined</code>), and sampled usage. The
+<code>fs.capacity_bytes</code> and <code>fs.available_bytes</code> metrics cover root
+only.</p>
+
+<h2>Image layout</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>Directory</th><th>Purpose</th></tr>
+  <tr><td><code>/system/services</code></td><td>sys-init, sys-tty, strobe, russhd, dns-resolver.</td></tr>
+  <tr><td><code>/system/cfg</code></td><td>Configuration: <code>sys-init.cfg</code>, <code>sys-net.toml</code>, <code>libc/</code> (hosts and other libc settings), <code>ssl/</code>.</td></tr>
+  <tr><td><code>/system/logs</code></td><td>Service logs written by strobe. Interactive may read them; None cannot enter the directory.</td></tr>
+  <tr><td><code>/system/tmp</code></td><td>System scratch. Interactive may traverse the directory and read sys-io's DHCP snapshot; None has no access.</td></tr>
+  <tr><td><code>/user/bin</code></td><td>User commands, including rush, sysbox and its wrappers, ripgrep, curl, red, rmux, kibim, httpd, and httpd-axum. Development commands live in <code>dev/</code>. Interactive may replace commands here.</td></tr>
+  <tr><td><code>/user/lib</code>, <code>/user/dev/lorry</code></td><td>Development-tool data and Lorry's Interactive repository and cache. None may read them.</td></tr>
+  <tr><td><code>/user/cfg</code></td><td>Interactive configuration, including <code>rush.cfg</code> and <code>sshd.toml</code>. None may traverse this directory and read explicitly shared configuration; private credentials remain closed.</td></tr>
+  <tr><td><code>/user/tmp</code></td><td>Interactive scratch, closed to None.</td></tr>
+  <tr><td><code>/none</code></td><td>The None role's home: <code>cfg</code> for configuration, <code>tmp</code> for scratch, and <code>dev</code> for sources and Lorry's None state. All three are writable by None.</td></tr>
+</table>
+</div>
+
+<h2>Permissions</h2>
+<p>A Motor OS filesystem mode is three permission triplets in <strong>System, Interactive, None</strong>
+order; <code>rw-r-----</code> gives System read and write, Interactive read, and None
+nothing. Each triplet is one of <code>rwx</code>, <code>rw-</code>, <code>r-x</code>,
+<code>r--</code>, or <code>---</code>, and permissions are monotonic across roles:</p>
+<pre><code>None &sube; Interactive &sube; System</code></pre>
+<ul>
+  <li>On a directory, <code>x</code> controls listing, traversal, and lookup, and
+  <code>w</code> controls creating, deleting, renaming, and changing the permissions
+  of children. A non-writable file can therefore still be replaced when its parent
+  directory is writable.</li>
+  <li>On a file, <code>x</code> is a hint enforced by the program loader, which refuses
+  to run a file the caller's role cannot execute. It is enforced cooperatively: a process
+  with <code>CAP_SPAWN</code> could build a child by hand from a readable file. The
+  boundaries that hold against a hostile process are read, write, and directory
+  traversal, which sys-io enforces, and the unforgeable role.</li>
+  <li>Image W^X: a shipped ELF initially grants no role write access. Scripts are
+  text interpreted by an executable and may be writable where the policy says so.</li>
+</ul>
+<p>sys-io learns the role of each client once, when the client connects, by asking the
+kernel for the peer's capabilities; it never trusts a role sent by the client.</p>
+<p>Changes also need <code>CAP_FS_WRITE</code>. Without it a process can stat, read, and
+list what its role allows, and every other request fails with
+<code>PermissionDenied</code>, file locks included. The capability never overrides the
+permissions above: a change needs both. See
+<a href="capabilities.html#filesystem-writes">Capabilities</a>.</p>
+
+<h3>What an image ships with</h3>
+<p>Images are built with a declarative policy, <code>src/imager/motor-os-permissions.yaml</code>,
+that assigns a mode to every destination by the longest matching tree, with exact entries
+for secrets and shared runtime-directory traversal. Smaller images omit trees; they never relax a mode. The main rules:</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Tree</th><th>Directories</th><th>Files</th><th>Scripts</th><th>ELF</th></tr>
+  <tr><td>default</td><td><code>rwxr-xr-x</code></td><td><code>rw-r--r--</code></td><td><code>rwxr-xr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
+  <tr><td><code>/system/logs</code></td><td><code>rwxr-x---</code></td><td><code>rw-r-----</code></td><td><code>r-xr-----</code></td><td><code>r-xr-----</code></td></tr>
+  <tr><td><code>/system/tmp</code></td><td><code>rwx------</code></td><td><code>rw-------</code></td><td><code>rwx------</code></td><td><code>r-x------</code></td></tr>
+  <tr><td><code>/user/tmp</code></td><td><code>rwxrwx---</code></td><td><code>rw-rw----</code></td><td><code>rwxrwx---</code></td><td><code>r-xr-x---</code></td></tr>
+  <tr><td><code>/none/cfg</code>, <code>/none/tmp</code>, <code>/none/dev</code></td><td><code>rwxrwxrwx</code></td><td><code>rw-rw-rw-</code></td><td><code>rwxrwxrwx</code></td><td><code>r-xr-xr-x</code></td></tr>
+  <tr><td><code>/none</code></td><td><code>rwxrwxr-x</code></td><td><code>rw-rw-r--</code></td><td><code>rwxrwxr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
+  <tr><td><code>/user</code>, <code>/user/bin</code>, <code>/user/dev/lorry</code></td><td><code>rwxrwxr-x</code></td><td><code>rw-rw-r--</code></td><td><code>rwxrwxr-x</code></td><td><code>r-xr-xr-x</code></td></tr>
+  <tr><td>Private descendants of <code>/user/cfg</code></td><td><code>rwxrwx---</code></td><td><code>rw-rw----</code></td><td><code>rwxrwx---</code></td><td><code>r-xr-x---</code></td></tr>
+</table>
+</div>
+<p>An exact-entry rule gives the <code>/system/tmp</code> directory
+<code>rwxr-x---</code>, without changing the private modes of its scratch files.
+sys-io creates its subdirectory with that same mode and publishes
+<code>sys-io/dhcp.toml</code> as <code>rw-r-----</code>.</p>
+<p><code>/user/cfg</code> itself is <code>rwxrwxr-x</code>. None may read
+<code>rush.cfg</code>, <code>rush.toml</code>, <code>rmux.toml</code>,
+<code>lorry.toml</code>, <code>cargo/config.toml</code>, and the Helix configuration, whose data mode is
+<code>rwxrw-r--</code>. Private siblings retain their closed modes.</p>
+<p><code>/user/cfg/sshd.toml</code> is <code>rwxrw----</code>, allowing Interactive
+to edit its PATH and host key. The TLS key <code>/system/cfg/ssl/ssl-key.pem</code>
+is <code>rw-r-----</code>. Both are invisible to None.
+<code>/user/cfg/russhd/users.toml</code> and <code>/user/cfg/ssh/authorized_keys.motor</code>
+are <code>rwxrw----</code>, the mode SFTP gives a new file, so that shipped and installed
+credentials match. With the initial modes, Interactive cannot create a new top-level directory or
+replace <code>/system</code>; it can install a newer toolchain under <code>/user/bin/dev</code>
+and <code>/user/lib</code>; only System can create or rotate files in <code>/system/logs</code>.</p>
+<p>The <a href="imager.html">imager</a> classifies each source file by its host execute bit (a host-executable file
+must be a <code>#!</code> script or an ELF executable, anything else is rejected), resolves
+every mode before it creates the image, rejects None write access anywhere under
+<code>/system</code> or <code>/user</code>, and creates non-writable files through a
+staging step so that a shipped ELF is never writable and executable at the same time
+during image construction,
+even during image construction. An image description that does not name a policy does
+not parse.</p>
+
+<h3>Files created at run time</h3>
+<ul>
+  <li>A new regular file starts <code>rw-</code> for its creator's role, <code>rwx</code>
+  for higher roles, and <code>r--</code> for lower roles. A new directory starts
+  <code>rwx</code> for the creator and higher roles and <code>r-x</code> for lower
+  roles.</li>
+  <li>A process can narrow its own role's permissions on an entry, and lower roles are
+  narrowed with it. It may also change <code>rw-</code> to <code>r-x</code>, or
+  <code>r-x</code> to <code>rwx</code>. These rules apply to files and directories,
+  for every role when the parent permits the change. Direct <code>rw-</code> to <code>rwx</code> remains denied; use
+  <code>rw-</code> &rarr; <code>r-x</code> &rarr; <code>rwx</code> for an editable
+  executable. Exact-permissions creation is also available.</li>
+  <li>Every runtime permission change, including narrowing or an unchanged mode,
+  requires the calling role's <code>w</code> on the entry's current parent and
+  <code>CAP_FS_WRITE</code>. Only System may change <code>/</code>. Entry-ID changes
+  need parent <code>w</code> but not <code>x</code>; pathname lookup still needs
+  <code>x</code>. A file's own <code>w</code> still permits editing its contents
+  under a protected parent: a file Interactive may write, in a directory whose
+  <code>w</code> it has dropped, can be edited but not chmodded.</li>
+  <li>An SFTP upload onto an existing file replaces its contents in place and keeps
+  its installed mode: OPEN's mode is a creation hint. An upload whose mode excludes
+  a lower role that can currently read the file first takes that role's access
+  away, and is refused under a protected parent. <code>put -p</code> and
+  <code>scp -p</code> install their mode at close and are refused before writing
+  when the parent denies it. A mode request on an open upload is authorized
+  immediately and removes lower-role access before further writes; finalization
+  at close may remove the uploader's write access or grant lower roles access.
+  New uploads start private until close; if another process seals the parent
+  first, the final chmod fails and the file stays private until an authorized role
+  restores parent write access.</li>
+  <li>Every change must fit within the immediately higher role's permissions; System
+  has no higher role. Widening does not automatically restore lower-role permissions.
+  <strong><code>r-x</code> is not a permanent seal:</strong> System can make a shipped
+  ELF writable, and a lower role can make an <code>r-x</code> directory writable when
+  its higher-role ceiling is <code>rwx</code> and its parent grants <code>w</code>.
+  None cannot chmod <code>/user/tmp</code> itself, but can chmod entries inside it.</li>
+  <li>A role at <code>r--</code> or <code>---</code> still cannot widen itself. The std
+  readonly round-trip (<code>rw-</code> &rarr; <code>r--</code> &rarr; <code>rw-</code>)
+  therefore fails on its second step. Replacing such a file requires reading it,
+  writing a new file, and renaming it into place under a writable parent.
+  <code>std::fs::copy</code> means contents plus mode: the destination takes the
+  source's permissions, so a copy needs the caller's <code>w</code> on the
+  destination's parent even when the destination file is writable and already has
+  that mode. Where the parent denies it, or the mode would exceed a higher role's
+  byte, the copy is refused before truncation; replacing such a file's contents in
+  place takes an ordinary write.</li>
+  <li><code>chmod MODE PATH...</code> takes the nine-character mode in System,
+  Interactive, None order; <code>cp</code> preserves file permissions the same
+  way.</li>
+</ul>
+
+<p>For offline changes, see <a href="imager.html#change-guest-permissions">imager chmod</a>
+and <a href="imager.html#resize-the-data-partition">imager resize</a>. These host commands
+edit an image's permissions or copy it into an image with a different data-partition size.</p>
+
+<h2>Locks</h2>
+<p>Advisory file locks (<code>std::fs::File::lock</code>, <code>lock_shared</code>,
+<code>try_lock</code>, <code>unlock</code>) are served by a lock manager in sys-io,
+keyed by connection, with at most 64 queued waiters per connection. A lock is released
+when the file is closed or when its owner's connection to sys-io goes away.
+After <code>wait()</code> or <code>try_wait()</code> reports process completion, its locks
+no longer block other clients: acquisition checks disconnected owners even if the
+connection cleanup task has not run yet. Memory pressure does not refuse lock
+operations.</p>
+<nav class="pager">
+<a class="pager-prev" href="memory.html"><span>Previous</span>Memory</a>
+<a class="pager-next" href="networking.html"><span>Next</span>Networking</a>
+</nav>
+</article>
+</main>
+<footer class="foot">
+  <div class="wrap">
+    <p><a href="https://github.com/moturus/motor-os/blob/main/CHANGELOG.md">Changelog</a></p>
+    <p>Motor OS is free software, dual-licensed under the MIT and Apache 2.0 licenses.
+    <br>This site is served by <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> running inside a Motor OS VM.</p>
+  </div>
+</footer>
+</body>
+</html>

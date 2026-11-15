@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Writing Rust for Motor OS: the x86_64-unknown-motor target, what the standard library supports, ported crates, and porting notes.">
+<meta name="theme-color" content="#0a0a0a">
+<title>Rust on Motor OS | Motor OS</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
+<style>
+@font-face {
+  font-family: 'RobotoMono';
+  src: url('fonts/roboto-mono-latin-400-normal.woff2') format('woff2'),
+       url('fonts/roboto-mono-latin-400-normal.woff') format('woff');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'RobotoMono';
+  src: url('fonts/roboto-mono-latin-500-normal.woff2') format('woff2'),
+       url('fonts/roboto-mono-latin-500-normal.woff') format('woff');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --bg: #0a0a0a;
+  --bg-2: #141414;
+  --bg-3: #1e1e1e;
+  --line: #2b2b2b;
+  --fg: #ededed;
+  --fg-2: #a9a9a9;
+  --accent: #ffaf00;
+  --accent-2: #ffd787;
+  --ink: #121212;
+  --mono: "RobotoMono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --wrap: 1120px;
+  --measure: 46rem;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 16px;
+  line-height: 1.65;
+}
+img { max-width: 100%; height: auto; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-2); text-decoration: underline; }
+.skip {
+  position: absolute; left: -999px; top: 0;
+  background: var(--accent); color: var(--ink); padding: .5rem 1rem;
+}
+.skip:focus { left: .5rem; top: .5rem; z-index: 10; }
+
+.wrap {
+  max-width: var(--wrap);
+  margin: 0 auto;
+  padding: 0 1.25rem;
+}
+
+/* Header */
+.top {
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+.top .wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .5rem 1.5rem;
+  min-height: 3.75rem;
+  padding-top: .5rem;
+  padding-bottom: .5rem;
+}
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: .6rem;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: 1.05rem;
+  letter-spacing: .01em;
+}
+.brand:hover { color: var(--fg); text-decoration: none; }
+.mark {
+  display: inline-grid;
+  place-items: center;
+  width: 1.7rem; height: 1.7rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  font-weight: 500;
+  font-size: 1rem;
+}
+.top-nav { display: flex; flex-wrap: wrap; gap: .25rem 1.25rem; font-family: var(--mono); font-size: .9rem; }
+.top-nav a { color: var(--fg-2); padding: .25rem 0; border-bottom: 2px solid transparent; }
+.top-nav a:hover { color: var(--fg); text-decoration: none; }
+.top-nav a.current { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Layout */
+main.wrap { padding-top: 2rem; padding-bottom: 3rem; }
+.with-sidebar { display: grid; grid-template-columns: 15rem minmax(0, 1fr); gap: 3rem; }
+.sidebar { font-size: .92rem; }
+.sidebar nav { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow-y: auto; padding-right: .5rem; }
+.nav-group { margin-bottom: 1.25rem; }
+.nav-title {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--fg-2);
+  margin-bottom: .35rem;
+}
+.sidebar ul { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--line); }
+.sidebar li a {
+  display: block;
+  color: var(--fg-2);
+  padding: .22rem .75rem;
+  margin-left: -1px;
+  border-left: 1px solid transparent;
+}
+.sidebar li a:hover { color: var(--fg); text-decoration: none; border-left-color: var(--fg-2); }
+.sidebar li a.current { color: var(--accent); border-left-color: var(--accent); }
+
+.content { min-width: 0; max-width: var(--measure); }
+.home .content, .plain .content { max-width: none; }
+
+/* Type */
+h1, h2, h3, h4 { line-height: 1.25; font-weight: 600; color: var(--accent); }
+h1 { font-size: 2.1rem; margin: 0 0 1rem; letter-spacing: -.01em; }
+h2 { font-size: 1.45rem; margin: 2.6rem 0 .8rem; padding-top: 1.2rem; border-top: 1px solid var(--line); }
+h3 { font-size: 1.12rem; margin: 1.8rem 0 .5rem; }
+h4 { font-size: 1rem; margin: 1.4rem 0 .4rem; }
+h2 a, h3 a { color: inherit; }
+p, ul, ol, table, pre, blockquote { margin: 0 0 1rem; }
+ul, ol { padding-left: 1.4rem; }
+li { margin: .25rem 0; }
+li > ul, li > ol { margin-bottom: .25rem; }
+hr { border: 0; border-top: 1px solid var(--line); margin: 2rem 0; }
+strong { color: #fff; }
+.lead { font-size: 1.15rem; color: var(--fg); }
+.muted { color: var(--fg-2); }
+.eyebrow {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .6rem;
+}
+blockquote {
+  border-left: 3px solid var(--line);
+  margin-left: 0;
+  padding: .1rem 1rem;
+  color: var(--fg-2);
+}
+
+/* Code */
+code, kbd, pre { font-family: var(--mono); }
+code {
+  background: var(--bg-3);
+  padding: .08em .35em;
+  border-radius: 4px;
+  font-size: .88em;
+  color: var(--accent-2);
+}
+pre {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: .9rem 1.1rem;
+  overflow-x: auto;
+  font-size: .86rem;
+  line-height: 1.55;
+}
+pre code { background: none; padding: 0; font-size: inherit; color: var(--fg); }
+kbd {
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 .35em;
+  font-size: .85em;
+}
+
+/* Tables */
+.table-wrap { overflow-x: auto; margin-bottom: 1rem; }
+table { border-collapse: collapse; width: 100%; font-size: .93rem; }
+th, td { text-align: left; vertical-align: top; padding: .5rem .7rem; border-bottom: 1px solid var(--line); }
+th {
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .78rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+td code { white-space: nowrap; }
+table.plain td code { white-space: normal; }
+
+/* Callouts */
+.note, .tbd, .warn {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: .8rem 1rem;
+  margin: 0 0 1.2rem;
+}
+.note p:last-child, .tbd p:last-child, .warn p:last-child { margin-bottom: 0; }
+.tbd { border-left-style: dashed; }
+.warn { border-left-color: var(--accent-2); }
+.callout-title {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .3rem;
+}
+
+/* Cards and pills */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 1rem;
+  margin: 1.2rem 0 1.5rem;
+}
+.card {
+  display: block;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1.1rem 1.2rem;
+  color: var(--fg);
+}
+a.card:hover { border-color: var(--accent); color: var(--fg); text-decoration: none; }
+.card h3 { margin: 0 0 .4rem; font-size: 1.02rem; }
+a.card h3 { color: var(--accent); }
+.card p { margin: 0; color: var(--fg-2); font-size: .94rem; }
+.card .tag { font-family: var(--mono); font-size: .72rem; color: var(--fg-2); letter-spacing: .1em; text-transform: uppercase; }
+.pill {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: .74rem;
+  letter-spacing: .06em;
+  padding: .1rem .55rem;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  vertical-align: middle;
+}
+.pill.dim { border-color: var(--line); color: var(--fg-2); }
+
+/* Buttons */
+.btn {
+  display: inline-block;
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .95rem;
+  padding: .6rem 1.15rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  border: 1px solid var(--accent);
+}
+.btn:hover { background: var(--accent-2); border-color: var(--accent-2); color: var(--ink); text-decoration: none; }
+.btn.ghost { background: transparent; color: var(--accent); }
+.btn.ghost:hover { background: rgba(255, 175, 0, .1); color: var(--accent-2); }
+.actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
+
+/* Home page */
+.hero { padding: 1.5rem 0 2.5rem; }
+.hero h1 { font-size: 3rem; margin-bottom: .75rem; }
+.hero .lead { max-width: 40rem; font-size: 1.2rem; }
+.hero-tag {
+  font-family: var(--mono);
+  color: var(--accent);
+  font-size: .85rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  margin-bottom: 1rem;
+}
+.home h2 { border-top: 0; padding-top: 0; margin-top: 2.5rem; }
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0 2rem;
+}
+.fact { border-top: 2px solid var(--accent); padding-top: .6rem; }
+.fact b { display: block; font-family: var(--mono); font-size: 1.35rem; color: #fff; font-weight: 500; }
+.fact span { color: var(--fg-2); font-size: .9rem; }
+.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem 3rem; }
+.two-col h3 { margin-top: .5rem; }
+.terminal {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 1.2rem 0 1.5rem;
+}
+.terminal .bar {
+  background: var(--accent);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: .8rem;
+  padding: .3rem .8rem;
+}
+.terminal pre { border: 0; border-radius: 0; margin: 0; }
+
+/* Pager and footer */
+.pager {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 3rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--line);
+  font-size: .95rem;
+}
+.pager a { display: block; }
+.pager a span { display: block; font-family: var(--mono); font-size: .72rem; letter-spacing: .12em; text-transform: uppercase; color: var(--fg-2); }
+.pager-next { text-align: right; }
+.foot {
+  border-top: 1px solid var(--line);
+  color: var(--fg-2);
+  font-size: .85rem;
+  padding: 1.5rem 0 2.5rem;
+}
+.foot p { margin: 0 0 .5rem; }
+
+/* Small screens */
+@media (max-width: 860px) {
+  main.wrap { padding-top: 1.25rem; }
+  .with-sidebar { display: block; }
+  .sidebar { margin-bottom: 1.5rem; }
+  .sidebar nav {
+    position: static;
+    max-height: none;
+    display: flex;
+    gap: .5rem;
+    overflow-x: auto;
+    padding: 0 0 .6rem;
+    border-bottom: 1px solid var(--line);
+    scrollbar-width: thin;
+  }
+  .nav-group { margin: 0; flex: 0 0 auto; }
+  .nav-title { display: none; }
+  .sidebar ul { border: 0; display: flex; gap: .4rem; }
+  .sidebar li { margin: 0; }
+  .sidebar li a {
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: .25rem .75rem;
+    margin: 0;
+    white-space: nowrap;
+    font-size: .85rem;
+  }
+  .sidebar li a.current { border-color: var(--accent); }
+  .hero { padding-bottom: 1.5rem; }
+  .hero h1 { font-size: 2.3rem; }
+  h1 { font-size: 1.75rem; }
+  h2 { font-size: 1.3rem; }
+  pre { font-size: .82rem; }
+}
+</style>
+<script src="sidebar.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
+    <nav class="top-nav" aria-label="Site">
+      <a href="what.html">What</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
+      <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </div>
+</header>
+<div id="content"></div>
+<main class="wrap with-sidebar">
+<aside class="sidebar">
+<nav aria-label="Documentation"><a href="docs.html">Documentation</a></nav>
+</aside>
+<article class="content">
+<div class="eyebrow">Developing</div>
+<h1>Rust on Motor OS</h1>
+<p class="lead">Motor OS is a Tier-3 Rust target, <code>x86_64-unknown-motor</code>. A
+program that uses the standard library and does not depend, directly or through its
+crates, on Unix or Windows APIs cross-compiles and runs. This page says what "the
+standard library works" means in practice and how Motor OS differs from Unix for a
+program that is being ported.</p>
+
+<h2>The target</h2>
+<ul>
+  <li>Static executables with no dynamic linking, <code>panic=unwind</code> by default,
+  and no ELF TLS; applications can opt out with <code>panic=abort</code>, and system
+  binaries declare abort profiles explicitly;
+  thread-local storage is provided by the runtime.</li>
+  <li>The standard library's Motor OS layer is deliberately thin: it calls
+  <code>moto-rt</code>, which forwards to the per-process runtime <code>rt.vdso</code>
+  through a versioned function table. The runtime is part of the OS image, so a compiled
+  program picks up runtime fixes when the image is updated.</li>
+  <li>The target is documented in the
+  <a href="https://doc.rust-lang.org/nightly/rustc/platform-support/motor.html">Rust platform
+  support pages</a>. Building for it needs the Motor OS toolchain, described on the
+  <a href="toolchain.html">Toolchains</a> page.</li>
+</ul>
+<p>Cross-compiling on Linux, from a project inside the Motor OS checkout, where the
+repository's <code>rust-toolchain.toml</code> selects the Motor OS toolchain (copy that file
+into a project that lives elsewhere):</p>
+<pre><code>cargo build --release --target x86_64-unknown-motor</code></pre>
+<p>The binary goes into the VM with <code>scp</code> (see
+<a href="hello.html">Hello Motor OS</a>). On the development environment the same program can be
+built natively with <code>rustc</code> or with <a href="lorry.html">Lorry</a> (see
+<a href="hello-native.html">Hello Motor OS, natively</a>).</p>
+
+<h2>What std supports</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>Module</th><th>Status</th></tr>
+  <tr><td><code>std::thread</code>, <code>sync</code></td><td>Threads, thread-local storage, mutexes, condition variables, channels, futex-based parking.</td></tr>
+  <tr><td><code>std::fs</code></td><td>Files, directories, metadata with timestamps, rename, truncate, permissions in the three-role model, advisory file locks. No symbolic or hard links.</td></tr>
+  <tr><td><code>std::net</code></td><td>TCP and UDP, IPv4 and IPv6, name resolution, nonblocking mode, timeouts, <code>TCP_NODELAY</code>, TTL, linger, buffer sizes. No multicast or broadcast.</td></tr>
+  <tr><td><code>std::process</code></td><td><code>Command</code> with arguments, environment, and stdio piping; kill, wait, and try_wait; exit codes. No <code>fork</code>, no signals, no process groups.</td></tr>
+  <tr><td><code>std::io</code></td><td>Stdio, pipes, <code>IsTerminal</code>; see <a href="terminals.html">Terminals</a> for what a terminal is.</td></tr>
+  <tr><td><code>std::env</code>, <code>time</code>, <code>alloc</code></td><td>Arguments, environment, current directory, <code>current_exe</code>; system and monotonic time; the frusa allocator.</td></tr>
+  <tr><td><code>std::os::unix</code></td><td>Not available. Motor OS-specific extensions come from <code>moto-rt</code> and <code>moto-sys</code>.</td></tr>
+</table>
+</div>
+
+<h2>Ported crates and what works on top of them</h2>
+<ul>
+  <li><strong>mio and Tokio</strong>: Motor OS forks backed by the runtime's edge-triggered
+  readiness interface. The runtime, async TCP and UDP, async child processes, and async
+  stdio work; not every Tokio feature is ported.</li>
+  <li><strong>hyper, axum, tower-http</strong>: httpd-axum serves this site with them.</li>
+  <li><strong>rustls with ring</strong>: TLS on both the client (curl, Gears) and server
+  (httpd, httpd-axum) side.</li>
+  <li><strong>russh</strong> and russh-sftp: the SSH server and clients. The russh fork
+  supports application-controlled receive windows on both the client and server,
+  including cancellation-safe credit handoff for outgoing forwarding channels.</li>
+  <li><strong>crossterm</strong>: a Motor OS backend that handles terminal size and Ctrl+C the
+  Motor OS way, so a crossterm program needs no Motor OS-specific code.</li>
+  <li><strong>ctrlc</strong>: a fork whose handler is the process's Ctrl+C handler.</li>
+  <li><strong>tracing</strong> and friends compile unchanged; see
+  <a href="profiling.html">Profiling</a>.</li>
+  <li><strong>ripgrep</strong>: a fork that ships as <code>rg</code>.</li>
+</ul>
+<p>The forks are ordinary Git dependencies, added to a program's <code>Cargo.toml</code>
+under <code>[patch.crates-io]</code> (or as a direct dependency, for russh and ctrlc), as
+the in-tree programs do:</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Crate</th><th>Repository</th><th>Branch or tag</th></tr>
+  <tr><td>tokio</td><td><code>https://github.com/moturus/tokio.git</code></td><td><code>tokio-motor-1.47.1_2025-10-07</code></td></tr>
+  <tr><td>mio</td><td><code>https://github.com/moturus/mio.git</code></td><td><code>mio-motor-v1.0.4_2025-10-07</code></td></tr>
+  <tr><td>ring</td><td><code>https://github.com/moturus/ring.git</code></td><td><code>motor-os-0.17.14</code></td></tr>
+  <tr><td>crossterm</td><td><code>https://github.com/moturus/crossterm.git</code></td><td><code>motor-os-support</code></td></tr>
+  <tr><td>russh</td><td><code>https://github.com/moturus/russh.git</code></td><td><code>motor-v0.65.1</code></td></tr>
+  <tr><td>ctrlc</td><td><code>https://github.com/moturus/rust-ctrlc.git</code></td><td><code>motor-os-rustc</code></td></tr>
+  <tr><td>cc (for crates that compile C)</td><td><code>https://github.com/moturus/cc-rs.git</code></td><td><code>main</code></td></tr>
+</table>
+</div>
+<p>As a rule, sans-io crates and crates such as rand or rustls compile and work, sometimes
+with minor tweaks; async crates that assume Tokio features which are not ported need
+refactoring; and crates that wrap native Linux or Windows APIs will not work.</p>
+
+<h2>Porting notes</h2>
+<ul>
+  <li><strong>No fork or exec.</strong> Use <code>std::process::Command</code>; the parent's
+  runtime builds the child directly. Programs that fork to daemonize should instead spawn
+  themselves detached, which needs <code>CAP_SPAWN_DETACHED</code> and the
+  <code>MOTOR_OS_DETACHED</code> spawn key; rmux's server is the in-tree example.</li>
+  <li><strong>No signals.</strong> Ctrl+C terminates a process with status 130 unless it
+  registers a handler, through the <code>ctrlc</code> crate or crossterm's
+  <code>enable_ctrl_c_events()</code>. There is nothing to catch for termination; a killed
+  process just stops.</li>
+  <li><strong>No users.</strong> A process's authority is its capability word, and files
+  carry per-role permissions. A role can use <code>rw-</code> &rarr; <code>r-x</code>
+  &rarr; <code>rwx</code> when its higher-role ceiling allows it, but cannot widen
+  itself from <code>r--</code> or <code>---</code>. See
+  <a href="filesystem.html">Filesystem</a> for the transition and replacement rules. <code>~</code> is
+  not a home directory in the Unix sense; per-program configuration goes under
+  <code>/user/cfg</code>, and temporary files under <code>/user/tmp</code>
+  (<code>TMPDIR</code>). The root directory initially denies Interactive write access.</li>
+  <li><strong>No pty.</strong> A terminal is a pipe whose far end behaves like one.
+  <code>IsTerminal</code> works; raw mode is a property of the provider, not of the
+  descriptor, and the terminal size arrives in the byte stream. Use crossterm, or read
+  <a href="terminals.html">Terminals</a> if you handle escape sequences yourself.</li>
+  <li><strong>Error codes.</strong> Motor OS error codes map to <code>io::ErrorKind</code>
+  where the toolchain's std knows them; a reset connection is <code>ConnectionReset</code>,
+  while a few network conditions still surface as <code>NotConnected</code>. A new code
+  needs both a moto-rt release and a toolchain std that knows it.</li>
+  <li><strong>Memory.</strong> Spawning is refused with a recoverable error while free
+  physical memory is below 4 MiB. Under pressure, allocating operations can wait while
+  the kernel kills eligible processes and reclaims their memory.
+  See <a href="memory.html">Memory</a>.</li>
+  <li><strong>Motor OS-specific APIs.</strong> <code>moto-rt</code> exposes the runtime
+  (process capabilities and roles, the Ctrl+C handler, the terminal descriptor, file
+  permission updates); <code>moto-sys</code> exposes the syscalls and shared pages
+  (free physical memory, per-process statistics, peer capabilities on a connection);
+  <code>moto-sdk</code> holds the IPC, native I/O, logging, and metrics libraries, and
+  re-exports the other two as <code>moto_sdk::rt</code> and <code>moto_sdk::sys</code>.
+  All three are on crates.io. Services in the tree use them; ordinary programs rarely
+  need to.</li>
+</ul>
+
+<h2>C and C++</h2>
+<p>Rust is the preferred language on Motor OS, but C and C++ are fully supported: a C
+library, mlibc, sits on a C ABI shim over the same runtime, libc++ sits on top of it, and
+Clang/LLVM targets Motor OS directly, on the development environment and as a cross-compiler on
+Linux. See <a href="c-cpp.html">C/C++ on Motor OS</a>.</p>
+<nav class="pager">
+<a class="pager-prev" href="toolchain.html"><span>Previous</span>Toolchains</a>
+<a class="pager-next" href="c-cpp.html"><span>Next</span>C/C++ on Motor OS</a>
+</nav>
+</article>
+</main>
+<footer class="foot">
+  <div class="wrap">
+    <p><a href="https://github.com/moturus/motor-os/blob/main/CHANGELOG.md">Changelog</a></p>
+    <p>Motor OS is free software, dual-licensed under the MIT and Apache 2.0 licenses.
+    <br>This site is served by <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> running inside a Motor OS VM.</p>
+  </div>
+</footer>
+</body>
+</html>

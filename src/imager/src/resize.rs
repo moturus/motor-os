@@ -387,7 +387,7 @@ async fn copy_tree(
     Ok(())
 }
 
-// Run by the developer-image suite only (see src/tests/full-test.sh), hence
+// Run explicitly by the host phase of src/tests/full-test.sh, hence
 // `#[ignore]`: cargo test resize -- --ignored
 #[cfg(test)]
 mod tests {

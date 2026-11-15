@@ -53,21 +53,19 @@ endif
 else
 
 all: base.img main.img
-images: base.img main.img dev.img wasm.img
+images: base.img main.img
 boot: mbr.bin boot.bin kloader
 core: kernel vdso
 sys-base: strobe sys-io sys-init sys-tty
 sys: sys-base dns-resolver
 user-base: sysbox rush red rmux russhd
 user: user-base kibim httpd httpd-axum ssh wg curl
-user-dev: user gix lorry mdbg rnetbench crossbench \
-	systest mio-test tokio-tests crossterm-smoke wg-self-test
 
-.PHONY: all images boot core sys-base sys user-base user user-dev
-.PHONY: base.img main.img raw.img dev.img wasm.img system-tty.img vsock-test.img ro-root.img
+.PHONY: all images boot core sys-base sys user-base user
+.PHONY: base.img main.img raw.img
 .PHONY: mbr.bin boot.bin kloader kernel vdso
 .PHONY: strobe sys-io sys-init sys-tty dns-resolver
-.PHONY: sysbox sysbox-tests systest mio-test tokio-tests crossterm-smoke
+.PHONY: sysbox systest mio-test tokio-tests crossterm-smoke
 .PHONY: rush kibim red rmux russhd ssh httpd httpd-axum
 .PHONY: gix lorry curl wg wg-self-test
 .PHONY: mdbg rnetbench crossbench
@@ -134,11 +132,6 @@ sysbox:
 	mkdir -p $(BIN_DIR)
 	cd src/sys/tools/sysbox && CARGO_TARGET_DIR="$(OBJ_DIR)/sysbox" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/sysbox" "$(OBJ_DIR)/sysbox/$(SUB_DIR)/sysbox"
-
-sysbox-tests:
-	mkdir -p $(BIN_DIR)
-	cd src/sys/tools/sysbox && CARGO_TARGET_DIR="$(OBJ_DIR)/sysbox" $(DO_BUILD) --example utility-tests
-	strip -o "$(BIN_DIR)/sysbox-utility-tests" "$(OBJ_DIR)/sysbox/$(SUB_DIR)/examples/utility-tests"
 
 mdbg:
 	mkdir -p $(BIN_DIR)
@@ -233,13 +226,6 @@ rnetbench:
 
 lorry:
 	mkdir -p $(BIN_DIR)
-	# Prepare the exact cc-rs archive used by the offline C++ contract.
-	mkdir -p "$(OBJ_DIR)/lorry-cxx-deps/src"
-	printf '%s\n' '[package]' 'name = "lorry-cxx-deps"' 'version = "0.0.0"' \
-		'edition = "2024"' '[workspace]' '[dependencies]' 'cc = "=1.2.29"' \
-		> "$(OBJ_DIR)/lorry-cxx-deps/Cargo.toml"
-	touch "$(OBJ_DIR)/lorry-cxx-deps/src/lib.rs"
-	cargo fetch --manifest-path "$(OBJ_DIR)/lorry-cxx-deps/Cargo.toml"
 	cd src/bin/lorry && \
 		CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$(MOTOR_SYSROOT)/bin/motor-clang" \
 		CARGO_TARGET_DIR="$(OBJ_DIR)/lorry" $(DO_BUILD)
@@ -316,34 +302,6 @@ raw.img: boot core sys user
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the raw standard Motor OS image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os.img"
 
-# Test harnesses own the output directory and remove it after VM teardown.
-# A temporary root supplies the imager's usual layout without copying inputs.
-define BUILD_TEST_IMAGE
-	@case "$(TEST_IMAGE_ROOT)" in /*) ;; *) \
-		echo "$(1).img requires an absolute TEST_IMAGE_ROOT; use the corresponding test script" >&2; exit 2 ;; esac
-	test_root="$$(realpath -e -- "$(TEST_IMAGE_ROOT)")" && \
-	case "$$(realpath -m -- "$$test_root/vm_images/$(IMG_CMD)")/" in "$$(realpath -m -- "$(ROOT_DIR)/vm_images")/"*) \
-		echo "test images must be built outside vm_images" >&2; exit 2 ;; esac && \
-	mkdir -p "$$test_root/build" "$$test_root/vm_images/$(IMG_CMD)" && \
-	ln -sfn "$(ROOT_DIR)/build/bin" "$$test_root/build/bin" && \
-	ln -sfn "$(ROOT_DIR)/img_files" "$$test_root/img_files" && \
-	cd src/imager && ( flock 9 && $(BUILD_IMAGER) && \
-		"$(IMAGER_BIN)" "$$test_root" $(IMG_CMD) motor-os-$(1).yaml ) 9>"$(IMAGER_LOCK)"
-	cp -f "$(ROOT_DIR)/src/vm_scripts/"* "$(TEST_IMAGE_ROOT)/vm_images/$(IMG_CMD)/"
-	chmod 400 "$(TEST_IMAGE_ROOT)/vm_images/$(IMG_CMD)/test.key"
-endef
-
-# A small test-only image whose later overlay selects a System serial console.
-system-tty.img: boot core sys-base user-base wg
-	$(call BUILD_TEST_IMAGE,system-tty)
-
-# An isolated System-console image for vsock tests that must run without IP.
-vsock-test.img: boot core sys-base sysbox rush systest
-	$(call BUILD_TEST_IMAGE,vsock-test)
-
-ro-root.img: boot core sys-base sysbox rush russhd dns-resolver systest
-	$(call BUILD_TEST_IMAGE,ro-root)
-
 # The minimal base image; it takes nothing from the assembly.
 base.img: boot core sys-base user-base
 	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)"
@@ -352,31 +310,6 @@ base.img: boot core sys-base user-base
 		"$(IMAGER_BIN)" "$(ROOT_DIR)" $(IMG_CMD) motor-os-base.yaml ) 9>"$(IMAGER_LOCK)"
 	$(INSTALL_VM_SCRIPTS)
 	@echo "built the Motor OS base image in $(ROOT_DIR)/vm_images/$(IMG_CMD)"
-
-# The dev image adds diagnostics, tests, sources, and native toolchains. A VM
-# then prepares its staged library sources for offline native tests; their
-# dependencies come from src/build-motor-os.sh --sys-lib-deps-only.
-dev.img: boot core sys user-dev
-	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)" && \
-	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.img" \
-		"$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.qcow2" && \
-	cd src/imager && ( flock 9 && $(BUILD_IMAGER) && \
-		install -m 755 $(IMAGER_INSTALL_STRIP) "$(IMAGER_BIN)" "$(BIN_DIR)/imager" && \
-		MOTOR_ASSEMBLY_IMAGE_ROOT="$(ASSEMBLY_IMAGE_ROOT)" \
-		"$(IMAGER_BIN)" "$(ROOT_DIR)" $(IMG_CMD) motor-os-dev.yaml ) 9>"$(IMAGER_LOCK)"
-	$(INSTALL_VM_SCRIPTS)
-	"$(ROOT_DIR)/src/build-scripts/prepare-dev-image.sh" $(IMG_CMD)
-	@echo "built the Motor OS dev image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-dev.qcow2"
-
-# Release Javy and Wasmtime are prepared by src/build-motor-os.sh --javy-only --wasmtime-only.
-wasm.img: boot core sys user
-	mkdir -p "$(ROOT_DIR)/vm_images/$(IMG_CMD)" && \
-	rm -f "$(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-wasm.qcow2" && \
-	cd src/imager && ( flock 9 && $(BUILD_IMAGER) && \
-		MOTOR_ASSEMBLY_IMAGE_ROOT="$(ASSEMBLY_IMAGE_ROOT)" \
-		"$(IMAGER_BIN)" "$(ROOT_DIR)" $(IMG_CMD) motor-os-wasm.yaml ) 9>"$(IMAGER_LOCK)"
-	$(INSTALL_VM_SCRIPTS)
-	@echo "built the Motor OS wasm image: $(ROOT_DIR)/vm_images/$(IMG_CMD)/motor-os-wasm.qcow2"
 
 clippy: vdso
 	cd src/sys/sys-io && $(DO_CLIPPY)
@@ -412,15 +345,13 @@ clean:
 	rm -rf build/*
 	rm -rf vm_images
 	rm -rf src/sys/target
+	rm -rf src/sys/tests/*/target
 	rm -rf src/boot/*/target
-	rm -rf src/tests/*/target
 	rm -rf src/third_party/*/target
 	rm -rf src/third_party/*/Cargo.lock
 	rm -rf src/imager/target
 	cd src/bin && rm -rf */target
 	cd src/sys && rm -rf */target
 	rm -f src/sys/lib/rt.vdso/rt.vdso
-	rm -rf src/bin/lorry/tests/*/target
-	rm -rf src/tests/rust-analyzer-smoke/fixtures/*/target
 
 endif

@@ -538,7 +538,6 @@ trees:
         }
         // Installed tools belong to Interactive; each role can populate its cache.
         for (path, mode) in [
-            ("/devtools", "rwxrwxr-x"),
             ("/user/lib/llvm/bin", "rwxrwxr-x"),
             ("/user/dev/lorry", "rwxrwxr-x"),
             ("/user/dev/lorry/cache", "rwxrwxr-x"),

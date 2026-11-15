@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 #
-# build-motor-os.sh — build the external sources and the base, standard,
-# development, and wasm VM images with the Motor toolchain that
-# rust-toolchain.toml names.
+# build-motor-os.sh — build the external sources, base and standard images,
+# and native toolchain archive with the toolchain in rust-toolchain.toml.
 #
 # The toolchain is built separately (github.com/moturus/motor-os-toolchain)
 # and comes as two archives named by its version, x86_64-unknown-motor-<Rust
@@ -16,8 +15,7 @@
 # Helix, uutils sed, Lua, tar and zstd, Javy with Wasmi, and Wasmtime) are
 # fetched into external-sources/. The assembly, build/assembly/, holds what
 # the images take from outside the tree: the overlays of the native toolchain,
-# of the external sources, and of the dependencies of the staged library
-# sources, plus the external sources' build trees.
+# of the external sources, plus the external sources' build trees.
 
 set -euo pipefail
 
@@ -30,29 +28,22 @@ usage() {
 	cat << 'EOF'
 Usage: src/build-motor-os.sh
        src/build-motor-os.sh [--javy-only] [--wasmtime-only]
-       src/build-motor-os.sh --sys-lib-deps-only
        src/build-motor-os.sh --toolchain-overlays TOOLCHAIN_PREFIX OUTPUT
 
-Build the external sources and all four images with the Motor toolchain that
+Build the external sources and both images with the Motor toolchain that
 rust-toolchain.toml names, which must be installed in rustup, and whose
 native archive must be $MOTORH/motor-toolchain-<version>.tar.zst:
   - ripgrep as /user/bin/rg;
   - tar and zstd in /user/bin;
-  - Helix as /user/lib/helix/hx in the development image;
-  - uutils sed as /user/bin/dev/sed in the development image;
-  - Lua as /user/bin/dev/lua in the development image;
-  - Javy and Wasmi in the development and small wasm images;
+  - Helix, uutils sed, Lua, QuickJS, Javy and Wasmi in the toolchain archive;
   - full and runtime-only Wasmtime as /user/bin/dev/wasmtime and wasmtime-rt
-    in both of those images;
-  - the crates.io dependencies of the Motor OS library sources the development
-    image stages for native tests, as Lorry repository objects;
-  - all standard and dev-image Motor OS binaries;
-  - base, standard, dev, and wasm images under vm_images/release.
+    in the toolchain archive;
+  - all standard-image Motor OS binaries;
+  - base and standard images under vm_images/release;
+  - the current toolchain archive under build/toolchain/release.
 
 --javy-only and --wasmtime-only build only Javy/Wasmi and both Wasmtime CLIs;
 they skip host provisioning and image construction.
---sys-lib-deps-only likewise fetches only the dependencies of the development
-image's library sources.
 --toolchain-overlays builds the development programs with a freshly built
 Linux-host toolchain and copies their overlays into OUTPUT. This is the
 toolchain release builder's entry point; it needs neither an installed Motor
@@ -70,14 +61,13 @@ through Cargo and make, so it is safe to rerun. After installing a different or
 rebuilt toolchain, run make clean first. The script fetches the external
 sources into external-sources/ and builds in build/ and vm_images/. It uses
 sudo only at the start, for missing Ubuntu packages and host VM setup, and
-starts a VM only to prepare the development image.
+does not start a VM.
 EOF
 }
 
 parse_options() {
 	JAVY_ONLY=false
 	WASMTIME_ONLY=false
-	SYS_LIB_DEPS_ONLY=false
 	BOOTSTRAP_TOOLCHAIN=
 	TOOLCHAIN_OVERLAY_OUTPUT=
 	while [ "$#" -gt 0 ]; do
@@ -85,7 +75,6 @@ parse_options() {
 			-h|--help) usage; return 2 ;;
 			--javy-only) JAVY_ONLY=true; shift ;;
 			--wasmtime-only) WASMTIME_ONLY=true; shift ;;
-			--sys-lib-deps-only) SYS_LIB_DEPS_ONLY=true; shift ;;
 			--toolchain-overlays)
 				[ "$#" -ge 3 ] || die '--toolchain-overlays requires TOOLCHAIN_PREFIX and OUTPUT'
 				BOOTSTRAP_TOOLCHAIN="$(realpath -e "$2")" || die "toolchain directory is missing: $2"
@@ -97,7 +86,7 @@ parse_options() {
 		esac
 	done
 	if [ -n "$BOOTSTRAP_TOOLCHAIN" ]; then
-		[ "$JAVY_ONLY" = false ] && [ "$WASMTIME_ONLY" = false ] && [ "$SYS_LIB_DEPS_ONLY" = false ] ||
+		[ "$JAVY_ONLY" = false ] && [ "$WASMTIME_ONLY" = false ] ||
 			die '--toolchain-overlays cannot be combined with other build modes'
 	fi
 }
@@ -417,7 +406,6 @@ build_external_sources() {
 	build_development_sources
 	build_external_source ripgrep "$RG_IMG" user/bin/rg build_ripgrep
 	build_external_source tar "$TAR_IMG" user/bin/tar build_tar
-	fetch_sys_lib_deps
 }
 
 build_toolchain_overlays() {
@@ -447,41 +435,6 @@ build_tar() {
 	done
 }
 
-# --- dependencies of the staged Motor OS library sources ------------------------
-# The development image stages src/sys/lib crates for native tests, and
-# `make dev.img` admits and compiles them there offline
-# (src/build-scripts/prepare-dev-image.sh). Their crates.io dependencies
-# come from this overlay: objects of the image's
-# Interactive Lorry repository, fetched by a Lorry built for this host. Fetch
-# takes every package of the workspace's Cargo.lock, whatever features the
-# staged manifests select, so that lock alone decides the overlay; and
-# src/sys/Cargo.lock decides the lock.
-fetch_sys_lib_deps() {
-	local work="$ASSEMBLY_BUILD_ROOT/sys-lib-deps" overlay="$ASSEMBLY_IMAGE_ROOT/sys-lib-deps"
-	local repository="$overlay/user/dev/lorry/vendor"
-	log "fetching the dependencies of the staged Motor OS library sources"
-	rm -rf "$work" "$overlay"
-	"$MOTOR/src/build-scripts/sys-lib-workspace.sh" "$work/workspace"
-	CARGO_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/host-lorry" \
-		cargo build --manifest-path "$MOTOR/src/bin/lorry/Cargo.toml" --release --locked
-	mkdir -p "$work/home/.config/lorry" "${repository%/*}"
-	cat > "$work/home/.config/lorry/lorry.toml" << EOF
-config-version = 1
-
-[repositories]
-user = "$repository"
-EOF
-	# A private HOME keeps the user's own Lorry configuration out.
-	( cd "$work/workspace" &&
-		RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
-		HOME="$work/home" "$ASSEMBLY_BUILD_ROOT/host-lorry/release/lorry" fetch --locked )
-	# The image ships its own repository header; only objects and index records
-	# belong to the overlay.
-	rm -rf "$repository/repository.toml" "$repository/.staging"
-	[ -n "$(find "$repository/objects" -type f)" ] ||
-		die "Lorry fetched no dependency objects into $repository"
-}
-
 build_helix() {
 	log "fetching, building, and staging Helix as /user/lib/helix/hx"
 	(
@@ -506,7 +459,7 @@ build_helix() {
 # --- rebuild the OS and images ----------------------------------------------
 build_images() {
 	log "rebuilding Motor OS and all images (make images BUILD=release)"
-	( cd "$MOTOR" && make images BUILD=release -j"$(nproc)" )
+	( cd "$MOTOR" && make images toolchain-archive BUILD=release -j"$(nproc)" )
 }
 
 # --- the native toolchain ------------------------------------------------------
@@ -539,14 +492,13 @@ main() {
 		return "$parse_status"
 	}
 	local complete=true caller_has_rustup=true
-	if [ "$JAVY_ONLY" = true ] || [ "$WASMTIME_ONLY" = true ] || \
-		[ "$SYS_LIB_DEPS_ONLY" = true ] || [ -n "$BOOTSTRAP_TOOLCHAIN" ]; then
+	if [ "$JAVY_ONLY" = true ] || [ "$WASMTIME_ONLY" = true ] || [ -n "$BOOTSTRAP_TOOLCHAIN" ]; then
 		complete=false
 	else
 		log "complete Motor OS build starting"
 		log "Motor OS checkout: $MOTOR"
 
-		local test_ssh_key="$MOTOR/src/tests/test.key"
+		local test_ssh_key="$MOTOR/src/vm_scripts/test.key"
 		[ -f "$test_ssh_key" ] && [ ! -L "$test_ssh_key" ] ||
 			die "Motor test SSH key is absent or linked: $test_ssh_key"
 		chmod 400 "$test_ssh_key"
@@ -592,7 +544,6 @@ main() {
 		fi
 		[ "$WASMTIME_ONLY" = false ] ||
 			build_external_source wasmtime "$WASMTIME_IMG" user/bin/dev/wasmtime-rt build_wasmtime
-		[ "$SYS_LIB_DEPS_ONLY" = false ] || fetch_sys_lib_deps
 		return
 	fi
 	log "toolchain: $TOOLCHAIN"
@@ -620,8 +571,8 @@ main() {
 		"$QUICKJS_IMG/user/bin/dev/qjs"
 		"$QUICKJS_IMG/user/bin/dev/qjsc"
 		"$MOTOR/vm_images/release/motor-os.qcow2"
-		"$MOTOR/vm_images/release/motor-os-dev.qcow2"
-		"$MOTOR/vm_images/release/motor-os-wasm.qcow2"
+		"$MOTOR/vm_images/release/motor-os-base.img"
+		"$MOTOR/build/toolchain/release/motor-toolchain-$TOOLCHAIN.tar.zst"
 		"$JAVY_IMG/user/bin/dev/javy"
 		"$JAVY_IMG/user/bin/dev/wasmi"
 		"$WASMTIME_IMG/user/bin/dev/wasmtime"
@@ -631,7 +582,7 @@ main() {
 	for output in "${required_outputs[@]}"; do
 		[ -f "$output" ] || die "final build output is missing: $output"
 	done
-	log "base, standard, dev, and wasm release images built successfully"
+	log "base and standard release images and native toolchain archive built successfully"
 	[ "$caller_has_rustup" = true ] ||
 		warn "this shell's PATH lacks rustup: open a new shell or run '. \"\$HOME/.cargo/env\"' before make or the tests"
 	return 0

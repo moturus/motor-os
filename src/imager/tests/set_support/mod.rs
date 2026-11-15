@@ -21,7 +21,6 @@ pub const CLIENT_KEY: &str = "/user/cfg/ssh/id_ed25519";
 pub const OFFSET: u64 = 4096;
 pub const BLOCKS: u64 = 256;
 pub const BASE: &str = include_str!("../../../../img_files/motor-os-base/user/cfg/sshd.toml");
-pub const DEV: &str = include_str!("../../../../img_files/motor-os-dev/user/cfg/sshd.toml");
 pub const SHIPPED_USERS: &str =
     include_str!("../../../../img_files/motor-os-base/user/cfg/russhd/users.toml");
 pub const SHIPPED_KEYS: &str =
@@ -327,4 +326,4 @@ fn convert(input: &Path, output: &Path, from: &str, to: &str) {
 }
 
 pub const LOGIN_KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPqBJXmK6lCHMhdaldFapWRqrkugRx4pgTOtD2J4R6yB imager fixture";
-pub const HOST_KEY: &str = include_str!("../../../tests/test.key");
+pub const HOST_KEY: &str = include_str!("../../../vm_scripts/test.key");

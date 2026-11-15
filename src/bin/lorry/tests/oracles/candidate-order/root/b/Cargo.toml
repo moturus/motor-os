@@ -1,7 +1,0 @@
-[package]
-name = "b"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-foo = ">=1, <3"

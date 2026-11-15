@@ -1,0 +1,872 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="The commands and programs available inside a Motor OS VM: sysbox applets, the shell, editors, servers, and where they live.">
+<meta name="theme-color" content="#0a0a0a">
+<title>Commands | Motor OS</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ffaf00'/%3E%3Cpath d='M7 25V7h4l5 9 5-9h4v18h-4V14.5l-5 8.5-5-8.5V25z' fill='%23121212'/%3E%3C/svg%3E">
+<style>
+@font-face {
+  font-family: 'RobotoMono';
+  src: url('fonts/roboto-mono-latin-400-normal.woff2') format('woff2'),
+       url('fonts/roboto-mono-latin-400-normal.woff') format('woff');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'RobotoMono';
+  src: url('fonts/roboto-mono-latin-500-normal.woff2') format('woff2'),
+       url('fonts/roboto-mono-latin-500-normal.woff') format('woff');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --bg: #0a0a0a;
+  --bg-2: #141414;
+  --bg-3: #1e1e1e;
+  --line: #2b2b2b;
+  --fg: #ededed;
+  --fg-2: #a9a9a9;
+  --accent: #ffaf00;
+  --accent-2: #ffd787;
+  --ink: #121212;
+  --mono: "RobotoMono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --wrap: 1120px;
+  --measure: 46rem;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 16px;
+  line-height: 1.65;
+}
+img { max-width: 100%; height: auto; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-2); text-decoration: underline; }
+.skip {
+  position: absolute; left: -999px; top: 0;
+  background: var(--accent); color: var(--ink); padding: .5rem 1rem;
+}
+.skip:focus { left: .5rem; top: .5rem; z-index: 10; }
+
+.wrap {
+  max-width: var(--wrap);
+  margin: 0 auto;
+  padding: 0 1.25rem;
+}
+
+/* Header */
+.top {
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+.top .wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: .5rem 1.5rem;
+  min-height: 3.75rem;
+  padding-top: .5rem;
+  padding-bottom: .5rem;
+}
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: .6rem;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: 1.05rem;
+  letter-spacing: .01em;
+}
+.brand:hover { color: var(--fg); text-decoration: none; }
+.mark {
+  display: inline-grid;
+  place-items: center;
+  width: 1.7rem; height: 1.7rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  font-weight: 500;
+  font-size: 1rem;
+}
+.top-nav { display: flex; flex-wrap: wrap; gap: .25rem 1.25rem; font-family: var(--mono); font-size: .9rem; }
+.top-nav a { color: var(--fg-2); padding: .25rem 0; border-bottom: 2px solid transparent; }
+.top-nav a:hover { color: var(--fg); text-decoration: none; }
+.top-nav a.current { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* Layout */
+main.wrap { padding-top: 2rem; padding-bottom: 3rem; }
+.with-sidebar { display: grid; grid-template-columns: 15rem minmax(0, 1fr); gap: 3rem; }
+.sidebar { font-size: .92rem; }
+.sidebar nav { position: sticky; top: 1rem; max-height: calc(100vh - 2rem); overflow-y: auto; padding-right: .5rem; }
+.nav-group { margin-bottom: 1.25rem; }
+.nav-title {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--fg-2);
+  margin-bottom: .35rem;
+}
+.sidebar ul { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--line); }
+.sidebar li a {
+  display: block;
+  color: var(--fg-2);
+  padding: .22rem .75rem;
+  margin-left: -1px;
+  border-left: 1px solid transparent;
+}
+.sidebar li a:hover { color: var(--fg); text-decoration: none; border-left-color: var(--fg-2); }
+.sidebar li a.current { color: var(--accent); border-left-color: var(--accent); }
+
+.content { min-width: 0; max-width: var(--measure); }
+.home .content, .plain .content { max-width: none; }
+
+/* Type */
+h1, h2, h3, h4 { line-height: 1.25; font-weight: 600; color: var(--accent); }
+h1 { font-size: 2.1rem; margin: 0 0 1rem; letter-spacing: -.01em; }
+h2 { font-size: 1.45rem; margin: 2.6rem 0 .8rem; padding-top: 1.2rem; border-top: 1px solid var(--line); }
+h3 { font-size: 1.12rem; margin: 1.8rem 0 .5rem; }
+h4 { font-size: 1rem; margin: 1.4rem 0 .4rem; }
+h2 a, h3 a { color: inherit; }
+p, ul, ol, table, pre, blockquote { margin: 0 0 1rem; }
+ul, ol { padding-left: 1.4rem; }
+li { margin: .25rem 0; }
+li > ul, li > ol { margin-bottom: .25rem; }
+hr { border: 0; border-top: 1px solid var(--line); margin: 2rem 0; }
+strong { color: #fff; }
+.lead { font-size: 1.15rem; color: var(--fg); }
+.muted { color: var(--fg-2); }
+.eyebrow {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .6rem;
+}
+blockquote {
+  border-left: 3px solid var(--line);
+  margin-left: 0;
+  padding: .1rem 1rem;
+  color: var(--fg-2);
+}
+
+/* Code */
+code, kbd, pre { font-family: var(--mono); }
+code {
+  background: var(--bg-3);
+  padding: .08em .35em;
+  border-radius: 4px;
+  font-size: .88em;
+  color: var(--accent-2);
+}
+pre {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: .9rem 1.1rem;
+  overflow-x: auto;
+  font-size: .86rem;
+  line-height: 1.55;
+}
+pre code { background: none; padding: 0; font-size: inherit; color: var(--fg); }
+kbd {
+  background: var(--bg-3);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 .35em;
+  font-size: .85em;
+}
+
+/* Tables */
+.table-wrap { overflow-x: auto; margin-bottom: 1rem; }
+table { border-collapse: collapse; width: 100%; font-size: .93rem; }
+th, td { text-align: left; vertical-align: top; padding: .5rem .7rem; border-bottom: 1px solid var(--line); }
+th {
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .78rem;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+td code { white-space: nowrap; }
+table.plain td code { white-space: normal; }
+
+/* Callouts */
+.note, .tbd, .warn {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: .8rem 1rem;
+  margin: 0 0 1.2rem;
+}
+.note p:last-child, .tbd p:last-child, .warn p:last-child { margin-bottom: 0; }
+.tbd { border-left-style: dashed; }
+.warn { border-left-color: var(--accent-2); }
+.callout-title {
+  font-family: var(--mono);
+  font-size: .75rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: .3rem;
+}
+
+/* Cards and pills */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 1rem;
+  margin: 1.2rem 0 1.5rem;
+}
+.card {
+  display: block;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1.1rem 1.2rem;
+  color: var(--fg);
+}
+a.card:hover { border-color: var(--accent); color: var(--fg); text-decoration: none; }
+.card h3 { margin: 0 0 .4rem; font-size: 1.02rem; }
+a.card h3 { color: var(--accent); }
+.card p { margin: 0; color: var(--fg-2); font-size: .94rem; }
+.card .tag { font-family: var(--mono); font-size: .72rem; color: var(--fg-2); letter-spacing: .1em; text-transform: uppercase; }
+.pill {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: .74rem;
+  letter-spacing: .06em;
+  padding: .1rem .55rem;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  vertical-align: middle;
+}
+.pill.dim { border-color: var(--line); color: var(--fg-2); }
+
+/* Buttons */
+.btn {
+  display: inline-block;
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: .95rem;
+  padding: .6rem 1.15rem;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--ink);
+  border: 1px solid var(--accent);
+}
+.btn:hover { background: var(--accent-2); border-color: var(--accent-2); color: var(--ink); text-decoration: none; }
+.btn.ghost { background: transparent; color: var(--accent); }
+.btn.ghost:hover { background: rgba(255, 175, 0, .1); color: var(--accent-2); }
+.actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
+
+/* Home page */
+.hero { padding: 1.5rem 0 2.5rem; }
+.hero h1 { font-size: 3rem; margin-bottom: .75rem; }
+.hero .lead { max-width: 40rem; font-size: 1.2rem; }
+.hero-tag {
+  font-family: var(--mono);
+  color: var(--accent);
+  font-size: .85rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  margin-bottom: 1rem;
+}
+.home h2 { border-top: 0; padding-top: 0; margin-top: 2.5rem; }
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0 2rem;
+}
+.fact { border-top: 2px solid var(--accent); padding-top: .6rem; }
+.fact b { display: block; font-family: var(--mono); font-size: 1.35rem; color: #fff; font-weight: 500; }
+.fact span { color: var(--fg-2); font-size: .9rem; }
+.two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem 3rem; }
+.two-col h3 { margin-top: .5rem; }
+.terminal {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  margin: 1.2rem 0 1.5rem;
+}
+.terminal .bar {
+  background: var(--accent);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: .8rem;
+  padding: .3rem .8rem;
+}
+.terminal pre { border: 0; border-radius: 0; margin: 0; }
+
+/* Pager and footer */
+.pager {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 3rem;
+  padding-top: 1.2rem;
+  border-top: 1px solid var(--line);
+  font-size: .95rem;
+}
+.pager a { display: block; }
+.pager a span { display: block; font-family: var(--mono); font-size: .72rem; letter-spacing: .12em; text-transform: uppercase; color: var(--fg-2); }
+.pager-next { text-align: right; }
+.foot {
+  border-top: 1px solid var(--line);
+  color: var(--fg-2);
+  font-size: .85rem;
+  padding: 1.5rem 0 2.5rem;
+}
+.foot p { margin: 0 0 .5rem; }
+
+/* Small screens */
+@media (max-width: 860px) {
+  main.wrap { padding-top: 1.25rem; }
+  .with-sidebar { display: block; }
+  .sidebar { margin-bottom: 1.5rem; }
+  .sidebar nav {
+    position: static;
+    max-height: none;
+    display: flex;
+    gap: .5rem;
+    overflow-x: auto;
+    padding: 0 0 .6rem;
+    border-bottom: 1px solid var(--line);
+    scrollbar-width: thin;
+  }
+  .nav-group { margin: 0; flex: 0 0 auto; }
+  .nav-title { display: none; }
+  .sidebar ul { border: 0; display: flex; gap: .4rem; }
+  .sidebar li { margin: 0; }
+  .sidebar li a {
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: .25rem .75rem;
+    margin: 0;
+    white-space: nowrap;
+    font-size: .85rem;
+  }
+  .sidebar li a.current { border-color: var(--accent); }
+  .hero { padding-bottom: 1.5rem; }
+  .hero h1 { font-size: 2.3rem; }
+  h1 { font-size: 1.75rem; }
+  h2 { font-size: 1.3rem; }
+  pre { font-size: .82rem; }
+}
+</style>
+<script src="sidebar.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="index.html"><span class="mark">M</span><span>Motor OS</span></a>
+    <nav class="top-nav" aria-label="Site">
+      <a href="what.html">What</a>
+      <a href="why.html">Why</a>
+      <a href="docs.html" class="current">Docs</a>
+      <a href="https://github.com/moturus/motor-os" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </div>
+</header>
+<div id="content"></div>
+<main class="wrap with-sidebar">
+<aside class="sidebar">
+<nav aria-label="Documentation"><a href="docs.html">Documentation</a></nav>
+</aside>
+<article class="content">
+<div class="eyebrow">Userspace</div>
+<h1>Commands</h1>
+<p class="lead">Motor OS boots into <a href="rush.html">rush</a>, a POSIX-style shell.
+<code>PATH</code> is <code>/user/bin</code>, plus <code>/user/bin/dev</code> on
+the development environment. <code>ls /user/bin</code> lists what is
+installed.</p>
+
+<h2>sysbox</h2>
+<p>Most everyday commands are calls into <code>/user/bin/sysbox</code>, which was inspired
+by <code>busybox</code> in Linux.
+Motor OS has no symbolic links, so each command is a two-line rush script of the
+same name in <code>/user/bin</code> that forwards to sysbox; <code>sysbox help</code> lists
+them.</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Command</th><th>What it does</th></tr>
+  <tr><td><code>cat</code>, <code>less</code>, <code>wc</code></td><td>Print, page, and count files. <code>less</code> is a full pager built on the crossterm port.</td></tr>
+  <tr><td><code>head [-n [-]NUM | -c [-]NUM] [-q | -v] [-z] [FILE]...</code></td><td>The first 10 lines of each file, or the first NUM lines or bytes; a leading <code>-</code> on NUM prints all but the last NUM. With several files, each gets a <code>==&gt; NAME &lt;==</code> header. Options follow GNU <code>head</code>.</td></tr>
+  <tr><td><code>tail [-n [+]NUM | -c [+]NUM] [-q | -v] [-z] [FILE]...</code></td><td>The last 10 lines of each file, or the last NUM lines or bytes; a leading <code>+</code> on NUM starts at line or byte NUM instead. Options follow GNU <code>tail</code>, except that following a growing file (<code>-f</code>, <code>-F</code>) is not supported.</td></tr>
+  <tr><td><code>diff [-u | -U NUM | -c | -C NUM] [-q] [-s] [-r] [-N] [-i] [-b] [-w] FILE1 FILE2</code></td><td>Compare files, or directories, line by line. Output formats, messages, exit status (0 same, 1 different, 2 trouble), and the hunks themselves follow GNU <code>diff</code>. Side-by-side and ed output, <code>-B</code>, <code>-I</code>, and <code>-x</code> are not supported.</td></tr>
+  <tr><td><code>sort [-nhrufsc] [-k KEY] [-t BYTE] [-o FILE] [FILE]...</code></td><td>Sort byte lines by whole lines or field/byte ranges; exact numeric and human-size comparisons, reverse, unique, ASCII case folding, stable ties, order checking, and output files. Local key modifiers override global ordering flags; keys can skip leading blanks, compare numbers or human sizes, fold ASCII case, or reverse their order.</td></tr>
+  <tr><td><code>uniq [-cdui] [INPUT [OUTPUT]]</code></td><td>Group consecutive equal byte lines, preserving the first spelling; count groups, keep repeated or single groups, or ignore ASCII case. Streams input; sort first to group nonadjacent duplicates.</td></tr>
+  <tr><td><code>cut (-b LIST | -c LIST | -f LIST) [-d BYTE] [-s] [--complement] [FILE]...</code></td><td>Select one-based byte positions or ranges; -c counts bytes in the C locale. Overlaps appear once in input order; --complement selects other positions. -f selects fields separated by TAB or -d; -s suppresses undelimited lines.</td></tr>
+  <tr><td><code>tr [-dsc] SET1 [SET2]</code></td><td>Stream bytes, translating, deleting or squeezing, optionally complementing the first set. Supports aligned ASCII case-class translation and two-set deletion/squeezing. Supports byte ranges, backslash/octal escapes and C-locale POSIX classes.</td></tr>
+  <tr><td><code>echo [-neE] [ARG]...</code></td><td>Print arguments with optional newline suppression and byte escapes. Select sysbox echo or /user/bin/echo explicitly; Rush keeps its built-in echo.</td></tr>
+  <tr><td><code>xargs [-0rt] [-d BYTE] [-n COUNT] [-I MARKER] [COMMAND [ARG]...]</code></td><td>Run a command directly with bounded batches of UTF-8 arguments. Default input handles quotes and backslashes; -0/-d are literal, -n limits arguments per batch and -r skips empty input. -I replaces markers using one input record per invocation; -t traces a quoted command display. With no command it runs sysbox echo.</td></tr>
+  <tr><td><code>ls</code>, <code>find</code></td><td>List and search directories.</td></tr>
+  <tr><td><code>cp</code>, <code>mv</code>, <code>rm</code>, <code>mkdir</code>, <code>rmdir</code></td><td>Copy (preserving permissions), move, and delete files and directories. A denied operation fails with a nonzero status.</td></tr>
+  <tr><td><code>chmod MODE PATH...</code></td><td>Set permissions; MODE is nine characters in System, Interactive, None order (see <a href="filesystem.html">Filesystem</a>).</td></tr>
+  <tr><td><code>ps</code>, <code>pstat</code>, <code>top</code>, <code>free</code>, <code>uptime</code>, <code>stats</code></td><td>Processes (with role markers <code>*</code> System and <code>+</code> Interactive), CPU usage, memory, and any metric (see <a href="diagnostics.html">Logs and diagnostics</a>).</td></tr>
+  <tr><td><code>findmnt</code>, <code>df</code></td><td>Mounted filesystems by mount ID: target, source (<code>virtio1p2</code> for an MBR slot, <code>virtio1</code> for a whole device, <code>-</code> for memfs), type, state (<code>rw</code>, <code>ro</code>, or <code>quarantined</code>), and sampled usage, capacity, and entries (see <a href="filesystem.html#mounts">Filesystem</a>).</td></tr>
+  <tr><td><code>ss</code></td><td>TCP sockets known to sys-io.</td></tr>
+  <tr><td><code>ping [-c COUNT] [-i SECONDS] [-W SECONDS] [-s BYTES] DESTINATION</code></td><td>ICMP echo to an IPv4 or IPv6 address, <code>localhost</code>, or a DNS name.</td></tr>
+  <tr><td><code>date</code>, <code>time</code>, <code>sleep</code></td><td>The current time, timing a command, and pausing.</td></tr>
+  <tr><td><code>printenv</code></td><td>The environment.</td></tr>
+  <tr><td><code>loop</code></td><td>Run a command repeatedly.</td></tr>
+</table>
+</div>
+<p>A few names in <code>/user/bin</code> are scripts without a sysbox applet behind
+them: <code>uname</code> (prints "Motor OS"),
+<code>sh</code> (forwards to rush, so C library <code>system()</code> and
+<code>popen()</code> work), and <code>exit</code> (so that <code>ssh host exit 5</code>,
+which looks for an executable, works). <code>kill</code>, <code>cd</code>,
+<code>history</code>, <code>clear</code>, and the other shell builtins are part of rush.
+<code>rg</code> is ripgrep, a real binary, on the standard image.</p>
+
+<h2>Programs</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>Program</th><th>Where</th><th>What it is</th></tr>
+  <tr><td><a href="rush.html">rush</a></td><td><code>/user/bin</code></td><td>The shell, on the console and over SSH.</td></tr>
+  <tr><td><a href="rmux.html">rmux</a></td><td><code>/user/bin</code></td><td>A tmux-like terminal multiplexer with detachable sessions.</td></tr>
+  <tr><td><a href="editors.html">red</a></td><td><code>/user/bin</code></td><td>A vi-like editor with syntax highlighting.</td></tr>
+  <tr><td><a href="editors.html">kibim</a></td><td><code>/user/bin</code></td><td>A small kilo-style editor; standard image.</td></tr>
+  <tr><td>httpd</td><td><code>/user/bin</code></td><td>A small static-file HTTP server with optional TLS: <code>httpd -a ADDR:PORT -d DIR [--ssl-cert PEM --ssl-key PEM]</code>.</td></tr>
+  <tr><td>httpd-axum</td><td><code>/user/bin</code></td><td>The same job on axum, tower-http, and Tokio, with TLS through rustls. Serves this website.</td></tr>
+  <tr><td><a href="#ssh-client">ssh, scp, sftp, ssh-keygen, ssh-copy-id</a></td><td><code>/user/bin</code></td><td>SSH shells and commands, SFTP file transfers, key generation and installation; see the client reference below.</td></tr>
+  <tr><td>russhd</td><td><code>/system/services</code></td><td>The SSH server; started by sys-init (see <a href="running.html">Running Motor OS</a>).</td></tr>
+  <tr><td>curl</td><td><code>/user/bin</code></td><td>Development tools: a small curl-compatible HTTPS client written in Rust, used by Lorry to fetch crates and by gix for Git transfers.</td></tr>
+  <tr><td>gix</td><td><code>/user/bin/dev</code></td><td>Development tools: a small Git client with <code>init</code>, <code>clone</code> and <code>fetch</code> over HTTPS or SSH, <code>status</code>, <code>log</code>, <code>diff</code>, <code>add</code>, <code>unstage</code>, <code>restore</code>, <code>commit</code>, <code>branch</code>, <code>tag</code>, <code>remote</code>, <code>switch</code>, <code>checkout</code>, <code>merge</code>, <code>recover</code>, and <code>push</code> of one branch or tag over SSH. See the <a href="gix.html">gix</a> page.</td></tr>
+  <tr><td>lua</td><td><code>/user/bin/dev</code></td><td>Development tools: Lua 5.4, built natively against the C library.</td></tr>
+  <tr><td>sed</td><td><code>/user/bin/dev</code></td><td>Development tools: the stream editor, uutils sed (GNU-compatible, in Rust). <code>sed -i</code> edits a file in place: the file keeps its permissions, and so must be writable.</td></tr>
+</table>
+</div>
+<p>The toolchain archive adds gix, Lorry, mdbg, and the native compilers;
+see <a href="devtools.html">Development tools</a>. Tests stay in their Cargo repositories.</p>
+
+<h2 id="ssh-client">SSH clients</h2>
+
+<p>Motor OS provides <code>ssh</code>, <code>scp</code>, <code>sftp</code>, <code>ssh-keygen</code>, and <code>ssh-copy-id</code> in
+<code>/user/bin</code>. These commands implement the capabilities below; unsupported
+OpenSSH options are errors. Run <code>ssh --help</code> for the SSH option reference.</p>
+
+<h3 id="remote-shells-and-commands">Remote shells and commands</h3>
+
+<pre><code>ssh user@host
+ssh -p 2222 user@host echo hello
+ssh -t user@host top
+ssh -T user@host cat &lt; input.txt &gt; output.txt</code></pre>
+
+<p>Destinations use <code>[user@]host</code>; bracket IPv6 addresses, such as
+<code>motor@[2001:db8::1]</code>. The default port is 22. With no command, <code>ssh</code> opens
+an interactive shell and requires a terminal on stdin. Commands run without
+a remote terminal by default; <code>-t</code> requests one (and requires a local
+terminal), while <code>-T</code> disables it. Command arguments are joined with spaces
+for the remote shell; preserve any required remote quoting explicitly.</p>
+
+<p>Command sessions forward stdin, stdout, and stderr and return the remote
+exit status (0–255); client errors or a missing usable status return 255.
+Interactive sessions forward Ctrl+C and terminal size changes. At the
+start of a line, <code>~.</code> disconnects and <code>~~</code> sends a literal tilde.</p>
+
+<h3 id="local-tcp-forwarding">Local TCP forwarding</h3>
+
+<p><code>ssh -N -L 8080:localhost:80 user@host</code> listens on local port 8080 and connects
+to <code>localhost:80</code> from the remote host. <code>-N</code> runs without a command, terminal,
+or stdin forwarding. Omit <code>-N</code> to use forwards alongside a command or shell.
+Use <code>[bind:]port:host:port</code>, bracketing IPv6 addresses. Ports must be 1–65535.
+Target names resolve at the remote host. Forwards also work through <code>-J</code>.</p>
+
+<p>Listeners default to loopback. <code>-g</code> or <code>GatewayPorts yes</code> changes the default
+to all interfaces; an explicit bind address takes priority. Empty binds and
+<code>*</code> select all interfaces. Any local process that can reach a listener can
+use the SSH connection to reach its target.</p>
+
+<p>Setup failures warn and leave other forwards running. <code>ExitOnForwardFailure yes</code>
+instead exits 255 and releases earlier listeners. A later refused target closes
+only that connection. After a command finishes, listeners close and admitted
+forwards drain before SSH returns its status. Ctrl+C or transport loss cancels
+the forwards. A blocked command-output pipe can also pause forwarding; use
+<code>-N</code> for a tunnel without command-output backpressure.</p>
+
+<p><code>ssh -N -D 1080 user@host</code> creates a SOCKS4, SOCKS4a and SOCKS5 CONNECT
+proxy. No SOCKS authentication is required. The local SOCKS client selects
+the target; names resolve at the SSH server. The same bind controls, setup
+failure policy and connection lifetime apply. An incomplete handshake uses
+one forwarding slot without blocking other connections; no handshake timer
+is imposed.</p>
+
+<h3 id="remote-tcp-forwarding">Remote TCP forwarding</h3>
+
+<p><code>ssh -N -R 8080:localhost:80 user@host</code> asks the server to listen on port 8080
+and connects each forwarded connection to <code>localhost:80</code> on this client.
+Use <code>[bind:]port:host:port</code>, bracketing IPv6 addresses. Target names resolve
+on the client. Remote forwards also work through <code>-J</code> and alongside commands.</p>
+
+<p>Use remote listen port 0 to have the server allocate a port; SSH prints the
+allocated port to stderr. Target ports must be 1–65535. The server controls
+which interfaces its remote listeners use. Motor's default is loopback;
+the server's <code>gateway_ports = true</code> exposes them on all interfaces.</p>
+
+<p>The same setup-failure and connection-lifetime rules apply. After a command
+ends, new remote connections are refused while admitted connections drain.
+Configured forwards run only for SSH's final destination; copy applets load
+the settings without starting listeners.</p>
+
+<h3 id="shared-connection-options-and-authentication">Shared connection options and authentication</h3>
+
+<p><code>ssh</code>, <code>scp</code>, <code>sftp</code>, and <code>ssh-copy-id</code> share authentication, host-key checks,
+configuration, and jump routing. Put options before the destination or
+transfer operands; <code>--</code> ends option parsing.</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>Option</th><th>Meaning</th></tr>
+  <tr><td><code>-p PORT</code></td><td>Port for <code>ssh</code> and <code>ssh-copy-id</code>.</td></tr>
+  <tr><td><code>-P PORT</code></td><td>Port for <code>scp</code> and <code>sftp</code>.</td></tr>
+  <tr><td><code>-i FILE</code></td><td>Private identity for <code>ssh</code>, <code>scp</code>, and <code>sftp</code>; repeat to try multiple keys. For <code>ssh-copy-id</code>, selects the <strong>public key to install</strong>.</td></tr>
+  <tr><td><code>-F FILE</code></td><td>Config file; <code>none</code> or <code>/dev/null</code> disables configuration.</td></tr>
+  <tr><td><code>-J JUMPS</code></td><td>Jump host or comma-separated chain (see below).</td></tr>
+  <tr><td><code>-o Key=Value</code></td><td>Set a supported configuration option (see below).</td></tr>
+</table>
+</div>
+
+<p>Clients try configured OpenSSH private keys, prompting for encrypted-key
+passphrases when needed, then password authentication if the server offers
+it. Keys with unsafe permissions are ignored. <code>BatchMode=yes</code> disables
+password, passphrase, and host-confirmation prompts. Agents and
+keyboard-interactive authentication are not supported. <code>IdentitiesOnly</code> is
+accepted; identities always come from the configured files.</p>
+
+<p>Host-key checking defaults to <code>ask</code>: display the unknown key's fingerprint
+and record it only after <code>yes</code>. <code>StrictHostKeyChecking=yes</code> requires an
+already trusted key; <code>accept-new</code> records unknown keys without prompting.
+Changed keys of a known algorithm are rejected under every policy.
+Known-host records use <code>HOST KEYTYPE BASE64</code> for port 22 and
+<code>[HOST]:PORT KEYTYPE BASE64</code> otherwise, using the resolved <code>HostName</code>.
+Blank lines, comments, and trailing key comments are accepted; hashed
+hosts, patterns, comma-separated hosts, and <code>@</code> markers are unsupported.
+The known-hosts file's parent directory must already exist.</p>
+
+<h3 id="file-transfers">File transfers</h3>
+
+<p><code>scp</code> and <code>sftp</code> use the remote SFTP subsystem; legacy SCP is unsupported.</p>
+
+<pre><code>scp -P 2222 file.txt user@host:/path/file.txt
+scp first.txt second.txt user@host:/path/directory
+scp -r user@host:/path/directory /user/tmp
+sftp -P 2222 user@host
+sftp -b /user/tmp/sftp.commands user@host</code></pre>
+
+<p><code>scp [-r] SOURCE... TARGET</code> requires exactly one remote side, written
+<code>[user@]host:path</code> (including bracketed IPv6). Uploads accept multiple local
+sources when the remote target is a directory; downloads accept one remote
+source. <code>-r</code> copies directory trees. Remote paths are literal, with no
+wildcard or tilde expansion. Local-to-local and remote-to-remote copies,
+symbolic links, and <code>scp -p</code> are unsupported. Transfers preserve an existing
+target's permissions; new files and directories use source permissions
+translated to Motor OS roles when local.</p>
+
+<p><code>sftp [-b FILE] [user@]host</code> opens a command prompt, or reads commands from
+<code>FILE</code> (<code>-</code> means stdin). Batch mode disables authentication prompts and
+stops on the first error; the interactive prompt reports errors and
+continues. Commands accept single/double quotes and backslash escapes,
+with literal paths and no wildcard expansion.</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>SFTP command</th><th>Meaning</th></tr>
+  <tr><td><code>pwd</code>, <code>lpwd</code></td><td>Print remote/local working directory.</td></tr>
+  <tr><td><code>cd PATH</code>, <code>lcd PATH</code></td><td>Change remote/local working directory.</td></tr>
+  <tr><td><code>ls [PATH]</code>, <code>lls [PATH]</code></td><td>List remote/local names.</td></tr>
+  <tr><td><code>get [-r] SOURCE [TARGET]</code></td><td>Download a file or directory tree.</td></tr>
+  <tr><td><code>put [-r] SOURCE [TARGET]</code></td><td>Upload a file or directory tree.</td></tr>
+  <tr><td><code>mkdir PATH</code>, <code>lmkdir PATH</code></td><td>Create a remote/local directory.</td></tr>
+  <tr><td><code>rm PATH</code>, <code>rmdir PATH</code></td><td>Remove a remote file or empty directory.</td></tr>
+  <tr><td><code>rename [-l] OLD NEW</code></td><td>Rename remotely; use replacing <code>posix-rename</code> if advertised, otherwise ordinary no-replace rename. <code>-l</code> forces no-replace rename.</td></tr>
+  <tr><td><code>help</code></td><td>List commands.</td></tr>
+  <tr><td><code>bye</code>, <code>exit</code>, <code>quit</code></td><td>Close the session.</td></tr>
+</table>
+</div>
+
+<h3 id="generate-and-install-login-keys">Generate and install login keys</h3>
+
+<pre><code>ssh-keygen -t ed25519 -C motor-client
+ssh-keygen -y -f /user/cfg/ssh/id_ed25519
+ssh-copy-id -i /user/cfg/ssh/id_ed25519.pub user@host
+ssh-copy-id -t /user/cfg/ssh/authorized_keys.alice -i key.pub -p 2222 alice@motor-host</code></pre>
+
+<p><code>ssh-keygen</code> generates Ed25519 OpenSSH keys, defaulting to
+<code>/user/cfg/ssh/id_ed25519</code> and a matching <code>.pub</code> file. <code>-f FILE</code> selects a
+different output, <code>-C COMMENT</code> sets the comment, and <code>-q</code> suppresses success
+messages. It prompts twice for an optional encryption passphrase unless
+<code>-N PASSPHRASE</code> is supplied (<code>-N ''</code> creates an unencrypted key). Existing
+private or public files are never overwritten. <code>-y -f FILE</code> prints the
+public key from an existing private key, prompting to decrypt if needed.
+Generation supports only <code>-t ed25519</code>.</p>
+
+<p><code>ssh-copy-id</code> reads exactly one OpenSSH public-key line (default
+<code>/user/cfg/ssh/id_ed25519.pub</code>), authenticates using existing credentials,
+and installs it through SFTP. By default it targets servers that read
+<code>.ssh/authorized_keys</code> under the SFTP start directory: it sets <code>.ssh</code> to 0700
+and creates or appends the key file with mode 0600.</p>
+
+<p><code>-t PATH</code> names the key file instead, and is required for a Motor OS server.
+<code>PATH</code> is absolute or relative to the SFTP start directory. Its parent must
+exist, as <code>/user/cfg/ssh</code> does on every Motor OS image; <code>ssh-copy-id</code> neither
+creates nor changes it. It keeps existing content, including comments and a
+missing final newline, and skips a key already listed
+as a plain record with the same type and key data, regardless of comments. If
+the key's base64 is on any other line outside a comment, as in a record with
+options such as <code>from=</code> or <code>command=</code>, it reports an error and leaves the file
+unchanged rather than adding an unrestricted copy. Use
+<code>-p PORT</code> for a custom port and <code>-o IdentityFile=PATH</code> to select an existing
+authentication key; <code>-i</code> selects the public key being installed.</p>
+
+<h3 id="log-in-to-a-motor-os-server">Log in to a Motor OS server</h3>
+
+<p>Motor OS has one Interactive user. An SSH login name selects credentials: it
+creates no OS user and changes nothing a session may do. Shells and commands
+start in <code>/user</code>, which is also their <code>HOME</code>, under every name. Every
+authenticated session can edit every credential file, so the lists below select
+credentials rather than separate names from each other. Each name has an
+optional password and any number of public keys:</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>File</th><th>Holds</th></tr>
+  <tr><td><code>/user/cfg/russhd/users.toml</code></td><td>The login names and their password verifiers</td></tr>
+  <tr><td><code>/user/cfg/ssh/authorized_keys.NAME</code></td><td>The public keys of login name <code>NAME</code></td></tr>
+</table>
+</div>
+
+<pre><code>version = 1
+
+[users.alice]
+salt = '...hex...'
+password_hash = '...hex SHA-256 of the salt bytes followed by the password...'
+
+[users.deploy]</code></pre>
+
+<p>A name is 1 to 64 ASCII letters, digits, <code>_</code>, or <code>-</code>. A record with an absent
+or empty <code>password_hash</code>, like <code>deploy</code> above, has no password. Images ship one
+name, <code>motor</code>, with a test password and key, and a test host key; replace all
+three before any deployment that is reachable from a network you do not control.</p>
+
+<p><code>russhd</code> reads both files at every authentication, so a change applies to the
+next login with no restart; sessions already established stay logged in. Every
+username is offered the same methods, whether or not it exists. A connection
+runs one session channel at a time, so a multiplexing client's second session is
+refused until the first closes. Independent TCP forwards can share the connection.</p>
+
+<p>To use <code>russhd</code> as a jump host or accept TCP forwards from another SSH client,
+set <code>allow_tcp_forwarding = true</code> in <code>sshd.toml</code> and restart the service. This
+optional version 2 setting defaults to false; shipped images enable it. It
+allows connections to any destination reachable by the server, and remote
+listener requests such as OpenSSH's <code>-R</code>. Remote listeners bind loopback by
+default. <code>gateway_ports = true</code> exposes every remote listener on all interfaces,
+as with OpenSSH's <code>GatewayPorts yes</code>; shipped images leave it false. Cancelling
+a remote listener stops new accepts while existing forwarded connections finish.</p>
+
+<p>A key file holds <code>KEYTYPE BASE64 [COMMENT]</code> lines, blank lines, and <code>#</code>
+comments, with LF or CRLF line endings. A key listed for two names is listed in
+both files. A record with options (<code>command=</code>, <code>from=</code>, <code>restrict</code>, and so on), a
+certificate, a <code>cert-authority</code> entry, or a malformed line authorizes nothing but
+costs only itself; <code>russhd</code> never strips options to recover a key. A NUL byte or
+non-UTF-8 text anywhere in the file, even in a comment, refuses the whole file.
+A key file alone creates no login name, and removing a record disables its name
+at the next authentication, whatever key files remain.</p>
+
+<p>To add a key to a running system, name its file on the client:</p>
+
+<pre><code># Motor OS client
+ssh-copy-id -t /user/cfg/ssh/authorized_keys.alice -i key.pub -p 2222 alice@host
+# OpenSSH 9.4 or newer
+ssh-copy-id -s -t /user/cfg/ssh/authorized_keys.alice -i key.pub -p 2222 alice@host
+# Older OpenSSH
+ssh -p 2222 alice@host 'cat &gt;&gt; /user/cfg/ssh/authorized_keys.alice' &lt; key.pub</code></pre>
+
+<p>A name with a password but no key can install its first key this way. Other
+forms fail without installing a key: without <code>-t</code> the SFTP installers try <code>/.ssh</code>
+and get <code>Permission denied</code>, and OpenSSH's shell installer (no <code>-s</code>) stops at
+<code>dirname</code>, which Motor OS does not have. Installers do not coordinate and have
+no rollback, so serialize updates to one list. OpenSSH's <code>-s</code> mode rewrites the
+whole file, and its <code>chmod 700</code> of the parent leaves <code>/user/cfg/ssh</code> at
+<code>rwxrwx---</code>.</p>
+
+<p>To add a name, create its key file first and its record second. Replace the
+registry atomically, because <code>russhd</code> denies all new logins while it is
+incomplete. A file created from a shell starts readable by None, which <code>russhd</code>
+refuses in a registry, so narrow it before renaming it into place:</p>
+
+<pre><code>cp /user/cfg/russhd/users.toml /user/cfg/russhd/users.new
+# ...edit users.new...
+chmod rwxrw---- /user/cfg/russhd/users.new
+mv /user/cfg/russhd/users.new /user/cfg/russhd/users.toml</code></pre>
+
+<p><code>russhd</code> fails closed. Nothing is cached, so there is no last-known-good copy:</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>Problem</th><th>Effect</th></tr>
+  <tr><td>Registry missing, unreadable, unsafe, oversized, or malformed</td><td>All new logins are denied</td></tr>
+  <tr><td>The same with a key file</td><td>That name's keys are denied; its password still works</td></tr>
+  <tr><td>Key file missing or empty</td><td>The name has no keys; its password still works</td></tr>
+</table>
+</div>
+
+<p>Unlike a bad key record, one invalid record makes the whole registry malformed.
+<code>russhd</code> logs why it refused a file or skipped a record to
+<code>/system/logs/russhd.log</code>, with a line number where it has one, and never quotes
+the file.</p>
+
+<p>A credential file must be a regular file. None must not be able to write it, or
+to replace any directory above it up to <code>/user</code> (through <code>/</code> for a location
+outside <code>/user</code>), and must not be able to read the registry. Limits are 1 MiB per
+file, 1,024 users, 1,024 keys per file, and 16 KiB per key line; going past one
+refuses the whole file.</p>
+
+<p>If no usable credential is left, recover through the VM console, or stop the VM
+and use <code>imager set</code> (see <a href="imager.html#select-a-login-name">imager</a>), which also creates names and
+replaces whole key lists in a stopped image.</p>
+
+<p><code>/user/cfg/sshd.toml</code> holds the service settings and names the two credential
+locations, as normalized absolute paths:</p>
+
+<pre><code>version = 2
+listen_on = '0.0.0.0:2222'
+path = '/user/bin'
+host_key = '...OpenSSH private key...'
+users_file = '/user/cfg/russhd/users.toml'
+authorized_keys_dir = '/user/cfg/ssh'</code></pre>
+
+<p>Version 1 configurations, <code>[users]</code> sections, and unknown fields are rejected:
+this file holds no login credentials.</p>
+
+<h3 id="host-configuration-and-jump-hosts">Host configuration and jump hosts</h3>
+
+<p>Motor OS reads OpenSSH-style client configuration from <code>/user/cfg/ssh/config</code>.
+For example:</p>
+
+<pre><code>Host ssh-hub
+    HostName 11.12.13.14
+    User foo
+
+Host ssh-leaf
+    HostName 10.0.0.4
+    User bar
+    ProxyJump ssh-hub</code></pre>
+
+<p>Run <code>ssh ssh-hub</code> to connect directly, or <code>ssh ssh-leaf</code> to connect through
+<code>ssh-hub</code>. The gateway must allow TCP forwarding to the destination. The local
+client authenticates and checks host keys for both connections, so the gateway
+does not need a copy of the destination's private key.</p>
+
+<p><code>ssh</code>, <code>scp</code>, <code>sftp</code>, and <code>ssh-copy-id</code> share configuration and jump routing.
+For example, <code>scp file ssh-leaf:/path/file</code> uses the same gateway. Gix currently
+passes <code>-F /dev/null</code>, explicitly disabling client config for its SSH commands.</p>
+
+<p><code>Host</code> supports multiple patterns, <code>*</code>, <code>?</code>, and <code>!</code> negation. Blank lines,
+comments, double-quoted values, and <code>Key Value</code> / <code>Key=Value</code> syntax are
+accepted. Directive names are case-insensitive. Match against the alias in
+the command, even when <code>HostName</code> specifies a different network address.</p>
+
+<p>Supported settings (also accepted through <code>-o Key=Value</code>):</p>
+
+<div class="table-wrap">
+<table>
+  <tr><th>Setting</th><th>Meaning / default</th></tr>
+  <tr><td><code>HostName</code></td><td>Network destination; defaults to the command's host.</td></tr>
+  <tr><td><code>User</code></td><td>Login name; defaults to <code>$USER</code>, or <code>motor</code>.</td></tr>
+  <tr><td><code>Port</code></td><td>Remote port; 22.</td></tr>
+  <tr><td><code>IdentityFile</code></td><td>Private-key path; <code>/user/cfg/ssh/id_ed25519</code>. Repeatable; <code>none</code> suppresses the default.</td></tr>
+  <tr><td><code>ProxyJump</code></td><td>Gateway or chain; <code>none</code> disables jumping.</td></tr>
+  <tr><td><code>IdentitiesOnly</code></td><td><code>yes</code> / <code>no</code>; default <code>no</code> (file identities only in either case).</td></tr>
+  <tr><td><code>StrictHostKeyChecking</code></td><td><code>ask</code> (default), <code>yes</code>, or <code>accept-new</code>.</td></tr>
+  <tr><td><code>UserKnownHostsFile</code></td><td><code>/user/cfg/ssh/known_hosts</code>.</td></tr>
+  <tr><td><code>BatchMode</code></td><td><code>yes</code> / <code>no</code>; default <code>no</code>.</td></tr>
+  <tr><td><code>ConnectTimeout</code></td><td>Setup timeout in integer seconds; 0 (default) disables it.</td></tr>
+  <tr><td><code>ServerAliveInterval</code></td><td>Keepalive interval in integer seconds; 0 (default) disables it.</td></tr>
+  <tr><td><code>ServerAliveCountMax</code></td><td>Maximum unanswered keepalives; 3.</td></tr>
+  <tr><td><code>LocalForward</code></td><td><code>[bind:]port host:port</code>; repeatable, SSH final destination only.</td></tr>
+  <tr><td><code>DynamicForward</code></td><td><code>[bind:]port</code>; repeatable SOCKS listener, SSH final destination only.</td></tr>
+  <tr><td><code>RemoteForward</code></td><td><code>[bind:]port host:port</code>; repeatable remote listener, SSH final destination only; listen port 0 allocates a port.</td></tr>
+  <tr><td><code>GatewayPorts</code></td><td>Default local binds to all interfaces; <code>no</code>.</td></tr>
+  <tr><td><code>ExitOnForwardFailure</code></td><td>Exit on forward setup failure; <code>no</code>.</td></tr>
+</table>
+</div>
+
+<p>Command-line settings take priority. Otherwise the first matching scalar
+setting wins; put specific blocks before <code>Host *</code> defaults. Identity files
+accumulate in order, without duplicates. Explicit identity lists replace the
+default <code>/user/cfg/ssh/id_ed25519</code>; <code>IdentityFile none</code> suppresses the default
+without adding a key. Without <code>User</code>, the default is <code>$USER</code>, or <code>motor</code>.
+Known hosts default to <code>/user/cfg/ssh/known_hosts</code>.</p>
+
+<p>Each jump uses its own matching host block. Target command-line settings do
+not become jump settings. <code>ProxyJump</code> accepts aliases or <code>[user@]host[:port]</code>,
+including bracketed IPv6 addresses and comma-separated chains. The first
+jump in a chain can itself have a configured gateway. <code>ProxyJump none</code>
+disables jumping. Routes are limited to 16 hosts, including the destination;
+cycles fail before connection setup.</p>
+
+<p>Use <code>ssh -J ssh-hub ssh-leaf</code> to choose a gateway on the command line, <code>-F path</code>
+to choose a config file, or <code>-F none</code> / <code>-F /dev/null</code> to disable config.
+The supported settings are also accepted with <code>-o Key=Value</code>.</p>
+
+<p>Paths are literal. Use <code>/user/cfg/ssh/key</code>, not <code>~/.ssh/key</code>. <code>Include</code>,
+<code>Match</code>, <code>ProxyCommand</code>, value expansion, SSH URI jump syntax, agents,
+certificates, multiplexing, and system-wide config are not supported.
+Agent forwarding and X11 forwarding are unsupported.
+Unsupported directives and malformed settings report a filename and line;
+they are not silently ignored. A missing default config is allowed, while
+a missing file explicitly selected with <code>-F</code> is an error.</p>
+
+<h2>Configuration files</h2>
+<div class="table-wrap">
+<table>
+  <tr><th>File</th><th>Used by</th></tr>
+  <tr><td><code>/system/cfg/sys-init.cfg</code></td><td>sys-init: the console program and role, strobe, and the services with their capability masks.</td></tr>
+  <tr><td><code>/system/cfg/sys-net.toml</code></td><td>sys-io: network devices, addresses, routes, DNS servers, and limits.</td></tr>
+  <tr><td><code>/user/cfg/sshd.toml</code></td><td>russhd: listen address, command path, host key, and where the credentials below are.</td></tr>
+  <tr><td><code>/user/cfg/russhd/users.toml</code>, <code>/user/cfg/ssh/authorized_keys.NAME</code></td><td>russhd: login names, password verifiers, and each name's public keys; see <a href="#log-in-to-a-motor-os-server">Log in to a Motor OS server</a>.</td></tr>
+  <tr><td><code>/user/cfg/ssh/config</code>, <code>id_ed25519</code>, <code>known_hosts</code></td><td>SSH clients: host configuration, default private identity, and trusted server keys; see <a href="#ssh-client">SSH clients</a>.</td></tr>
+  <tr><td><code>/system/cfg/sys-tty.cfg</code>, <code>/user/cfg/rush.cfg</code></td><td>The console shell's environment and startup file.</td></tr>
+  <tr><td><code>/system/cfg/libc/hosts</code></td><td>Local names for the DNS resolver and C library. Without <code>resolv.conf</code>, mlibc uses the DNS service at <code>127.0.0.1:53</code>.</td></tr>
+  <tr><td><code>/system/tmp/sys-io/dhcp.toml</code></td><td>sys-io's current DHCP leases and active interface names; read by the Interactive DNS service.</td></tr>
+  <tr><td><code>/user/cfg/red.toml</code>, <code>rmux.toml</code>, <code>kibim/</code>, <code>lorry.toml</code></td><td>Per-program settings, all optional.</td></tr>
+</table>
+</div>
+<nav class="pager">
+<a class="pager-prev" href="diagnostics.html"><span>Previous</span>Logs and diagnostics</a>
+<a class="pager-next" href="rush.html"><span>Next</span>rush: the shell</a>
+</nav>
+</article>
+</main>
+<footer class="foot">
+  <div class="wrap">
+    <p><a href="https://github.com/moturus/motor-os/blob/main/CHANGELOG.md">Changelog</a></p>
+    <p>Motor OS is free software, dual-licensed under the MIT and Apache 2.0 licenses.
+    <br>This site is served by <a href="https://github.com/moturus/motor-os/tree/main/src/bin/httpd-axum">httpd-axum</a> running inside a Motor OS VM.</p>
+  </div>
+</footer>
+</body>
+</html>

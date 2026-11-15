@@ -1,5 +1,0 @@
-[source.crates-io]
-replace-with = "stage2-resolution-oracle"
-
-[source.stage2-resolution-oracle]
-directory = "../registry"

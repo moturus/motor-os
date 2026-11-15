@@ -15,12 +15,12 @@ toolchain_collect_overlays() (
             cp -a "$assembly/$overlay" "$output/"
         fi
     done
-    local motor="$output/motor" defaults="$root/img_files/motor-os-dev"
+    local motor="$output/motor" defaults="$root/img_files/motor-toolchain"
     mkdir -p "$motor/user/bin" "$motor/user/lib/imager" "$motor/none"
     cp -a "$defaults/user/bin/dev" "$motor/user/bin/"
     cp -a "$defaults/user/lib/www" "$motor/user/lib/"
     cp -a "$defaults/user/cfg" "$motor/user/"
-    # Installation extends these existing files; it never replaces them.
+    # The installer extends the user's PATH instead of replacing these files.
     rm -f "$motor/user/cfg/rush.cfg" "$motor/user/cfg/sshd.toml"
     cp -a "$defaults/none/cfg" "$motor/none/"
     for command in lorry gix mdbg; do

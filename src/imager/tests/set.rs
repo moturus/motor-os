@@ -60,7 +60,8 @@ fn authenticates(registry: &str, name: &str, password: &str) -> bool {
 #[test]
 fn all_commands_preserve_other_credentials_permissions_and_boot_data() {
     for qcow2 in [false, true] {
-        for source in [BASE, DEV] {
+        let installed = BASE.replace("path = \"/user/bin\"", "path = \"/user/bin:/user/bin/dev\"");
+        for source in [BASE, installed.as_str()] {
             let fixture = Fixture::new(qcow2, source);
             let before = fs::read(fixture.raw()).unwrap();
             let password = " /not/a/file 'quoted' 雪 ";
@@ -289,7 +290,8 @@ fn an_orphaned_key_file_is_not_reactivated() {
 fn repeated_password_updates_use_fresh_salts_and_preserve_custom_records() {
     let extra = "\n[users.other]\nsalt = 'unchanged'\n";
     let source = format!("{SHIPPED_USERS}{extra}");
-    let fixture = Fixture::new(false, DEV);
+    let installed = BASE.replace("path = \"/user/bin\"", "path = \"/user/bin:/user/bin/dev\"");
+    let fixture = Fixture::new(false, &installed);
     let sealed = RolePermissions::new(
         AccessPermissions::R,
         AccessPermissions::R,
