@@ -1,0 +1,23 @@
+[package]
+name = "motor-toolchain-tests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+autotests = false
+
+[workspace]
+
+[dev-dependencies]
+motor-analyzer-tests = { path = "../rust-analyzer" }
+
+[[test]]
+name = "installed"
+path = "tests/main.rs"
+harness = false
+
+[[bin]]
+name = "install-privacy"
+test = false
+
+[target.'cfg(target_os = "motor")'.dependencies]
+moto-sdk = "0.1"

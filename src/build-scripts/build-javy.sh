@@ -41,12 +41,8 @@ wasm_source_manifest() (
 )
 
 javy_source_manifest() {
-	local plugins
-	mapfile -t plugins < <(cd "$MOTOR" && git ls-files --cached --others --exclude-standard \
-		src/tests/javy-smoke/plugins | LC_ALL=C sort)
 	wasm_source_manifest "${JAVY_SOURCES[*]}" src/build-scripts/build-javy.sh \
-		src/tests/javy-smoke/fixtures/typescript-workload.js src/tests/javy-smoke/fixtures/hello.js \
-		"${plugins[@]}"
+		src/sys/tests/javy-smoke/src/inputs.rs src/sys/tests/javy-smoke/Cargo.lock
 	printf 'guest-toolchain=%s\n' "$(RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN" rustc --version)"
 	printf 'plugin=%s\ntypescript=%s\njavy-linux=%s\nwasi-sdk=%s\n' "$JAVY_PLUGIN_SHA" \
 		"$JAVY_TYPESCRIPT_SHA" "$JAVY_LINUX_SHA" "$WASI_SDK_SHA"
@@ -74,7 +70,7 @@ javy_linux_reference() {
 	rm -rf "$out"
 	mkdir -p "$out"
 	for mode in compressed uncompressed omitted; do
-		"$inputs/javy-linux" build "$MOTOR/src/tests/javy-smoke/fixtures/hello.js" \
+		"$inputs/javy-linux" build "$inputs/source/hello.js" \
 			-C plugin="$inputs/plugin.wasm" -C deterministic -C source=$mode -o "$out/hello-$mode.wasm"
 	done
 	"$inputs/javy-linux" build "$tests/typescript-workload.js" -C plugin="$inputs/plugin.wasm" \
@@ -87,7 +83,7 @@ build_javy_test_plugins() {
 	local tests="$1" build="$ASSEMBLY_BUILD_ROOT/javy-plugins"
 	[ -d "${WASI_SDK:-}" ] || die "the Javy test plugins need wasi-sdk"
 	(
-		cd "$MOTOR/src/tests/javy-smoke/plugins"
+		cd "$ASSEMBLY_BUILD_ROOT/javy-inputs/source/plugins"
 		export RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN" WASI_SDK
 		cargo fetch --locked
 		CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$build" cargo build --locked --release \
@@ -103,6 +99,8 @@ build_javy() {
 	local inputs="$ASSEMBLY_BUILD_ROOT/javy-inputs" data="$JAVY_IMG/user/lib/javy" manifest
 	manifest="$(javy_source_manifest)"
 	mkdir -p "$inputs"
+	cargo run --locked --offline --manifest-path "$MOTOR/src/sys/tests/javy-smoke/Cargo.toml" \
+		--bin prepare-inputs -- "$inputs/source"
 	javy_download https://github.com/bytecodealliance/javy/releases/download/v9.1.0/plugin.wasm.gz \
 		dc237a6fb9c7e58423456a12fc3c4e7a97d9d1eeb91b89ca73db76b78ae95e83 "$inputs/plugin.wasm.gz"
 	# Javy's build script rebuilds the CLI whenever this file is rewritten.
@@ -131,10 +129,10 @@ build_javy() {
 	printf '%s\n' "$manifest" > "$data/sources.txt"
 	(cd "$JAVY_IMG" && sha256sum user/bin/dev/{javy,wasmi} user/lib/javy/plugins/default.wasm \
 		user/lib/javy/sources.txt > "$data/SHA256SUMS")
-	# Test inputs stay out of the images; test-wasm.sh uploads them.
+	# Test inputs stay out of the images; full-test.sh uploads them.
 	local ts="$JAVY_TESTS/typescript-workload.js"
 	tar -xOf "$inputs/typescript.tgz" package/lib/typescript.js > "$ts"
-	cat "$MOTOR/src/tests/javy-smoke/fixtures/typescript-workload.js" >> "$ts"
+	cat "$inputs/source/typescript-workload.js" >> "$ts"
 	printf '%s  %s\n' "$JAVY_TYPESCRIPT_SHA" "$ts" | sha256sum -c -
 	tar -xOf "$inputs/typescript.tgz" package/LICENSE.txt > "$JAVY_TESTS/typescript-LICENSE.txt"
 	tar -xOf "$inputs/typescript.tgz" package/ThirdPartyNoticeText.txt \

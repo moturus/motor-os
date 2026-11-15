@@ -36,13 +36,13 @@ select_external_sources() {
 	if [ "$selection" != wasmtime ]; then
 		EXTERNAL_REPOS+=("${JAVY_SOURCES[@]}")
 		EXTERNAL_WORKSPACES+=("$EXTERNAL_SOURCES/javy" "$EXTERNAL_SOURCES/javy/motor-tests"
-			"$MOTOR/src/tests/javy-smoke" "$MOTOR/src/tests/javy-smoke/plugins")
+			"$MOTOR/src/sys/tests/javy-smoke")
 	fi
 	if [ "$selection" != javy ]; then
 		EXTERNAL_REPOS+=("${WASMTIME_SOURCES[@]}")
 		EXTERNAL_WORKSPACES+=("$EXTERNAL_SOURCES/wasmtime"
 			"$EXTERNAL_SOURCES/wasmtime/motor-tests"
-			"$MOTOR/src/tests/wasmtime-smoke")
+			"$MOTOR/src/sys/tests/wasmtime-smoke")
 	fi
 	local repos=("${EXTERNAL_REPOS[@]}")
 	EXTERNAL_REPOS=()

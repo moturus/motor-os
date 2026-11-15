@@ -127,7 +127,7 @@ build_wasmtime() {
 	printf '%s\n' "$manifest" > "$data/sources.txt"
 	(cd "$WASMTIME_IMG" && sha256sum user/bin/dev/wasmtime user/bin/dev/wasmtime-rt user/lib/wasmtime/sources.txt \
 		> "$data/SHA256SUMS")
-	# Test fixtures stay out of the images; test-wasm.sh uploads them.
+	# Test inputs stay out of the images; cross-test.sh uploads them.
 	rm -rf "$WASMTIME_TESTS"
 	mkdir -p "$WASMTIME_TESTS"
 	build_wasmtime_fixtures
