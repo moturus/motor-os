@@ -221,10 +221,6 @@ fn nested_reader() -> ! {
 }
 
 fn delayed_writer(args: &[String]) -> ! {
-    assert_eq!(
-        moto_sys::caps::ProcessRole::Interactive,
-        moto_sys::caps::ProcessRole::from_caps(moto_sys::ProcessStaticPage::get().capabilities)
-    );
     let mut completion = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -520,22 +516,18 @@ pub fn post_publish_error_progress_test() {
     println!("post_publish_error_progress_test PASS");
 }
 
-fn privileged_lifetime_tests() {
-    assert_eq!(
-        moto_sys::caps::ProcessRole::Interactive,
-        moto_sys::caps::ProcessRole::from_caps(moto_sys::ProcessStaticPage::get().capabilities)
-    );
-    assert_ne!(
-        moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_SPAWN_DETACHED,
-        0
-    );
+pub fn privileged_lifetime_tests() {
+    let own = moto_sys::ProcessStaticPage::get().capabilities;
+    if own & moto_sys::caps::CAP_SPAWN_DETACHED == 0 {
+        return;
+    }
     let caps = format!(
         "0x{:x}",
-        moto_sys::caps::CAP_SPAWN
+        own & (moto_sys::caps::CAP_SPAWN
             | moto_sys::caps::CAP_LOG
             | moto_sys::caps::CAP_SPAWN_DETACHED
             | moto_sys::caps::CAP_INTERACTIVE
-            | crate::IO_CAPS
+            | crate::IO_CAPS)
     );
     for route in ["direct", "relay"] {
         let output_path = crate::temp_path(&format!("stdio-lifetime-{route}"));

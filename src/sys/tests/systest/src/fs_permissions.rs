@@ -130,13 +130,12 @@ async fn create_file(
 }
 
 pub fn run_all_tests() {
-    use moto_sys::caps::{MOTOR_OS_CAPS_ENV_KEY, ProcessRole};
+    use moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY;
     use std::io::Write;
 
-    assert_eq!(
-        ProcessRole::Interactive,
-        ProcessRole::from_caps(moto_sys::ProcessStaticPage::get().capabilities)
-    );
+    if !crate::has_interactive() {
+        return;
+    }
 
     let started = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -766,7 +765,10 @@ pub fn test_write_capability_stdio() {
     use moto_sys::caps::{CAP_INTERACTIVE, CAP_NET, CAP_SPAWN, MOTOR_OS_CAPS_ENV_KEY};
     use std::process::{Command, Stdio};
 
-    let restricted = format!("0x{:x}", CAP_SPAWN | CAP_INTERACTIVE | CAP_NET);
+    let restricted = format!(
+        "0x{:x}",
+        moto_sys::ProcessStaticPage::get().capabilities & (CAP_SPAWN | CAP_INTERACTIVE | CAP_NET)
+    );
     let dir = crate::temp_path(&format!(
         "systest-fs-write-cap-stdio-{:016x}",
         std::random::random::<u64>(..)

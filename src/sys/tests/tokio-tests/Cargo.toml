@@ -3,6 +3,10 @@ name = "tokio-tests"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "tokio-tests"
+harness = false
+
 [dependencies]
 futures = "0.3.31"
 pin-project-lite = "0.2.16"

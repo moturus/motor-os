@@ -1,0 +1,23 @@
+[package]
+name = "motor-unwind-test"
+version = "0.1.0"
+edition = "2024"
+publish = false
+build = "build.rs"
+
+[workspace]
+
+[[bin]]
+name = "motor-unwind-test"
+test = false
+
+[features]
+cxx = []
+
+[profile.release-abort]
+inherits = "release"
+panic = "abort"
+
+[profile.release-lto]
+inherits = "release"
+lto = "fat"

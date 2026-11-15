@@ -391,6 +391,9 @@ fn basic(slot: &str) {
 }
 
 pub fn run_all_tests() {
+    if !crate::has_interactive() {
+        return;
+    }
     if !crate::has_cap_log() {
         crate::skip_without_cap_log("logging::protocol_hardening");
         crate::skip_without_cap_log("logging::basic");

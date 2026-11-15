@@ -358,6 +358,13 @@ pub fn move_noreplace_child(args: &[String]) {
 fn copy_test() {
     use moto_sdk::io::fs::{AccessPermissions, EntryKind, FsClient, Role, RolePermissions};
 
+    let interactive = crate::has_interactive();
+    let role = if interactive {
+        Role::Interactive
+    } else {
+        Role::None
+    };
+
     // A panic aborts systest without cleanup. Keep this fixture outside the
     // shared test directory, where a sealed leftover would break other
     // tests, and heal whatever an earlier run left before starting over.
@@ -440,8 +447,14 @@ fn copy_test() {
             .unwrap()
             .permissions()
             .unwrap();
-        assert_eq!(AccessPermissions::Rw, permissions.interactive);
-        assert_eq!(AccessPermissions::R, permissions.none);
+        assert_eq!(AccessPermissions::Rwx, permissions.system);
+        if interactive {
+            assert_eq!(AccessPermissions::Rw, permissions.interactive);
+            assert_eq!(AccessPermissions::R, permissions.none);
+        } else {
+            assert_eq!(AccessPermissions::Rwx, permissions.interactive);
+            assert_eq!(AccessPermissions::Rw, permissions.none);
+        }
     });
 
     // Copying a non-existent source must fail with NotFound.
@@ -487,6 +500,12 @@ fn copy_test() {
     );
     let private = root.join("private");
     std::fs::write(&private, b"private contents").unwrap();
+    // Interactive can deny None access; None can restrict its own source to R.
+    let private_none = if interactive {
+        AccessPermissions::None
+    } else {
+        AccessPermissions::R
+    };
     moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().unwrap();
         let (id, _) = client.stat(private.to_str().unwrap()).await.unwrap();
@@ -495,8 +514,12 @@ fn copy_test() {
                 id,
                 RolePermissions::new(
                     AccessPermissions::Rwx,
-                    AccessPermissions::Rw,
-                    AccessPermissions::None,
+                    if interactive {
+                        AccessPermissions::Rw
+                    } else {
+                        AccessPermissions::Rwx
+                    },
+                    private_none,
                 ),
             )
             .await
@@ -522,7 +545,7 @@ fn copy_test() {
         let client = FsClient::connect().unwrap();
         let (id, _) = client.stat(protected_dst.to_str().unwrap()).await.unwrap();
         assert_eq!(
-            AccessPermissions::None,
+            private_none,
             client
                 .metadata(id)
                 .await
@@ -587,7 +610,15 @@ fn copy_test() {
                     parent,
                     EntryKind::File,
                     source.file_name().unwrap().to_str().unwrap(),
-                    RolePermissions::new(AccessPermissions::Rwx, staging, staging),
+                    RolePermissions::new(
+                        AccessPermissions::Rwx,
+                        if interactive {
+                            staging
+                        } else {
+                            AccessPermissions::Rwx
+                        },
+                        staging,
+                    ),
                 )
                 .await
                 .unwrap();
@@ -604,7 +635,7 @@ fn copy_test() {
                     .metadata(source_id)
                     .await
                     .unwrap()
-                    .access(Role::Interactive)
+                    .access(role)
                     .unwrap()
             );
         });
@@ -629,10 +660,21 @@ fn copy_test() {
                 metadata.access(Role::System).unwrap()
             );
             assert_eq!(
-                final_interactive,
+                if interactive {
+                    final_interactive
+                } else {
+                    AccessPermissions::Rwx
+                },
                 metadata.access(Role::Interactive).unwrap()
             );
-            assert_eq!(final_none, metadata.access(Role::None).unwrap());
+            assert_eq!(
+                if interactive {
+                    final_none
+                } else {
+                    final_interactive
+                },
+                metadata.access(Role::None).unwrap()
+            );
         });
     }
 
@@ -646,6 +688,12 @@ fn copy_test() {
 /// before the destination changes, not after its contents were replaced.
 fn copy_ceiling_test() {
     use moto_sdk::io::fs::{AccessPermissions, EntryKind, FsClient, RolePermissions};
+
+    // The setup edits Interactive's byte and runs the denied copy as None.
+    if !crate::has_interactive() {
+        println!("    ---- FS: copy_ceiling_test runs under Interactive with a None child");
+        return;
+    }
 
     let root = crate::temp_path("systest-copy-ceiling");
     let _ = std::fs::remove_dir_all(&root);

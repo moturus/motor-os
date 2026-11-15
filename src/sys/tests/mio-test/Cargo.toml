@@ -3,6 +3,10 @@ name = "mio-test"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "mio-test"
+harness = false
+
 [dependencies]
 log = "0.4.28"
 env_logger = "0.11.8"

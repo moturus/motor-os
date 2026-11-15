@@ -78,6 +78,9 @@ pub fn run_child(args: &[String]) {
 }
 
 pub fn test_pid_kill_permissions() {
+    if !crate::has_interactive() {
+        return;
+    }
     let own = ProcessStaticPage::get().capabilities;
     assert_eq!(ProcessRole::Interactive, ProcessRole::from_caps(own));
     let mut sibling = idle_child();
@@ -99,6 +102,9 @@ pub fn test_pid_kill_permissions() {
 }
 
 pub fn test_debug_attach_permissions() {
+    if !crate::has_interactive() {
+        return;
+    }
     let own = ProcessStaticPage::get().capabilities;
     assert_eq!(ProcessRole::Interactive, ProcessRole::from_caps(own));
     let mut sibling = idle_child();

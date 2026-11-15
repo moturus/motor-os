@@ -379,9 +379,16 @@ pub fn test_shared_listener_restart() {
     expect_shared_listener_ready(&mut first_stdout);
 
     // A zero-capacity debugger request must be safe even against a live child.
-    let debug = moto_sys::SysRay::dbg_attach(u64::from(first.id())).unwrap();
-    assert_eq!(moto_sys::SysRay::dbg_list_threads(debug, 0, &mut []), Ok(0));
-    moto_sys::SysRay::dbg_detach(debug).unwrap();
+    let debug = moto_sys::SysRay::dbg_attach(u64::from(first.id()));
+    if moto_sys::caps::ProcessRole::from_caps(moto_sys::ProcessStaticPage::get().capabilities)
+        == moto_sys::caps::ProcessRole::None
+    {
+        assert_eq!(debug, Err(moto_rt::E_NOT_ALLOWED));
+    } else {
+        let debug = debug.unwrap();
+        assert_eq!(moto_sys::SysRay::dbg_list_threads(debug, 0, &mut []), Ok(0));
+        moto_sys::SysRay::dbg_detach(debug).unwrap();
+    }
     first.kill().unwrap();
 
     // Retain `first` without waiting: the parent still owns a process handle,
@@ -539,10 +546,16 @@ pub fn test_default_capability_policy() {
         CAP_FS_WRITE, CAP_INTERACTIVE, CAP_LOG, CAP_NET, CAP_SPAWN, CAP_VSOCK, ProcessRole,
     };
 
+    let own = moto_sys::ProcessStaticPage::get().capabilities;
+    if !crate::has_interactive() {
+        let expected = moto_sys::caps::default_child_capabilities(own);
+        assert_eq!(ProcessRole::None, ProcessRole::from_caps(expected));
+        assert_eq!(expected, probe_child_capabilities(None).unwrap());
+        return;
+    }
     if crate::skip_without_cap_log("test_default_capability_policy") {
         return;
     }
-    let own = moto_sys::ProcessStaticPage::get().capabilities;
     assert_eq!(ProcessRole::Interactive, ProcessRole::from_caps(own));
     assert_eq!(crate::FULL_RUN_CAPS, own & crate::FULL_RUN_CAPS);
 

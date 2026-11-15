@@ -1,4 +1,4 @@
-#[path = "../../../../tests/vsock-protocol.rs"]
+#[path = "vsock_protocol.rs"]
 mod protocol;
 
 use core::future::Future;

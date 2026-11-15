@@ -28,19 +28,31 @@ fn child_tmpdir(configure: impl FnOnce(&mut Command)) -> String {
         .to_owned()
 }
 
-/// Run as Interactive with an explicit `TMPDIR`, as full-test.sh does.
 pub fn test_child_temp_dir() {
     let own = std::env::var("TMPDIR").unwrap();
+    let role_default = if crate::has_interactive() {
+        "/user/tmp"
+    } else {
+        "/none/tmp"
+    };
     let none = format!("0x{:x}", CAP_SPAWN | CAP_FS_WRITE);
     assert_eq!(child_tmpdir(|_| {}), own, "same role, inherited");
     let unset = child_tmpdir(|command| {
         command.env_remove("TMPDIR");
     });
-    assert_eq!(unset, "/user/tmp", "same role, none");
+    assert_eq!(unset, role_default, "same role, none");
     let lower = child_tmpdir(|command| {
         command.env(MOTOR_OS_CAPS_ENV_KEY, &none);
     });
-    assert_eq!(lower, "/none/tmp", "lower role, inherited");
+    assert_eq!(
+        lower,
+        if crate::has_interactive() {
+            "/none/tmp"
+        } else {
+            &own
+        },
+        "None role, inherited"
+    );
     let chosen = child_tmpdir(|command| {
         command
             .env(MOTOR_OS_CAPS_ENV_KEY, &none)

@@ -4,8 +4,6 @@ use moto_sdk::sys_io::api_fs;
 use std::io::ErrorKind;
 
 const RAM_DIR: &str = "/none/tmp/systest-mounts";
-// In crate::DISK_TEMP_DIR, on Motor FS.
-const DISK_DIR: &str = "/user/test-tmp/systest-mounts";
 const MEMFS_MOUNTS: [&str; 3] = ["/none/tmp", "/system/tmp", "/user/tmp"];
 
 async fn memfs_mount(client: &std::rc::Rc<FsClient>) -> Result<MountInfo, String> {
@@ -19,7 +17,6 @@ async fn memfs_mount(client: &std::rc::Rc<FsClient>) -> Result<MountInfo, String
 }
 
 pub fn run_all_tests() {
-    crate::sysbox_findmnt::run_test();
     namespace();
     let child = std::process::Command::new(std::env::current_exe().unwrap())
         .arg("mounts-none")
@@ -38,7 +35,6 @@ pub fn run_all_tests() {
 }
 
 pub fn none_role() {
-    crate::sysbox_findmnt::run_test();
     moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().unwrap();
         let mount = memfs_mount(&client).await.unwrap();
@@ -81,6 +77,8 @@ pub fn none_role() {
 
 fn namespace() {
     use std::io::{Read, Seek, Write};
+    let disk_path = crate::disk_temp_path("systest-mounts");
+    let disk_dir = disk_path.to_str().unwrap();
     assert!(!std::fs::exists("/none/tmp/.shadowed-by-memfs").unwrap());
     assert!(
         std::fs::read_dir("/none/tmp")
@@ -88,11 +86,11 @@ fn namespace() {
             .all(|entry| { entry.unwrap().file_name() != ".shadowed-by-memfs" })
     );
     std::fs::create_dir(RAM_DIR).unwrap();
-    std::fs::create_dir_all(crate::DISK_TEMP_DIR).unwrap();
-    std::fs::create_dir(DISK_DIR).unwrap();
+    std::fs::create_dir_all(crate::disk_temp_dir()).unwrap();
+    std::fs::create_dir(disk_dir).unwrap();
     let pattern: Vec<u8> = (0..100_003).map(|i| (i * 17 + i / 256) as u8).collect();
     let ram = format!("{RAM_DIR}/file");
-    let disk = format!("{DISK_DIR}/file");
+    let disk = format!("{disk_dir}/file");
     std::fs::write(&disk, &pattern).unwrap();
     assert_eq!(std::fs::copy(&disk, &ram).unwrap(), pattern.len() as u64);
     assert_eq!(std::fs::read(&ram).unwrap(), pattern);
@@ -109,15 +107,15 @@ fn namespace() {
     }
     std::fs::create_dir(format!("{RAM_DIR}/sub")).unwrap();
     assert_eq!(
-        std::fs::rename(format!("{RAM_DIR}/sub"), format!("{DISK_DIR}/sub"))
+        std::fs::rename(format!("{RAM_DIR}/sub"), format!("{disk_dir}/sub"))
             .unwrap_err()
             .kind(),
         ErrorKind::CrossesDevices
     );
     assert!(std::fs::exists(format!("{RAM_DIR}/sub")).unwrap());
-    assert!(!std::fs::exists(format!("{DISK_DIR}/sub")).unwrap());
+    assert!(!std::fs::exists(format!("{disk_dir}/sub")).unwrap());
     // Fixtures for copies at or past a source's end (checked below).
-    for (from, to) in [(RAM_DIR, DISK_DIR), (DISK_DIR, RAM_DIR)] {
+    for (from, to) in [(RAM_DIR, disk_dir), (disk_dir, RAM_DIR)] {
         for len in [0, 8192] {
             std::fs::write(format!("{from}/eof-source-{len}"), vec![5; len]).unwrap();
             std::fs::write(format!("{to}/eof-target-{len}"), [6; 8192]).unwrap();
@@ -128,7 +126,7 @@ fn namespace() {
         ErrorKind::PermissionDenied
     );
     assert_eq!(
-        std::fs::rename("/none/tmp", format!("{DISK_DIR}/mount"))
+        std::fs::rename("/none/tmp", format!("{disk_dir}/mount"))
             .unwrap_err()
             .kind(),
         ErrorKind::PermissionDenied
@@ -146,7 +144,7 @@ fn namespace() {
         ErrorKind::PermissionDenied
     );
     assert_eq!(
-        std::fs::rename(DISK_DIR, "/none/tmp").unwrap_err().kind(),
+        std::fs::rename(disk_dir, "/none/tmp").unwrap_err().kind(),
         ErrorKind::PermissionDenied
     );
 
@@ -229,7 +227,7 @@ fn namespace() {
         // A copy at or past the source's end copies nothing and leaves the
         // destination alone: same size, no write (same modified time) and no
         // memfs storage, for empty and block-aligned sources both ways.
-        for (from, to) in [(RAM_DIR, DISK_DIR), (DISK_DIR, RAM_DIR)] {
+        for (from, to) in [(RAM_DIR, disk_dir), (disk_dir, RAM_DIR)] {
             for len in [0, 8192] {
                 let (source, _) = client
                     .stat(&format!("{from}/eof-source-{len}"))
@@ -273,7 +271,7 @@ fn namespace() {
     assert_eq!(&read, b"boundary");
     drop(file);
     std::fs::remove_dir_all(RAM_DIR).unwrap();
-    std::fs::remove_dir_all(DISK_DIR).unwrap();
+    std::fs::remove_dir_all(disk_dir).unwrap();
     println!("mounts: namespace and cross-device operations PASS");
 }
 
@@ -485,7 +483,7 @@ pub(super) fn memory() {
                 .map_err(|err| err.to_string())?;
             held[0] = None;
             let (disk_dir, _) = client
-                .stat(crate::DISK_TEMP_DIR)
+                .stat(crate::disk_temp_dir())
                 .await
                 .map_err(|err| err.to_string())?;
             let disk_probe = client

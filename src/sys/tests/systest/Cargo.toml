@@ -6,6 +6,18 @@ license = "MIT OR Apache-2.0"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+test = false
+doctest = false
+
+[[bin]]
+name = "systest"
+test = false
+
+[[test]]
+name = "native"
+harness = false
+
 [dependencies]
 virtio-task-tests = { path = "../virtio-task-tests" }
 virtio-async = { path = "../../lib/virtio-async", features = ["test-support"] }

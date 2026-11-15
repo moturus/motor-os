@@ -1,0 +1,2135 @@
+#![feature(addr_parse_ascii)]
+#![feature(motor_ext)]
+#![feature(local_waker)]
+#![feature(random)]
+
+mod checked_copy_in;
+mod cold_spawn;
+mod memory;
+mod oom;
+mod raw_spawn;
+mod sched_fairness;
+// mod channel_test;
+mod alloc_bench;
+mod block_mounts;
+mod boot_identity;
+mod boot_options;
+mod closerace;
+mod command_output;
+mod ctrl_c;
+mod debugger;
+mod descriptor_attr;
+mod diagnostics;
+mod dns_service;
+mod environment;
+mod executable_memory;
+mod execute_permissions;
+mod file_append;
+mod file_locking;
+mod fs;
+mod fs_permissions;
+mod fsbench;
+mod futex_stress;
+mod icmp;
+mod io_channel;
+mod ip_device;
+mod ip_device_admission;
+mod ip_device_live;
+mod ip_device_plain;
+mod ip_device_queues;
+mod ip_device_udp;
+mod ipc_service;
+mod kernel_log;
+mod logging;
+mod mem_blocks;
+mod mmio;
+mod moto_async;
+mod mounts;
+mod mpmc;
+mod net_caps;
+mod net_driver;
+mod net_harness;
+mod poll;
+mod process_permissions;
+mod sparse;
+mod spawn_wait_kill;
+mod stats;
+mod stdio;
+mod stdio_errors;
+mod stdio_file_direct;
+mod stdio_file_input;
+mod stdio_file_relay;
+mod stdio_peek;
+mod stdio_terminal;
+mod strlen;
+mod subcommand;
+mod swap_cancel;
+mod sys_io_self_test;
+mod sys_tty;
+mod tcp;
+mod temp_dir;
+mod threads;
+mod tls;
+mod udp;
+mod virtio;
+mod vsock;
+mod vsock_outgoing;
+mod wait_set;
+mod wakebench;
+mod wireguard;
+mod wireguard_bench;
+mod wireguard_load;
+mod xor_server;
+
+use std::{
+    io::{Read, Write},
+    sync::{Arc, Barrier, atomic::*},
+    time::Duration,
+};
+
+use moto_sys::SysHandle;
+
+pub(crate) fn temp_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(name)
+}
+
+/// A path for fixtures that a None-role child must reach. `TMPDIR` may be
+/// closed to None, so these go in None's own temporary directory.
+pub(crate) fn none_temp_path(name: &str) -> std::path::PathBuf {
+    std::path::Path::new("/none/tmp").join(name)
+}
+
+/// Motor FS scratch for tests that must reach the disk: every role's tmp is memfs.
+pub(crate) fn disk_temp_dir() -> &'static str {
+    if has_interactive() {
+        "/none/dev/systest-interactive"
+    } else {
+        "/none/dev/systest-none"
+    }
+}
+
+pub(crate) fn disk_temp_path(name: &str) -> std::path::PathBuf {
+    std::fs::create_dir_all(disk_temp_dir()).unwrap();
+    std::path::Path::new(disk_temp_dir()).join(name)
+}
+
+pub(crate) fn has_interactive() -> bool {
+    moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_INTERACTIVE != 0
+}
+
+pub(crate) fn set_directory_access(
+    path: &std::path::Path,
+    access: moto_sdk::io::fs::AccessPermissions,
+) -> moto_rt::Result<()> {
+    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+        let client = moto_sdk::io::fs::FsClient::connect()?;
+        let (id, moto_sdk::io::fs::EntryKind::Directory) =
+            client.stat(path.to_str().unwrap()).await?
+        else {
+            return Err(moto_rt::Error::NotADirectory);
+        };
+        client.set_permissions(id, access).await
+    })
+}
+
+/// A kernel metric by its `stats get 1` name, for one scope: a pid, or
+/// `moto_sdk::stats::provider::KERNEL` for the kernel's own counters.
+pub(crate) fn kernel_metric(name: &str, scope: u64) -> u64 {
+    let kernel = moto_sdk::stats::Collector::kernel();
+    let metric = moto_sdk::stats::Collector::describe(&kernel)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.name == name)
+        .unwrap_or_else(|| panic!("no kernel metric {name}"));
+    moto_sdk::stats::Collector::read(&kernel, metric.id, scope).unwrap()
+}
+
+pub(crate) fn ensure_temp_dir() {
+    let temp_dir = std::env::temp_dir();
+    if !temp_dir.is_dir() {
+        std::fs::create_dir_all(temp_dir).unwrap();
+    }
+}
+
+/// Sys-io access that explicit test masks keep unless its absence is the
+/// subject of the test.
+pub(crate) const IO_CAPS: u64 = moto_sys::caps::CAP_NET | moto_sys::caps::CAP_FS_WRITE;
+
+/// The capabilities a complete run needs; `full-test.sh` grants this set.
+/// A shell's unadorned child holds `CAP_SPAWN | CAP_INTERACTIVE | CAP_VSOCK`
+/// and [`IO_CAPS`], and cannot delegate `CAP_LOG`, so the tests that spawn
+/// logging children skip themselves instead of failing on their first spawn.
+pub(crate) const FULL_RUN_CAPS: u64 = moto_sys::caps::CAP_SPAWN
+    | moto_sys::caps::CAP_LOG
+    | moto_sys::caps::CAP_INTERACTIVE
+    | moto_sys::caps::CAP_VSOCK
+    | IO_CAPS;
+
+pub(crate) fn has_cap_log() -> bool {
+    moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_LOG != 0
+}
+
+/// Prints the skip notice for `test` and returns true when `CAP_LOG` is missing.
+pub(crate) fn skip_without_cap_log(test: &str) -> bool {
+    if has_cap_log() {
+        return false;
+    }
+    let exe = std::env::current_exe()
+        .map(|exe| exe.display().to_string())
+        .unwrap_or_else(|_| "systest".to_owned());
+    println!(
+        "skipping {test} test because CAP_LOG capability is missing; \
+         run it with all needed capabilities as: {}=0x{:x} {exe}",
+        moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
+        FULL_RUN_CAPS
+    );
+    true
+}
+
+fn test_syscall() {
+    const ITERS: usize = 1_000_000;
+    let start = std::time::Instant::now();
+    for _ in 0..ITERS {
+        let res = moto_sys::syscalls::do_syscall(u64::MAX, 0, 0, 0, 0, 0, 0);
+        assert!(!res.is_ok());
+    }
+    let elapsed = start.elapsed();
+
+    let ns_per_syscall = (elapsed.as_nanos() as f64) / (ITERS as f64);
+
+    println!("test_syscall: {ITERS} iterations: {ns_per_syscall:.2} ns/syscall.");
+}
+
+// A dup'd handle has its own kernel missed-wake latch: a wake pending on the
+// object must be deliverable through each handle independently. This is what
+// lets the vdso readiness task wait on a dup of a pollee's handle without
+// stealing wakes from blocking reads on the original (EventSourceUnmanaged).
+fn test_handle_dup() {
+    use moto_sys::SysObj;
+
+    let wait = |handle: SysHandle, timeout_ms: Option<u64>| {
+        moto_sys::SysCpu::wait(
+            &mut [handle],
+            SysHandle::NONE,
+            SysHandle::NONE,
+            timeout_ms
+                .map(|ms| moto_rt::time::Instant::now() + std::time::Duration::from_millis(ms)),
+        )
+    };
+
+    // Built-in pseudo handles are not in the process handle table.
+    assert!(SysObj::dup(SysHandle::NONE).is_err());
+    assert!(SysObj::dup(SysHandle::SELF).is_err());
+
+    let (h1, h2) = SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
+    let h2_dup = SysObj::dup(h2).unwrap();
+    assert_ne!(h2, h2_dup);
+
+    // Latch a wake on h2's object while nobody waits on it.
+    moto_sys::SysCpu::wake(h1).unwrap();
+
+    // The pending wake is delivered through each handle...
+    wait(h2_dup, Some(5000)).expect("wake lost on dup'd handle");
+    wait(h2, Some(5000)).expect("wake consumed through the dup'd handle");
+    // ...exactly once per handle.
+    assert_eq!(wait(h2_dup, Some(20)), Err(moto_rt::E_TIMED_OUT));
+    assert_eq!(wait(h2, Some(20)), Err(moto_rt::E_TIMED_OUT));
+
+    // A put dup neither invalidates the original nor consumes its wakes.
+    SysObj::put(h2_dup).unwrap();
+    assert_eq!(wait(h2_dup, Some(20)), Err(moto_rt::E_BAD_HANDLE));
+    moto_sys::SysCpu::wake(h1).unwrap();
+    wait(h2, Some(5000)).expect("wake lost after dup put");
+
+    SysObj::put(h1).unwrap();
+    SysObj::put(h2).unwrap();
+    println!("test_handle_dup PASS");
+}
+
+fn test_rt_mutex() {
+    use moto_rt::mutex::Mutex;
+
+    static COUNTER: Mutex<u64> = Mutex::new(0);
+    const THREADS: u16 = 40;
+
+    let mut threads = vec![];
+    *COUNTER.lock() = 0;
+
+    for _idx in 0..THREADS {
+        threads.push(std::thread::spawn(|| {
+            let mut val = COUNTER.lock();
+            *val += 1;
+        }));
+    }
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
+
+    assert_eq!(THREADS, *COUNTER.lock() as u16);
+    println!("test_rt_mutex PASS");
+}
+
+fn test_reentrant_mutex() {
+    let _lock1 = std::io::stdout().lock();
+    let mut lock2 = std::io::stdout().lock();
+    lock2
+        .write_all(b"test_reentrant_stdout lock PASS\n")
+        .unwrap();
+}
+
+/// Guest halt polling (kernel Scheduler::halt_poll): in a cross-CPU
+/// ping-pong the woken CPU is still polling when the next wake arrives, so
+/// the kernel counts poll hits and skipped IPIs.
+fn test_halt_poll_metrics() {
+    let num_cpus = moto_sys::num_cpus();
+    if num_cpus < 2 {
+        println!("test_halt_poll_metrics: SKIPPED (one cpu)");
+        return;
+    }
+    const ITERS: u32 = 2000;
+    let scope = moto_sdk::stats::provider::KERNEL;
+    let hits_0 = kernel_metric("sched.poll_hit", scope);
+    let elided_0 = kernel_metric("sched.ipi_elided", scope);
+
+    let token = Arc::new(AtomicU32::new(0));
+    let peer_handle = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let main_thread = moto_sys::current_thread();
+    moto_sys::SysCpu::affine_to_cpu(Some(num_cpus - 2)).unwrap();
+    let peer = {
+        let (token, peer_handle) = (token.clone(), peer_handle.clone());
+        std::thread::spawn(move || {
+            moto_sys::SysCpu::affine_to_cpu(Some(num_cpus - 1)).unwrap();
+            peer_handle.store(moto_sys::current_thread().as_u64(), Ordering::Release);
+            for i in 0..ITERS {
+                while token.load(Ordering::Acquire) != 2 * i + 1 {
+                    moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, None)
+                        .unwrap();
+                }
+                token.store(2 * i + 2, Ordering::Release);
+                moto_sys::SysCpu::wake(main_thread).unwrap();
+            }
+        })
+    };
+    while peer_handle.load(Ordering::Acquire) == 0 {
+        core::hint::spin_loop();
+    }
+    let peer_handle = SysHandle::from_u64(peer_handle.load(Ordering::Acquire));
+    for i in 0..ITERS {
+        // Give the peer's CPU time to go idle (it polls for 200 us), so the
+        // wake lands in its poll rather than while the peer still runs.
+        let pause = std::time::Instant::now() + Duration::from_micros(30);
+        while std::time::Instant::now() < pause {
+            core::hint::spin_loop();
+        }
+        token.store(2 * i + 1, Ordering::Release);
+        moto_sys::SysCpu::wake(peer_handle).unwrap();
+        while token.load(Ordering::Acquire) != 2 * i + 2 {
+            moto_sys::SysCpu::wait(&mut [], SysHandle::NONE, SysHandle::NONE, None).unwrap();
+        }
+    }
+    peer.join().unwrap();
+    moto_sys::SysCpu::affine_to_cpu(None).unwrap();
+
+    let hits = kernel_metric("sched.poll_hit", scope) - hits_0;
+    let elided = kernel_metric("sched.ipi_elided", scope) - elided_0;
+    println!(
+        "test_halt_poll_metrics: {ITERS} round trips: {hits} poll hits, {elided} IPIs skipped"
+    );
+    let floor = if under_load() { 1 } else { ITERS as u64 / 4 };
+    assert!(
+        hits >= floor && elided >= floor,
+        "hits {hits}, elided {elided}, floor {floor}"
+    );
+    println!("test_halt_poll_metrics PASS");
+}
+
+fn test_cpus() {
+    let num_cpus = moto_sys::num_cpus();
+    assert_ne!(num_cpus, 0);
+
+    let target = Arc::new(AtomicU32::new(u32::MAX));
+    let stop = Arc::new(AtomicBool::new(false));
+    let spinning: Arc<Vec<AtomicBool>> =
+        Arc::new((0..num_cpus).map(|_| AtomicBool::new(true)).collect());
+    let ready: Arc<Vec<AtomicBool>> =
+        Arc::new((0..num_cpus).map(|_| AtomicBool::new(false)).collect());
+    let stopped: Arc<Vec<AtomicBool>> =
+        Arc::new((0..num_cpus).map(|_| AtomicBool::new(false)).collect());
+    let running: Arc<Vec<AtomicBool>> =
+        Arc::new((0..num_cpus).map(|_| AtomicBool::new(false)).collect());
+    let touched: Arc<Vec<AtomicBool>> =
+        Arc::new((0..num_cpus).map(|_| AtomicBool::new(false)).collect());
+    let controller = std::thread::current();
+
+    // Keep every CPU busy. CPU 0 cannot be an affinity target for this
+    // process, so its spinner is the only unpinned one; the other spinners
+    // leave CPU 0 as its natural placement. When resumed, spinner 0 yields
+    // anywhere else until it is back on CPU 0.
+    let mut threads = Vec::with_capacity(num_cpus as usize);
+    for cpu in 0..num_cpus {
+        let stop = stop.clone();
+        let spinning = spinning.clone();
+        let ready = ready.clone();
+        let stopped = stopped.clone();
+        let running = running.clone();
+        let controller = controller.clone();
+        threads.push(std::thread::spawn(move || {
+            if cpu != 0 {
+                moto_sys::SysCpu::affine_to_cpu(Some(cpu)).unwrap();
+            }
+
+            while !stop.load(Ordering::Acquire) {
+                if !spinning[cpu as usize].load(Ordering::Acquire) {
+                    running[cpu as usize].store(false, Ordering::Release);
+                    stopped[cpu as usize].store(true, Ordering::Release);
+                    controller.unpark();
+                    while !spinning[cpu as usize].load(Ordering::Acquire)
+                        && !stop.load(Ordering::Acquire)
+                    {
+                        std::thread::park();
+                    }
+                    stopped[cpu as usize].store(false, Ordering::Release);
+                    continue;
+                }
+
+                if moto_sys::current_cpu() != cpu {
+                    running[cpu as usize].store(false, Ordering::Release);
+                    if ready[cpu as usize].load(Ordering::Acquire) {
+                        std::thread::yield_now();
+                    } else {
+                        std::hint::spin_loop();
+                    }
+                    continue;
+                }
+
+                if !running[cpu as usize].swap(true, Ordering::AcqRel) {
+                    ready[cpu as usize].store(true, Ordering::Release);
+                    controller.unpark();
+                }
+                std::hint::spin_loop();
+            }
+        }));
+    }
+
+    while ready.iter().any(|ready| !ready.load(Ordering::Acquire)) {
+        std::thread::park();
+    }
+
+    let probe_target = target.clone();
+    let probe_stop = stop.clone();
+    let probe_touched = touched.clone();
+    let probe_ready = Arc::new(AtomicBool::new(false));
+    let child_ready = probe_ready.clone();
+    let probe_controller = controller.clone();
+    let probe = std::thread::spawn(move || {
+        child_ready.store(true, Ordering::Release);
+        probe_controller.unpark();
+        while !probe_stop.load(Ordering::Acquire) {
+            let cpu = probe_target.load(Ordering::Acquire);
+            if cpu < num_cpus
+                && moto_sys::current_cpu() == cpu
+                && !probe_touched[cpu as usize].swap(true, Ordering::AcqRel)
+            {
+                probe_controller.unpark();
+            }
+            std::hint::spin_loop();
+        }
+    });
+
+    while !probe_ready.load(Ordering::Acquire) {
+        std::thread::park();
+    }
+
+    spinning[0].store(false, Ordering::Release);
+    while !stopped[0].load(Ordering::Acquire) {
+        std::thread::park();
+    }
+    target.store(0, Ordering::Release);
+    while !touched[0].load(Ordering::Acquire) {
+        std::thread::park();
+    }
+
+    for cpu in 1..num_cpus {
+        spinning[cpu as usize].store(false, Ordering::Release);
+        while !stopped[cpu as usize].load(Ordering::Acquire) {
+            std::thread::park();
+        }
+        target.store(cpu, Ordering::Release);
+
+        let previous = (cpu - 1) as usize;
+        spinning[previous].store(true, Ordering::Release);
+        threads[previous].thread().unpark();
+        while !running[previous].load(Ordering::Acquire) {
+            std::thread::park();
+        }
+        while !touched[cpu as usize].load(Ordering::Acquire) {
+            std::thread::park();
+        }
+    }
+
+    stop.store(true, Ordering::Release);
+    for (cpu, thread) in threads.iter().enumerate() {
+        spinning[cpu].store(true, Ordering::Release);
+        thread.thread().unpark();
+    }
+    probe.join().unwrap();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+
+    println!("test_cpus PASS");
+}
+
+// rt.vdso draws eight bytes at a time and copies the tail out of the last draw,
+// so what is worth pinning is the arithmetic around that: sizes that are not a
+// multiple of eight, the byte past the caller's buffer, and one fresh draw per
+// chunk. The retry path itself cannot be reached without a seam over RDRAND and
+// is reviewed rather than tested.
+fn test_random_bytes() {
+    const GUARD: u8 = 0xab;
+
+    for size in 1..=17_usize {
+        let mut last = [0_u8; 8];
+        for draw in &mut last {
+            let mut buf = [GUARD; 24];
+            moto_rt::fill_random_bytes(&mut buf[..size]);
+            assert!(
+                buf[size..].iter().all(|byte| *byte == GUARD),
+                "fill_random_bytes({size}) wrote past the buffer"
+            );
+            *draw = buf[size - 1];
+        }
+        // Eight draws agreeing on the last byte means it is never written; an
+        // honest source repeats itself seven times over with odds of 2^-56.
+        assert!(
+            last.iter().any(|byte| *byte != last[0]),
+            "fill_random_bytes({size}) left its last byte alone"
+        );
+    }
+
+    let mut empty = [GUARD; 1];
+    moto_rt::fill_random_bytes(&mut empty[..0]);
+    assert_eq!(empty[0], GUARD);
+
+    // Identical chunks would be one draw hoisted out of the loop, identical
+    // calls a source that is not drawing at all.
+    let mut first = [0_u8; 32];
+    let mut second = [0_u8; 32];
+    moto_rt::fill_random_bytes(&mut first);
+    moto_rt::fill_random_bytes(&mut second);
+    assert!(first.chunks(8).any(|chunk| chunk != &first[..8]));
+    assert_ne!(first, second);
+
+    println!("test_random_bytes PASS");
+}
+
+fn test_ipc() {
+    use moto_sdk::ipc::sync::*;
+
+    let mut xor_service = subcommand::spawn();
+    xor_service.start_xor_service();
+
+    // start_xor_service() only writes a command to the child's stdin; the child
+    // must then read it, spawn a thread, and register "xor-service" before this
+    // connect can succeed. That whole chain is not bounded by any fixed delay --
+    // under load it takes well over the 1ms this used to sleep, and connect then
+    // returns NotFound. connect() early-returns without mutating on failure, so
+    // the same object can be retried; a service that never appears still fails.
+    let mut conn = ClientConnection::new(ChannelSize::Small).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match conn.connect("xor-service") {
+            Ok(()) => break,
+            Err(err) => {
+                assert!(
+                    err == moto_rt::E_NOT_FOUND && std::time::Instant::now() < deadline,
+                    "connect(xor-service): {err}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    const STEPS: u64 = 1_000;
+    #[cfg(not(debug_assertions))]
+    const STEPS: u64 = 100_000;
+
+    // let prev_log_level = moto_sys::syscalls::SysCtl::set_log_level(4).unwrap();
+    let start = std::time::Instant::now();
+    for idx in 0..STEPS {
+        let req = conn.req::<xor_server::XorRequest>();
+        req.data = 0xdeadbeef ^ idx;
+        assert!(conn.connected());
+        conn.do_rpc(None).expect("???");
+        let resp = conn.resp::<xor_server::XorResponse>();
+        assert_eq!(resp.data ^ (0xdeadbeef ^ idx), u64::MAX);
+    }
+    let stop = std::time::Instant::now();
+
+    let num_cpus = moto_sys::KernelStaticPage::get().num_cpus;
+    let mut cpu_usage = vec![0.0; num_cpus as usize];
+    moto_sys::stats::get_cpu_usage(&mut cpu_usage).unwrap();
+
+    conn.disconnect();
+    xor_service.do_exit(0);
+
+    let nanos = (stop - start).as_nanos();
+    assert!(nanos > 0);
+    assert!(nanos < (u64::MAX as u128));
+    println!(
+        "test_ipc: {} RPC calls (roundtrips) in {} nanoseconds: {} ns per RPC.",
+        STEPS,
+        nanos,
+        (nanos as u64) / STEPS
+    );
+
+    for cpu in 0..num_cpus {
+        println!("\tCPU {cpu} usage: {:.3}", cpu_usage[cpu as usize]);
+    }
+}
+
+fn test_lazy_memory_map_read() {
+    use moto_sys::*;
+
+    let addr = SysMem::map(
+        SysHandle::SELF,
+        SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_LAZY,
+        u64::MAX,
+        u64::MAX,
+        sys_mem::PAGE_SIZE_SMALL,
+        1,
+    )
+    .unwrap();
+
+    let buf = unsafe {
+        core::slice::from_raw_parts_mut(addr as usize as *mut u8, sys_mem::PAGE_SIZE_SMALL as usize)
+    };
+
+    #[allow(clippy::needless_range_loop)]
+    for idx in 0..buf.len() {
+        assert_eq!(0, buf[idx]);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    #[allow(clippy::needless_range_loop)]
+    for idx in 0..buf.len() {
+        buf[idx] = (idx % (u8::MAX as usize)) as u8;
+        assert_eq!(buf[idx], (idx % (u8::MAX as usize)) as u8);
+    }
+
+    SysMem::free(addr).unwrap();
+    println!("test_lazy_memory_map_read: done");
+}
+
+fn test_lazy_memory_map_write() {
+    use moto_sys::*;
+
+    let addr = SysMem::map(
+        SysHandle::SELF,
+        SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_LAZY,
+        u64::MAX,
+        u64::MAX,
+        sys_mem::PAGE_SIZE_SMALL,
+        1,
+    )
+    .unwrap();
+
+    let buf = unsafe {
+        core::slice::from_raw_parts_mut(addr as usize as *mut u8, sys_mem::PAGE_SIZE_SMALL as usize)
+    };
+
+    #[allow(clippy::needless_range_loop)]
+    for idx in 0..buf.len() {
+        buf[idx] = (idx % (u8::MAX as usize)) as u8;
+    }
+
+    #[allow(clippy::needless_range_loop)]
+    for idx in 0..buf.len() {
+        assert_eq!(buf[idx], (idx % (u8::MAX as usize)) as u8);
+    }
+
+    SysMem::free(addr).unwrap();
+    println!("test_lazy_memory_map_write: done");
+}
+
+/// The guest's RAM in MiB as sys-io's sizing sees it: the kernel reports less
+/// than the configured RAM, so sys-io adds 10 MiB to its figure.
+pub fn guest_ram_mib() -> u64 {
+    (moto_sys::stats::MemoryStats::get().unwrap().available >> 20) + 10
+}
+
+// Leave room for metadata and concurrent services in bulk-memory tests.
+pub fn spare_pages() -> u64 {
+    moto_sys::KernelStaticPage::get()
+        .free_pages
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .saturating_sub(1024)
+}
+
+fn test_concurrent_lazy_memory_map_write() {
+    use moto_sys::*;
+
+    const NUM_THREADS: usize = 8;
+    const PAGE_SIZE: usize = sys_mem::PAGE_SIZE_SMALL as usize;
+    const CHUNK_SIZE: usize = PAGE_SIZE / NUM_THREADS;
+    let num_pages = (spare_pages() / 2).min(8192) as usize;
+
+    let addr = SysMem::map(
+        SysHandle::SELF,
+        SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_LAZY,
+        u64::MAX,
+        u64::MAX,
+        sys_mem::PAGE_SIZE_SMALL,
+        num_pages as u64,
+    )
+    .unwrap();
+
+    let barrier = Arc::new(Barrier::new(NUM_THREADS));
+    let mut threads = Vec::with_capacity(NUM_THREADS);
+    for thread_idx in 0..NUM_THREADS {
+        let barrier = Arc::clone(&barrier);
+        threads.push(std::thread::spawn(move || {
+            for page_idx in 0..num_pages {
+                barrier.wait();
+                let offset = page_idx * PAGE_SIZE + thread_idx * CHUNK_SIZE;
+                unsafe {
+                    (addr as usize as *mut u8)
+                        .add(offset)
+                        .write_bytes((thread_idx + 1) as u8, CHUNK_SIZE);
+                }
+            }
+        }));
+    }
+    for thread in threads {
+        thread.join().unwrap();
+    }
+
+    let pages =
+        unsafe { core::slice::from_raw_parts(addr as usize as *const u8, num_pages * PAGE_SIZE) };
+    for page_idx in 0..num_pages {
+        for thread_idx in 0..NUM_THREADS {
+            let start = page_idx * PAGE_SIZE + thread_idx * CHUNK_SIZE;
+            let expected = (thread_idx + 1) as u8;
+            assert!(
+                pages[start..start + CHUNK_SIZE]
+                    .iter()
+                    .all(|byte| *byte == expected),
+                "concurrent first touch lost writes on page {page_idx}, chunk {thread_idx}"
+            );
+        }
+    }
+
+    SysMem::free(addr).unwrap();
+    println!("test_concurrent_lazy_memory_map_write: done");
+}
+
+fn test_fixed_memory_map_overlap() {
+    use moto_sys::{SysHandle, SysMem, SysObj, sys_mem::PAGE_SIZE_SMALL};
+
+    let space = SysObj::create(SysHandle::NONE, 0, "address_space:debug_name=map-overlap").unwrap();
+    const BASE: u64 = 0x10_0000;
+    let map = |offset, pages| {
+        SysMem::map2(
+            space,
+            SysMem::F_SHARE_SELF | SysMem::F_READABLE | SysMem::F_WRITABLE,
+            u64::MAX,
+            BASE + offset * PAGE_SIZE_SMALL,
+            PAGE_SIZE_SMALL,
+            pages,
+        )
+    };
+    let unmap = |(remote, local)| {
+        SysMem::unmap(space, 0, u64::MAX, remote).unwrap();
+        SysMem::free(local).unwrap();
+    };
+
+    // Two disjoint intervals, [2, 4) and [6, 8), in an otherwise empty space.
+    let mappings = [map(2, 2).unwrap(), map(6, 2).unwrap()];
+    for (_, local) in mappings {
+        unsafe { (local as *mut u64).write_volatile(0x1234_5678) };
+    }
+    for (offset, pages) in [
+        (1, 4), // Contains the first mapping.
+        (1, 2), // Overlaps its left edge.
+        (2, 2), // Identical.
+        (3, 2), // Overlaps its right edge.
+        (2, 1), // Contained in it.
+        (1, 8), // Contains both mappings.
+        (3, 3), // Ends at the next mapping's start; still overlaps the first.
+    ] {
+        assert_eq!(
+            map(offset, pages),
+            Err(moto_rt::E_INVALID_ARGUMENT),
+            "overlap: offset {offset}, pages {pages}"
+        );
+    }
+    // Half-open boundaries: touching on either side and an exact gap are valid.
+    for offset in [0, 4, 8] {
+        let mapping = map(offset, 2).unwrap();
+        assert_eq!(mapping.0, BASE + offset * PAGE_SIZE_SMALL);
+        unmap(mapping);
+    }
+    for mapping in mappings {
+        assert_eq!(
+            unsafe { (mapping.1 as *const u64).read_volatile() },
+            0x1234_5678
+        );
+        unmap(mapping);
+    }
+    unmap(map(0, 10).unwrap());
+    SysObj::put(space).unwrap();
+    println!("test_fixed_memory_map_overlap PASS");
+}
+
+fn test_pager_ops_need_sys_io() {
+    use moto_sys::SysMem;
+
+    // The executable pager is sys-io's: every operation is refused for any
+    // other caller before its arguments are looked at.
+    assert_eq!(SysMem::pager_init().err(), Some(moto_rt::E_NOT_ALLOWED));
+    let mut events = [[0_u64; 2]; 1];
+    assert_eq!(
+        SysMem::pager_dequeue(&mut events).err(),
+        Some(moto_rt::E_NOT_ALLOWED)
+    );
+    println!("test_pager_ops_need_sys_io PASS");
+}
+
+fn test_invalid_memory_map_options() {
+    use moto_sys::*;
+
+    for flags in [
+        SysMem::F_SHARE_SELF,
+        SysMem::F_SHARE_SELF | SysMem::F_WRITABLE,
+        SysMem::F_SHARE_SELF | SysMem::F_EXECUTABLE,
+        SysMem::F_SHARE_SELF | SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_EXECUTABLE,
+    ] {
+        assert_eq!(
+            SysMem::map2(
+                SysHandle::SELF,
+                flags,
+                u64::MAX,
+                u64::MAX,
+                sys_mem::PAGE_SIZE_SMALL,
+                1,
+            ),
+            Err(moto_rt::E_INVALID_ARGUMENT)
+        );
+    }
+
+    // Zero pages are refused at the entry, before any path can build an
+    // empty segment, which was a kernel panic. The wrapper asserts a
+    // non-zero count, so these go through the raw syscall.
+    for flags in [
+        0,
+        SysMem::F_READABLE | SysMem::F_WRITABLE,
+        SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_LAZY,
+        SysMem::F_SHARE_SELF | SysMem::F_READABLE | SysMem::F_WRITABLE,
+    ] {
+        let nr = (u64::from(syscalls::SYS_MEM) << 56)
+            | (u64::from(SysMem::OP_MAP) << 48)
+            | (u64::from(flags) << 16);
+        assert_eq!(
+            syscalls::do_syscall(
+                nr,
+                SysHandle::SELF.as_u64(),
+                u64::MAX,
+                u64::MAX,
+                sys_mem::PAGE_SIZE_SMALL,
+                0,
+                0
+            )
+            .error_code(),
+            moto_rt::E_INVALID_ARGUMENT,
+            "flags 0x{flags:x}"
+        );
+    }
+
+    println!("test_invalid_memory_map_options PASS");
+}
+
+// First-touch fault throughput: maps a lazy region and writes one u64 per
+// page. Each touch takes the full uspace #PF path (preempt machinery, see
+// scheduler-work.md S6/S8), so ns/fault tracks kernel #PF-entry costs.
+fn bench_page_faults() {
+    use moto_sys::*;
+
+    let num_pages = (spare_pages() / 2).min(8192); // 32 MiB on larger guests.
+    let addr = SysMem::map(
+        SysHandle::SELF,
+        SysMem::F_READABLE | SysMem::F_WRITABLE | SysMem::F_LAZY,
+        u64::MAX,
+        u64::MAX,
+        sys_mem::PAGE_SIZE_SMALL,
+        num_pages,
+    )
+    .unwrap();
+
+    let start = std::time::Instant::now();
+    for page in 0..num_pages {
+        let ptr = (addr + page * sys_mem::PAGE_SIZE_SMALL) as *mut u64;
+        unsafe { ptr.write_volatile(page) };
+    }
+    let elapsed = start.elapsed();
+    SysMem::free(addr).unwrap();
+
+    println!(
+        "bench_page_faults: {num_pages} first-touch faults: {:.0} ns/fault, {:.0} faults/s",
+        elapsed.as_nanos() as f64 / num_pages as f64,
+        num_pages as f64 / elapsed.as_secs_f64()
+    );
+}
+
+// MXCSR and the x87 control word are callee-saved in the SysV ABI, so they
+// must survive a blocking syscall (S10: the kernel's pause/resume path skips
+// xsave/xrstor; before the fix another thread's FP env could leak in).
+fn test_fp_env_across_blocking_syscall() {
+    use core::arch::asm;
+
+    fn read_mxcsr() -> u32 {
+        let mut value = 0_u32;
+        unsafe {
+            asm!("stmxcsr [{value}]", value = in(reg) &mut value, options(nostack, preserves_flags));
+        }
+        value
+    }
+
+    unsafe fn write_mxcsr(value: u32) {
+        unsafe {
+            asm!("ldmxcsr [{value}]", value = in(reg) &value, options(nostack, preserves_flags));
+        }
+    }
+
+    const FTZ_DAZ: u32 = 0x8040; // Flush-to-zero + denormals-are-zero.
+
+    let orig_mxcsr = read_mxcsr();
+    assert_eq!(orig_mxcsr & FTZ_DAZ, 0);
+    unsafe { write_mxcsr(orig_mxcsr | FTZ_DAZ) };
+
+    // Blocks in sys_wait with a timeout => TCB::pause()/resume() round trip.
+    std::thread::sleep(std::time::Duration::from_millis(30));
+
+    let mxcsr = read_mxcsr();
+    unsafe { write_mxcsr(orig_mxcsr) };
+    assert_eq!(
+        mxcsr & FTZ_DAZ,
+        FTZ_DAZ,
+        "MXCSR FTZ/DAZ lost across a blocking syscall"
+    );
+
+    println!("test_fp_env_across_blocking_syscall PASS");
+}
+
+fn test_file_write() {
+    const WRITTEN: &str = "Lorem Ipsum";
+
+    let mut path = std::env::temp_dir();
+    path.push("temp_file");
+
+    if path.exists() {
+        std::fs::remove_file(path.clone()).unwrap();
+    }
+
+    // Write.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path.clone())
+        .unwrap_or_else(|_| panic!("Failed to create {path:?}"));
+
+    file.write_all(WRITTEN.as_bytes()).unwrap();
+    std::mem::drop(file); // Close it.
+
+    // Read.
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .open(path.clone())
+        .unwrap();
+    let mut read_back = String::new();
+    file.read_to_string(&mut read_back).unwrap();
+
+    assert_eq!(read_back.as_str(), WRITTEN);
+    core::mem::drop(file);
+    std::fs::remove_file(path.clone()).unwrap();
+
+    println!("test_file_write() PASS");
+}
+
+// W^X: executing from heap or stack must kill the process (NX).
+fn test_nx() {
+    let mut child = subcommand::spawn();
+    child.exec_heap();
+    let status = child.wait().unwrap();
+    assert!(!status.success());
+
+    let mut child = subcommand::spawn();
+    child.exec_stack();
+    let status = child.wait().unwrap();
+    assert!(!status.success());
+
+    println!("test_nx() PASS");
+}
+
+// A new file is not executable until it is given PERM_EXEC.
+fn write_executable(path: &std::path::Path, bytes: &[u8]) {
+    std::fs::write(path, bytes).unwrap();
+    moto_rt::fs::set_perm(
+        path.to_str().unwrap(),
+        moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC,
+    )
+    .unwrap();
+}
+
+fn test_writable_executable_elf_rejected() {
+    let mut bytes = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+    assert_eq!(&bytes[..4], b"\x7fELF");
+    assert_eq!(bytes[4], 2); // ELFCLASS64
+    assert_eq!(bytes[5], 1); // ELFDATA2LSB
+
+    let phoff = u64::from_le_bytes(bytes[32..40].try_into().unwrap()) as usize;
+    let phentsize = u16::from_le_bytes(bytes[54..56].try_into().unwrap()) as usize;
+    let phnum = u16::from_le_bytes(bytes[56..58].try_into().unwrap()) as usize;
+    let mut modified = false;
+    for idx in 0..phnum {
+        let offset = phoff + idx * phentsize;
+        let kind = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        let flags = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap());
+        if kind == 1 && flags & 1 != 0 {
+            bytes[offset + 4..offset + 8].copy_from_slice(&(flags | 2).to_le_bytes());
+            modified = true;
+            break;
+        }
+    }
+    assert!(modified, "current executable has no executable PT_LOAD");
+
+    let path = std::env::temp_dir().join("systest-writable-executable-elf");
+    write_executable(&path, &bytes);
+    let result = std::process::Command::new(&path)
+        .arg("test-native-net-cancellation")
+        .spawn();
+    std::fs::remove_file(path).unwrap();
+
+    match result {
+        Ok(mut child) => {
+            let _ = child.kill();
+            let status = child.wait().unwrap();
+            panic!("loader accepted a writable executable PT_LOAD: {status}");
+        }
+        // The loader's refusal, not an earlier one such as a missing PERM_EXEC.
+        Err(err) => assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err:?}"),
+    }
+
+    println!("test_writable_executable_elf_rejected PASS");
+}
+
+fn test_caps(login: bool) {
+    use moto_sys::caps::{CAP_INTERACTIVE, CAP_SYS, ProcessRole};
+
+    assert_eq!(ProcessRole::None, ProcessRole::from_caps(0));
+    assert_eq!(
+        ProcessRole::Interactive,
+        ProcessRole::from_caps(CAP_INTERACTIVE)
+    );
+    assert_eq!(ProcessRole::System, ProcessRole::from_caps(CAP_SYS));
+    assert_eq!(
+        ProcessRole::System,
+        ProcessRole::from_caps(CAP_SYS | CAP_INTERACTIVE)
+    );
+    assert_eq!(Ok(ProcessRole::None), ProcessRole::try_from(0));
+    assert_eq!(Ok(ProcessRole::Interactive), ProcessRole::try_from(1));
+    assert_eq!(Ok(ProcessRole::System), ProcessRole::try_from(2));
+    assert_eq!(Err(()), ProcessRole::try_from(3));
+
+    let self_caps = moto_sys::ProcessStaticPage::get().capabilities;
+    assert_eq!(0, self_caps & CAP_SYS);
+    if !has_interactive() {
+        assert_eq!(ProcessRole::None, ProcessRole::from_caps(self_caps));
+        spawn_wait_kill::test_default_capability_policy();
+        return;
+    }
+
+    assert!(
+        std::process::Command::new(std::env::args().next().unwrap())
+            .arg("subcommand")
+            .env(
+                moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
+                format!("0x{CAP_SYS:x}"),
+            )
+            .spawn()
+            .is_err()
+    );
+
+    let mut processes = vec![moto_sys::stats::ProcessInfoV1::default(); 1024];
+    let count =
+        moto_sys::stats::ProcessInfoV1::list(moto_sys::stats::PID_SYSTEM, &mut processes).unwrap();
+    processes.truncate(count);
+    let role_for = |pid| {
+        ProcessRole::try_from(
+            processes
+                .iter()
+                .find(|process| process.pid == pid)
+                .unwrap()
+                .process_role,
+        )
+        .unwrap()
+    };
+    assert_eq!(ProcessRole::None, role_for(moto_sys::stats::PID_SYSTEM));
+    assert_eq!(ProcessRole::None, role_for(moto_sys::stats::PID_KERNEL));
+    assert_eq!(ProcessRole::System, role_for(moto_sys::stats::PID_SYS_IO));
+    assert_eq!(
+        ProcessRole::from_caps(self_caps),
+        role_for(moto_sys::current_pid())
+    );
+
+    let active_named = |prefix: &str| {
+        processes
+            .iter()
+            .find(|process| process.active != 0 && process.debug_name().starts_with(prefix))
+            .unwrap_or_else(|| panic!("missing active process '{prefix}'"))
+    };
+    let sys_tty = active_named("/system/services/sys-tty");
+    let russhd = active_named("/system/services/russhd");
+    let strobe = active_named("/system/services/strobe");
+    assert_eq!(ProcessRole::Interactive, role_for(sys_tty.pid));
+    assert_eq!(ProcessRole::Interactive, role_for(russhd.pid));
+    assert_eq!(ProcessRole::System, role_for(strobe.pid));
+
+    let console_shell = processes
+        .iter()
+        .find(|process| {
+            process.active != 0
+                && process.parent_pid == sys_tty.pid
+                && process.debug_name().starts_with("/user/bin/rush")
+        })
+        .expect("missing console rush");
+    assert_eq!(ProcessRole::Interactive, role_for(console_shell.pid));
+
+    if login {
+        let this_process = processes
+            .iter()
+            .find(|process| process.pid == moto_sys::current_pid())
+            .unwrap();
+        let parent_shell = processes
+            .iter()
+            .find(|process| process.pid == this_process.parent_pid)
+            .expect("missing parent shell");
+        assert!(parent_shell.debug_name().starts_with("/user/bin/rush"));
+        assert!(russhd.pid == parent_shell.parent_pid || sys_tty.pid == parent_shell.parent_pid);
+        assert_eq!(ProcessRole::Interactive, role_for(parent_shell.pid));
+    }
+
+    spawn_wait_kill::test_default_capability_policy();
+
+    println!("test_caps() PASS");
+}
+
+fn test_thread_names() {
+    let handle = std::thread::current();
+    assert_eq!(handle.name(), Some("main"));
+
+    let t_data = moto_sys::SysRay::dbg_get_thread_data_v1(
+        SysHandle::SELF,
+        moto_sys::UserThreadControlBlock::this_thread_tid(),
+    )
+    .unwrap();
+    assert_eq!(t_data.thread_name(), "main");
+
+    let builder = std::thread::Builder::new().name("foo".into());
+
+    builder
+        .spawn(|| {
+            assert_eq!(std::thread::current().name(), Some("foo"));
+            let t_data = moto_sys::SysRay::dbg_get_thread_data_v1(
+                SysHandle::SELF,
+                moto_sys::UserThreadControlBlock::this_thread_tid(),
+            )
+            .unwrap();
+            assert_eq!(t_data.thread_name(), "foo");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+
+    const LONG_NAME: &str = "foo__0123456789012345678901234567890123456789";
+    let builder = std::thread::Builder::new().name(LONG_NAME.into());
+
+    builder
+        .spawn(|| {
+            assert_eq!(std::thread::current().name(), Some(LONG_NAME));
+            let t_data = moto_sys::SysRay::dbg_get_thread_data_v1(
+                SysHandle::SELF,
+                moto_sys::UserThreadControlBlock::this_thread_tid(),
+            )
+            .unwrap();
+            // Names that are too long are ignored at the OS level.
+            assert_eq!(t_data.thread_name(), "");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+
+    println!("test_thread_names() PASS");
+}
+
+fn test_liveness() {
+    // Spinloop on each CPU; then test that sleep/wake behaves OK.
+    let mut cpus: Arc<Vec<crossbeam::utils::CachePadded<AtomicU64>>> = Arc::new(vec![]);
+    for _i in 0..moto_sys::num_cpus() {
+        Arc::get_mut(&mut cpus)
+            .unwrap()
+            .push(crossbeam::utils::CachePadded::new(AtomicU64::new(0)));
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+
+    let num_cpus = moto_sys::num_cpus() as u16;
+
+    // Spawn spinning threads, one for each CPU.
+    let mut threads = vec![];
+    for _idx in 0..num_cpus {
+        let cpus_clone = cpus.clone();
+        let stop_clone = stop.clone();
+        threads.push(std::thread::spawn(move || {
+            loop {
+                let cpu = moto_sys::current_cpu() as usize;
+                cpus_clone[cpu].fetch_add(1, Ordering::Relaxed);
+
+                if stop_clone.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+        }));
+    }
+
+    // Wait until all CPUs are used.
+    for cpu in 0..num_cpus {
+        while cpus[cpu as usize].load(Ordering::Relaxed) < 1000 {}
+    }
+
+    // We are running in a VM. Give the host time to use num_cpus.
+    std::thread::sleep(std::time::Duration::from_millis(15));
+
+    // Test that this (main) thread is responsive.
+    const NUM_ITERS: usize = 100;
+    assert_eq!(0, NUM_ITERS % 100);
+
+    let mut results: Vec<u64> = Vec::with_capacity(NUM_ITERS);
+    for _ in 0..NUM_ITERS {
+        let started_sleeping = std::time::Instant::now();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let slept = std::time::Instant::now() - started_sleeping;
+        results.push(slept.as_millis().try_into().unwrap());
+    }
+
+    results.sort();
+
+    // Sched tick is 10ms or less.
+    const P50: u64 = 15;
+    const P99: u64 = 25;
+
+    // This measures how promptly a sleeping thread is resumed, which bounds
+    // only what the guest controls. Under `--under-load` the harness has told
+    // us the host multiplexes our vCPUs onto fewer cores (the stress soak runs
+    // 8 vCPUs on 2), so the tail here is host descheduling, not guest
+    // scheduling: observed p99 of 27-54ms against this 25ms bound while p50
+    // stayed at 3ms. Keep loose bounds there so a real breakdown still fails.
+    const P50_LOADED: u64 = 100;
+    const P99_LOADED: u64 = 1000;
+    let (p50_max, p99_max) = if under_load() {
+        (P50_LOADED, P99_LOADED)
+    } else {
+        (P50, P99)
+    };
+
+    let p50 = results[(NUM_ITERS / 2) - 1];
+
+    if p50 > p50_max {
+        panic!("test_liveness: p50 {p50}");
+    }
+
+    let p99 = results[(NUM_ITERS * 99 / 100) - (NUM_ITERS / 100) - 1];
+    if p99 > p99_max {
+        panic!("test_liveness: p99 {p99}");
+    }
+
+    stop.store(true, Ordering::Release);
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
+
+    println!(
+        "test_liveness() PASS: p50: {p50}, p99: {p99}, max: {}",
+        results[NUM_ITERS - 1]
+    );
+}
+
+/// Set by `--under-load`: the harness is running us in a deliberately degraded
+/// environment (vCPUs oversubscribed onto fewer host cores), where wall-clock
+/// SLOs that depend on host scheduling cannot hold. Correctness checks are
+/// unaffected -- only latency bounds consult this.
+static UNDER_LOAD: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn under_load() -> bool {
+    UNDER_LOAD.load(Ordering::Relaxed)
+}
+
+/// Waits for a child spawned through the raw runtime API and releases its
+/// process handle, as std's `Child` does on drop: a dead child keeps its
+/// memory until its last handle closes.
+pub(crate) fn wait_child(handle: u64) -> moto_rt::Result<i32> {
+    let status = moto_rt::process::wait(handle);
+    moto_rt::alloc::release_handle(handle).unwrap();
+    status
+}
+
+// Global sizing hint; remove it before dispatching positional subcommands.
+fn take_host_cpus(args: &mut Vec<String>) -> Result<Option<usize>, &'static str> {
+    let mut host_cpus = None;
+    let mut index = 1;
+    while index < args.len() {
+        let Some(value) = args[index].strip_prefix("--host-cpus=") else {
+            index += 1;
+            continue;
+        };
+        if host_cpus.is_some() {
+            return Err("duplicate --host-cpus");
+        }
+        let count = value
+            .parse::<usize>()
+            .ok()
+            .filter(|count| *count != 0)
+            .ok_or("--host-cpus requires a positive CPU count");
+        host_cpus = Some(count?);
+        args.remove(index);
+    }
+    Ok(host_cpus)
+}
+
+fn test_cpu_overrides() {
+    for arguments in [
+        vec!["--host-cpus=1", "futex-stress", "1"],
+        vec!["--host-cpus=1", "test-active-channel-polls"],
+    ] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(&arguments)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{arguments:?}: {output:?}");
+        if arguments[1] == "futex-stress" {
+            let text = String::from_utf8(output.stdout).unwrap();
+            assert!(
+                text.contains("1 available CPUs") && text.contains("futex-stress: PASS"),
+                "{text}"
+            );
+        }
+    }
+    for value in ["0", "invalid"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([&format!("--host-cpus={value}"), "futex-stress", "1"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("--host-cpus requires a positive CPU count")
+        );
+    }
+}
+
+pub fn run() {
+    let mut args: Vec<String> = std::env::args().collect();
+    let host_cpus = take_host_cpus(&mut args).unwrap_or_else(|error| {
+        eprintln!("systest: {error}");
+        std::process::exit(2);
+    });
+    let available_cpus = (moto_sys::num_cpus() as usize).min(host_cpus.unwrap_or(usize::MAX));
+    if environment::run_command(&args) {
+        return;
+    }
+    if stdio_errors::run_command(&args) {
+        return;
+    }
+    if swap_cancel::run_command(&args) {
+        return;
+    }
+    if args.len() == 2 && args[1] == "boot-random-id" {
+        println!("{:016x}", moto_sys::KernelStaticPage::get().boot_random_id);
+        return;
+    }
+    if args.len() == 2 && args[1] == "kernel-log-boot" {
+        kernel_log::boot_latency();
+        return;
+    }
+    if cold_spawn::is_child(&args) {
+        cold_spawn::run_child(&args);
+    }
+    if args.len() == 2 && args[1] == "cold-spawn" {
+        cold_spawn::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "mounts" {
+        mounts::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "hold-dns-port" {
+        dns_service::hold_port();
+    }
+    if args.len() == 3 && args[1] == "dns-lookup" {
+        dns_service::lookup(&args[2]);
+        return;
+    }
+    if args.len() == 2 && args[1] == "block-ro-root" {
+        block_mounts::read_only_root();
+        return;
+    }
+    if args.len() == 3 && args[1] == "block-partition" {
+        block_mounts::partition(&args[2]);
+        return;
+    }
+    if args.len() == 3 && args[1] == "block-devices" {
+        block_mounts::devices(&args[2]);
+        return;
+    }
+    if args.len() == 2 && args[1] == "block-stress" {
+        block_mounts::stress();
+        return;
+    }
+    if args.len() == 2 && args[1] == "mounts-none" {
+        mounts::none_role();
+        return;
+    }
+    if args.len() == 2 && args[1] == "paging-soak" {
+        cold_spawn::run_soak_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "sparse-soak" {
+        sparse::run_soak_tests();
+        return;
+    }
+    #[cfg(debug_assertions)]
+    if args.len() == 2 && args[1] == "sys-io-self-test" {
+        sys_io_self_test::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "sched-fairness" {
+        sched_fairness::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "raw-spawn" {
+        raw_spawn::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "mem-error-codes" {
+        memory::test_map_error_codes();
+        test_invalid_memory_map_options();
+        test_fixed_memory_map_overlap();
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("process-permissions-child") {
+        process_permissions::run_child(&args);
+        return;
+    }
+    if args.len() == 3 && args[1] == "executable-memory-child" {
+        executable_memory::run_child(&args[2]);
+        return;
+    }
+    if args.len() == 2 && args[1] == "pid-kill-permissions" {
+        process_permissions::test_pid_kill_permissions();
+        return;
+    }
+    if args.len() == 2 && args[1] == "debug-attach-permissions" {
+        process_permissions::test_debug_attach_permissions();
+        return;
+    }
+    if temp_dir::is_print_tmpdir_child(&args) {
+        temp_dir::run_print_tmpdir_child();
+    }
+    if args.get(1).map(String::as_str) == Some("test-virtio-reply-drop") {
+        virtio_task_tests::test_premature_reply_drop();
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("test-virtio-task") {
+        virtio_task_tests::run_tests();
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("test-virtio-descriptors") {
+        virtio::run_tests();
+        return;
+    }
+    if args.len() == 3 && args[1] == "test-virtio-premature-drop" {
+        virtio_async::test_premature_completion_drop(args[2] == "block");
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("test-virtio-rx-pool-drop") {
+        virtio_async::test_premature_rx_pool_drop();
+        return;
+    }
+    if args.len() == 3 && args[1] == "test-virtio-header-layout" {
+        virtio_async::test_header_layout_rejection(&args[2]);
+        return;
+    }
+    if args.len() == 3 && args[1] == "test-virtio-used-id" {
+        virtio_async::test_used_id_rejection(&args[2]);
+        return;
+    }
+    if args.len() == 3 && args[1] == "test-virtio-ordered-completion" {
+        virtio_async::test_ordered_completion_rejection(&args[2]);
+        return;
+    }
+    if args.len() == 2 && args[1] == "checked-copy-in-tests" {
+        checked_copy_in::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "mem-placement" {
+        mem_blocks::placement_subcommand();
+        return;
+    }
+    if args.len() == 2 && args[1] == "mem-huge-sizes" {
+        mem_blocks::huge_sizes_subcommand();
+        return;
+    }
+    if args.len() == 2 && args[1] == "mmio-validation-tests" {
+        mmio::validation_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "mmio-unmap-suite" {
+        mmio::ownership_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "mmio-unmap-fault" {
+        mmio::unmap_fault();
+    }
+    if args.len() == 2 && args[1] == "ipc-listener-tests" {
+        io_channel::test_listener_cleanup();
+        return;
+    }
+    if args.len() == 2 && args[1] == "ipc-canceled-page-send" {
+        io_channel::test_canceled_page_send();
+        return;
+    }
+    if args.len() == 2 && args[1] == "wait-set-tests" {
+        wait_set::run_all_tests();
+        return;
+    }
+    if args.len() == 4 && args[1] == "stderr-burst" {
+        sys_tty::stderr_burst(args[2].parse().unwrap(), args[3].parse().unwrap());
+    }
+    if args.len() == 2 && args[1] == "sparse-tests" {
+        sparse::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "system-caps-tests" {
+        boot_options::cmdline(None);
+        spawn_wait_kill::test_system_parent_cannot_grant_unheld();
+        fs_permissions::test_write_capability(moto_sys::caps::CAP_SYS);
+        // Nothing listens: an admitted client would see a refusal instead.
+        net_caps::check_denied(9);
+        return;
+    }
+    if args.len() == 2 && args[1] == "system-oom-tests" {
+        oom::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "system-oom-abort" {
+        oom::abort_test();
+    }
+    if args.len() == 3 && args[1] == "oom-child" {
+        oom::run_child(&args[2]);
+    }
+    if args.len() == 2 && args[1] == "capability-policy-tests" {
+        test_caps(true);
+        return;
+    }
+    if args.len() == 2 && args[1] == "unresolved-neighbor" {
+        tcp::test_unresolved_neighbor_fails_connect();
+        return;
+    }
+    if args.len() == 3 && args[1] == "boot-console" {
+        boot_options::console(args[2].parse::<bool>().unwrap());
+        return;
+    }
+    if args.len() == 3 && args[1] == "boot-cmdline" {
+        boot_options::cmdline(Some(args[2].as_bytes()));
+        return;
+    }
+    if args.len() == 2 && args[1] == "boot-cmdline-denied" {
+        boot_options::cmdline_denied(moto_sys::caps::ProcessRole::None);
+        return;
+    }
+    if args.len() == 2 && args[1] == "boot-no-network" {
+        boot_options::no_network();
+        return;
+    }
+    if args.len() >= 2 && args[1] == "close-race-child" {
+        closerace::run_child_mode(&args);
+        return;
+    }
+    if args.len() == 3 && args[1] == "close-race-client" {
+        closerace::run_client(&args);
+        return;
+    }
+    if args.len() >= 2 && args[1] == "close-race" {
+        closerace::run(&args);
+        return;
+    }
+    if args.len() >= 2 && args[1] == "wake-bench" {
+        wakebench::run(&args);
+        return;
+    }
+    if args.len() >= 2 && args[1] == "futex-stress" {
+        futex_stress::run(&args, available_cpus);
+        return;
+    }
+    if args.len() >= 2 && args[1] == "fs-bench" {
+        fsbench::run(&args);
+        return;
+    }
+    if args.len() >= 2 && args[1] == "alloc-bench" {
+        alloc_bench::run();
+        return;
+    }
+    // Suite flags, not subcommands: strip them and run the normal suite.
+    let mut vsock_tests = false;
+    while args.len() >= 2 {
+        match args[1].as_str() {
+            "--under-load" => UNDER_LOAD.store(true, Ordering::Relaxed),
+            "--vsock" => vsock_tests = true,
+            _ => break,
+        }
+        args.remove(1);
+    }
+    if net_caps::is_denied_child(&args) {
+        net_caps::run_denied_child(&args);
+    }
+    if net_caps::is_without_vsock_child(&args) {
+        net_caps::run_without_vsock_child(&args);
+    }
+    if net_driver::is_vsock_discovery_denied_child(&args) {
+        net_driver::run_vsock_discovery_denied_child(args.len() == 3);
+    }
+    if net_driver::is_vsock_foreign_accept_child(&args) {
+        net_driver::run_vsock_foreign_accept_child(args[2].parse().unwrap());
+    }
+    if net_driver::is_vsock_exit_accept_child(&args) {
+        net_driver::run_vsock_exit_accept_child(
+            args[2].parse().unwrap(),
+            args[3].parse().unwrap(),
+            args.len() == 5,
+        );
+    }
+    if args.len() == 3 && args[1] == "test-vsock-discovery" {
+        net_driver::test_vsock_discovery(&args[2]);
+        return;
+    }
+    if args.len() >= 5 && args[1] == "test-vsock-outgoing" {
+        vsock_outgoing::run(&args[2..]);
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-disconnect-before-rx-ready" {
+        tcp::test_disconnect_before_rx_ready_releases_channels();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-native-net-cancellation" {
+        tcp::test_disconnect_before_rx_ready_releases_channels();
+        tcp::test_native_net_cancellation();
+        return;
+    }
+    if ip_device_admission::run_child(&args) {
+        return;
+    }
+
+    if args.len() == 4 && args[1] == "wireguard-client" {
+        wireguard::exchange(&args[2], &args[3]);
+        return;
+    }
+    if args.len() == 3 && args[1] == "wireguard-permissions" {
+        wireguard::permissions(&args[2..]);
+        return;
+    }
+    if args.len() == 2 && args[1] == "wireguard-cleanup" {
+        wireguard::cleanup();
+        return;
+    }
+    if args.len() == 3 && args[1] == "wireguard-readable-secrets" {
+        wireguard::reject_readable_secrets(&args[2..]);
+        return;
+    }
+    if args.len() == 3 && args[1] == "wireguard-rejections" {
+        wireguard::rejection_counters(&args[2]);
+        return;
+    }
+    if args.len() == 3 && args[1] == "wireguard-await-tick" {
+        wireguard::await_tick(&args[2]);
+        return;
+    }
+    if args.len() == 2 && args[1] == "wireguard-fragmented-reply" {
+        wireguard::fragmented_reply();
+        return;
+    }
+    if args.len() == 2 && args[1] == "wireguard-stale-sockets" {
+        wireguard::stale_sockets();
+        return;
+    }
+    if args.len() == 3 && args[1] == "wireguard-load" {
+        wireguard_load::run(&args[2]);
+        return;
+    }
+    if args.len() == 4 && args[1] == "ip-device-plain" {
+        ip_device_plain::run(&args[2], &args[3]);
+        return;
+    }
+    if args.len() == 4 && args[1] == "wireguard-measure" {
+        wireguard_bench::run(&args[2], &args[3]);
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-ip-device" {
+        ip_device::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-native-net" {
+        tcp::test_disconnect_before_rx_ready_releases_channels();
+        net_driver::run_all_tests();
+        tcp::run_all_tests();
+        udp::run_all_tests();
+        println!("systest: test-native-net PASS");
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-tcp-teardown" {
+        tcp::test_channel_teardown_drains_staged_tcp();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-tcp-shutdown-repro" {
+        tcp::test_tcp_shutdown_repro();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-loopback-peer-time-wait" {
+        tcp::test_loopback_peer_time_wait();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-outgoing-listener-ports" {
+        tcp::test_outgoing_ports_exclude_listeners();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-udp-local-delivery" {
+        udp::test_udp_local_delivery();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-time-wait-releases-client-channel" {
+        tcp::test_time_wait_releases_client_channel();
+        return;
+    }
+    if args.len() == 2 && args[1] == "tcp-time-wait-child" {
+        tcp::time_wait_child();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-requests-to-retired-tcp-socket" {
+        tcp::test_requests_to_retired_tcp_socket();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-native-listener-drop-backpressure" {
+        tcp::test_native_listener_drop_backpressure();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-concurrent-flush-stress" {
+        fs::concurrent_flush_stress_test();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-fs" {
+        fs::run_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-fs-create" {
+        fs::concurrent_create_test();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-fs-service-progress" {
+        fs::service_progress_test();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-fs-scattered-writes" {
+        fs::scattered_writes_test();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-fs-client-progress" {
+        fs::concurrent_client_progress_test();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-fs-metadata-page-pressure" {
+        fs::metadata_page_pressure_test();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-ipv6-loopback" {
+        tcp::test_ipv6();
+        return;
+    }
+    if args.len() == 3 && args[1] == "test-tap-udp-fragmentation" {
+        udp::test_tap_udp_fragmentation(&args[2]);
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-poll" {
+        poll::run_all_tests();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-active-channel-polls" {
+        io_channel::test_active_channel_polls(available_cpus);
+        return;
+    }
+    if (args.len() == 3 || args.len() == 4) && args[1] == "mio-ping-pong-peer" {
+        poll::run_mio_ping_pong_peer(&args[2], args.get(3).map(String::as_str));
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-moto-async" {
+        moto_async::run_all_tests();
+        return;
+    }
+    // The suite runs one round of the rebind race; the knob for a soak of just
+    // that loop, which is how narrow the race is -- it took tens of thousands
+    // of iterations to lose.
+    if args.len() == 3 && args[1] == "udp-rebind-soak" {
+        for round in 0..args[2].parse::<u32>().unwrap() {
+            println!("-- udp-rebind-soak round {round}");
+            udp::udp_rebind_after_close_test();
+        }
+        println!("PASS");
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-shared-listener-restart" {
+        spawn_wait_kill::test_shared_listener_restart();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-kill-paused" {
+        debugger::test_kill_paused();
+        return;
+    }
+    if ipc_service::run_command(&args) {
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-thread-creation-exit-rollback" {
+        spawn_wait_kill::test_thread_creation_exit_rollback();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-exit-releases-memory" {
+        spawn_wait_kill::test_exit_releases_memory();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-address-space-hosts-one-process" {
+        spawn_wait_kill::test_address_space_hosts_one_process();
+        return;
+    }
+    if args.len() == 2 && args[1] == "test-kill-after-wait" {
+        spawn_wait_kill::test_kill_after_wait();
+        return;
+    }
+    if spawn_wait_kill::is_shared_listener_child(&args) {
+        spawn_wait_kill::run_shared_listener_child();
+    }
+    if spawn_wait_kill::is_pid_query_child(&args) {
+        spawn_wait_kill::run_pid_query_child();
+    }
+    if spawn_wait_kill::is_peer_caps_query_child(&args) {
+        spawn_wait_kill::run_peer_caps_query_child();
+    }
+    if spawn_wait_kill::is_caps_policy_child(&args) {
+        spawn_wait_kill::run_caps_policy_child();
+    }
+    if spawn_wait_kill::is_denied_vsock_child(&args) {
+        spawn_wait_kill::run_denied_vsock_child();
+    }
+    if spawn_wait_kill::is_denied_io_child(&args) {
+        spawn_wait_kill::run_denied_io_child(&args);
+    }
+    if spawn_wait_kill::is_regain_probe_child(&args) {
+        spawn_wait_kill::run_regain_probe_child(&args);
+    }
+    if spawn_wait_kill::is_spawn_result_pid_child(&args) {
+        spawn_wait_kill::run_spawn_result_pid_child();
+    }
+    if spawn_wait_kill::is_interrupt_child(&args) {
+        spawn_wait_kill::run_interrupt_child();
+    }
+    if debugger::is_child(&args) {
+        debugger::run_child(&args[2]);
+    }
+    if spawn_wait_kill::is_empty_args_child(&args) {
+        spawn_wait_kill::run_empty_args_child(&args);
+    }
+    if spawn_wait_kill::is_thread_exit_race_child(&args) {
+        spawn_wait_kill::run_thread_exit_race_child();
+    }
+    if spawn_wait_kill::is_exit_release_child(&args) {
+        spawn_wait_kill::run_exit_release_child();
+    }
+    if raw_spawn::is_child(&args) {
+        raw_spawn::run_child(&args);
+    }
+    if ctrl_c::is_helper(&args) {
+        ctrl_c::run_helper(&args);
+    }
+    if diagnostics::is_child(&args) {
+        diagnostics::run_child(&args);
+    }
+    if logging::is_child(&args) {
+        logging::run_child(&args);
+    }
+    if stdio::is_stdio_child(&args) {
+        stdio::run_stdio_child(&args);
+    }
+    if stdio::is_inherited_relay_child(&args) {
+        stdio::run_inherited_relay_child(&args);
+    }
+    if stdio_peek::is_child(&args) {
+        stdio_peek::run_child(&args);
+    }
+    if args.get(1).map(String::as_str) == Some("test-stdio-peek") {
+        stdio_peek::run_all_tests();
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("test-inherited-relay-order") {
+        stdio::test_wait_drains_inherited_output();
+        return;
+    }
+    if stdio_file_direct::is_child(&args) {
+        stdio_file_direct::run_child(&args);
+    }
+    if args.get(1).map(String::as_str) == Some("stdio-post-publish-error-progress") {
+        stdio_file_input::post_publish_error_progress_test();
+        return;
+    }
+    if stdio_file_input::is_child(&args) {
+        stdio_file_input::run_child(&args);
+    }
+    if file_append::is_child(&args) {
+        file_append::run_child(&args);
+    }
+    if stdio_file_relay::is_child(&args) {
+        stdio_file_relay::run_child(&args);
+    }
+    // The suite runs these at a size that fits a full run; this is the knob
+    // for a long soak of the same exchange.
+    if args.len() == 4 && args[1] == "stdio-poll-stress" {
+        if args[2] == "child_stress" {
+            stdio::child_poll_stress(args[3].parse().unwrap());
+        } else {
+            stdio::poll_stress(&args[2], args[3].parse().unwrap());
+        }
+        println!("PASS");
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("move-noreplace-child") {
+        fs::move_noreplace_child(&args);
+        return;
+    }
+    if args.len() == 5 && args[1] == "concurrent-read-child" {
+        fs::verify_pattern_file(&args[2], args[3].parse().unwrap(), &args[4]);
+        return;
+    }
+    if fs_permissions::is_write_cap_child(&args) {
+        fs_permissions::run_write_cap_child(&args);
+    }
+    if fs_permissions::is_stdout_writer_child(&args) {
+        fs_permissions::run_stdout_writer_child(&args);
+    }
+    if fs_permissions::is_stdout_relay_helper(&args) {
+        fs_permissions::run_stdout_relay_helper(&args);
+    }
+    if fs_permissions::is_none_child(&args) {
+        fs_permissions::run_none_child(&args);
+    }
+    if command_output::is_child(&args) {
+        command_output::run_child(&args);
+    }
+    if descriptor_attr::is_null_child(&args) {
+        descriptor_attr::run_null_child(&args);
+    }
+    if descriptor_attr::is_pipe_child(&args) {
+        descriptor_attr::run_pipe_child(&args);
+    }
+    // The focused entry the terminal acceptance runner (src/tests/cross-test.sh)
+    // uses; the full suite runs the same tests via stdio::run_all_tests().
+    if args.len() == 2 && args[1] == "stdio-terminal-tests" {
+        stdio_terminal::run_all_tests();
+        println!("PASS");
+        return;
+    }
+    if stdio_terminal::is_report_child(&args) {
+        stdio_terminal::run_report_child();
+    }
+    if stdio_terminal::is_mask_child(&args) {
+        stdio_terminal::run_mask_child(&args);
+    }
+    if stdio_terminal::is_read_until_q(&args) {
+        stdio_terminal::run_read_until_q();
+    }
+    if io_channel::is_spawn_read_child(&args) {
+        return;
+    }
+    if args.len() > 1 {
+        if args[1] == "file-lock-test" {
+            file_locking::run_tests();
+            return;
+        }
+        if args[1] == "file-lock-child" {
+            file_locking::child()
+        }
+        subcommand::run_child(args)
+    }
+
+    println!("Systest starting...");
+    let boot_random_id = boot_identity::run_tests();
+
+    assert!(!args.is_empty());
+    assert_eq!(
+        args[0],
+        std::env::current_exe()
+            .unwrap()
+            .into_os_string()
+            .into_string()
+            .unwrap()
+    );
+
+    diagnostics::run_all_tests();
+    sys_tty::run_all_tests();
+    kernel_log::run_all_tests();
+
+    // Run the service logging test before later tests emit through its logger.
+    logging::run_all_tests();
+
+    // Logging checked stats readiness; run this exact global channel-count
+    // check before later networking fixtures leave channels still draining.
+    tcp::test_disconnect_before_rx_ready_releases_channels();
+    strlen::run_all_tests();
+    mem_blocks::run_all_tests();
+    memory::run_all_tests();
+    test_invalid_memory_map_options();
+    executable_memory::run_all_tests();
+    test_fixed_memory_map_overlap();
+    test_pager_ops_need_sys_io();
+    checked_copy_in::run_all_tests();
+    test_lazy_memory_map_read();
+    test_lazy_memory_map_write();
+    test_concurrent_lazy_memory_map_write();
+    bench_page_faults();
+    test_fp_env_across_blocking_syscall();
+    fs::run_tests();
+    mounts::run_all_tests();
+    virtio::run_tests();
+    virtio_task_tests::run_tests();
+    fs_permissions::run_all_tests();
+    fs_permissions::test_write_capability(
+        moto_sys::ProcessStaticPage::get().capabilities
+            & (moto_sys::caps::CAP_INTERACTIVE | moto_sys::caps::CAP_NET),
+    );
+    fs_permissions::test_write_capability_stdio();
+    execute_permissions::run_all_tests();
+    sched_fairness::run_all_tests();
+    raw_spawn::run_all_tests();
+    cold_spawn::run_all_tests();
+    descriptor_attr::run_all_tests();
+    file_locking::run_tests();
+    // return;
+
+    // Test that a userspace interrupt is handled correctly.
+    unsafe { core::arch::asm!("int 3") }
+
+    environment::run_all_tests();
+
+    // We should never be allowed to shut down the sytem.
+    assert_eq!(
+        moto_sys::SysCpu::kill(SysHandle::KERNEL).err().unwrap(),
+        moto_rt::E_NOT_ALLOWED
+    );
+
+    test_syscall();
+    test_handle_dup();
+    wait_set::run_all_tests();
+    threads::run_all_tests();
+    moto_async::run_all_tests();
+    poll::run_all_tests();
+    io_channel::run_all_tests(available_cpus);
+    test_cpu_overrides();
+    test_thread_names();
+    test_halt_poll_metrics();
+    test_cpus();
+    test_random_bytes();
+    tls::test_tls();
+    tls::test_tls_join();
+    tls::test_tls_exit_dtors();
+    tls::test_tls_set_no_dtor();
+    tls::test_tls_current_on_drop();
+    test_caps(false);
+    temp_dir::test_child_temp_dir();
+    test_liveness();
+
+    spawn_wait_kill::test_pid_invariants();
+    spawn_wait_kill::test_empty_args_preserved();
+    spawn_wait_kill::test_process_pid_query();
+    spawn_wait_kill::test_peer_capabilities_query();
+    spawn_wait_kill::test_child_id();
+    spawn_wait_kill::test_spawn_result_pid();
+    spawn_wait_kill::smoke_test();
+    spawn_wait_kill::test_kill_after_wait();
+    spawn_wait_kill::test_ctrl_c_interrupt();
+    spawn_wait_kill::test_pid_kill();
+    process_permissions::test_pid_kill_permissions();
+    process_permissions::test_debug_attach_permissions();
+    debugger::test_kill_paused();
+    spawn_wait_kill::test_shared_listener_restart();
+    ipc_service::run_tests();
+    spawn_wait_kill::test_thread_creation_exit_rollback();
+    spawn_wait_kill::test_exit_releases_memory();
+    spawn_wait_kill::test_address_space_hosts_one_process();
+    swap_cancel::run_tests();
+    ctrl_c::run_tests();
+    command_output::run_test();
+    sparse::run_all_tests();
+    test_nx();
+    test_writable_executable_elf_rejected();
+    std::thread::sleep(Duration::new(1, 10_000_000));
+    test_rt_mutex();
+    sys_io_self_test::run_all_tests();
+    if vsock_tests {
+        net_driver::run_vsock_tests();
+    } else {
+        println!("vsock tests: skipped (run with --vsock under the test harness)");
+    }
+    net_driver::run_all_tests();
+    tcp::run_all_tests();
+    udp::run_all_tests();
+    icmp::run_all_tests();
+    ip_device::run_all_tests();
+    memory::run_all_tests();
+
+    mpmc::test_mpmc();
+    mpmc::test_array_queue();
+    // channel_test::test_io_channel();
+    // channel_test::test_io_latency();
+    // channel_test::test_io_throughput();
+    test_reentrant_mutex();
+    // tcp::test_wget();
+    test_file_write();
+
+    test_lazy_memory_map_read();
+    test_lazy_memory_map_write();
+    test_ipc();
+    stats::test_stats_provider();
+    stdio::run_all_tests();
+    stdio_errors::run_all_tests();
+    stdio_file_direct::run_tests();
+    stdio_file_input::run_tests();
+    stdio_file_input::privileged_lifetime_tests();
+    stdio_file_relay::run_tests();
+    file_append::run_tests();
+    // fs::run_tests();
+
+    assert_eq!(
+        moto_sys::KernelStaticPage::get().boot_random_id,
+        boot_random_id,
+        "boot identity changed during the system tests"
+    );
+    println!("systest: ALL PASS");
+
+    std::thread::sleep(Duration::new(0, 10_000_000));
+}

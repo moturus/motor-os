@@ -109,6 +109,7 @@ fn deep_backtrace(depth: usize) {
 }
 
 fn child(mode: &str, caps: u64) -> Command {
+    let caps = caps & moto_sys::ProcessStaticPage::get().capabilities;
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
         .arg(CHILD)

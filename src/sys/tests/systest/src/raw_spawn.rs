@@ -122,11 +122,12 @@ fn test_kill_racing_a_wake() {
 
 /// A detached child that was never woken has no one left to wake it once
 /// its parent is gone: the parent's teardown kills it. Needs
-/// `CAP_SPAWN_DETACHED`, which the suite's caller lacks; full-test.sh runs
-/// `systest raw-spawn-detached` with it.
+/// `CAP_SPAWN_DETACHED`.
 fn test_unstarted_detached_child_dies_with_parent() {
     let ours = moto_sys::ProcessStaticPage::get().capabilities;
-    assert_ne!(ours & moto_sys::caps::CAP_SPAWN_DETACHED, 0);
+    if ours & moto_sys::caps::CAP_SPAWN_DETACHED == 0 {
+        return;
+    }
     // Children do not inherit the detach capability unless given it.
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .arg(DETACHED_CHILD)
@@ -286,5 +287,6 @@ pub fn run_all_tests() {
     test_kill_racing_a_wake();
     test_double_wake();
     test_kill_racing_creation();
+    test_unstarted_detached_child_dies_with_parent();
     println!("raw_spawn::run_all_tests PASS");
 }
