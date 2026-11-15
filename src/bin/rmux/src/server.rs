@@ -1751,7 +1751,7 @@ mod tests {
     fn served() -> (Server, Receiver<Event>, Receiver<ToClient>, ClientId) {
         let (events, queue) = channel();
         let config = Config {
-            default_shell: "cat".to_owned(),
+            default_shell: crate::test_programs::program("cat"),
             ..Config::default()
         };
         let mut server = Server::new(config, &[], events);
@@ -2142,7 +2142,7 @@ mod tests {
         // a client, there being no screen at the moment the file is read.
         let (events, queue) = channel();
         let config = Config {
-            default_shell: "cat".to_owned(),
+            default_shell: crate::test_programs::program("cat"),
             ..Config::default()
         };
         let mut server = Server::new(config, &["3: not a setting".to_owned()], events);

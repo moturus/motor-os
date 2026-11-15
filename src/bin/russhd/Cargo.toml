@@ -27,7 +27,7 @@ getrandom    = { version = "=0.2.17", features = ["custom"] }
 [build-dependencies]
 getrandom = { version = "=0.2.17", features = ["rdrand"] }
 
-[target.'cfg(unix)'.dev-dependencies]
+[dev-dependencies]
 tokio = { version = "=1.47.1", features = ["test-util"] }
 
 [patch.crates-io]
@@ -40,3 +40,24 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
+
+[features]
+cross-test-support = []
+
+[[bin]]
+name = "ssh-socks-probe"
+path = "tests/helpers/socks.rs"
+required-features = ["cross-test-support"]
+test = false
+
+[[bin]]
+name = "ssh-forwarding-probe"
+path = "tests/helpers/forwarding.rs"
+required-features = ["cross-test-support"]
+test = false
+
+[[bin]]
+name = "sftp-permissions"
+path = "tests/helpers/sftp_permissions.rs"
+required-features = ["cross-test-support"]
+test = false

@@ -200,7 +200,7 @@ mod tests {
     /// A pane running `true`, which exits at once and exists long enough to be
     /// counted and named.
     fn opts() -> PaneOpts {
-        PaneOpts::new("true")
+        PaneOpts::new(&crate::test_programs::program("true"))
     }
 
     fn session_with(name: &str, windows: usize) -> (Sessions, mpsc::Receiver<Event>) {

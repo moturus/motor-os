@@ -15,7 +15,7 @@
 //! crossterm, which is the whole of red's side, is the same code on both. What
 //! only Motor OS can answer is the owner-known first paint, where the size
 //! arrives as `$COLUMNS`/`$LINES` set by rmux or russhd before red exists;
-//! `src/tests/test-terminal-size.sh` drives that end.
+//! `src/tests/cross-test.sh` drives that end.
 //!
 //! The gauge is red's own status bar. `render_status_bar` pads it to exactly
 //! `screen_cols`, and `draw` puts it on the row below the text area, so a single

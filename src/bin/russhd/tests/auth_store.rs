@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
 //! Credential parsing, limits and trust checks, driven through the files russhd
-//! really reads. The guest's role checks are in src/tests/test-sshd-keys.sh.
+//! really reads. The guest's role checks are in src/tests/cross-test.sh.
 
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};

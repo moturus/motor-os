@@ -324,6 +324,7 @@ fn noclobber_protects_existing_files() {
 }
 
 #[test]
+#[cfg(unix)]
 fn noclobber_exempts_non_regular_files() {
     // POSIX only protects existing *regular* files, so `> /dev/null` still works.
     let run = run_c("set -C; echo x > /dev/null && echo ok");
@@ -633,7 +634,12 @@ fn prompt_variables_have_defaults_and_are_expandable() {
     // PS2/PS4 match dash; PS1 is rush's colored prompt (a documented divergence).
     assert_eq!(out("echo \"[$PS2]\""), "[> ]\n");
     assert_eq!(out("echo \"[$PS4]\""), "[+ ]\n");
-    assert!(out("echo \"$PS1\"").contains("rush"));
+    let name = if cfg!(target_os = "motor") {
+        "motor-os"
+    } else {
+        "rush"
+    };
+    assert!(out("echo \"$PS1\"").contains(name));
     // An inherited value wins over the default.
     let out = Command::new(RUSH)
         .args(["-c", "echo \"[$PS2]\""])
@@ -685,7 +691,12 @@ fn pwd_is_maintained() {
         std::env::current_dir().unwrap().to_str().unwrap()
     );
     assert_eq!(out("cd /; echo $PWD"), "/\n");
-    assert_eq!(out("cd /tmp; cd /; echo $OLDPWD"), "/tmp\n");
+    let tmp = std::env::temp_dir();
+    let tmp = tmp.display();
+    assert_eq!(
+        out(&format!("cd {tmp}; cd /; echo $OLDPWD")),
+        format!("{tmp}\n")
+    );
 }
 
 // ---- I/O errors -------------------------------------------------------------

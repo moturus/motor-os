@@ -13,6 +13,10 @@ license = "MIT OR Apache-2.0"
 name = "rush"
 path = "src/main.rs"
 
+[[test]]
+name = "motor_caps"
+harness = false
+
 [dependencies]
 # The terminal layer: keys, the terminal's size, raw mode and the escape
 # sequences the editor paints with. Motor OS is a supported target of the

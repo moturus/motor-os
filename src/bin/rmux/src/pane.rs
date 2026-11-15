@@ -451,7 +451,12 @@ mod tests {
         // `cat` ends when its input does, whether that is a closed pipe or the
         // `^D` a pty needs instead.
         let (tx, rx) = mpsc::channel();
-        let mut pane = Pane::spawn(Command::new("cat"), (24, 80), tx).unwrap();
+        let mut pane = Pane::spawn(
+            Command::new(crate::test_programs::program("cat")),
+            (24, 80),
+            tx,
+        )
+        .unwrap();
         pane.write(b"line\n").unwrap();
         pane.end_input();
 
@@ -546,7 +551,12 @@ mod tests {
         // `\n` into a new line itself (§3.3); one on a pty leaves it to `ONLCR`,
         // which has already happened by the time the bytes arrive here.
         let (tx, _rx) = mpsc::channel();
-        let mut pane = Pane::spawn(Command::new("cat"), (4, 10), tx).unwrap();
+        let mut pane = Pane::spawn(
+            Command::new(crate::test_programs::program("cat")),
+            (4, 10),
+            tx,
+        )
+        .unwrap();
         pane.feed(b"aa\nbb");
         let second = pane.grid().line(1);
         pane.kill();
@@ -571,7 +581,12 @@ mod tests {
         // calls below queue on the same writer, so `marker` arriving proves an
         // unasked answer would have arrived already.
         let (tx, rx) = mpsc::channel();
-        let mut pane = Pane::spawn(Command::new("cat"), (24, 80), tx).unwrap();
+        let mut pane = Pane::spawn(
+            Command::new(crate::test_programs::program("cat")),
+            (24, 80),
+            tx,
+        )
+        .unwrap();
         pane.feed(b"\x1b[6n");
         pane.resize((10, 20));
 
@@ -591,7 +606,12 @@ mod tests {
         // `cat` would print it, and a program that never asked has no reason to
         // expect an answer.
         let (tx, rx) = mpsc::channel();
-        let mut pane = Pane::spawn(Command::new("cat"), (24, 80), tx).unwrap();
+        let mut pane = Pane::spawn(
+            Command::new(crate::test_programs::program("cat")),
+            (24, 80),
+            tx,
+        )
+        .unwrap();
         pane.resize((10, 20));
 
         let echoed = echoed_through_marker(pane, &rx);
@@ -612,7 +632,12 @@ mod tests {
         // question in front of it. No probe, no prompt, no round trip -- the
         // report is there by the time the child next reads.
         let (tx, rx) = mpsc::channel();
-        let mut pane = Pane::spawn(Command::new("cat"), (24, 80), tx).unwrap();
+        let mut pane = Pane::spawn(
+            Command::new(crate::test_programs::program("cat")),
+            (24, 80),
+            tx,
+        )
+        .unwrap();
         pane.feed(b"\x1b[?2048h");
         pane.resize((10, 20));
         // A refit to the size it already has is the common case -- every split,
@@ -639,7 +664,12 @@ mod tests {
         // Unsubscribing has to stop the reports, or a program that turned the
         // mode off would go on being typed at.
         let (tx, rx) = mpsc::channel();
-        let mut pane = Pane::spawn(Command::new("cat"), (24, 80), tx).unwrap();
+        let mut pane = Pane::spawn(
+            Command::new(crate::test_programs::program("cat")),
+            (24, 80),
+            tx,
+        )
+        .unwrap();
         pane.feed(b"\x1b[?2048h\x1b[?2048l");
         pane.resize((10, 20));
 
@@ -685,7 +715,12 @@ mod tests {
     #[test]
     fn a_pane_resized_to_the_size_it_already_has_is_left_alone() {
         let (tx, _rx) = mpsc::channel();
-        let mut pane = Pane::spawn(Command::new("cat"), (24, 80), tx).unwrap();
+        let mut pane = Pane::spawn(
+            Command::new(crate::test_programs::program("cat")),
+            (24, 80),
+            tx,
+        )
+        .unwrap();
         let answers = [
             pane.resize((24, 80)),
             pane.resize((10, 20)),
@@ -735,13 +770,23 @@ mod tests {
         // fails here), so what this holds is the rule the hang taught.
         // A live child: there is something to kill.
         let (tx, _rx) = mpsc::channel();
-        let mut live = Pane::spawn(Command::new("cat"), (24, 80), tx).unwrap();
+        let mut live = Pane::spawn(
+            Command::new(crate::test_programs::program("cat")),
+            (24, 80),
+            tx,
+        )
+        .unwrap();
         assert!(live.kill(), "a live child is there to be killed");
         live.join();
 
         // And one that has run its course and been collected: there is not.
         let (tx, rx) = mpsc::channel();
-        let mut collected = Pane::spawn(Command::new("true"), (24, 80), tx).unwrap();
+        let mut collected = Pane::spawn(
+            Command::new(crate::test_programs::program("true")),
+            (24, 80),
+            tx,
+        )
+        .unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
             match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
@@ -765,7 +810,12 @@ mod tests {
         // status here -- so what this holds is the bookkeeping that stops `Drop`
         // from asking again, which is where the bug was.
         let (tx, rx) = mpsc::channel();
-        let mut pane = Pane::spawn(Command::new("true"), (24, 80), tx).unwrap();
+        let mut pane = Pane::spawn(
+            Command::new(crate::test_programs::program("true")),
+            (24, 80),
+            tx,
+        )
+        .unwrap();
         assert!(
             pane.owes_a_wait(),
             "a fresh pane has not collected anything"
@@ -821,8 +871,18 @@ mod tests {
     #[test]
     fn panes_are_identified_by_rmuxs_own_counter_not_by_pid() {
         let (tx, _rx) = mpsc::channel();
-        let first = Pane::spawn(Command::new("true"), (24, 80), tx.clone()).unwrap();
-        let second = Pane::spawn(Command::new("true"), (24, 80), tx).unwrap();
+        let first = Pane::spawn(
+            Command::new(crate::test_programs::program("true")),
+            (24, 80),
+            tx.clone(),
+        )
+        .unwrap();
+        let second = Pane::spawn(
+            Command::new(crate::test_programs::program("true")),
+            (24, 80),
+            tx,
+        )
+        .unwrap();
         assert_ne!(first.id(), second.id());
         first.join();
         second.join();

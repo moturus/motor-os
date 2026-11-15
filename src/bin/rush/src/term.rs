@@ -1588,7 +1588,8 @@ mod tests {
         // which a stripper that stopped at the first `m` would measure wrong,
         // and a prompt measured wrong is a line edited in the wrong column.
         let ps1 = crate::shell::default_prompt("PS1").replace("$PWD", "/tmp");
-        assert_eq!(display_width(&ps1), 11, "{ps1:?}");
+        let width = if cfg!(target_os = "motor") { 15 } else { 11 };
+        assert_eq!(display_width(&ps1), width, "{ps1:?}");
     }
 
     fn chars(s: &str) -> Vec<char> {

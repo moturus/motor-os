@@ -88,6 +88,10 @@ impl Fixture {
             .unwrap();
         write_private(&root.join("users.toml"), SHIPPED_USERS);
         write_private(&root.join("authorized_keys.motor"), SHIPPED_KEYS);
+        write_private(
+            &root.join("test.key"),
+            include_str!("../../../vm_scripts/test.key"),
+        );
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/sshd.toml");
         let config = std::fs::read_to_string(source)
             .unwrap()
@@ -132,7 +136,7 @@ impl Fixture {
             child,
             log_thread: Some(log_thread),
             known_hosts: root.join("known_hosts"),
-            identity: Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/test.key"),
+            identity: root.join("test.key"),
             root,
             port,
         }

@@ -32,6 +32,10 @@ pub mod status;
 pub mod sys;
 pub mod window;
 
+#[cfg(test)]
+#[path = "../tests/support/programs.rs"]
+pub(crate) mod test_programs;
+
 pub use pane::Pane;
 pub use pane::PaneId;
 pub use screen::Frame;

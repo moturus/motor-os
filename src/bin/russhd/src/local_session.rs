@@ -935,15 +935,27 @@ mod tests {
             std::ffi::OsStr::new("LINES"),
             Some(std::ffi::OsStr::new("43"))
         )));
+        #[cfg(target_os = "motor")]
+        assert!(envs.contains(&(
+            std::ffi::OsStr::new(moto_sdk::rt::process::STDIO_IS_TERMINAL_ENV_KEY),
+            Some(std::ffi::OsStr::new("true"))
+        )));
 
         let mut plain_command = tokio::process::Command::new("unused");
         plain_command.env("COLUMNS", "80").env("LINES", "24");
+        #[cfg(target_os = "motor")]
+        plain_command.env(moto_sdk::rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true");
         assert!(!configure_terminal(&mut plain_command, None));
         assert_eq!(
             plain_command.as_std().get_envs().collect::<Vec<_>>(),
             [
                 (std::ffi::OsStr::new("COLUMNS"), None),
                 (std::ffi::OsStr::new("LINES"), None),
+                #[cfg(target_os = "motor")]
+                (
+                    std::ffi::OsStr::new(moto_sdk::rt::process::STDIO_IS_TERMINAL_ENV_KEY),
+                    None,
+                ),
             ]
         );
     }

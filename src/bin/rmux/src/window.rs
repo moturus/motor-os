@@ -497,7 +497,7 @@ mod tests {
     /// A window list running `true` in each window, which exits at once but
     /// exists long enough to be counted, numbered and named.
     fn opts() -> PaneOpts {
-        PaneOpts::new("true")
+        PaneOpts::new(&crate::test_programs::program("true"))
     }
 
     fn windows(renumber: bool, count: usize) -> (Windows, mpsc::Receiver<Event>) {
@@ -668,7 +668,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel();
         let mut windows = Windows::new(true);
         let opts = PaneOpts {
-            shell: "cat".to_owned(),
+            shell: crate::test_programs::program("cat"),
             history_limit: 2,
         };
         windows.open(&opts, (2, 10), tx).unwrap();

@@ -3,8 +3,16 @@ fn main() {}
 
 #[cfg(not(target_os = "motor"))]
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    host::run()
+    if std::env::args_os().len() == 1 {
+        tests::run()
+    } else {
+        host::run()
+    }
 }
+
+#[cfg(not(target_os = "motor"))]
+#[path = "support/https.rs"]
+mod tests;
 
 #[cfg(not(target_os = "motor"))]
 mod host {

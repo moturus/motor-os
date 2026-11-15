@@ -11,6 +11,7 @@ const RUSH: &str = env!("CARGO_BIN_EXE_rush");
 
 struct Run {
     stdout: String,
+    stderr: String,
     code: i32,
 }
 
@@ -25,6 +26,7 @@ fn run_c(script: &str) -> Run {
         .expect("failed to spawn rush");
     Run {
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         code: out.status.code().unwrap_or(-1),
     }
 }
@@ -229,10 +231,15 @@ fn while_read_loop_over_a_pipe() {
 
 #[test]
 fn cd_pwd_and_oldpwd() {
+    let tmp = std::env::temp_dir();
+    let tmp = tmp.display();
     assert_eq!(out("cd /; pwd"), "/\n");
     // `cd -` returns to (and prints) the previous directory.
-    assert_eq!(out("cd /; cd /tmp; cd - "), "/\n");
-    assert_eq!(out("cd /tmp; cd /; echo $OLDPWD"), "/tmp\n");
+    assert_eq!(out(&format!("cd /; cd {tmp}; cd - ")), "/\n");
+    assert_eq!(
+        out(&format!("cd {tmp}; cd /; echo $OLDPWD")),
+        format!("{tmp}\n")
+    );
 }
 
 // ---- set / shift ------------------------------------------------------------
@@ -263,7 +270,7 @@ fn shift_past_end_is_fatal() {
 fn unset_variable_and_function() {
     assert_eq!(out("x=5; unset x; echo \"[$x]\""), "[]\n");
     assert_eq!(
-        out("f() { echo hi; }; unset -f f; type f 2>/dev/null; echo done"),
+        out("f() { echo hi; }; unset -f f; type f; echo done"),
         "done\n"
     );
 }
@@ -361,16 +368,24 @@ fn eval_runs_in_current_shell() {
 
 #[test]
 fn dot_sources_a_file() {
-    let script = "echo 'echo sourced; MYVAR=42' > /tmp/rush_p5_src.sh; \
-                  . /tmp/rush_p5_src.sh; echo \"var=$MYVAR\"; rm -f /tmp/rush_p5_src.sh";
-    assert_eq!(out(script), "sourced\nvar=42\n");
+    let path = std::env::temp_dir().join(format!("rush_p5_src_{}.sh", std::process::id()));
+    std::fs::write(&path, "echo sourced; MYVAR=42\n").unwrap();
+    assert_eq!(
+        out(&format!(". {}; echo \"var=$MYVAR\"", path.display())),
+        "sourced\nvar=42\n"
+    );
+    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
 fn dot_return_leaves_the_sourced_file() {
-    let script = "printf 'echo one\\nreturn 3\\necho two\\n' > /tmp/rush_p5_ret.sh; \
-                  . /tmp/rush_p5_ret.sh; echo \"rc=$?\"; rm -f /tmp/rush_p5_ret.sh";
-    assert_eq!(out(script), "one\nrc=3\n");
+    let path = std::env::temp_dir().join(format!("rush_p5_ret_{}.sh", std::process::id()));
+    std::fs::write(&path, "echo one\nreturn 3\necho two\n").unwrap();
+    assert_eq!(
+        out(&format!(". {}; echo \"rc=$?\"", path.display())),
+        "one\nrc=3\n"
+    );
+    std::fs::remove_file(path).unwrap();
 }
 
 // ---- : / true / false -------------------------------------------------------
@@ -389,10 +404,7 @@ fn alias_defines_lists_and_expands() {
     // dash's parse-time behavior), so `ll` runs even in a `-c` string.
     assert_eq!(out("alias ll='echo LL'; ll"), "LL\n");
     assert_eq!(out("alias a=b; alias a"), "a='b'\n");
-    assert_eq!(
-        out("alias g='echo G'; unalias g; g 2>/dev/null; echo done"),
-        "done\n"
-    );
+    assert_eq!(out("alias g='echo G'; unalias g; g; echo done"), "done\n");
 }
 
 // ---- trap -------------------------------------------------------------------
@@ -410,10 +422,17 @@ fn trap_exit_fires_once() {
 
 #[test]
 fn builtins_in_pipelines() {
-    assert_eq!(
-        out("printf 'apple\\nbanana\\napricot\\n' | grep ^a | wc -l"),
-        "2\n"
-    );
+    let filter = if cfg!(target_os = "motor") {
+        "rg"
+    } else {
+        "grep"
+    };
+    let run = run_c(&format!(
+        "printf 'apple\\nbanana\\napricot\\n' | {filter} ^a | wc -l"
+    ));
+    assert_eq!(run.code, 0, "{}", run.stderr);
+    assert!(run.stderr.is_empty(), "{}", run.stderr);
+    assert_eq!(run.stdout, "2\n");
     assert_eq!(out("echo hi | cat"), "hi\n");
     assert_eq!(out("printf 'a\\nb\\nc\\n' | wc -l"), "3\n");
 }

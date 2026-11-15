@@ -1184,8 +1184,12 @@ fn canonicalize_lexical(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{SftpSession, canonicalize_lexical};
-    use crate::sftp_extensions::{POSIX_RENAME, POSIX_RENAME_VERSION, encode_posix_rename};
-    use russh_sftp::protocol::{FileAttributes, OpenFlags, Packet, StatusCode};
+    #[cfg(target_os = "linux")]
+    use crate::sftp_extensions::encode_posix_rename;
+    use crate::sftp_extensions::{POSIX_RENAME, POSIX_RENAME_VERSION};
+    #[cfg(target_os = "linux")]
+    use russh_sftp::protocol::Packet;
+    use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
     use russh_sftp::server::Handler as _;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};

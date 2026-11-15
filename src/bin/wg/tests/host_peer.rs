@@ -210,7 +210,7 @@ fn receive(socket: &UdpSocket, crypto: &mut Crypto) -> Option<Vec<u8>> {
 
 #[test]
 fn fork_interoperates_with_upstream_in_both_roles_and_families() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/wg-peer");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("host-peer");
     let profile = if cfg!(debug_assertions) {
         "debug"
     } else {
