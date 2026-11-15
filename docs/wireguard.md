@@ -589,7 +589,7 @@ revision `dcad5645547a89b278b346a399dbc0fae19a02f4`. The fork has two changes:
    check or limiter charge. Normal public `decapsulate` checks remain intact.
 
 boringtun's crypto implementation is unchanged. The independent reference
-peer in `src/tests/wg-peer` uses upstream 0.7.1 with `ring` and a separate
+peer in `src/bin/wg/host-peer` uses upstream 0.7.1 with `ring` and a separate
 workspace/lockfile.
 
 `getrandom` 0.2 uses a custom backend over
@@ -815,26 +815,28 @@ for inspection with `status`. See [`launch.rs`](../src/bin/wg/src/launch.rs).
 
 ## Validation
 
-The focused guest gate builds its image and native test binaries, then runs
+The cross runner builds native test binaries, then runs
 with a hermetic local host peer. With the repository's VM test networking
 configured, run either build mode from the repository root:
 
 ```sh
-src/tests/test-wireguard.sh
-src/tests/test-wireguard.sh --release
+src/tests/full-test.sh
+src/tests/full-test.sh --release
 ```
 
 This exercises configuration creation and edits, native permissions and
 capabilities, discovery and malformed IPC, startup/stop failure paths,
 detached lifetime, and IPv4/IPv6 traffic with the independent upstream peer.
-`src/tests/test-system-tty.sh` (also accepting `--release`) covers System-role
+The cross runner's System-console phase covers System-role
 rejection, including a System caller that also has `CAP_INTERACTIVE`.
 
 Host parser, prompt, editor, redacted-protocol and interoperability tests run
 with `cargo test --manifest-path src/bin/wg/Cargo.toml --locked`; add
 `--release` for the release build. These checks and the native discovery
 API tests are reached through `src/tests/full-test.sh` in the selected build
-mode. WireGuard tests use local peers and do not require Internet access.
+mode. WireGuard uses Cargo on Linux and Lorry on Motor; Linux `cdylib`
+support in Lorry is outside the image-layout migration. WireGuard tests use
+local peers and do not require Internet access.
 Use the existing [benchmark procedure](wireguard-measurements.md) when changing
 forwarding or statistics publication.
 

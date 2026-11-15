@@ -127,14 +127,13 @@ with the rest of `build/`:
 
 - the external sources, built with the toolchain on every run: Lua,
   ripgrep, Helix, uutils sed, tar and zstd, Javy with Wasmi, and Wasmtime,
-  with their Cargo target directories, and the dependencies of the developer
-  image's library sources;
+  with their Cargo target directories, and dependencies for native builds;
 - the native toolchain's overlays `llvm`, `rustc`, `rust-analyzer`, and
   `libc`, unpacked from the native archive with motor-os-tar's `tar` built
   for Linux on every run, so a replaced archive takes effect.
 
-The standard and wasm images take the `libc` overlay's runtime configuration
-under `/system/cfg/libc`. The developer image takes all four overlays:
+The standard image takes the `libc` overlay's runtime configuration
+under `/system/cfg/libc`. The toolchain archive packages all four overlays:
 
 | Path on Motor OS | Contents |
 |---|---|
@@ -160,16 +159,12 @@ Outputs and scratch files stay under `build/toolchain/release`; the original
 archive in `$MOTORH` is unchanged. Run `src/build-motor-os.sh` to rebuild the
 external overlays when their sources change. Ordinary suite runs always
 repackage with the current payloads and installer, including the Linux imager.
-To validate a release archive itself, pass its path explicitly to the same
-install/reinstall/reboot gate:
+The full gate repackages, installs, reinstalls, and reboots with the current
+archive before running native compiler tests:
 
 ```sh
-src/tests/test-native-toolchain-install.sh --release \
-  --archive ../motor-toolchain-x86_64-unknown-motor-1.99.1-3.tar.zst
+src/tests/full-test.sh --release
 ```
-
-The explicit archive is installed without repackaging; the gate prints its
-absolute path and SHA-256 before starting the VM.
 
 There is no native Cargo, rustdoc, separate proc-macro server, or shared
 `librustc_driver`; Lorry is the native build driver. The host cross wrappers,
@@ -199,7 +194,7 @@ configuration stays in the image's `/system/cfg/libc`.
 The installer appends `/user/bin/dev` once to the console and SSH PATH settings.
 Reboot after installation to activate those settings.
 
-`src/tests/test-native-toolchain-install.sh` installs twice on a copy of the
+`src/tests/full-test.sh` installs twice on a copy of the
 standard image, checks replacement of a shipped command, reboots, and builds
 and runs programs with the installed tools as None. An install invalidates
 Lorry's compiled dependencies, which are bound to the installed toolchain files'
@@ -245,8 +240,9 @@ checks this layout, unwind-provider symbols, constructors, unwind sections,
 and static-PIE protections on its native tools, and
 `src/build-scripts/validate-native-elf.sh` checks the same of Motor OS
 programs linked through the cross sysroot.
-`src/tests/test-unwind.sh` validates its own binaries and exercises both
+The native Cargo harness in `src/sys/tests/unwind` exercises both
 entry paths, abort and fat-LTO builds, and Rust/C++ destructor propagation.
+The host phase of `full-test.sh` validates its ELF binaries.
 
 Native rustfmt is built by Rust bootstrap with the compiler-private Motor OS
 rlibs, packaged at `/user/lib/rust/bin/rustfmt`, and exposed through the
@@ -262,7 +258,7 @@ project and user configuration, ignored environment settings, editions, macros,
 and parser/lexer-error recovery. The size gates bound both the stripped
 formatter and its fresh-image growth at 21 MiB. Runtime, editor, and size
 gates are wired into `src/tests/full-test.sh`, with native formatting and
-editor cases in its developer-image branch.
+editor cases in the native installed-tool harness.
 
 
 ## 7. Changing the toolchain
@@ -276,7 +272,7 @@ editor cases in its developer-image branch.
    again with the new toolchain.
 5. Because the standard library of every OS binary changes, run the core
    gate from AGENTS.md: three debug and three release runs of
-   `src/tests/full-test.sh`, then `src/tests/full-test-dev.sh --release`.
+   `src/tests/full-test.sh`, which includes native compiler and tool tests.
 6. Commit `rust-toolchain.toml` with any changes the new version needed.
 
 An archive rebuilt under the same name, as a local `-dev` build is, is a
@@ -305,6 +301,5 @@ run `src/build-motor-os.sh`, then the same validation gates.
 | `src/build-motor-os.sh`, `src/build-scripts/build-base.sh` | the external sources, the native toolchain's overlays, and the images; host provisioning |
 | `src/build-scripts/external-sources.sh`, `src/build-scripts/build-javy.sh`, `src/build-scripts/build-wasmtime.sh` | the external sources' checkouts, and Javy and Wasmtime |
 | `src/build-scripts/validate-native-elf.sh` | the loader's requirements, checked on cross-linked Motor OS programs |
-| `src/tests/test-external-sources.sh` | offline contract test of the external-source stage |
-| `src/tests/test-toolchain-bootstrap.sh`, `src/tests/test-toolchain-archive.sh` | offline release-source and archive contracts |
-| `src/tests/test-native-toolchain-install.sh` | the native archive installed twice on a standard VM |
+| `src/tests/full-test.sh` | offline build/archive contracts and toolchain installation on a disposable standard VM |
+| `src/tests/full-native-test.sh`, `src/sys/tests/toolchain` | native compiler and installed-tool checks |

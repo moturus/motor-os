@@ -274,19 +274,14 @@ edits are stronger initial candidates than the roughly 2 ms fallback cost.
 
 ## Tests
 
-- `tests/test-native.sh` vendors from crates.io and GitHub on every run of
-  `test-all.sh`. Supply pinned local source fixtures for regular offline
-  validation and make online acquisition a separate integration step. Keep
-  the Cargo and cross/native Lorry byte-identity checks in the offline gate.
-- `artifact-lock-contract.sh` and `helpers/cancel-probe.rs` wait 0.1-0.2 s
-  before checking that nothing happened, so they pass trivially when Lorry is
-  slow. Replace elapsed-time assumptions with synchronization proving that
-  the competing operation reached the relevant state.
-- `stage2-differential.sh` keeps the old "stage 2" name.
-- 25 test scripts embed Python (48 `python3` calls), mostly to read JSON and
-  to build synthetic crates. Port them to shell or Rust.
-  `mixed-case-name-contract.sh` builds a synthetic crate with `tar` and
-  `sha256sum`.
+The image-layout migration replaces the shell/Python tests with Cargo
+harnesses and generated temporary workspaces. Host preparation supplies locked
+sources before offline native runs; acquisition tests use loopback servers.
+Cargo and cross/native Lorry byte comparisons belong to `src/tests/cross-test.sh`.
+
+- The process-control tests retain fixed waits before some negative checks.
+  Replace elapsed-time assumptions with synchronization proving that the
+  competing operation reached the relevant state; see `tests/control/`.
 
 ## Recommended order after the product review
 

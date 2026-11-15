@@ -1,9 +1,8 @@
 # Filesystem permissions in Motor OS images
 
-Motor OS images are built with a declarative Motor OS filesystem permission policy. The
-development image contains the complete policy surface; the base, standard,
-and System-tty images contain subsets of the same destination paths and apply
-the same mode to every shared entry.
+Motor OS images are built with a declarative Motor OS filesystem permission policy.
+The base and standard images apply the same mode to every shared entry. The
+toolchain installer applies matching permissions to its development tools.
 
 This document describes permissions on newly built images. It does not define
 a migration for existing images and does not impose an OS-wide W^X rule on
@@ -124,11 +123,11 @@ The initial image policy follows these principles:
   execute bits select which files require script or ELF classification; the
   image policy supplies all three complete Motor OS permission triplets.
 
-## Development-image policy
+## Image and toolchain policy
 
 The following table is exhaustive. A destination uses the longest matching
-tree rule, with an exact-entry rule taking precedence. Images smaller than the
-development image simply omit some of these destinations.
+tree rule, with an exact-entry rule taking precedence. Images omit destinations
+that they do not use; development tools are installed separately.
 
 "Regular" means a file without a host execute bit, including an ELF object or
 even an executable-type ELF stored as non-executable on the host. "Script"
@@ -148,7 +147,6 @@ ELF whose type is `ET_EXEC` or `ET_DYN`.
 | `/none` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | The None role's home; None cannot add entries here |
 | `/none/cfg` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | None-role configuration, which None may write |
 | `/none/tmp` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | None-role scratch |
-| `/devtools` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Transitional developer-image test fixtures |
 | `/user/dev/lorry` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Interactive Lorry repository and cache, readable by None |
 | `/none/dev` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | Source trees and the None-role Lorry repository and cache |
 
@@ -160,9 +158,8 @@ Interactive traversal without making its scratch files readable. sys-io creates
 Before any other runtime permission changes, the directory modes have these effects:
 
 - Interactive cannot create a new root-level tree or replace `/system`.
-- Interactive can create and replace entries throughout `/user` and the
-  transitional developer-image test tree, except where a longer tree rule
-  restricts access. A native
+- Interactive can create and replace entries throughout `/user`, except where
+  a longer tree rule restricts access. A native
   toolchain archive's `install.sh` relies on this to replace `/user/lib/llvm`
   and `/user/lib/rust` ([toolchain.md](toolchain.md)).
 - Each role can create and replace entries in its own temporary directory
@@ -184,15 +181,15 @@ Several installed trees deliberately use the default rule:
   is System-writable and publicly readable. None-role services have not yet
   been audited for configuration reads.
 - Development commands live in `/user/bin/dev`, and their supporting data in
-  `/user/lib`; Clang reads `/user/lib/llvm/cfg`. Only the developer image's
-  test programs temporarily stay under `/devtools/tests`. `/user/dev/lorry` and
+  `/user/lib`; Clang reads `/user/lib/llvm/cfg`. Tests are never shipped.
+  `/user/dev/lorry` and
   `/none/dev/lorry` hold the Interactive and None repositories and caches of
   the installed Lorry tool; Lorry refuses to run as System. Other guest build and test
   writes belong under `/none/dev` or the role's temporary directory.
-- Development source trees staged in `/none/dev` are consumed in place;
+- Development source trees uploaded to `/none/dev` are consumed in place;
   project build output belongs under `/none/dev` and scratch output in
-  the role's temporary directory. Git dependencies are fetched by the build
-  tool rather than staged as separate source trees.
+  the role's temporary directory. The full gate prepares verified Git sources
+  on the host and uploads them for offline native builds.
 
 ### Exact entries
 
@@ -326,25 +323,22 @@ Guest acceptance tests check command modes in `/user/bin` and `/user/bin/dev`:
 - any regular data file or unexpected mode in those directories fails the
   suite.
 
-With the initial image permissions, the development-image suite proves that
+With the runtime installation permissions, the full suite proves that
 Interactive can edit `/user/bin/dev/www` in place and rename it, and installs
 a native toolchain into `/user/bin/dev` and `/user/lib`. Functional checks prove
 that Interactive cannot create a root-level directory and can write the
 appropriate scratch and source trees. Tests do not walk and assert the modes of
-every other image file. `test-image-layout.sh` also checks shared configuration,
+every other image file. The cross runner also checks shared configuration,
 private credentials, and replacement through a temporary name. Runtime-installed
 executables use `rwxrwxr-x`, data uses `rwxrw-r--`, and directories use
 `rwxrwxr-x`; None can read or execute them but cannot write them.
 
-The VM harnesses share their guest directories (`src/tests/test-roots.sh`).
-Test binaries are the development image's shipped `/devtools/tests`, or, on
-the standard image, uploads to `/none/tmp/motor-tests/tests`, which None-role
-test children can run. Interactive scratch is `/user/tmp/motor-tests` on both
-images, and fixtures that a None-role child must open go in
-`/none/tmp/motor-tests/tmp`. The harness creates these directories itself and
-fails if one already exists, because a directory that None created would be
-writable by None. Standard tests continue to assert that `/devtools` is
-absent.
+`src/tests/cross-test.sh` owns its guest scratch directories and uploads
+cross-compiled programs to `/none/tmp`. Native Cargo tests create their own
+temporary data and test role-dependent access inside each case. The full gate
+extracts the working tree and Git sources as None under `/none/dev/motor-os`,
+preserving executable source flags; Interactive extracts dependency objects
+under `/user/dev/lorry`. Published images contain neither tests nor `/devtools`.
 
 ## Runtime behavior and remaining limits
 

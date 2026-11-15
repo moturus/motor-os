@@ -1,16 +1,32 @@
 # Helix on Motor OS
 
-The developer image includes the Motor OS port of Helix 25.07.1, native
+The toolchain archive includes the Motor OS port of Helix 25.07.1, native
 rust-analyzer, and native rustfmt. Helix runs on the console, over SSH, and
-inside an rmux pane. The base and standard images do not include it.
+inside an rmux pane. Install the archive on the standard image to use it.
 
 ## Using the editor
 
-Boot with `vm_images/release/run-dev.sh`, which defaults to 8 GiB of guest
-RAM. In Motor OS, try the packaged example; it needs no downloads:
+After installing the toolchain, boot with
+`MOTO_MEMORY_MIB=8192 vm_images/release/run-chv.sh`. Create a small project in
+Motor OS; it needs no downloads:
 
 ```sh
-cd /none/dev/helix-rust-demo
+cd /none/dev
+lorry new hello
+cd hello
+cat > src/greeting.rs <<'RS'
+/// A constant to explore with hover, completion, and go-to-definition.
+pub const ANSWER: u32 = 42;
+RS
+cat > src/main.rs <<'RS'
+#![feature(motor_ext)]
+mod greeting;
+fn main() {
+    let answer: u32 = greeting::ANSWER;
+    println!("Hello from Motor OS! The answer is {answer}.");
+    println!("Runtime version: {}", std::os::motor::rt_version());
+}
+RS
 hx src/main.rs
 ```
 
@@ -53,7 +69,7 @@ project is not a sandbox boundary.
 ## Native Rust integration
 
 The packaged configuration is
-[`img_files/motor-os-dev/user/cfg/helix/languages.toml`](../img_files/motor-os-dev/user/cfg/helix/languages.toml),
+[`img_files/motor-toolchain/user/cfg/helix/languages.toml`](../img_files/motor-toolchain/user/cfg/helix/languages.toml),
 installed at `/user/cfg/helix/languages.toml`. The `/user/bin/dev/hx`
 launcher sets `XDG_CONFIG_HOME=/user/cfg` and
 `XDG_CACHE_HOME=$TMPDIR/.cache` unless they are already set. The runtime gives
@@ -126,7 +142,7 @@ normal directories.
 
 To use Clippy for save diagnostics, set rust-analyzer's `check.command` to
 `"clippy"` in the project's `.helix/languages.toml`. Lorry uses the native
-Clippy driver supplied by the development image and reports Cargo-compatible
+Clippy driver supplied by the toolchain archive and reports Cargo-compatible
 diagnostics. The shipped configuration continues to use `"check"`.
 
 The pinned integration can log a Lorry version-string warning and an
@@ -207,17 +223,17 @@ Salsa cancellation uses `resume_unwind`. The standard Motor OS sysroot supplies
 real unwinding; an abort-only analyzer exits on ordinary cancellation.
 The former private analyzer library has been retired. The
 [toolchain runtime contract](toolchain.md#rust-runtime-and-native-formatting)
-and [`test-unwind.sh`](../src/tests/test-unwind.sh) cover this requirement.
+and the [unwind crate tests](../src/sys/tests/unwind) cover this requirement.
 
-`src/tests/test-tui.sh` and its `test-helix-lsp.sh` helper cover parser health,
+The native [installed-tool harness](../src/sys/tests/toolchain) covers parser health,
 editing, saves, terminal restoration, resize, rmux, native semantic requests,
 formatting, and clean server shutdown. The LSP cases include empty editor
 startup, opening a file afterward, an unprepared virtual workspace with
 same-file and module definitions, edits during loading, paths with spaces,
 Motor OS std navigation, and formatter-error recovery. The readiness helper's
-host tests guard waiting for source scans and indexing before semantic
-assertions. These tests run through `src/tests/full-test.sh`; developer
-coverage is reached with `src/tests/full-test-dev.sh --release`.
+Rust tests guard waiting for source scans and indexing before semantic
+assertions. These tests run through `src/tests/full-native-test.sh` in both
+Motor roles, reached by `src/tests/full-test.sh`.
 
 The unrelated, unresolved sys-io abort observed during integration is
 recorded in [future work](plans/future-work.md#unresolved-sys-io-abort-during-listener-exhaustion-2026-09-10).

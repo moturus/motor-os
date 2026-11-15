@@ -71,14 +71,15 @@ The SDK combines eleven former crates. Paths below are relative to `moto_sdk`.
 - Versions follow Cargo's semver rules. One version covers the whole SDK.
 - Crates outside `src/sys` see an SDK change only after it is published.
   Publish, then raise their requirement where needed and re-resolve their
-  lockfiles. That includes javy-smoke, wasmtime-smoke and the Lorry editor
-  fixture, which are built with `--locked`.
+  lockfiles. That includes javy-smoke and wasmtime-smoke, which are built
+  with `--locked`.
 - Publish moto-rt or moto-sys first when the SDK needs a newer one, and raise
   the SDK's floor for it.
-- `src/tests/test-sdk-package.sh`, part of `full-test.sh`, builds the SDK the
+- The `host_sdk_package` phase of `src/tests/full-test.sh` builds the SDK the
   way crates.io would ship it, against crates.io only. Its lock pins each
   direct dependency at the lowest version the manifest allows. After a
-  dependency change, `test-sdk-package.sh --update-lock` writes a new lock.
+  dependency change, `bash -c 'source src/tests/full-test.sh;
+  host_sdk_package --update-lock'` writes a new lock.
 - Publish from `src/sys` after the gates pass, and from a pushed commit: the
   package records its commit, and crates.io links to it.
 - Crates the SDK replaced, such as moto-ipc 0.2.4, stay on crates.io. New code

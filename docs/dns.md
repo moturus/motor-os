@@ -100,7 +100,7 @@ returns a truncated response to the retransmission, and completes the lookup
 over TCP.
 
 `--self-test-local` covers the hermetic subset, both loopback transports, IPC,
-and snapshot permissions. `test-block-mounts.sh`, called by `full-test.sh`, runs
+and snapshot permissions. The block-mount phase of `cross-test.sh` runs
 it on a read-only root containing the libc directory. Its QEMU DHCP fixture
 checks a real acquired lease and resolver selection with `--test-dhcp`, and
 verifies that the root image remains byte-for-byte unchanged. `full-test.sh` also

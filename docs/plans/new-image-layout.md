@@ -1,11 +1,20 @@
 # Developing Motor OS on Motor OS: image layout, Lorry as None, native tests
 
-Status: milestones 1-4 implemented and committed. The fresh 1.99.1-3 archives
-have passed host installation, a clean rebuild, exact-archive native installation,
+Status: milestones 1-5 implemented and committed. The consolidated release gate
+passed on November 15 with the documented Motor-only deferrals.
+Milestone 6 remains conditional. The 1.99.1-3
+release is unpublished.
+Before milestone 5, its archives passed host installation, a clean rebuild,
+exact-archive native installation,
 three main release and three main debug runs, and the full release developer-image
 gate after separately committed test fixture corrections.
-The release is unpublished. Milestone 5 is ready, updated 2026-11-13;
-milestone 6 remains conditional. v1 is commit e7d46767, v2 is 3035a48a,
+Current milestone 5 validation and the jobserver toolchain update are recorded
+below. The user's validation policy and deferred newly exercised Motor
+checks are recorded in [new-layout-followups.md](new-layout-followups.md): change
+only tests and docs, preserve previously exercised coverage, make no commits,
+and stop at the first complete full-gate pass or a blocker requiring other code
+changes. The user subsequently authorized an eight-commit series; no tests were
+rerun while assembling it. v1 is commit e7d46767, v2 is 3035a48a,
 v3 is 29779e3f, v4 is 98fe39e0.
 Milestone 1 is implemented: kernel command-line access, the System-console
 boot option, network-device omission, and launcher and guest coverage.
@@ -22,7 +31,7 @@ The approved shared defaults live in `/user/cfg/cargo/config.toml`, with
 `/user/cfg/cargo` as Motor's default Cargo home for both roles.
 The updated native Lorry gate, release red/rush/russhd/Helix builds, and release
 developer-source gate pass. Milestone 3 is committed in `d555218f`, with
-documentation in `952ebd58`. Milestones 5-6 have not been implemented by this work.
+documentation in `952ebd58`.
 
 ## The workflow this serves
 
@@ -77,6 +86,9 @@ documentation in `952ebd58`. Milestones 5-6 have not been implemented by this wo
   development environment.
 - Archives are identified by version only, never by a git hash.
 - All guest tests run on the standard image, and base tests on the base image.
+- Published images contain no tests. Test programs and fixtures are uploaded
+  only to the disposable images used by the test harnesses. `stress-soak.sh`
+  remains a repository script; it is never installed in an image.
 
 **Testing**
 
@@ -645,7 +657,10 @@ each rule.
 
 **Rules for crates.** Each ordinary crate harness passes `lorry test`
 natively on Motor OS from `/none/dev/motor-os` where it supports Motor,
-and `cargo test` and `lorry test` on Linux where it supports Linux.
+and `cargo test` and `lorry test` on Linux where it supports Linux. WireGuard
+uses Cargo only on Linux by the user's November 14 scope decision: adding
+Linux `cdylib` support to Lorry is outside this migration. It still runs Lorry
+natively on Motor.
 Host-only tooling such as the Linux imager is tested in the host build
 checks, not added to the Motor native list. Kernel tests and privileged
 service self-tests that run during boot remain there, observed through the
@@ -659,11 +674,11 @@ network beyond loopback, or assumes a host.
 list of supported crate harnesses for that OS, retaining the feature
 variants exercised today, and runs `lorry test` in each (`cargo test` as
 well on Linux), stopping at the first failure. When `/user/bin/dev` is
-installed it also runs the shell checks of the installed tools: Helix with
+installed it also runs Cargo harnesses for the installed tools: Helix with
 rust-analyzer, javy, wasmtime, sed, lua, and QuickJS. QuickJS retains its
 smoke, native compilation, and release Test262 checks; the host prepares
 the patched runner sources and pinned corpus, and the guest run is offline.
-Compilation in these shell checks also runs as None, including when the
+Compilation in these harnesses also runs as None, including when the
 check was started by Interactive. On Motor OS the script runs as whoever
 started it, and `full-test.sh` runs it twice, from a None shell and from an
 Interactive one. There is no list of which tests need which role: a test
@@ -691,11 +706,11 @@ crates they test:
   become rmux tests under `#[cfg(target_os = "motor")]`. rmux has no
   networking, so nothing of it stays in `cross-test.sh`.
 - The developer-image checks of native compilation become ordinary
-  `lorry build` and `lorry test` runs in the checkout. Installed-tool shell
-  checks keep their C/C++ and other compiler coverage.
+  `lorry build` and `lorry test` runs in the checkout. Installed-tool Cargo
+  harnesses keep their C/C++ and other compiler coverage.
 - Lorry has only Rust tests, like every other crate: `lorry test` on Motor
   OS, `lorry test` and `cargo test` on Linux. Its shell scripts become Rust
-  tests in the Lorry crate, which write a fixture workspace into a temporary
+  tests in the Lorry crate, which write a workspace into a temporary
   directory and run the Lorry under test on it. Tests of behavior that
   exists on one system only (the Landlock sandbox; roles and the None
   child) are under `cfg`. No Lorry test runs Cargo, boots a VM, or reaches
@@ -718,7 +733,7 @@ crates they test:
   sources, where today the guest vendors them from the network.
 - Lorry's ignored curl integration tests (`curl::tests::`) stay in every
   run, not only `--full`, on Linux and Motor OS. Before running them,
-  `full-native-test.sh` prepares the fixture that `curl-contract.sh`
+  `full-native-test.sh` prepares the executables that `curl-contract.sh`
   supplies today: it builds the curl executable and its HTTPS test harness
   for the current OS, and sets `LORRY_TEST_CURL`, `LORRY_TEST_TLS_SERVER`,
   `LORRY_TEST_CA`, `LORRY_TEST_HOSTNAME_CA`, and `LORRY_TEST_UNTRUSTED_CA`
@@ -752,11 +767,11 @@ the host/guest byte-code comparison is also owned here. No crate's
 byte-identical output. It builds one fixture workspace for
 `x86_64-unknown-motor` three ways: with Cargo on the host, with Lorry on
 the host, and with Lorry on the guest. The three results must be the same
-bytes. It also builds the fixture for Linux with Cargo and with Lorry on
-the host and compares those. The fixture is today's
-`tests/fixtures/cargo-identity-workspace`, which has no crates.io
-dependencies, so the guest build needs no repository objects; the fixture
-and the comparison move to `src/tests`. This replaces `cargo-identity.sh`
+bytes. It also builds the workspace for Linux with Cargo and with Lorry on
+the host and compares those. The runner generates the dependency-free
+workspace formerly held in `tests/fixtures/cargo-identity-workspace`, so
+the guest build needs no repository objects and no fixture tree remains.
+This replaces `cargo-identity.sh`
 and the host/guest comparison in `test-native.sh`. The script that checks
 the retained Cargo results still match the current Cargo
 (`verify-resolution-oracles.sh`) needs Cargo too, so it moves to the host
@@ -851,8 +866,8 @@ host-build, boot, or cross-test destination before deleting its old driver.
 `test-external-sources.sh` keeps its applicable checkout, staging, and ELF
 validation checks in host step 1; only obsolete developer-image assertions
 go. The applicable Helix, rust-analyzer, and rustfmt size contracts stay in
-host checks with updated paths. QuickJS smoke fixtures move out of the
-developer image into the test tree, and the Test262 driver is split into
+host checks with updated paths. QuickJS smoke inputs become source data in
+the installed-tool Cargo harness, and the Test262 driver is split into
 host input preparation and native execution.
 
 **Removed after migration.** Drivers that exist only for the developer image
@@ -866,21 +881,23 @@ the Helix, rust-analyzer, and rustfmt native drivers,
 `tests/test-all.sh` and its 30-minute budget, the contract scripts,
 `test-native.sh`, and `test-native-projects.sh`. The native builds of red,
 rush, and russhd that `test-native-projects.sh` made are covered by the
-guest run of `full-native-test.sh`; its native build of Helix becomes the
+  guest run of `full-native-test.sh`; its native build of Helix becomes the
 Rust test described above. The javy and wasmtime checks become
 native tests, except the comparison of the byte code compiled on the guest
 with the host's, which stays in `cross-test.sh`. The Helix checks become
 native: Helix has no networking. The two Python tests go: Python is not used
 for tests. `test-helix-lsp-ready.py`, which waits for rust-analyzer's
-progress messages in Helix's log, becomes the shell check of the installed
+progress messages in Helix's log, becomes a Rust check of the installed
 Helix that `full-native-test.sh` runs; `test-dev-path-locks.py`, which
 checks that the curl and lorry lockfiles match their path dependencies,
 becomes a shell host check in step 1. The x86_64 crate's `ci-release.py` is
 a dependency's own release script, not a test, and stays.
 
 **The other users of the developer image.** `stress-soak.sh` boots the
-developer image too; it boots the standard image with the archive installed
-instead. `run-dev.sh` goes with the developer image.
+developer image too. Per the milestone 5 implementation scope, leave this
+repository script unchanged and do not gate this work on it passing. Updating
+it after removal of the developer image is separate work. It is never
+published to an image. `run-dev.sh` goes with the developer image.
 
 ### Outside the main Motor OS repo
 
@@ -1437,9 +1454,336 @@ Evidence is in `build/milestone4/resize-fast/full-test-release.log`,
   gates. `src/bin/lorry/AGENTS.md` is one: its rules about `test-all.sh`,
   the developer image, and where the Cargo comparison runs change, and a
   change confined to Lorry is gated by `cargo test` and `lorry test` in
-  the crate. Remove Lorry's shell tests. Move `stress-soak.sh` to the
-  standard image.
+  the crate. Remove Lorry's shell tests. `src/tests` contains only the three
+  runners and the unchanged `stress-soak.sh`; freestanding fixture trees go
+  away as coverage moves into crate tests or runner setup. Keep
+  `stress-soak.sh` out of the validation scope and never publish it or any
+  tests in the standard image.
 - 5e. The full gate, on Cloud Hypervisor.
+
+Milestone 5 is complete under the user's latest continuation policy. The coverage inventory is in
+[`new-image-layout-test-coverage.md`](new-image-layout-test-coverage.md).
+`src/tests` now contains only the three runners and unchanged `stress-soak.sh`;
+the developer and dedicated test-image definitions and fixture trees have been
+removed. Standard and base images contain no tests. On November 15,
+`src/tests/full-test.sh --release` passed the complete host, Linux, installation,
+cross-system, Interactive native, and None native phases. The exclusions and
+evidence are recorded in [new-layout-followups.md](new-layout-followups.md).
+The completed changes were subsequently split into eight commits at the user's
+request. Earlier validation notes follow; this paragraph records the completed
+gate's current status.
+
+On November 14, the refreshed release images, native toolchain archive, offline
+source preparation, and complete consolidated release host phase passed. The
+Javy/Wasmtime assembly and their relocated Motor harnesses were rebuilt; the
+installed-tool harness also cross-compiled successfully. VM execution is being
+validated through the consolidated runner's phases.
+
+The first consolidated Linux native run stopped on the independent upstream
+WireGuard peer: its `boringtun` dependency declares a Linux `cdylib`, which Lorry
+deliberately does not support. That Linux-only cross-test tool's Cargo harness
+now belongs to the host build checks, alongside the imager. Its localhost and
+cross-system coverage is retained. WireGuard itself uses Cargo on Linux and
+Lorry on Motor; the user explicitly excluded adding Linux `cdylib` support.
+
+Linux validation also found that the SSH protocol harness depended on the old
+runner changing the checkout key's permissions. Each test now writes a private
+`0600` copy, and the suite passes through both Cargo and Lorry. Preparation now
+fetches Cargo's own dependency cache and the SDK package's locked inputs before
+offline checks. WireGuard's existing localhost interoperability test passes
+through Cargo.
+The complete Linux native release gate now passes, including WireGuard through
+Cargo only, the six unwind variants, netstack feature variants, and Lorry's
+selected curl integration tests. The complete consolidated VM gate is still
+pending.
+
+Focused release VM runs exposed migration errors in the image-root listing,
+installer extraction role, relocated System `findmnt` dispatch, no-SSH teardown,
+socket path length, and SSH credential-test isolation and cleanup. These have
+been corrected without changing production behavior or the existing assertions.
+Installation and reinstallation, network and SSH transport, terminal checks,
+Git transport, System capabilities and MMIO, the three-VMM boot-option matrix,
+block mounts, vsock, and credential reboot persistence now pass in focused runs.
+The block phase caps its RAM at 1 GiB to retain the existing memfs capacity check
+when the native build VM uses 4 GiB; the complete block phase passes with that
+coverage restored. The 256 MiB wasm checks, service and role matrix, and OOM-abort
+case also pass. These phase results do not count as complete gate passes.
+
+Native validation corrected the shared runner's script-path discovery, curl
+output permissions, and executable selection. rmux and Rush now pass their
+crate suites as Interactive and None on the normal release image. Their test
+adaptations use Cargo-built probes, platform commands and paths, and corrected
+terminal coordinates and prompt expectations. No commands or test files are
+added to the published images. russhd also passes in both roles after enabling
+Tokio's existing test utilities for Motor tests and correcting a terminal
+environment expectation. The remaining native suites and complete gates are
+still being validated.
+
+Two preexisting issues surfaced during validation:
+
+- The debug scheduler initialized `last_alive_check` to zero, so a slow boot
+  could trigger the watchdog before CPU 0's first scheduler update. The user
+  approved initializing it with `Instant::now()` and committing that one-line
+  fix separately. Initial full debug/release validation used an isolated
+  checkout of the previous gate while the consolidated gate was being finished.
+  One complete debug run passed. A subsequent nested-SSH deadline failure was
+  reproduced by concurrent host image construction, which caused substantial
+  disk stalls; the traced terminal test passed without that competing workload.
+  Remaining kernel gates run without concurrent image construction. Their
+  assertions and timeouts are unchanged, and diagnostic instrumentation has
+  been removed. A session restart removed the in-flight process and its `/tmp`
+  logs; the six required gates were restarted on November 14 with persistent
+  evidence under `build/milestone5/kernel-validation`. The first restarted gate
+  stopped before guest boot because the host's `moto-tap` interface was absent.
+  The user restored host networking on November 14. The next debug run reached
+  `systest: ALL PASS` but hit the old runner's 1800-second aggregate deadline
+  during the following Rush checks. It does not count as a pass. The original
+  log and console evidence remain under `build/milestone5/kernel-validation`.
+  Timing the existing layout check with identical boot artifacts took 24.46
+  seconds on disk and 8.45 seconds on tmpfs; the old console launch took 24.03
+  seconds on disk. Storage latency contributes, but these focused results do
+  not fully explain the aggregate timeout. No assertion or deadline changed.
+  The user explicitly requested committing the isolated fix after being told
+  that the required full gates had not completed. It is committed separately as
+  `6b2f836a` (`kernel: initialize scheduler watchdog timestamp`). Milestone 5's
+  full validation remains incomplete.
+- WireGuard's `ring` pin `b1dad257` lacks the pre-generated files required by
+  Lorry's Git exports. Its immediate successor `e4de8c22`, already used by curl,
+  russhd, and httpd-axum, adds both assembly and symbol-prefix headers without
+  changing the library code or version (0.17.14). A fresh unmodified export
+  passes 94 library tests. WireGuard now pins that existing revision and its
+  release Cargo tests pass. Lorry gets past the ring build but stops on the
+  existing Linux `cdylib` restriction in its `boringtun` dependency. The user
+  chose Cargo-only Linux WireGuard tests and retained native Motor Lorry tests;
+  no `cdylib` support is added. The Linux native release gate now passes; the
+  complete Motor gate remains pending. The
+  earlier proposed external patch was unnecessary and has been withdrawn. No
+  external fork is modified or pushed, and source provenance is preserved.
+
+Native installed-tool validation corrected migration errors in terminal mode
+restoration, capability delegation, early language-server shutdown, and test
+input setup. Helix now tails its log through one open handle and retains the
+original request-timeout matcher. Formatting inputs are created before editor
+startup, avoiding reloads introduced by the migrated setup. Helix and QuickJS
+pass as Interactive and None, and the None compiler, utility, and rustfmt
+checks pass in focused tmpfs diagnostics; these are not full-gate passes.
+
+The normal disk-backed debug Helix check still exceeds its 60-second source
+loading deadline. The unchanged former shell check also fails on the same
+installed image. Flushing the copied image before boot does not resolve it.
+Routing kernel logs to the console on a disposable image lets the entire Helix
+suite pass on the normal disk with its assertions and deadlines unchanged.
+This isolates persistent debug logging as a contributor. The user requested
+removing MotorFS's routine lookup message entirely, committed separately as
+`eb2d27a0` (`motor-fs: remove routine stat logging`). No tests were run for that
+one-line removal, as explicitly requested. Milestone validation continues;
+the altered-environment diagnostics are not normal full-gate passes.
+
+The native WireGuard library builds through Lorry, but its existing scheduler
+test exposed a preexisting cadence bug. Clock conversion rounds a 510 ms
+interval down by 1 ns, producing a four-tick deadline drift. At an exact missed
+boundary, the scheduler sets its next deadline only 1 ns later instead of one
+250 ms period later. The original failure and a targeted diagnostic are retained
+under `build/milestone5`. The user approved the scheduler patch and exact-boundary
+regression assertion, committed separately as `2696f10b` (`wg: preserve timer
+cadence across clock rounding`). The release Cargo suite on Linux and native
+Lorry suites in both Motor roles pass with the fix.
+Unrelated native suites continue separately. No consolidated gate pass is
+claimed from those component runs.
+
+The native Lorry unit suite reached 445 passing cases and five failures.
+Four were test portability assumptions: Linux home configuration, unsupported
+timestamp mutation, and missing native execute permissions in a generated
+source tree. Their corrections preserve Linux assertions and check Motor's
+role-based behavior. The shared analyzer test helper also needed public
+visibility after moving into its own Cargo crate.
+The corrected Lorry unit cases now pass in both Motor roles, and the Linux
+unit suite passes through Cargo and Lorry. The native analyzer integration also
+passes in both roles after accounting for its intentional loose-sysroot loading
+and matching its known version warning against the actual test executable path.
+Build-state and compiler-contract tests also pass through both Linux tools and
+in both Motor roles. Their migration fixes canonicalize permission-check paths,
+use the established Motor C-runtime link recipe, and give mock compiler modes
+distinct executable identities so their query-cache records cannot collide.
+The remaining failure exposed an `rt.vdso` race: two non-exclusive creates can
+both observe a missing file, and the losing create reports `AlreadyInUse`
+instead of opening the winner. The user approved the runtime fix, committed
+separately as `3d73e4eb` (`rt.vdso: handle concurrent non-exclusive file creation`).
+Native memfs/disk creation regressions, file-locking tests, and the unchanged
+Lorry concurrency test pass with debug and release runtimes in both Motor roles.
+The full filesystem suite now passes in both roles. The migrated copy tests
+retain the Interactive assertions and check that None preserves higher-role
+permissions; the ceiling-denial check still runs its None child from an
+Interactive parent. The original role-assumption failure is retained, and
+these focused results do not count as complete milestone gate passes.
+
+Further Lorry migration checks corrected generated workspace locations, native
+approval-state paths, and role-owned registry configuration. Linux retains its
+metadata-pipelining assertions; Motor checks serial dependency ordering and its
+existing worker-cancellation and staging-recovery cases. Linux Cargo and Lorry
+component gates pass. Interactive Motor checks now pass through process control,
+profiles, registry contracts, target selection, and workspace build, clean,
+metadata, and run. The workspace harness now expects Motor's documented abort
+exit code of `-1`, instead of the Unix signal fallback of `101`. This focused
+case passes through Cargo and Lorry on Linux and in both Motor roles.
+
+The remaining workspace example/benchmark matrix exposed a native compiler
+stall whose stacks implicated `jobserver` 0.1.34, pinned by Rust commit `d2e9dd029`.
+The compiler coordinator waits to join its helper while that helper waits for
+a token. The dependency's non-Unix/non-Windows backend explicitly documents
+this shutdown defect. Guest stacks and the matching compiler disassembly were
+saved under `build/milestone5`, along with the generated workspaces. The stalled
+compiler was stopped only after capturing that evidence; its resulting test
+failure is not a completed run. A shutdown-cancellation patch and crate
+regression test were prepared in
+`build/milestone5/review/jobserver-shutdown.patch`. Compiler integration requires a
+separate change to the native-toolchain build in `../motor-os-toolchain` and a
+rebuilt native compiler archive. That integration has not been performed.
+
+A second diagnosis checked Lorry's invocation and reproduced the shutdown
+mechanism independently. The captured compiler environment contains no
+jobserver variables or thread overrides, and Lorry does not configure a
+shared jobserver on Motor. Direct ordinary compiler replays completed,
+including 32 cold and 16 warm incremental compilations. An isolated Cargo
+test using the unchanged dependency backend hangs on Motor, passes with
+Linux's Unix backend, and hangs on Linux when explicitly selecting the
+fallback backend that Motor uses. The blocked native test's symbolicated
+stacks identify `Helper::join` and `Client::acquire`.
+
+Direct native rustc also hangs with the diagnostic options
+`-Z unstable-options --jobs-backend=sync`, with incremental compilation
+disabled. Its helper and coordinator stop at the exact same addresses as in
+the original failure (`0x6dc950b` and `0x6dcac3d`). The equivalent
+`--jobs-backend=1` control completes. This confirms the blocked-shutdown
+mechanism without Lorry; the original invocation with default worker settings
+has not been reproduced directly. These are diagnostic controls, not changes
+to Lorry's compiler flags or milestone gate results. Evidence is retained in
+`build/milestone5/rustc-recheck-*` and `jobserver-recheck-*`. Milestone 5 remains
+incomplete pending compiler integration and the remaining native and
+consolidated gates.
+
+The coverage history explains why this workload reaches the fallback backend
+now. Before milestone 5, `src/bin/lorry/tests/workspace-test-contract.sh` ran
+the example/benchmark matrix on Linux. Its Motor-target checks were cross
+compilations with a Linux-hosted compiler, which still uses the Unix jobserver
+backend. The separate native gate used other workspaces and did not run this
+matrix. Milestone 5 migrates it to `tests/workspace_tests.rs`, executed on Motor
+as well as Linux. The toolchain selector and Lorry's compiler invocation and
+execution code are unchanged from the pre-milestone-5 commit `e37b8a31`;
+`jobserver` 0.1.34 was already pinned. This establishes newly exercised native
+coverage, not the exact scheduling trigger of the original default-worker stall.
+
+At the user's request, the patch was applied to the separate `../jobserver-rs`
+checkout, version 0.1.35. Only `src/wasm.rs` and its regression test in
+`src/lib.rs` changed. That initial verification left the patch uncommitted
+and did not update the toolchain dependency.
+Motor verification uses Cargo to compile the actual patched library source
+and a control containing the same regression test with the original backend.
+The control fails after five seconds with the expected blocked-shutdown error.
+All three patched native unit tests pass as Interactive and None, including
+the regression. Logs are in `build/milestone5/verify-jobserver-patch.log` and
+`jobserver-*-motor-*.log`. Subsequent local verification rebuilt native rustc
+with the patched dependency. The previously hanging direct
+`--jobs-backend=sync` invocation now completes, and both workspace tests pass
+as Interactive and None. Existing jobserver helper tests pass on Motor in both
+roles; Linux GNU and musl, stable/beta/nightly, wasm, Rust 1.85, documentation,
+and formatting checks also pass. The local verification inventory is in
+`build/milestone5/jobserver-local-checks.txt`.
+
+The user pushed the fix to `moturus/jobserver-rs`, branch
+`wasm-jobserver-fix`, commit `bae15a7637b8d1660b96a4084342c1ae0a8b01de`, and
+authorized toolchain integration. This changes the separate
+`../motor-os-toolchain` repository: its source preparation applies
+`patches/rust-jobserver.patch`, pinning the GitHub revision in Rust's manifest
+and lockfile before bootstrap. It does not depend on a local jobserver checkout
+or alter `../rust`. Native rustc, Clippy, and rustfmt were rebuilt from that Git
+source; their ELF checks and archive packaging pass. The unpublished local
+native archive now contains those binaries, with the previous archive retained
+under `build/milestone5/pre-github-native-toolchain`. The compiler dependency
+file records the Git checkout at `bae15a7`. Remaining native suites and the
+complete milestone 5 gates use this archive. No further jobserver tests or CI
+changes are included.
+
+With the GitHub-built archive installed in a disposable standard-image copy,
+the remaining Lorry integration groups pass in both roles. The workspace tests
+that originally stalled pass in 40.62 seconds as Interactive and 40.14 seconds
+as None; the None-role check and Clippy cases also pass with the rebuilt tools.
+The continuation is recorded in `build/milestone5/continue-native-github.log`.
+Native libraries and installed tools are still being validated; these focused
+results do not count as consolidated gate passes.
+
+The continuation then passed the Interactive HTTPd-axum suite and 41 Gix
+library tests, but stopped at the migrated Gix closed-stdout CLI test. Its
+original `std::io::pipe()` setup is unsupported on Motor. The revised Motor
+setup uses a directly captured child stdout and a generated 64 KiB commit
+title, larger than the pipe's capacity, then drops the reader without reading.
+Linux's original setup remains unchanged; all five CLI tests pass through both
+Cargo and Lorry on Linux. The direct Motor test still exits successfully with
+no error, recorded in `build/milestone5/continue-native-gix-direct.log`.
+
+Targeted instrumentation confirmed a production runtime error as both
+Interactive and None: a control captures 65,576 bytes of ordinary log output,
+but after closing the reader, raw `moto_rt::fs::write` returns `BadHandle` (17)
+while `std::io::stdout().write_all` returns success. Motor's stdio adapter
+classifies this as `EBADF`, which Rust's common stdout wrapper intentionally
+suppresses. The pipe writer exposes a lost IPC peer as an invalid handle,
+instead of its existing `NotConnected` (19) error for a closing reader.
+Evidence is in `build/milestone5/gix-stdout-diagnosis.log`; temporary Gix
+instrumentation was removed afterward. No production fix has been applied.
+
+The initial proposal to normalize peer loss to `NotConnected` would prevent
+silent success but leaves a known error-classification gap. At the user's
+request, a deeper review found the existing design in
+`future-work.md`, "Pipe closure is not reported as BrokenPipe": add a distinct
+pipe-closure error in `moto-rt`, return it for a valid writer whose reader is
+gone, and map it to `std::io::ErrorKind::BrokenPipe` in the external Motor
+stdlib port. This requires separately reviewed ABI and stdlib changes.
+Invalid local descriptors must retain their existing behavior. In particular,
+`3b576408` deliberately preserves successful discarded writes after a process
+closes its own standard descriptor; simply disabling Motor's `is_ebadf` hook
+would break that contract.
+
+The older disconnect fix `9cf5eac8` only changed the parent-side
+`ChildStdio::write` closed-event branch. The failing child stdout uses
+`SelfStdio` and the pipe wait/wake path. The existing reader-drop test bypasses
+Rust stdout and accepts any raw error, so its success does not establish that
+Rust callers see closure. Gix already propagates both its writes and explicit
+flush with `?` and returns a failing exit status on error. No Gix production
+change is indicated. The original CLI broken-pipe assertion ran only on Linux;
+milestone 5 newly exercises this known Motor gap. The user subsequently directed
+that such newly exercised Motor checks be logged and deferred so the layout can
+finish first. This case is ignored only on Motor as NLF-001 in
+`new-layout-followups.md`; Linux coverage remains enabled. No runtime fix has
+been applied. The remaining native component checks now pass as both roles,
+with exclusions and test-scope corrections in `new-layout-followups.md`.
+The first consolidated release run passed host checks, all native Linux suites,
+installation/reinstallation, and the complete cross-system gate. It stopped in
+Interactive systest because the C++ unwind helper's exported linker flags
+escaped Rush's emulated subshell and selected C startup for later Rust tests.
+The test-only correction confines those flags to the external Lorry commands;
+the complete native system suite now passes in the focused verification,
+including the unchanged page-zero assertion. NLF-010 records the failure,
+diagnosis, and evidence. The second consolidated release run passed the entire
+Interactive native phase, then stopped in two None-role Lorry unit tests whose
+repository setup and diagnostic expectation assumed Interactive. NLF-011 records
+the test-only corrections; both tests remain enabled. The None continuation is
+now passing after also isolating workspace-trust unit records from Motor's
+persistent role configuration (NLF-012). It passed all 450 enabled Lorry unit
+tests, its complete integration suite, and every remaining native suite.
+The third complete release run is recorded in
+`build/milestone5/full-gate-followups-release-3.log`. It passed all phases through
+Interactive and the corrected None Lorry unit suite, then exposed a migrated
+analyzer test path that truncates the sampled `check` command at five-digit PIDs.
+NLF-013 records the test-path correction and its boundary verification.
+The existing analyzer case reproduced the five-digit truncation and passed
+with the corrected maximum-width path, without changing any resource or semantic
+assertion. The fourth consolidated release run passed on November 15, with
+exit status 0 and `full-test: PASS (release, chv)`, recorded in
+`build/milestone5/full-gate-followups-release-4.log`. It includes complete native
+runs as both roles and the analyzer resource check at a five-digit None PID.
+The user's stopping condition of one complete full-gate pass is satisfied;
+work stopped without a commit. The deferred Motor checks remain documented for
+separate follow-up work.
 
 **Milestone 6: sys-io.** After the sys-io refactoring lands, and only if the
 check is free (question 1). Then the full gate again.

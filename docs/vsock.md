@@ -336,14 +336,14 @@ without releasing outstanding device DMA.
 
 ## Tested launch configuration
 
-The hermetic entrypoint is:
+The cross runner includes the hermetic vsock checks:
 
 ```sh
-src/tests/test-vsock.sh [--release] [--vmm qemu|chv|fc]
+src/tests/cross-test.sh [--release] [--vmm qemu|chv|fc] --image /path/to/installed-standard-image
 ```
 
-It runs `src/tests/test-vsock-outgoing.sh` with the local
-`src/tests/vsock-peer.rs` UDS peer, followed by IP-disabled discovery. The
+It drives the outgoing cases with the local
+`src/sys/tests/cross-peer` UDS peer and checks IP-disabled discovery. The
 default topology is four vCPUs, 1 GiB RAM, guest CID 3, host CID 2, and local
 host port 70000. QEMU uses `vhost-user-vsock-pci`, shared guest memory, and the
 pinned `vhost-device-vsock` 0.3.0 backend with queue size 256. Cloud Hypervisor and
@@ -362,45 +362,39 @@ Runner sources live in `src/vm_scripts/`; copies in `vm_images/` are generated.
 | Image/phase | QEMU / Cloud Hypervisor | Firecracker |
 | --- | --- | --- |
 | Standard suite / vsock peer tests | `main.img` → `motor-os.qcow2`. | Opt-in `raw.img` → `motor-os.img`, with standard-image contents. |
-| System console (`test-system-tty.sh`) | QEMU: raw `motor-os-system-tty.img`. Cloud Hypervisor: a copy of `motor-os.qcow2`, booted with `--system-tty`. | A copy of `motor-os.img`, booted with `--system-tty`. |
-| OOM abort (`test-oom-abort.sh`) | Raw `motor-os-system-tty.img`. | Same. |
-| Developer image | `dev.img` → `motor-os-dev.qcow2`. | Unsupported. |
-| Non-selected VMM boot check | Main qcow2 image. | `base.img` → `motor-os-base.img`. |
-| IP-disabled vsock discovery | Isolated raw `motor-os-vsock-test.img`, with and without the device. | Same. |
+| System console and OOM abort | Cloud Hypervisor: a standard-image copy with `--system-tty`. QEMU names its skip. | A raw standard-image copy with `--system-tty`. |
+| Installed development tools | Standard image plus the toolchain archive. | Named skips; raw disk has no room. |
+| Non-selected VMM boot check | Main qcow2 image. | Raw standard image. |
+| IP-disabled vsock discovery | A standard-image copy with networking configured off, with and without the device. | Same, in raw format. |
 
-The System-console and IP-disabled discovery images are built in temporary
-directories owned by their test scripts, outside `vm_images/`, and the
-standard-image copies are made there too. Each script
-removes its image and boot artifacts after VM teardown, including on failure
-or interruption. Full-suite preparation compiles their binaries without
-creating test images.
+The runner owns disposable image copies and generates their configuration
+under `build/cross-test-*`. It retains failure artifacts and reaps its VMM,
+backend and peer processes. Published images contain no test programs or data.
 
 `raw.img` stays outside default build targets. Both peer and discovery phases
 use the selected VMM, profile, and CPU/memory settings. Main-image full tests
 also boot-check the other two VMMs, including SSH and liveness checks; these
-are separate from vsock protocol coverage. Boot checks and dedicated vsock
-VMs finish before the long-lived suite VM starts. All runners share the VM
+are separate from vsock protocol coverage. All runners share the VM
 exclusion lock and run sequentially to avoid overlapping tap/address ownership.
 Incompatible selections fail before launch, without fallback or stale-image
-reuse; Firecracker developer selection fails before building or launching.
-Developer gates do not require Firecracker boot checks.
+reuse. Firecracker skips toolchain installation and native guest harnesses.
 
 Run both profiles and all supported VMM selections explicitly when validating
 the vsock phase, for example:
 
 ```sh
-src/tests/test-vsock.sh --vmm qemu
-src/tests/test-vsock.sh --release --vmm qemu
-src/tests/test-vsock.sh --vmm chv
-src/tests/test-vsock.sh --release --vmm chv
-src/tests/test-vsock.sh --vmm fc
-src/tests/test-vsock.sh --release --vmm fc
+src/tests/full-test.sh --vmm qemu
+src/tests/full-test.sh --release --vmm qemu
+src/tests/full-test.sh --vmm chv
+src/tests/full-test.sh --release --vmm chv
+src/tests/full-test.sh --vmm fc
+src/tests/full-test.sh --release --vmm fc
 ```
 
 `src/tests/full-test.sh [--release] [--vmm qemu|chv|fc] [--cpus N] [--memory MIB]` includes this phase.
 Core changes follow [AGENTS.md](../AGENTS.md): fresh builds and at least three
-passing main-image full tests in each profile before committing. Non-Lorry
-developer-image validation uses `src/tests/full-test-dev.sh --release` only.
+passing full tests in each profile before committing. There is no separate
+developer-image gate.
 
 ### Coverage and test interpretation
 
@@ -413,7 +407,7 @@ through `full-test.sh`. Pure sys-io helpers are source-included by
 | [Virtio queue fixtures](../src/sys/lib/virtio-async/src/virtio_queue/tests.rs) | Layout/DMA ownership, used-ring ordering, wraparound, wakeups, pool preparation/reuse, malformed packets/events, and failure retention. |
 | [Protocol helper fixtures](../src/sys/tests/virtio-task-tests/src/lib.rs) | Credit boundaries, atomic RX rejection, state transitions, both half-close directions, terminal-cause/device-failure precedence, admission, and cleanup. |
 | [Native codecs](../src/sys/tests/systest/src/vsock.rs) and [NET driver tests](../src/sys/tests/systest/src/net_driver.rs) | Independent wire-layout expectations, malformed IPC, capability/address checks, cancellation, driver lifetime, receive-ring backpressure, and TCP/UDP sharing. |
-| [Live guest cases](../src/sys/tests/systest/src/vsock_outgoing.rs) and [UDS peer](../src/tests/vsock-peer.rs) | Transfers beyond the receive window, accepted-TX drain, shutdown ordering, accept handoff/backpressure, client death, coexistence, and exact global capacity/reuse. Shared framing and payload helpers live in [vsock-protocol.rs](../src/tests/vsock-protocol.rs). |
+| [Live guest cases](../src/sys/tests/systest/src/vsock_outgoing.rs) and [UDS peer](../src/sys/tests/cross-peer/src/bin/vsock-peer.rs) | Transfers beyond the receive window, accepted-TX drain, shutdown ordering, accept handoff/backpressure, client death, coexistence, and exact global capacity/reuse. Shared framing and payload helpers live in [vsock_protocol.rs](../src/sys/tests/systest/src/vsock_protocol.rs). |
 
 Lifecycle regressions cover idle-driver process death separately from unread
 replies/pages, reply-backpressured cross-channel teardown, listener

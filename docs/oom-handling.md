@@ -179,38 +179,40 @@ run boot self-tests for the floors and transitions, the wait queues, victim
 cleanup, pager retry, class propagation and unarmed exhaustion. systest
 covers the error codes, release at exit, killing debugger-paused threads and
 memfs refusals. Pressure itself is exercised from the System console of
-`test-system-tty.sh` by `systest system-oom-tests`: spawn refusal, victim
+`cross-test.sh` by `systest system-oom-tests`: spawn refusal, victim
 order, repeated recovery, a paused victim, Latched refusals and System
 progress, fault and syscall waits and their cancellation. `full-test.sh`
-ends with `src/tests/test-oom-abort.sh`, which drains a separate disposable
+also runs the cross runner's abort phase, which drains a separate disposable
 guest below 512 pages and requires the exact report and panic above.
 
 Changes here are gated like other core work: `full-test.sh` three times in
 debug and three in release, including at least one `--cpus 1` run per
-build, then `full-test-dev.sh --release`.
+build. The full gate includes native tests in both Motor roles.
 
 ### Reproducing the abort by hand
 
-Build and boot a fresh System-console image. Test images need an absolute
-`TEST_IMAGE_ROOT` outside the repository's `vm_images`:
+Build and boot a disposable standard-image copy with a System console:
 
 ```sh
 root="$(mktemp -d)"
-make -j"$(nproc)" system-tty.img systest BUILD=release TEST_IMAGE_ROOT="$root"
-MOTO_IMAGE=motor-os-system-tty.img MOTO_MEMORY_MIB=256 "$root/vm_images/release/run-qemu.sh"
+make -j"$(nproc)" main.img systest BUILD=release
+cp src/vm_scripts/*.sh vm_images/release/kloader vm_images/release/initrd "$root/"
+cp --reflink=auto --sparse=always vm_images/release/motor-os.qcow2 "$root/"
+MOTO_MEMORY_MIB=256 "$root/run-chv.sh" --system-tty
 ```
 
 From another terminal, copy `build/bin/release/systest` into the guest as
 `/none/tmp/oom-abort` with the repository's test key:
 
 ```sh
-chmod 600 src/tests/test.key
-scp -F /dev/null -P 2222 -i src/tests/test.key -o IdentitiesOnly=yes \
-  -o StrictHostKeyChecking=yes -o UserKnownHostsFile=src/tests/test-known-hosts \
+cp src/vm_scripts/test.key /tmp/motor-oom-test.key
+chmod 600 /tmp/motor-oom-test.key
+scp -F /dev/null -P 2222 -i /tmp/motor-oom-test.key -o IdentitiesOnly=yes \
   build/bin/release/systest motor@192.168.4.2:/none/tmp/oom-abort
 ```
 
-In the guest's System serial console run `chmod r-xr-xr-x /none/tmp/oom-abort`
+Verify the SSH host key as for an ordinary login. In the guest's System serial
+console run `chmod r-xr-xr-x /none/tmp/oom-abort`
 and then `/none/tmp/oom-abort system-oom-abort`. Expect the protected-process
 inventory, `oom-abort: READY`, the kernel's report and panic, and the VM
 exiting. The helper keeps its memory until the guest dies, so use only a

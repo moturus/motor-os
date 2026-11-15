@@ -514,14 +514,14 @@ authorizes an operation must use an explicit authorization policy.
   matrix: mixed redirection masks through `std::process::Command`,
   environment mutation, duplication, the direct-spawn hint, and non-stdio
   descriptors. `systest stdio-terminal-tests` runs just these tests.
-- `src/tests/test-tui.sh` validates the real providers end to end: the
+- `src/tests/cross-test.sh` validates the real providers end to end: the
   probe (`systest stdio-terminal-report-child`) reports `111` on the serial
   console, in SSH pty sessions, and in rmux panes, and `000` in non-pty SSH
   sessions and their descendants. It also injects terminal Ctrl+C into
   Default and handler leaves, verifies fd 0 and fd 3 delivery, foreground
   route restoration, no parent callback, retained type-ahead, the Crossterm
   adapter, and a nested rmux → rush → Default-child chain.
-- `src/tests/test-terminal-size.sh` validates the size half of the same
+- Its terminal-size phase validates the size half of the same
   providers, from the application's end: rush and red laid out for the size
   each terminal last reported, and repainted when it changes with no key
   typed, on the serial console, in an SSH pty session, and in an rmux pane —
@@ -534,7 +534,7 @@ All three run from `src/tests/full-test.sh`.
 terminal-chain probes. Lower-level atomic classification, route generation,
 batch scanning, and fixed-status process interruption are covered in their
 own tests: moto-sdk's `ipc::stdio_pipe` tests run natively under
-`full-test-dev.sh`, and the rt.vdso, moto-rt, and kernel tests are reached
+`full-native-test.sh`, and the rt.vdso, moto-rt, and kernel tests are reached
 transitively by `full-test.sh`.
 
 Redirection has its own set, also run from `full-test.sh`:

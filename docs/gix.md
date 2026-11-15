@@ -1,6 +1,6 @@
 # gix: Git on Motor OS
 
-The developer image comes with `gix`, a small Git client, at
+The toolchain archive installs `gix`, a small Git client, at
 `/user/bin/dev/gix`. It works with normal Git repositories: a worktree with a
 `.git` directory, full history and SHA-1 object names. Gix reads and writes
 the same files as Git does, so you can copy a repository between Motor OS and
@@ -323,10 +323,11 @@ can use 512 MiB of buffers in all, and the files of one commit can add up to
 
 ## Source and tests
 
-The program is in [src/bin/gix](../src/bin/gix). Its tests are in
-[test-gix.sh](../src/tests/test-gix.sh), which runs them on Linux and inside
-a Motor OS VM, and they are part of the release developer suite,
-`src/tests/full-test-dev.sh --release`.
+The program and its Cargo tests are in [src/bin/gix](../src/bin/gix).
+`src/tests/full-native-test.sh` runs the supported native harnesses on Linux
+and Motor. `src/tests/cross-test.sh` checks guest HTTPS/SSH transports with
+local host servers and compares Git index and pack formats. Both are included
+in `src/tests/full-test.sh`; generated repositories stay in temporary directories.
 
 ### Testing changes to the Gitoxide fork
 

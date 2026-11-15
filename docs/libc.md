@@ -116,7 +116,7 @@ full-test suites:
 ## On-image layout and configuration
 
 Motor OS keeps the toolchain and libc out of the classic Unix `/usr` + `/etc`
-trees and uses the ownership-based `/devtools` and `/system` trees:
+trees and uses the ownership-based `/user`, `/none`, and `/system` trees:
 
 | What | Where |
 | --- | --- |

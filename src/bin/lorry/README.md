@@ -377,8 +377,8 @@ Clippy outputs and incremental state are separate from check's. Fresh units
 replay warnings. Configuration discovery follows the driver, including
 `.clippy.toml` or `clippy.toml` above the package and `CLIPPY_CONF_DIR`.
 Editing a configuration or creating a nearer one invalidates the affected
-units. On Motor, the development image supplies the matching driver through
-`/devtools/bin/clippy-driver`.
+units. On Motor, the installed toolchain supplies the matching driver through
+`/user/bin/dev/clippy-driver`.
 
 ## Cargo's cache
 
@@ -487,7 +487,7 @@ Targeted fetch retains complete resolution inputs, but full metadata can still
 need sources outside that target closure.
 
 The ordinary complete-graph limit is 64 outside packages; builds from Cargo's
-cache have no default limit. The developer image
+cache have no default limit. The installed toolchain's policy
 uses 384; `--max-packages N` overrides it for one command subject to system
 constraints. A scoped review does not reduce complete resolution or its cap.
 Dependency depth has no default cap, matching Cargo. An explicit
@@ -588,7 +588,7 @@ lorry +motor-1.99.0-beta-f47d5bb-dev.2-<full-toolchain-key> \
 ```
 
 Without a selector, `RUSTC` takes precedence over `rustc` from `PATH` on
-Linux. Motor OS normally uses `/devtools/bin/rustc`. Only installed
+Linux. Motor OS normally uses `/user/bin/dev/rustc`. Only installed
 target triples are supported; custom JSON targets are rejected.
 
 Lorry supports only Cargo compiler-identity compatibility family 1.99, the

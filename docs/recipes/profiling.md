@@ -53,9 +53,8 @@ Note: you may need to manually edit profile.folded (it is a text file) or fiddle
 
 ## Built-in microbenchmarks
 
-`systest` carries three measurement tools next to its test suite (on the
-development image it is `/devtools/tests/systest`; on the standard image,
-copy `build/bin/release/systest` into the VM first). A bare `systest` runs
+`systest` carries three measurement tools next to its test suite.
+Copy `build/bin/release/systest` into the VM first. A bare `systest` runs
 the suite only; each tool has its own subcommand and prints to stdout.
 
 * `systest wake-bench` measures a cross-thread wake/wait hop: ns per
@@ -98,9 +97,9 @@ take the difference.
 ## Other benchmarks
 
 * `rnetbench` (`src/bin/rnetbench`) measures TCP between the VM and the
-  host. Server in the VM: `/devtools/tests/rnetbench --server` (port 40000
-  by default, `-p` changes it; on the standard image copy
-  `build/bin/release/rnetbench` in first). Client on the host, from
+  host. Upload `build/bin/release/rnetbench` to `/none/tmp` and run
+  `/none/tmp/rnetbench --server` (port 40000 by default, `-p` changes it).
+  Client on the host, from
   `src/bin/rnetbench`: `cargo run --release -- --client 192.168.4.2:40000`.
   The client runs three phases of `-t` seconds each (default 5): a
   round-robin exchange of 64-byte messages (iterations per second and usec

@@ -351,12 +351,31 @@ current reclaim stalls allocs/frees.
 
 ## Pipe closure is not reported as BrokenPipe (2026-10-09)
 
-The native writer no longer keeps succeeding after its reader is dropped:
-rt.vdso's `create_stdio_pipes` gives the child a direct pipe, closing the
-parent descriptor drops its endpoint, and `StdioPipe::write_timeout_impl`
-propagates peer-close errors. The source of
-`systest::stdio::test_child_stdout_reader_drop` covers termination after
-reader drop, but its child accepts any write error.
+The raw native writer observes reader loss: rt.vdso's `create_stdio_pipes`
+gives the child a direct pipe, closing the parent descriptor drops its
+endpoint, and `StdioPipe::write_timeout_impl` propagates peer-close errors.
+`systest::stdio::test_child_stdout_reader_drop`, added in `a3be0fed`, calls
+`moto_rt::fs::write` directly and accepts any write error. It does not establish
+that Rust's stdout writer reports the disconnect. The source-only review in
+`9b45fc7b` overstated this when it replaced the original `f53a85c9` observation
+of a stdout `write_all` loop that kept succeeding.
+
+Milestone 5 diagnosis on 2026-11-14 confirmed the distinction as Interactive
+and None. After dropping Gix's directly captured stdout reader, raw
+`moto_rt::fs::write` returned `BadHandle` (17), but Rust stdout `write_all`
+returned success. Motor's `sys/stdio/motor.rs::is_ebadf` classifies raw error
+17 as a closed local standard descriptor; shared `std::io::stdio::handle_ebadf`
+then discards the error. Gix propagates write and flush errors but receives
+success. Evidence is in `build/milestone5/gix-stdout-diagnosis.log`; the
+temporary instrumentation was removed. This explains the current failure
+without establishing the precise cause of the original October workload.
+
+Commit `9cf5eac8` changed the parent-side `ChildStdio::write` closed-event
+case from `BadHandle` to `NotConnected`. It did not change the child's own
+`SelfStdio` writer or normalize errors from the pipe's wait/wake calls.
+Commit `3b576408` explicitly preserves successful discarded writes when the
+process closes its own standard descriptor; that separate behavior is now
+covered by `systest::stdio_errors` and must survive a pipe-closure fix.
 
 The 2026-11-05 OOM follow-up developer gate also exposed this classification
 in sysbox's argument-error tests: `cut -b=1` exited before the fixture's stdin

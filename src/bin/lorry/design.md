@@ -365,10 +365,10 @@ workspaces, caches, repositories, and None approvals. `motor_fs.rs` preserves
 source identity through None's execute bit and shares workspace state by kind.
 
 Motor's native compiler toolchain is an installed platform capability, not a
-Lorry bootstrap responsibility. Standard development images provide `/devtools/bin/cc`
-and `/devtools/bin/c++`, the `/devtools/llvm/bin/llvm` multicall with Clang, LLD, and
-LLVM binutils, and the complete C/C++ sysroot below `/devtools/llvm` until
-the next toolchain release moves it. Build scripts find compilers and archivers
+Lorry bootstrap responsibility. Installing the toolchain archive provides
+`/user/bin/dev/cc` and `/user/bin/dev/c++`, the `/user/lib/llvm/bin/llvm`
+multicall with Clang, LLD, and LLVM binutils, and the complete C/C++ sysroot
+below `/user/lib/llvm`. Build scripts find compilers and archivers
 through PATH or the caller's compiler environment. No Lorry native-tool grants
 or argument prefixes remain.
 

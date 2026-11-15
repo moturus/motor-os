@@ -668,7 +668,7 @@ This works because Motor already resolves both halves in the **runtime's** spawn
 path, before rmux or rush is involved:
 
 - **PATH lookup** — `rt.vdso/src/rt_process.rs` stats `<dir>/<exe>` across `PATH`,
-  so a bare `sh` finds `/user/bin/sh` exactly as `/devtools/bin/cc` is found today.
+  so a bare `sh` finds `/user/bin/sh` exactly as `/user/bin/dev/cc` is found today.
 - **Shebang** — `rt_process.rs:170` matches `SCRIPT_MAGIC = *b"#!/"` and
   `run_script` (`:178`) reads the interpreter line, opens it, and `run_elf`s it
   with the script as an argument.
@@ -1281,11 +1281,10 @@ exits when the last one goes. Two consequences worth keeping:
 
 ### 9.4 On the real thing
 
-`src/tests/test-terminal-size.sh` boots the image under qemu with the console
-on a fifo, drives rmux on the actual Motor console through actual sys-tty,
-replays the stream, and asserts the picture and the byte costs. This is where
-§3.3's byte mangling and
-§3.4's CRLF are actually proven.
+`tests/motor.rs` runs through Lorry on Motor, drives rmux with Motor terminal
+pipes, replays the stream, and asserts the picture and byte costs, including
+§3.3's byte mangling and §3.4's CRLF. `src/tests/cross-test.sh` separately
+checks the sys-tty and SSH terminal transports. The full gate includes both.
 
 **TRAP: `C-a` is doubled under qemu.** `run-qemu.sh` passes `-nographic`, which
 implies `-serial mon:stdio` and makes **`Ctrl-A` qemu's monitor escape prefix**
@@ -1953,7 +1952,7 @@ cost is for** (§6.3). It used `run-qemu-echr.sh`, since `-nographic` keeps
    harness clears the rendezvous first.
 
 That harness was run by hand. Its checks now run in
-`src/tests/test-terminal-size.sh`, part of `full-test.sh` (§9.4).
+`tests/motor.rs`, included by `full-test.sh` (§9.4).
 
 **M10 — The console changes shape. Done.** The gap M3 named and every phase
 since walked past: rmux learned its size once and believed it for ever. Reported
@@ -1992,7 +1991,7 @@ Three things it had to get right, and each is a test:
 
 The host tests drive it through `TIOCSWINSZ` on the pty, `tests/m1.rs` drives
 the Motor shape — a console that is a pipe, where the probe is the only channel
-there is — and `src/tests/test-terminal-size.sh` is a terminal that reports a
+there is — and `tests/motor/terminal.rs` is a terminal that reports a
 new size, which is exactly what a dragged window looks like from inside the
 guest. Both halves of the report are pinned, the second by asserting the status
 line has *left* the row it was on.
@@ -2064,9 +2063,8 @@ happened to each is the shortest account of where the effort actually went.
    built in M8: a line that scrolls off stops being cells and becomes text plus
    style runs.
 5. **sys-tty and SSH are two different terminals** (§3.3). Still true, and it
-   is why M1 was verified on both and why `src/tests/test-terminal-size.sh`
-   (§9.4) drives the serial console specifically — the host tests are all the other
-   terminal.
+   is why M1 was verified on both and why `src/tests/cross-test.sh`
+   (§9.4) retains checks for both transports alongside the native rmux tests.
 
 ---
 

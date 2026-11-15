@@ -557,7 +557,7 @@ Console arbitration:
   prompt that passes waiting stderr that way), a full pipe emptied by one
   read, unread EOF tails, UART completion, and a message wake sent before
   polling;
-- `test-system-tty.sh` checks short error bursts and one larger than 16 KiB
+- The System-console phase of `cross-test.sh` checks short error bursts and one larger than 16 KiB
   against a unique next-prompt marker. A blocking stdin handshake separates
   command echo from the checked output. The checked text must otherwise be
   exact, except for whole log records on lines of their own: sys-tty may fit
@@ -626,7 +626,7 @@ message remains.
 
 The feature gate is the complete main-image `src/tests/full-test.sh`, three
 successful runs in debug and three in release for each core patch. It is not
-gated by `full-test-dev.sh`. Relevant native focused tests run first; formatting
+included through `full-native-test.sh`. Relevant native focused tests run first; formatting
 and strict clippy must be clean. The tests use no new Internet resource.
 
 ## Chosen defaults

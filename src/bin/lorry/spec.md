@@ -60,7 +60,7 @@ targets are unsupported.
 - Linux compiler discovery follows Cargo-compatible precedence: a leading
   `+toolchain` asks rustup only to locate that toolchain's `rustc`; otherwise
   `RUSTC` precedes `rustc` from `PATH`.
-- Motor defaults to `/devtools/bin/rustc`. A controlled `RUSTC` or
+- Motor defaults to `/user/bin/dev/rustc`. A controlled `RUSTC` or
   absolute configured override may be allowed unless system policy locks the
   compiler.
 - Missing rustup/toolchain/compiler selections must produce actionable errors.
@@ -872,8 +872,8 @@ verified source descriptions. It accepts feature selection, remains offline,
 and does not require or reconstruct admission. Explicit source vetoes and
 resource limits apply; tree neither compiles package code nor needs build-time
 execution grants.
-The developer image's Lorry policy and native product fixture allow 384 outside
-packages in the complete lock. The ordinary default remains 64; the one-run
+The installed toolchain's Lorry policy allows 384 outside packages in the
+complete lock. The ordinary default remains 64; the one-run
 `--max-packages N` override obeys configured system constraints.
 
 Path-root allowlists constrain outside path packages. Editable members are
@@ -2065,8 +2065,8 @@ exists. Output and verbose commands must not expose credentials or secret
 environment values.
 
 The requirements below govern validation coverage, not inputs or behavior of
-an installed Lorry command. `tests/test-all.sh` runs every distinct product
-boundary once and must finish within a hard 30-minute wall-clock budget:
+an installed Lorry command. Lorry's Cargo harnesses run through Cargo and Lorry
+on Linux, and through Lorry on Motor OS:
 
 - the Rust suite covers parsing, resolution, admission, policy, acquisition,
   archives, repositories, cache behavior, sandboxing, compilation, execution,
@@ -2074,16 +2074,21 @@ boundary once and must finish within a hard 30-minute wall-clock budget:
 - focused contracts prove multiple targets, selected workspaces, and
   procedural-macro host execution/cache reuse in Linux-native and
   Linux-to-Motor builds;
-- a live check through the exact current Motor Cargo retains the supported
-  lockfile-family contract, while a dependency-free fixture proves native and
-  Linux-to-Motor release artifact identity against the paired Cargo;
-- one fresh real registry acquisition followed by one warm reuse proves the
-  external download and immutable-publication boundary;
+- frozen resolution results are asserted directly; the host phase of
+  `src/tests/full-test.sh` compares them with the selected Cargo;
+- acquisition from a loopback registry followed by warm reuse proves the
+  download and immutable-publication boundary without Internet traffic;
 - one built curl graph exercises every ignored production curl-process case;
   and
-- one release Motor VM proves that the cross-built Lorry executes, self-builds
-  byte-identically, builds/runs/tests the compact native fixture, and reuses
-  one persistent incremental root across two native debug compilations.
+- native tests create their own workspaces and exercise both roles, source
+  permissions, child authority, compilation and incremental reuse;
+- `src/tests/cross-test.sh` creates a dependency-free workspace and compares
+  its Cargo and Lorry outputs on Linux, then host and native Motor outputs.
+
+The crate tests neither invoke Cargo nor boot a VM. The native Helix build is
+ignored by default and selected by name with the full gate's `--full` option.
+Ignored curl integration tests run on every native gate with a loopback TLS
+server. Host preparation supplies locked sources; guest tests stay offline.
 
 Debug/release unit duplication, repeated clean runs, downstream Red/Rush
 campaigns, custom validation images, duplicate repositories, second Lorry

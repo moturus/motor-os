@@ -81,12 +81,13 @@ What works today:
 * **Programs**: the rush shell, the rmux terminal multiplexer, the red and
   kibim editors, an SSH server with SFTP, two static web servers with TLS,
   the usual commands (ls, ps, top, ss, ping, free, ...), and ripgrep.
-* **A self-hosting developer image**: native Clang/LLVM, native rustc, and
+* **A self-hosting toolchain**: native Clang/LLVM, native rustc, and
   Lorry, a smaller, stricter Cargo replacement for security-sensitive
   environments (Cargo-compatible: the same `Cargo.toml` and `Cargo.lock`,
   byte-identical binaries; but offline, with every dependency fetched once,
-  checked, and approved before it is built), plus curl, mdbg, and the
-  test suites.
+  checked, and approved before it is built), plus mdbg. Install the toolchain
+  archive into the standard image; test suites stay in their Cargo crates
+  and are uploaded only to disposable images during validation.
 
 ## Status
 

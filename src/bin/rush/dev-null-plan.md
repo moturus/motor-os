@@ -108,34 +108,16 @@ the trade-off is probably not worth it.
 
 ## Tests
 
-Host tests in `tests/phase3.rs`/`phase6.rs` will pass before and after this
-change, so they are regression guards only. The real gate should be in the VM.
-`src/tests/full-test.sh` already sources `src/tests/test-rush-script-caps.sh`
-(line 410) and calls its functions around line 900, so add something like:
+When this proposal is implemented, add Cargo tests in `tests/phase3.rs` and
+`tests/phase6.rs`. The image-layout migration runs them on Linux and Motor
+through `src/tests/full-native-test.sh`, transitively from `full-test.sh`.
+No separate SSH driver or published test files are needed.
 
-```sh
-test_rush_dev_null() {
-  local out
-  out="$(vm_ssh_stdout "/user/bin/rush -c '
-    echo hidden >/dev/null
-    echo hidden >/dev/null 2>&1
-    echo hidden 2>/dev/null >/dev/null
-    /user/bin/ls /nonexistent-rush-devnull 2>/dev/null
-    /user/bin/ls / >/dev/null
-    cat </dev/null
-    { echo hidden; } >/dev/null
-    echo hidden >&-; echo closed=\$?
-    echo msg 2>&1 1>/dev/null
-    echo visible
-  '")" || fail "rush /dev/null redirection failed"
-  [ "$out" = $'closed=0\nmsg\nvisible' ] || fail "rush /dev/null output: '$out'"
-}
-```
-
-called from `full-test.sh` next to `test_rush_script_caps rush`. Also add a
-host regression in `tests/phase6.rs` asserting `echo x >/dev/null`,
-`2>/dev/null`, `< /dev/null`, and `>&-` all reach the command and give the POSIX
-status.
+Cover stdout and stderr discard, empty stdin, grouped commands, descriptor
+closure with `>&-`, and ordering in `echo msg 2>&1 1>/dev/null`. Assert both
+the output and status, including that `>&-` succeeds and the ordered redirect
+still emits `msg`. Linux results alone do not prove the Motor behavior because
+Linux provides a real `/dev/null`.
 
 ## Remaining gaps (worth documenting, not necessarily fixing now)
 

@@ -57,9 +57,9 @@ sysroot/user/lib/llvm/    headers and libraries
 the Motor OS build uses them for Lua, Helix's C++ grammars, gix, curl, and
 Lorry.
 
-## Development-image layout
+## Installed toolchain layout
 
-The development image contains:
+After installing the toolchain archive, the standard image contains:
 
 ```text
 /user/lib/llvm/bin/llvm       native LLVM/Clang/LLD multicall binary

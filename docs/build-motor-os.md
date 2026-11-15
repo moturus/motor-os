@@ -127,12 +127,11 @@ The workflow performs these stages:
 4. Unpack the native toolchain's overlays into the assembly with
    motor-os-tar's `tar`, built for Linux.
 5. Build the external sources into the assembly: Lua, QuickJS-NG, ripgrep,
-   Helix, sed, tar and zstd, Javy/Wasmi, and Wasmtime, and fetch the
-   dependencies of the developer image's library sources. Every run builds
+   Helix, sed, tar and zstd, Javy/Wasmi, and Wasmtime. Every run builds
    them all again; their Cargo target directories in the assembly keep that
    incremental.
-6. Build the base, standard, development, and wasm images with
-   `make images BUILD=release`.
+6. Build the base and standard images with `make images BUILD=release`,
+   and repackage the native toolchain with `make toolchain-archive BUILD=release`.
 
 The toolchain release builder uses a smaller entry point:
 
@@ -154,7 +153,7 @@ build/assembly/
     build/       the external sources' build trees
     images/      toolchain overlays (libc, llvm, rustc, rust-analyzer),
                  overlays of the external sources (lua, quickjs, rg, tar,
-                 helix, sed, javy, wasmtime), and sys-lib-deps
+                 helix, sed, javy, wasmtime)
     tests/       the Javy and Wasmtime test inputs
 ```
 
@@ -165,15 +164,13 @@ The final images are:
 ```text
 vm_images/release/motor-os-base.img
 vm_images/release/motor-os.qcow2
-vm_images/release/motor-os-dev.qcow2
-vm_images/release/motor-os-wasm.qcow2
 ```
 
 The standard image includes the libc configuration, ripgrep, tar, and zstd.
-The development image additionally includes LLVM/Clang, the native Rust
+The separately installed toolchain archive includes LLVM/Clang, the native Rust
 toolchain, rust-analyzer with matching `rust-src`, headers, and libraries.
-Generated `/devtools` content is never allowed to leak into the base or
-standard image.
+Both images contain no tests. The full gate uploads test inputs and sources to
+disposable copies; there is no `/devtools` tree or developer image.
 
 The native rust-analyzer lives at `/user/lib/rust/bin/rust-analyzer` and its
 sources at `/user/lib/rust/lib/rustlib/src/rust/library`. The image contains

@@ -6,7 +6,7 @@ from [Rust Book](https://doc.rust-lang.org/book/title-page.html) inside a Motor 
 
 First, make sure that you can [build and run Motor OS](https://github.com/moturus/motor-os/blob/main/docs/build.md).
 
-To build the program inside a VM instead, on the developer image, see
+To build the program inside a VM with the toolchain installed, see
 [Hello Motor OS, natively](hello-motor-os-native.md).
 
 On the host, start from the Motor OS checkout. Create the example below it

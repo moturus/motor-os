@@ -31,7 +31,7 @@ run `cargo run --release -- <arguments>`. That directory's Cargo configuration
 supplies the required build flags. Cargo's `--release` selects the host tool's
 build profile; the separate `debug|release` argument selects guest build inputs.
 
-The developer image also carries this Linux binary at `/user/lib/imager/imager`,
+The toolchain archive also installs this Linux binary at `/user/lib/imager/imager`,
 off the guest's PATH, so it can be copied out to a Linux host. It does not run
 on Motor OS.
 
@@ -86,18 +86,18 @@ serialize image construction:
 make base.img BUILD=release
 make main.img BUILD=release
 make raw.img BUILD=release
-make dev.img BUILD=release
 ```
 
-These produce `motor-os-base.img`, `motor-os.qcow2`, `motor-os.img` (the raw
-standard image), and `motor-os-dev.qcow2`, respectively. Later rebuilding an
+These produce `motor-os-base.img`, `motor-os.qcow2`, and `motor-os.img` (the raw
+standard image), respectively. Later rebuilding an
 image replaces any customizations made directly to that output file.
 
 ### Image configuration
 
 The YAML file is read from the supplied host path. Start from the image
 descriptions in [`src/imager`](../src/imager), such as `motor-os-base.yaml`,
-`motor-os.yaml`, and `motor-os-dev.yaml`.
+and `motor-os.yaml`. Both images contain no tests. Development tools are
+installed from the toolchain archive onto a standard image.
 
 | Field | Meaning |
 | --- | --- |
@@ -117,9 +117,8 @@ descriptions in [`src/imager`](../src/imager), such as `motor-os-base.yaml`,
 | `ca_bundle` | Optional host PEM file installed as `/system/cfg/ssl/ca-certificates.crt`. Relative paths use `REPO ROOT`. The build fails unless it exists and contains only certificates; text outside PEM blocks is allowed. |
 
 Source snapshots are added after static overlays and exclude `.git`, `.lorry`,
-`__pycache__`, and `target` directories. Static overlays omit `devtools`
-directories unless the configuration declares `/devtools` or a directory
-below it. File modes come from the
+`__pycache__`, and `target` directories. Every final image must contain exactly
+the `system`, `user`, and `none` roots. File modes come from the
 [permission policy](fs-permissions.md#imager-enforcement), not host ownership
 or host read/write permissions.
 

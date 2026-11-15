@@ -9,8 +9,6 @@ and several useful scripts:
 - `motor-os-base.img` contains the minimal bootable system and user shell tools;
 - `motor-os.qcow2` is the standard production image, adding networking, DNS, and
   regular user programs;
-- `motor-os-dev.qcow2` adds native toolchains, sources, diagnostics, tests, and
-  the bundled sample website;
 - `create-tap.sh` creates the local `moto-tap` interface the VMs use for
   networking and the NAT rules that let them reach the Internet; the build runs
   the same steps, so it is needed only after a host reboot;
@@ -54,12 +52,12 @@ lines select no options; `system-tty=1` and `no-system-tty` do not select a
 System console. Command lines must terminate within 4096 bytes of mapped boot
 RAM, including the NUL; an invalid address or missing terminator fails boot.
 
-`src/tests/test-boot-options.sh [--release] [--vmm qemu|chv|fc]` checks the
+`src/tests/cross-test.sh` checks the
 standard image's console capabilities and boots without a network device.
-`full-test.sh` calls it for every available VMM. Guest tests check the query's
+boot options on every available VMM. Guest tests check the query's
 bytes and access control. Kernel command-line reader self-tests run inside
 debug Motor OS boots; sys-init's parser has host unit tests, and
-`test-vm-image-format.sh` checks host argument construction and QEMU's refusal.
+the host checks in `full-test.sh` verify argument construction and QEMU's refusal.
 
 For host-side image creation, data filesystems, guest files, permission
 changes, resizing, and SSH/TLS credential replacement, see the [imager command reference](imager.md).
@@ -76,7 +74,7 @@ as running this from the checkout with network access:
 cargo install --locked --version 0.3.0 vhost-device-vsock
 ```
 
-The lookup (`src/tests/vm-vsock-backend.sh`) takes an explicit
+The lookup in `src/tests/cross-test.sh` takes an explicit
 `VHOST_DEVICE_VSOCK` path first, then `PATH`, where `cargo install` puts the
 backend beside `cargo` itself. It checks the version and never skips
 coverage. An explicit path is only checked, never replaced; a failed install
@@ -85,11 +83,11 @@ or a mismatched explicit backend fails the test and prints the command.
 QEMU uses opt-in shared guest RAM (`MOTO_SHARED_MEM=1`), preserving
 the runner's hugepage policy and any `MOTO_HUGEPAGES` override.
 
-`src/tests/test-vsock.sh [--release] [--vmm qemu|chv|fc]` runs outgoing stream
-tests on the selected VMM (QEMU by default), then the existing IP-disabled
+`src/tests/cross-test.sh` runs outgoing stream
+tests on the selected VMM (Cloud Hypervisor by default), then the IP-disabled
 discovery cases on the same VMM. The full standard suite calls this phase.
-The selected Firecracker phase requests `raw.img`; developer-image tests
-support QEMU and Cloud Hypervisor only. All phases share the VM lock and run
+The selected Firecracker phase requests `raw.img` and skips development tools.
+All phases share the VM lock and run
 sequentially; each owns and reaps its VMM and any backend/peer processes.
 
 ## Tools available inside the Motor OS VM
@@ -101,8 +99,8 @@ This is how `top` looks like:
 Motor OS boots into a unix-like shell [rush](https://github.com/moturus/rush).
 The shell is somewhat barebones now (contributions are welcome!).
 
-- `ls /user/bin` shows the standard commands; the development image also
-  places `/user/bin/dev` on `PATH`, as does installing the toolchain archive;
+- `ls /user/bin` shows the standard commands; installing the toolchain archive
+  adds development tools in `/user/bin/dev` and extends `PATH`;
 - `free`, `kill`, `ping`, `printenv`, `ps`, `ss`, and `top` are worth mentioning;
 - `mkdir [-p | --parents] [--] DIRECTORY...` creates directories. With `-p`,
   it creates missing parents and accepts directories that already exist;
@@ -171,9 +169,8 @@ The shell is somewhat barebones now (contributions are welcome!).
   trouble) follow GNU `diff`, and so do the hunks: it finds the same edit
   script GNU `diff` does. Side-by-side and ed output, `-B`, `-I` and `-x`
   are not supported;
-- On the development image, `/devtools/tests/systest`,
-  `/devtools/tests/mio-test`, and `/devtools/tests/tokio-tests` are useful to
-  make sure everything is working as expected;
+- Native Cargo harnesses for systest, mio, and Tokio run through
+  `src/tests/full-native-test.sh` in an uploaded source checkout;
 - `/system/logs` contains current and rotated service logs. Interactive
   sessions can list and read them, System-role strobe alone creates and rotates
   them, and None-role processes cannot traverse the directory. The unfiltered
@@ -192,9 +189,9 @@ The shell is somewhat barebones now (contributions are welcome!).
 
 ![ps -H](ps.png)
 
-## Git on the developer image
+## Git on Motor OS
 
-The developer image includes `/user/bin/dev/gix` for Git repositories:
+The toolchain archive installs `/user/bin/dev/gix` for Git repositories:
 HTTPS/SSH clone and fetch, local inspection and authoring, branch switching,
 merging, and single-ref HTTPS/SSH push. See [gix on Motor OS](gix.md) for
 commands, configuration, recovery and limits.
