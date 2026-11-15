@@ -450,33 +450,18 @@ mod tests {
         std::os::unix::fs::symlink("value.txt", root.join("linked.txt")).unwrap();
         std::os::unix::fs::symlink("src", root.join("linked-dir")).unwrap();
         let manifest = Manifest::load_for_vendor(&root).unwrap();
-        let compare_cargo = |manifest: &Manifest| {
-            let output = std::process::Command::new(env!("CARGO"))
-                .args([
-                    "package",
-                    "--list",
-                    "--offline",
-                    "--allow-dirty",
-                    "--manifest-path",
-                ])
-                .arg(&manifest.path)
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let mut cargo = String::from_utf8(output.stdout)
-                .unwrap()
-                .lines()
-                .filter(|path| *path != "Cargo.toml.orig")
-                .map(|path| root.join(path))
-                .collect::<Vec<_>>();
-            cargo.sort();
-            assert_eq!(files(manifest).unwrap(), cargo);
-        };
-        compare_cargo(&manifest);
+        assert_eq!(
+            files(&manifest).unwrap(),
+            [
+                "Cargo.lock",
+                "Cargo.toml",
+                "linked-dir/lib.rs",
+                "linked.txt",
+                "src/lib.rs",
+                "value.txt"
+            ]
+            .map(|path| root.join(path))
+        );
         let selected = files(&manifest).unwrap();
         assert!(selected.contains(&root.join("linked.txt")));
         assert!(selected.contains(&root.join("linked-dir/lib.rs")));
@@ -513,7 +498,17 @@ mod tests {
         fs::write(&included.path, fs::read_to_string(&included.path).unwrap().replace(
             "edition = \"2024\"", "edition = \"2024\"\ninclude = [\"/src/**\", \"/linked.txt\", \"/.hidden\"]\nexclude = [\"*\"]"
         )).unwrap();
-        compare_cargo(&included);
+        assert_eq!(
+            files(&included).unwrap(),
+            [
+                ".hidden",
+                "Cargo.lock",
+                "Cargo.toml",
+                "linked.txt",
+                "src/lib.rs"
+            ]
+            .map(|path| root.join(path))
+        );
         fs::write(
             &manifest.path,
             "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
@@ -533,7 +528,19 @@ mod tests {
             );
         }
         fs::write(root.join(".gitignore"), ".hidden\nvalue.txt\n").unwrap();
-        compare_cargo(&manifest);
+        assert_eq!(
+            files(&manifest).unwrap(),
+            [
+                ".gitignore",
+                ".hidden",
+                "Cargo.lock",
+                "Cargo.toml",
+                "linked-dir/lib.rs",
+                "linked.txt",
+                "src/lib.rs"
+            ]
+            .map(|path| root.join(path))
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
