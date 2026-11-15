@@ -343,14 +343,12 @@ mod platform {
             libc::SYS_listen,
             libc::SYS_accept,
             libc::SYS_accept4,
-            libc::SYS_sendto,
             libc::SYS_sendmsg,
             libc::SYS_sendmmsg,
-            libc::SYS_recvfrom,
-            libc::SYS_recvmsg,
-            libc::SYS_recvmmsg,
         ];
-        let mut filters = Vec::with_capacity(denied.len() * 2 + 12);
+        // Rust's fork/exec status channel needs socket receives. Keep message
+        // sends denied; sendto is limited to address-free sends below.
+        let mut filters = Vec::with_capacity(denied.len() * 2 + 17);
         filters.push(libc::sock_filter {
             code: BPF_LD_W_ABS,
             jt: 0,
@@ -403,6 +401,39 @@ mod platform {
                 k: SECCOMP_RET_ERRNO | libc::EPERM as u32,
             });
         }
+        // send() passes a zero addr_len; reject per-call destinations.
+        filters.extend([
+            libc::sock_filter {
+                code: BPF_JMP_JEQ_K,
+                jt: 0,
+                jf: 4,
+                k: libc::SYS_sendto as u32,
+            },
+            libc::sock_filter {
+                code: BPF_LD_W_ABS,
+                jt: 0,
+                jf: 0,
+                k: 16 + 5 * 8, // Low 32 bits of seccomp_data.args[5]: addr_len.
+            },
+            libc::sock_filter {
+                code: BPF_JMP_JEQ_K,
+                jt: 0,
+                jf: 1,
+                k: 0,
+            },
+            libc::sock_filter {
+                code: BPF_RET_K,
+                jt: 0,
+                jf: 0,
+                k: SECCOMP_RET_ALLOW,
+            },
+            libc::sock_filter {
+                code: BPF_RET_K,
+                jt: 0,
+                jf: 0,
+                k: SECCOMP_RET_ERRNO | libc::EPERM as u32,
+            },
+        ]);
         filters.push(libc::sock_filter {
             code: BPF_RET_K,
             jt: 0,
@@ -599,14 +630,25 @@ mod tests {
 
     #[test]
     fn linux_enforces_filesystem_and_network_policy() {
+        use std::os::unix::net::UnixDatagram;
+
         let fixture = Fixture::new();
         let policy = fixture.policy();
+        let socket_path = fixture.output.join("datagram");
+        let receiver = UnixDatagram::bind(&socket_path).unwrap();
+        let sender = UnixDatagram::unbound().unwrap();
+        assert_eq!(sender.send_to(b"ok", &socket_path).unwrap(), 2);
+        let mut bytes = [0; 2];
+        assert_eq!(receiver.recv(&mut bytes).unwrap(), 2);
+        assert_eq!(&bytes, b"ok");
+
         for action in [
             "read-source",
             "write-output",
             "deny-source-write",
             "deny-outside-read",
             "deny-network",
+            "deny-addressed-datagram",
             "allow-local-ipc",
             "allow-exec",
         ] {
@@ -675,11 +717,42 @@ mod tests {
                 std::net::TcpStream::connect("127.0.0.1:9")
                     .is_err_and(|error| { error.kind() == std::io::ErrorKind::PermissionDenied })
             ),
-            "allow-local-ipc" => {
-                let (left, right) = std::os::unix::net::UnixStream::pair().unwrap();
-                drop((left, right));
+            "deny-addressed-datagram" => {
+                let socket = std::os::unix::net::UnixDatagram::unbound().unwrap();
+                let error = socket
+                    .send_to(b"denied", output.join("datagram"))
+                    .unwrap_err();
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
             }
-            "allow-exec" => assert!(Command::new("/bin/true").output().unwrap().status.success()),
+            "allow-local-ipc" => {
+                use std::io::{Read, Write};
+                let (mut left, mut right) = std::os::unix::net::UnixStream::pair().unwrap();
+                left.write_all(b"ok").unwrap();
+                let mut bytes = [0; 2];
+                right.read_exact(&mut bytes).unwrap();
+                assert_eq!(&bytes, b"ok");
+
+                let (left, right) = std::os::unix::net::UnixDatagram::pair().unwrap();
+                assert_eq!(left.send(b"ok").unwrap(), 2);
+                let mut bytes = [0; 2];
+                assert_eq!(right.recv(&mut bytes).unwrap(), 2);
+                assert_eq!(&bytes, b"ok");
+            }
+            "allow-exec" => {
+                use std::os::unix::process::CommandExt;
+                for program in ["/bin/true", "/bin/lorry-nonexistent-program"] {
+                    let mut command = Command::new(program);
+                    // Force Rust's fork/exec path, which uses a local socket
+                    // pair instead of the libc posix_spawn fast path.
+                    unsafe { command.pre_exec(|| Ok(())) };
+                    let result = command.output();
+                    if program == "/bin/true" {
+                        assert!(result.unwrap().status.success());
+                    } else {
+                        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+                    }
+                }
+            }
             "allow-tool" => {
                 let tool = std::env::var_os("LORRY_SANDBOX_TOOL").unwrap();
                 assert!(
