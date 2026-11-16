@@ -5,7 +5,7 @@ use std::{
 };
 
 use gix::{
-    bstr::ByteSlice,
+    bstr::{BStr, ByteSlice},
     index::entry::Stage,
     merge::{
         blob::{Resolution as BlobResolution, builtin_driver::text::Labels},
@@ -46,6 +46,26 @@ pub fn prepare(
     target_commit: gix::ObjectId,
     cancellation: &Cancellation,
 ) -> crate::Result<Preparation> {
+    prepare_admitted(
+        opened,
+        locked_index,
+        original,
+        target_commit,
+        || Ok(()),
+        cancellation,
+    )
+}
+
+/// As `prepare()`. `admit_divergence` runs once both sides are known to have commits of
+/// their own, before the merge engine writes any object; its error refuses the merge.
+fn prepare_admitted(
+    opened: &OpenedRepository,
+    locked_index: &gix::index::State,
+    original: &Original,
+    target_commit: gix::ObjectId,
+    admit_divergence: impl FnOnce() -> crate::Result,
+    cancellation: &Cancellation,
+) -> crate::Result<Preparation> {
     cancellation.check()?;
     let repo = &opened.repo;
     if original.reference.as_ref().and_then(|name| name.category())
@@ -81,6 +101,7 @@ pub fn prepare(
         return Ok(Preparation::FastForward { target_tree });
     }
 
+    admit_divergence()?;
     commit::identities(repo)?;
     let target_index = tree_index::build(repo, &target_tree, workdir, cancellation)?;
     // Ancestor cases never invoke the merge engine, so its driver policy applies only here.
@@ -139,29 +160,90 @@ pub fn run(
     cancellation: &Cancellation,
 ) -> crate::Result {
     cancellation.check()?;
-    let mut guard = Guard::acquire(&opened.repo)?;
-    reject_merge_markers(opened.repo.git_dir())?;
-    let original = head_ref::capture(&opened.repo)?;
+    let guard = Guard::acquire(&opened.repo)?;
     let target_commit = opened
         .repo
         .rev_parse_single(revision.as_bytes().as_bstr())?
         .object()?
         .peel_to_commit()?
         .id;
+    let message = format!("Merge {target_commit}");
+    let reflog = gix::reference::log::message("merge", message.as_bytes().as_bstr(), 1);
+    let planned = plan(opened, guard, target_commit, || Ok(()), cancellation)?;
+    install(opened, planned, &message, reflog.as_bstr(), cancellation)
+}
+
+/// A merge classified under its mutation guard, with nothing published yet.
+pub(crate) struct Planned {
+    guard: Guard,
+    original: Original,
+    original_tree: gix::ObjectId,
+    target_commit: gix::ObjectId,
+    preparation: Preparation,
+}
+
+impl Planned {
+    pub(crate) fn preparation(&self) -> &Preparation {
+        &self.preparation
+    }
+
+    /// The commit HEAD's branch has before the merge; `None` on an unborn branch.
+    pub(crate) fn original_commit(&self) -> Option<gix::ObjectId> {
+        self.original.id
+    }
+}
+
+/// Classify the merge of `target_commit` into the attached branch, as `prepare()` does.
+///
+/// `admit_divergence` may refuse a merge that needs more than a fast-forward.
+pub(crate) fn plan(
+    opened: &OpenedRepository,
+    guard: Guard,
+    target_commit: gix::ObjectId,
+    admit_divergence: impl FnOnce() -> crate::Result,
+    cancellation: &Cancellation,
+) -> crate::Result<Planned> {
+    reject_merge_markers(opened.repo.git_dir())?;
+    let original = head_ref::capture(&opened.repo)?;
     let original_tree = match original.id {
         Some(id) => opened.repo.find_commit(id)?.tree_id()?.detach(),
         None => gix::ObjectId::empty_tree(opened.repo.object_hash()),
     };
-    let message = format!("Merge {target_commit}");
-    let prepared = prepare(
+    let preparation = prepare_admitted(
         opened,
         guard.index(),
         &original,
         target_commit,
+        admit_divergence,
         cancellation,
     )?;
+    Ok(Planned {
+        guard,
+        original,
+        original_tree,
+        target_commit,
+        preparation,
+    })
+}
 
-    match prepared {
+/// Carry out a planned merge. `message` is the text of a merge commit, and
+/// `fast_forward_reflog` the reflog line of a fast-forward.
+pub(crate) fn install(
+    opened: &mut OpenedRepository,
+    planned: Planned,
+    message: &str,
+    fast_forward_reflog: &BStr,
+    cancellation: &Cancellation,
+) -> crate::Result {
+    let Planned {
+        mut guard,
+        original,
+        original_tree,
+        target_commit,
+        preparation,
+    } = planned;
+
+    match preparation {
         Preparation::UpToDate => {
             drop(transition::prepare(
                 opened,
@@ -208,13 +290,12 @@ pub fn run(
                 guard.publish_fresh_index(index)?;
                 guard.require_operation(&record)?;
                 let mut time = gix::date::parse::TimeBuf::default();
-                let reflog = gix::reference::log::message("merge", message.as_bytes().as_bstr(), 1);
                 head_ref::advance_attached(
                     &opened.repo,
                     &record.original,
                     target_commit,
                     committer.to_ref(&mut time),
-                    reflog.as_bstr(),
+                    fast_forward_reflog,
                     cancellation,
                 )?;
                 guard.cleanup_operation(&record, cancellation)
@@ -262,7 +343,7 @@ pub fn run(
                     return Err(invalid("installed merge conflicts changed after preflight").into());
                 }
                 guard.publish_fresh_index(index)?;
-                publish_merge_markers(&opened.repo, &guard, &incomplete, &message, cancellation)?;
+                publish_merge_markers(&opened.repo, &guard, &incomplete, message, cancellation)?;
                 guard.require_operation(&incomplete)?;
                 head_ref::require(&opened.repo, &incomplete.original)?;
                 #[cfg(feature = "native-test-support")]
@@ -286,7 +367,7 @@ pub fn run(
                 &guard,
                 &ready,
                 result_tree,
-                &message,
+                message,
                 &identities,
                 cancellation,
             )

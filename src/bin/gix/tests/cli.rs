@@ -162,6 +162,135 @@ fn init_stage_commit_recover_switch_and_merge() -> Result {
     Ok(())
 }
 
+// A local upstream (`branch.<name>.remote = .`) exercises everything in pull but the fetch.
+#[test]
+fn pull_merges_the_upstream_as_git_does() -> Result {
+    let client = Client::new();
+    let root = client.0.join("repository");
+    client.ok(&client.0, &["init", root.to_str().unwrap()]);
+    let identity = [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+    ];
+    let commit = |file: &str| {
+        fs::write(root.join(file), file).unwrap();
+        client.ok(&root, &["add", file]);
+        client.ok(&root, &[&identity[..], &["commit", "-m", file]].concat());
+    };
+    let commit_on_main = |file: &str| {
+        client.ok(&root, &["checkout", "main"]);
+        commit(file);
+        client.ok(&root, &["checkout", "topic"]);
+    };
+    let tip = |name: &str| {
+        let repo = gix::open(&root).unwrap();
+        repo.find_reference(name).unwrap().id().detach()
+    };
+    let head = || gix::open(&root).unwrap().head_id().unwrap().detach();
+    commit("base");
+    client.error(&root, &["pull"], "branch 'main' has no upstream branch");
+    client.ok(&root, &["checkout", "--track", "-b", "topic", "main"]);
+    assert_eq!(client.ok(&root, &["pull"]), "Already up to date.\n");
+    client.error(
+        &root,
+        &["pull", "origin"],
+        "branch 'topic' has no upstream on remote 'origin'",
+    );
+
+    // Behind the upstream: every choice but `pull.ff = false` fast-forwards.
+    commit_on_main("upstream-1");
+    client.error(
+        &root,
+        &["-c", "pull.ff=false", "pull"],
+        "pull.ff = false asks for a merge commit",
+    );
+    assert!(!root.join("upstream-1").exists());
+    let pulled = client.ok(&root, &["-c", "pull.rebase=true", "pull"]);
+    assert!(
+        pulled.starts_with("Updating ") && pulled.ends_with("\nFast-forward\n"),
+        "{pulled}"
+    );
+    assert!(root.join("upstream-1").is_file());
+    assert_eq!(head(), tip("refs/heads/main"));
+    let reflog = fs::read_to_string(root.join(".git/logs/HEAD"))?;
+    assert!(
+        reflog.trim_end().ends_with("\tpull: Fast-forward"),
+        "{reflog}"
+    );
+
+    // Diverged: only an explicit choice to merge goes ahead.
+    commit("topic-1");
+    commit_on_main("upstream-2");
+    let ours = head();
+    for (args, message) in [
+        (&["pull"][..], "run 'gix pull --no-rebase' to merge"),
+        (&["pull", "--ff-only"], "a fast-forward is not possible"),
+        (
+            &["-c", "pull.ff=only", "pull"],
+            "a fast-forward is not possible",
+        ),
+        (&["-c", "pull.rebase=true", "pull"], "which gix cannot do"),
+        (
+            &[
+                "-c",
+                "pull.rebase=false",
+                "-c",
+                "branch.topic.rebase=merges",
+                "pull",
+            ],
+            "which gix cannot do",
+        ),
+        // Empty values: a user configuration outside the test may name an identity.
+        (
+            &[
+                "-c",
+                "user.name=",
+                "-c",
+                "user.email=",
+                "pull",
+                "--no-rebase",
+            ],
+            "author identity requires a nonempty name and email",
+        ),
+    ] {
+        client.error(&root, args, message);
+    }
+    assert_eq!(head(), ours);
+    assert!(!root.join("upstream-2").exists());
+    let merge = [
+        &identity[..],
+        &["-c", "pull.ff=only", "pull", "--no-rebase"],
+    ]
+    .concat();
+    assert_eq!(client.ok(&root, &merge), "Merge made.\n");
+    let repo = gix::open(&root)?;
+    let merged = repo.head_commit()?;
+    assert_eq!(
+        merged.message_raw()?.as_bytes(),
+        b"Merge branch 'main' into topic"
+    );
+    let theirs = tip("refs/heads/main");
+    assert_eq!(
+        merged.parent_ids().map(gix::Id::detach).collect::<Vec<_>>(),
+        [ours, theirs]
+    );
+    assert!(root.join("upstream-2").is_file());
+    assert_eq!(
+        client.ok(&root, &["-c", "pull.rebase=false", "pull", ".", "main"]),
+        "Already up to date.\n"
+    );
+
+    fs::write(root.join(".git/HEAD"), format!("{theirs}\n"))?;
+    client.error(
+        &root,
+        &["pull", ".", "main"],
+        "pull requires HEAD attached to a local branch",
+    );
+    Ok(())
+}
+
 #[test]
 fn relative_paths_are_relative_to_the_invocation_directory() -> Result {
     let client = Client::new();

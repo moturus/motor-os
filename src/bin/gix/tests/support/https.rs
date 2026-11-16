@@ -158,6 +158,7 @@ pub fn run() -> Result {
     );
     test.git(&test.0, &["init", "--bare", "push.git"]);
     clone_and_fetch(&test)?;
+    pull(&test)?;
     push_pack::check_push_pack(&test.0)?;
     push(&test)?;
     println!("gix loopback HTTPS tests PASS");
@@ -418,6 +419,143 @@ fn checkout(test: &Test, root: &Path) -> Result {
     );
     assert!(!root.join("remote-only").exists());
     test.git(root, &["fsck", "--strict", "--no-dangling"]);
+    Ok(())
+}
+
+/// Pull into a fresh clone while host Git advances the remote through `update`.
+fn pull(test: &Test) -> Result {
+    let server = Server::new(test, "pull-server");
+    let root = test.0.join("pull");
+    let update = test.0.join("update");
+    let identity = [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+    ];
+    let advance = |file: &str| {
+        fs::write(update.join(file), file).unwrap();
+        test.git(&update, &["add", file]);
+        test.git(&update, &[&identity[..], &["commit", "-m", file]].concat());
+        test.git(&update, &["push", "origin", "main"]);
+        test.git(&update, &["rev-parse", "HEAD"])
+    };
+    let subject = || test.git(&root, &["log", "-1", "--format=%s"]);
+    let merged = format!("Merge branch 'main' of {}\n", server.url("/repo"));
+    success(
+        test.gix(&test.0)
+            .args(["clone", &server.url("/repo.git"), "pull"]),
+    );
+    assert_eq!(
+        success(test.gix(&root).arg("pull")),
+        "Already up to date.\n"
+    );
+
+    let first = advance("pulled-1");
+    let pulled = success(test.gix(&root).arg("pull"));
+    assert!(
+        pulled.starts_with("Updating ") && pulled.ends_with("\nFast-forward\n"),
+        "{pulled}"
+    );
+    assert_eq!(test.git(&root, &["rev-parse", "HEAD"]), first);
+    assert_eq!(
+        test.git(&root, &["rev-parse", "refs/remotes/origin/main"]),
+        first
+    );
+    assert!(root.join("pulled-1").is_file());
+    assert_eq!(
+        test.git(&root, &["reflog", "-1", "--format=%gs"]),
+        "pull: Fast-forward\n"
+    );
+
+    // Diverged: the fetch still happens, but nothing is merged without a choice.
+    fs::write(root.join("local-only"), "local\n")?;
+    success(test.gix(&root).args(["add", "local-only"]));
+    success(
+        test.gix(&root)
+            .args(identity)
+            .args(["commit", "-m", "local"]),
+    );
+    let local = test.git(&root, &["rev-parse", "HEAD"]);
+    let second = advance("pulled-2");
+    rejected(
+        test.gix(&root).arg("pull").output()?,
+        "run 'gix pull --no-rebase' to merge",
+    );
+    rejected(
+        test.gix(&root).args(["pull", "--ff-only"]).output()?,
+        "a fast-forward is not possible",
+    );
+    assert_eq!(test.git(&root, &["rev-parse", "HEAD"]), local);
+    assert_eq!(
+        test.git(&root, &["rev-parse", "refs/remotes/origin/main"]),
+        second
+    );
+    // The generic committer that the fetch uses for reflogs must not sign a merge commit.
+    rejected(
+        test.gix(&root)
+            .args([
+                "-c",
+                "author.name=A",
+                "-c",
+                "author.email=a@example.invalid",
+            ])
+            .args(["pull", "--no-rebase"])
+            .output()?,
+        "committer identity is not configured",
+    );
+    assert_eq!(
+        success(test.gix(&root).args(identity).args(["pull", "--no-rebase"])),
+        "Merge made.\n"
+    );
+    assert_eq!(
+        test.git(&root, &["rev-parse", "HEAD^1", "HEAD^2"]),
+        format!("{local}{second}")
+    );
+    assert_eq!(subject(), merged);
+    assert!(root.join("pulled-2").is_file() && root.join("local-only").is_file());
+
+    // A named branch is merged even when no configured refspec fetches it.
+    test.git(
+        &root,
+        &[
+            "config",
+            "--replace-all",
+            "remote.origin.fetch",
+            "+refs/heads/absent/*:refs/remotes/origin/absent/*",
+        ],
+    );
+    let third = advance("pulled-3");
+    rejected(
+        test.gix(&root)
+            .args(["pull", "origin", "absent"])
+            .output()?,
+        "remote 'origin' has no ref named 'absent'",
+    );
+    rejected(
+        test.gix(&root).args(["pull", "origin", "a:b"]).output()?,
+        "'a:b' does not name a single branch or tag",
+    );
+    assert_eq!(
+        success(
+            test.gix(&root)
+                .args(identity)
+                .args(["pull", "--no-rebase", "origin", "main"])
+        ),
+        "Merge made.\n"
+    );
+    assert_eq!(test.git(&root, &["rev-parse", "HEAD^2"]), third);
+    assert_eq!(subject(), merged);
+    assert_eq!(
+        test.git(&root, &["rev-parse", "refs/remotes/origin/main"]),
+        second
+    );
+    assert!(root.join("pulled-3").is_file());
+    assert_eq!(
+        success(test.gix(&root).args(["pull", "origin", "refs/heads/main"])),
+        "Already up to date.\n"
+    );
+    test.git(&root, &["fsck", "--strict", "--no-dangling"]);
     Ok(())
 }
 

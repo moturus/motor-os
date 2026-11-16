@@ -10,7 +10,7 @@ mod log;
 
 use motor_gix::{
     Result, add, branch_checkout, branches, cancellation, clone, commit, diff, fetch, init, merge,
-    network, push, recover, refs, remotes, repository, restore, status, switch, unstage,
+    network, pull, push, recover, refs, remotes, repository, restore, status, switch, unstage,
 };
 
 fn main() -> ExitCode {
@@ -151,6 +151,32 @@ fn run() -> Result {
                     Arg::new("remote")
                         .default_value("origin")
                         .value_name("REMOTE"),
+                ),
+        )
+        .subcommand(
+            Command::new("pull")
+                .about("Fetch a remote and merge its branch into the current branch")
+                .arg(
+                    Arg::new("ff-only")
+                        .long("ff-only")
+                        .action(ArgAction::SetTrue)
+                        .help("Only fast-forward; fail if the branches have diverged"),
+                )
+                .arg(
+                    Arg::new("no-rebase")
+                        .long("no-rebase")
+                        .action(ArgAction::SetTrue)
+                        .help("Merge if the branches have diverged"),
+                )
+                .arg(
+                    Arg::new("remote")
+                        .value_name("REMOTE")
+                        .help("The remote to fetch [default: the upstream remote]"),
+                )
+                .arg(
+                    Arg::new("branch")
+                        .value_name("BRANCH")
+                        .help("The remote's branch or tag to merge [default: the upstream branch]"),
                 ),
         )
         .subcommand(
@@ -367,6 +393,23 @@ fn run() -> Result {
                     .get_one::<String>("remote")
                     .expect("default remote"),
                 &policy,
+                &cancellation,
+            )
+        }
+        Some("pull") => {
+            let command = matches.subcommand_matches("pull").expect("matched pull");
+            let policy = network::Policy::new(&overrides, &cancellation)?;
+            let request = pull::Request {
+                remote: command.get_one::<String>("remote").map(String::as_str),
+                branch: command.get_one::<String>("branch").map(String::as_str),
+                ff_only: command.get_flag("ff-only"),
+                no_rebase: command.get_flag("no-rebase"),
+            };
+            pull::run(
+                &mut opened,
+                request,
+                &policy,
+                io::stdout().lock(),
                 &cancellation,
             )
         }

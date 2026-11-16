@@ -25,6 +25,7 @@ pub mod network;
 pub mod object_database;
 pub mod operation;
 pub mod prompt;
+pub mod pull;
 pub mod push;
 pub mod push_discovery;
 pub mod push_objects;
