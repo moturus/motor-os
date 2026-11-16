@@ -33,6 +33,7 @@ pub mod push_pack;
 pub mod push_policy;
 pub mod push_protocol;
 pub mod push_report;
+pub mod rebase;
 pub mod recover;
 pub mod refs;
 pub mod remotes;

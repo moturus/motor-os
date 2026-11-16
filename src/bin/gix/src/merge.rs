@@ -201,6 +201,11 @@ impl Planned {
     pub(crate) fn original_commit(&self) -> Option<gix::ObjectId> {
         self.original.id
     }
+
+    /// Give up the plan and keep the mutation guard that it was made under.
+    pub(crate) fn into_guard(self) -> Guard {
+        self.guard
+    }
 }
 
 /// Classify the merge of `target_commit` into the attached branch, as `prepare()` does.
@@ -386,7 +391,11 @@ pub(crate) fn install(
     }
 }
 
-fn apply_conflicts(index: &mut gix::index::State, conflicts: &[Conflict]) -> crate::Result<bool> {
+/// Add the stages of every unresolved conflict to `index`. Returns whether there is one.
+pub(crate) fn apply_conflicts(
+    index: &mut gix::index::State,
+    conflicts: &[Conflict],
+) -> crate::Result<bool> {
     let how = TreatAsUnresolved::git();
     let unresolved = conflicts.iter().any(|conflict| conflict.is_unresolved(how));
     let changed = apply_index_entries(

@@ -12,6 +12,8 @@ static FAILURE: AtomicU8 = AtomicU8::new(IDLE);
 pub enum Failure {
     AfterFirstInstallRemoval = 1,
     BeforeMergeReady = 2,
+    BeforeRebaseStopped = 3,
+    BeforeRebaseAborted = 4,
 }
 
 #[must_use]
@@ -47,6 +49,8 @@ pub(crate) fn checkpoint(failure: Failure) -> crate::Result {
         let message = match failure {
             Failure::AfterFirstInstallRemoval => "injected failure after the first install removal",
             Failure::BeforeMergeReady => "injected failure before the merge became ready",
+            Failure::BeforeRebaseStopped => "injected failure before the rebase was stopped",
+            Failure::BeforeRebaseAborted => "injected failure before the rebase was aborted",
         };
         return Err(io::Error::other(message).into());
     }

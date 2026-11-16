@@ -10,7 +10,8 @@ mod log;
 
 use motor_gix::{
     Result, add, branch_checkout, branches, cancellation, clone, commit, diff, fetch, init, merge,
-    network, pull, push, recover, refs, remotes, repository, restore, status, switch, unstage,
+    network, pull, push, rebase, recover, refs, remotes, repository, restore, status, switch,
+    unstage,
 };
 
 fn main() -> ExitCode {
@@ -269,6 +270,17 @@ fn run() -> Result {
                         .required_unless_present("abort"),
                 ),
         )
+        .subcommand(
+            Command::new("rebase")
+                .about("Go on with a rebase that 'pull --rebase' had to stop")
+                .arg(
+                    Arg::new("abort")
+                        .long("abort")
+                        .action(ArgAction::SetTrue)
+                        .required(true)
+                        .help("Return to the branch as it was before the rebase"),
+                ),
+        )
         .subcommand(Command::new("status").about("Show worktree status"))
         .subcommand(
             Command::new("switch")
@@ -467,6 +479,7 @@ fn run() -> Result {
                 )
             }
         }
+        Some("rebase") => rebase::abort(&opened, &cancellation),
         Some("recover") => {
             let action = recover::run(&opened, &cancellation)?;
             let mut out = io::stdout().lock();

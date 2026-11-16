@@ -219,6 +219,8 @@ fn run(fixture: &Path, output: &Path) -> Result {
     check_merge_prepare(&output)?;
     rebase::check_replay(output)?;
     rebase::check_rebase_record(output)?;
+    #[cfg(feature = "native-test-support")]
+    rebase::check_rebase_recovery(output)?;
     check_restore(&output)?;
     check_executable_attributes(&output)?;
     check_unstage(&output)?;

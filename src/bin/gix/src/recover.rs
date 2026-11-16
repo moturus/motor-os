@@ -16,7 +16,7 @@ pub fn run(opened: &OpenedRepository, cancellation: &Cancellation) -> crate::Res
     let (mut guard, record) = Guard::acquire_for_recovery(repo)?;
     operation::require_objects(repo, &record, cancellation)?;
     if matches!(record.kind, Kind::Rebase(_)) {
-        return Err(invalid("gix cannot recover a rebase").into());
+        return crate::rebase::recover(opened, guard, record, cancellation);
     }
     require_switch_branches(repo, &record)?;
     let observed = head_ref::capture(repo)?;

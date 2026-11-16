@@ -672,3 +672,211 @@ pub fn check_rebase_record(output: &Path) -> Result {
     assert!(error.contains("no rebase is in progress"), "{error}");
     Ok(())
 }
+
+/// A branch `topic` whose second commit conflicts with the one commit that `main` has more.
+#[cfg(feature = "native-test-support")]
+struct Conflicting {
+    root: std::path::PathBuf,
+    opened: motor_gix::repository::OpenedRepository,
+    cancellation: motor_gix::cancellation::Cancellation,
+    /// The tip of `topic` before the rebase.
+    original: ObjectId,
+}
+
+#[cfg(feature = "native-test-support")]
+impl Conflicting {
+    fn new(output: &Path, name: &str) -> Result<Self> {
+        let root = output.join(name);
+        let cancellation = motor_gix::cancellation::Cancellation::new();
+        motor_gix::init::run(&root, &["init.defaultBranch=main"], false, &cancellation)?;
+        let identities = ["user.name=Replayer", "user.email=replayer@example.com"];
+        let mut opened = motor_gix::repository::open(&root, &identities, false)?;
+        let commit = |opened: &motor_gix::repository::OpenedRepository,
+                      message: &str,
+                      files: &[(&str, &str)]|
+         -> Result {
+            for (path, text) in files {
+                std::fs::write(root.join(path), text)?;
+            }
+            motor_gix::add::run(opened, true, &[], &cancellation)?;
+            motor_gix::commit::run(opened, message, &cancellation)
+        };
+        commit(&opened, "base", &[("a", "1\n2\n3\n"), ("keep", "k\n")])?;
+        opened.repo.reference(
+            "refs/heads/topic",
+            opened.repo.head_id()?.detach(),
+            gix::refs::transaction::PreviousValue::MustNotExist,
+            "fixture",
+        )?;
+        commit(
+            &opened,
+            "theirs",
+            &[("a", "1\n2\n3\nTHEIRS\n"), ("up", "u\n")],
+        )?;
+        motor_gix::switch::run(&mut opened, "topic", &cancellation)?;
+        commit(&opened, "t1", &[("t1", "t1\n")])?;
+        commit(&opened, "mine", &[("a", "1\n2\n3\nMINE\n")])?;
+        let original = opened.repo.head_id()?.detach();
+        Ok(Conflicting {
+            root,
+            opened,
+            cancellation,
+            original,
+        })
+    }
+
+    /// `gix pull --rebase . main`, which must stop at the commit `mine`.
+    fn pull(&mut self) -> String {
+        let request = motor_gix::pull::Request {
+            remote: Some("."),
+            branch: Some("main"),
+            ff_only: false,
+            rebase: true,
+            no_rebase: false,
+        };
+        let policy = motor_gix::network::Policy::new(&[], &self.cancellation).unwrap();
+        let error = motor_gix::pull::run(
+            &mut self.opened,
+            request,
+            &policy,
+            std::io::sink(),
+            &self.cancellation,
+        )
+        .expect_err("the conflicting commit was applied");
+        error.to_string()
+    }
+
+    fn status(&self) -> Result<String> {
+        let mut status = Vec::new();
+        motor_gix::status::collect(&self.opened, &self.cancellation)?
+            .write_to(&mut status, &self.cancellation)?;
+        Ok(String::from_utf8(status)?)
+    }
+
+    fn file(&self, path: &str) -> Option<String> {
+        std::fs::read_to_string(self.root.join(path)).ok()
+    }
+
+    /// Require the rebase to be paused at the replayed `t1`, with the files of that commit.
+    fn require_paused(&self) -> Result {
+        use motor_gix::operation::State;
+
+        let path = self.opened.repo.git_dir().join("gix-operation");
+        let record = motor_gix::operation::read(&path)?.ok_or("the rebase has no record")?;
+        assert_eq!(record.state, State::Paused);
+        let head = motor_gix::head_ref::capture(&self.opened.repo)?;
+        assert_eq!(
+            (head.reference, head.id),
+            (None, Some(record.target_commit))
+        );
+        let commit = self.opened.repo.find_commit(record.target_commit)?;
+        assert_eq!(commit.message_raw()?, "t1");
+        assert_eq!(self.status()?, "operation rebase paused\n");
+        assert_eq!(self.file("a").as_deref(), Some("1\n2\n3\nTHEIRS\n"));
+        assert_eq!(self.file("up").as_deref(), Some("u\n"));
+        assert_eq!(self.file("t1").as_deref(), Some("t1\n"));
+        Ok(())
+    }
+
+    /// Require the branch to be as it was before the rebase, with nothing left of it.
+    fn require_aborted(&self) -> Result {
+        let head = motor_gix::head_ref::capture(&self.opened.repo)?;
+        assert_eq!(
+            (head.reference.as_ref().map(|name| name.as_bstr()), head.id),
+            (Some("refs/heads/topic".into()), Some(self.original))
+        );
+        assert!(!self.opened.repo.git_dir().join("gix-operation").exists());
+        assert_eq!(self.status()?, "");
+        assert_eq!(self.file("a").as_deref(), Some("1\n2\n3\nMINE\n"));
+        assert_eq!(self.file("up"), None);
+        assert_eq!(self.file("t1").as_deref(), Some("t1\n"));
+        Ok(())
+    }
+}
+
+/// Interrupt each step of a stopping rebase, then repair it with `recover` or `abort`.
+#[cfg(feature = "native-test-support")]
+pub fn check_rebase_recovery(output: &Path) -> Result {
+    use motor_gix::test_support::{Failure, fail_once};
+
+    let incomplete = "a step of the rebase is incomplete";
+
+    // The stop fails while it writes files, before HEAD moves. Recovery goes forward.
+    let mut fixture = Conflicting::new(output, "rebase-recovery-files")?;
+    let armed = fail_once(Failure::AfterFirstInstallRemoval)?;
+    let error = fixture.pull();
+    drop(armed);
+    assert!(error.contains(incomplete), "{error}");
+    assert_eq!(fixture.opened.repo.head_id()?, fixture.original);
+    assert_eq!(
+        fixture.status()?.lines().next(),
+        Some("operation rebase incomplete")
+    );
+    let recovered = motor_gix::recover::run(&fixture.opened, &fixture.cancellation)?;
+    assert!(recovered.starts_with("the rebase is paused"), "{recovered}");
+    fixture.require_paused()?;
+    let error = motor_gix::recover::run(&fixture.opened, &fixture.cancellation)
+        .expect_err("a paused rebase was recovered again");
+    assert!(
+        error.to_string().contains("a rebase is in progress"),
+        "{error}"
+    );
+    motor_gix::rebase::abort(&fixture.opened, &fixture.cancellation)?;
+    fixture.require_aborted()?;
+
+    // The stop fails after HEAD has moved. Then the abort fails while it writes files.
+    let mut fixture = Conflicting::new(output, "rebase-recovery-head")?;
+    let armed = fail_once(Failure::BeforeRebaseStopped)?;
+    let error = fixture.pull();
+    drop(armed);
+    assert!(error.contains(incomplete), "{error}");
+    assert_ne!(fixture.opened.repo.head_id()?, fixture.original);
+    assert!(
+        fixture
+            .file("a")
+            .is_some_and(|text| text.contains("<<<<<<< HEAD"))
+    );
+    motor_gix::recover::run(&fixture.opened, &fixture.cancellation)?;
+    fixture.require_paused()?;
+    let armed = fail_once(Failure::AfterFirstInstallRemoval)?;
+    let error = motor_gix::rebase::abort(&fixture.opened, &fixture.cancellation)
+        .expect_err("the abort ignored the injected failure");
+    drop(armed);
+    assert!(error.to_string().contains(incomplete), "{error}");
+    let recovered = motor_gix::recover::run(&fixture.opened, &fixture.cancellation)?;
+    assert_eq!(recovered, "finished the abort of the rebase");
+    fixture.require_aborted()?;
+
+    // The abort of a stopped rebase fails before HEAD returns. A second abort finishes it.
+    let mut fixture = Conflicting::new(output, "rebase-recovery-abort")?;
+    let error = fixture.pull();
+    assert!(
+        error.contains("could not apply") && error.contains("(mine)"),
+        "{error}"
+    );
+    assert_eq!(fixture.status()?, "operation rebase ready\nUU a\n");
+    let armed = fail_once(Failure::BeforeRebaseAborted)?;
+    let error = motor_gix::rebase::abort(&fixture.opened, &fixture.cancellation)
+        .expect_err("the abort ignored the injected failure");
+    drop(armed);
+    assert!(error.to_string().contains(incomplete), "{error}");
+    assert_ne!(fixture.opened.repo.head_id()?, fixture.original);
+    assert_eq!(fixture.file("a").as_deref(), Some("1\n2\n3\nMINE\n"));
+    motor_gix::rebase::abort(&fixture.opened, &fixture.cancellation)?;
+    fixture.require_aborted()?;
+
+    // An interrupted first step can be aborted at once, without `recover`.
+    let mut fixture = Conflicting::new(output, "rebase-recovery-direct")?;
+    let armed = fail_once(Failure::AfterFirstInstallRemoval)?;
+    fixture.pull();
+    drop(armed);
+    motor_gix::rebase::abort(&fixture.opened, &fixture.cancellation)?;
+    fixture.require_aborted()?;
+    let error = motor_gix::rebase::abort(&fixture.opened, &fixture.cancellation)
+        .expect_err("a rebase was aborted twice");
+    assert!(
+        error.to_string().contains("no rebase is in progress"),
+        "{error}"
+    );
+    Ok(())
+}

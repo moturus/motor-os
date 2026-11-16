@@ -73,13 +73,14 @@ directory. Put `--` in front of a name that starts with a dash. `gix COMMAND
 | `switch BRANCH`, `checkout BRANCH` | Move to another local branch. |
 | `checkout [--track] -b NEW [START]` | Create a branch and move to it. |
 | `merge REV`, `merge --abort` | Merge a commit into the current branch, or give up on a merge. |
+| `rebase --abort` | Give up on a rebase that `pull --rebase` had to stop. |
 | `recover` | Finish or undo an operation that was interrupted. |
 | `push [OPTIONS] REMOTE SOURCE:DESTINATION` | Publish one branch or tag over HTTPS or SSH. |
 
 A few things work differently from Git:
 
-- `pull --rebase` cannot stop at a conflict yet. If one of your commits
-  conflicts, it changes nothing and says so.
+- When `pull --rebase` stops at a conflict, you can only go back, with
+  `gix rebase --abort`. Gix cannot continue the rebase yet.
 - To stage a deleted file, delete it in the shell and then run `add` on its
   name.
 - `commit` refuses to make an empty commit, except to conclude a merge, and
@@ -234,7 +235,10 @@ are not replayed:
   your history becomes one line.
 
 If one of your commits conflicts with the remote branch, the rebase stops
-and nothing has changed. You can merge instead with `gix pull --no-rebase`.
+at that commit. The conflict is in your files, and `gix status` shows
+`operation rebase ready`. Your branch has not moved: `gix branch` shows `(no
+branch, rebasing BRANCH)`. Run `gix rebase --abort` to return to your branch
+as it was. You can then merge instead with `gix pull --no-rebase`.
 
 Gix can only do this plain rebase. Pull stops on diverged branches when
 `pull.rebase` or `branch.NAME.rebase` is `merges` or `interactive`. Gix also

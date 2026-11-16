@@ -428,17 +428,12 @@ fn pull_rebase_replays_local_commits() -> Result {
     );
     assert!(last_reflog("HEAD").starts_with("pull (finish): refs/heads/topic onto "));
 
-    // A conflict, or a missing identity, stops the rebase before anything changes.
-    on_main("theirs", Some("theirs"));
-    commit_as(&identity, "mine", Some("mine"));
+    // A missing identity stops the rebase before anything changes.
+    on_main("theirs", Some("theirs\n"));
+    commit_as(&identity, "mine", Some("mine\n"));
+    let mine = rev("HEAD");
     commit("topic-4");
     let before = rev("HEAD");
-    let output = client
-        .command(&root)
-        .args(identity)
-        .args(["pull", "--rebase"])
-        .output()?;
-    assert_error(&output, "(mine): it conflicts with what was pulled");
     client.error(
         &root,
         &["-c", "user.name=", "-c", "user.email=", "pull", "--rebase"],
@@ -446,8 +441,73 @@ fn pull_rebase_replays_local_commits() -> Result {
     );
     assert_eq!(rev("HEAD"), before);
     assert_eq!(client.ok(&root, &["status"]), "");
-    assert_eq!(fs::read_to_string(root.join("base"))?, "mine");
     assert!(!root.join(".git/gix-operation").exists());
+
+    // A conflict stops the rebase at the last commit that applied, with the conflict in
+    // the files. The branch itself does not move.
+    let output = client
+        .command(&root)
+        .args(identity)
+        .args(["pull", "--rebase"])
+        .output()?;
+    assert_error(
+        &output,
+        &format!(
+            "could not apply {} (mine): the conflict is in your files",
+            &mine[..7]
+        ),
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("base"))?,
+        format!(
+            "<<<<<<< HEAD\ntheirs\n=======\nmine\n>>>>>>> {} (mine)\n",
+            &mine[..7]
+        )
+    );
+    assert_eq!(
+        client.ok(&root, &["status"]),
+        "operation rebase ready\nUU base\n"
+    );
+    assert_eq!(
+        client.ok(&root, &["branch"]),
+        "* (no branch, rebasing topic)\n  main\n  side\n  topic\n"
+    );
+    assert_eq!(history()[0], "topic-3 Test/Test");
+    assert_eq!(rev("refs/heads/topic"), before);
+    assert_eq!(
+        fs::read_to_string(root.join(".git/HEAD"))?,
+        format!("{}\n", rev("HEAD"))
+    );
+    let in_progress = "a rebase is in progress; run 'gix rebase --continue'";
+    for (args, message) in [
+        (&["switch", "main"][..], in_progress),
+        (&["pull"], in_progress),
+        (&["merge", "main"], in_progress),
+        (&["recover"], in_progress),
+        (&["restore", "base"], in_progress),
+        (
+            &["commit", "-m", "resolved"],
+            "a rebase is stopped at a conflict",
+        ),
+        (&["merge", "--abort"], "operation is not a ready merge"),
+    ] {
+        client.error(&root, &[&identity[..], args].concat(), message);
+    }
+
+    assert_eq!(client.ok(&root, &["rebase", "--abort"]), "");
+    assert_eq!(
+        fs::read(root.join(".git/HEAD"))?,
+        b"ref: refs/heads/topic\n"
+    );
+    assert_eq!(rev("HEAD"), before);
+    assert_eq!(client.ok(&root, &["status"]), "");
+    assert_eq!(fs::read_to_string(root.join("base"))?, "mine\n");
+    assert!(!root.join(".git/gix-operation").exists());
+    assert_eq!(
+        last_reflog("HEAD"),
+        "rebase (abort): returning to refs/heads/topic"
+    );
+    client.error(&root, &["rebase", "--abort"], "no rebase is in progress");
     Ok(())
 }
 

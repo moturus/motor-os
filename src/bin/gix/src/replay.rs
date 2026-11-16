@@ -203,7 +203,7 @@ pub(crate) fn label(repo: &gix::Repository, id: gix::ObjectId) -> crate::Result<
 }
 
 /// The first line of a commit message that is not blank, which is how Git names a commit.
-fn subject(message: &BStr) -> &[u8] {
+pub(crate) fn subject(message: &BStr) -> &[u8] {
     message
         .lines()
         .find(|line| !line.trim().is_empty())

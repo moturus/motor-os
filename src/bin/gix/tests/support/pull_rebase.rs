@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use super::{Result, Server, Test, success};
+use super::{Result, Server, Test, rejected, success};
 
 const IDENTITY: [&str; 4] = [
     "-c",
@@ -83,6 +83,80 @@ pub fn check(test: &Test) -> Result {
         git(&by_gix, &["reflog", "-1", "--format=%gs", "main"]),
         git(&by_git, &["reflog", "-1", "--format=%gs", "main"])
     );
+    test.git(&by_gix, &["fsck", "--strict", "--no-dangling"]);
+    stop(test, &server)
+}
+
+/// A rebase that stops at a conflict must leave what host Git leaves, and abort like it.
+fn stop(test: &Test, server: &Server) -> Result {
+    let (by_gix, by_git) = (test.0.join("stop-gix"), test.0.join("stop-git"));
+    success(
+        test.gix(&test.0)
+            .args(["clone", &server.url("/repo.git"), "stop-gix"]),
+    );
+    test.git(&test.0, &["clone", "remote.git", "stop-git"]);
+    // With both dates fixed the twins have the same commits, so Git's name for the
+    // conflicting commit is the same in both.
+    let git = |directory: &Path, args: &[&str]| {
+        let mut command = test.command("git", directory);
+        for date in ["GIT_AUTHOR_DATE", "GIT_COMMITTER_DATE"] {
+            command.env(date, "2026-01-02T03:04:05+00:00");
+        }
+        command.args(["-c", "core.hooksPath=/dev/null", "-c", "core.abbrev=12"]);
+        command.args(IDENTITY).args(args);
+        command
+    };
+    let commit = |clone: &Path, file: &str, text: &str, message: &str| {
+        std::fs::write(clone.join(file), text).unwrap();
+        success(&mut git(clone, &["add", file]));
+        success(&mut git(clone, &["commit", "-m", message]));
+    };
+    for clone in [&by_gix, &by_git] {
+        commit(clone, "before", "before\n", "before");
+        commit(clone, "pulled-1", "mine\n", "clash");
+        commit(clone, "after", "after\n", "after");
+    }
+    let update = test.0.join("update");
+    commit(&update, "pulled-1", "theirs\n", "theirs");
+    success(&mut git(&update, &["push", "origin", "main"]));
+
+    let mut pull = test.gix(&by_gix);
+    pull.args(IDENTITY).args(["-c", "core.abbrev=12"]);
+    rejected(pull.args(["pull", "--rebase"]).output()?, "could not apply");
+    assert!(
+        !git(&by_git, &["pull", "--rebase"])
+            .output()?
+            .status
+            .success()
+    );
+
+    let same = |args: &[&str]| {
+        let ours = success(&mut git(&by_gix, args));
+        assert_eq!(ours, success(&mut git(&by_git, args)), "{args:?}");
+        ours
+    };
+    let conflict = std::fs::read_to_string(by_gix.join("pulled-1"))?;
+    assert_eq!(conflict, std::fs::read_to_string(by_git.join("pulled-1"))?);
+    assert!(conflict.starts_with("<<<<<<< HEAD\ntheirs\n=======\nmine\n>>>>>>> "));
+    assert!(conflict.ends_with(" (clash)\n"), "{conflict}");
+    // The three versions of the file in the index, HEAD, and the branch that has not moved.
+    assert_eq!(same(&["ls-files", "-u"]).lines().count(), 3);
+    assert_eq!(
+        same(&["status", "--porcelain", "--", "pulled-1"]),
+        "UU pulled-1\n"
+    );
+    let head = same(&["log", "-1", "--format=%an|%ae|%ad|%cn|%s|%T"]);
+    assert!(head.contains("|before|"), "{head}");
+    assert_eq!(same(&["rev-parse", "--abbrev-ref", "HEAD"]), "HEAD\n");
+    assert_eq!(same(&["log", "-1", "--format=%s", "main"]), "after\n");
+    same(&["rev-parse", "main"]);
+
+    success(test.gix(&by_gix).args(["rebase", "--abort"]));
+    success(&mut git(&by_git, &["rebase", "--abort"]));
+    assert_eq!(same(&["rev-parse", "--abbrev-ref", "HEAD"]), "main\n");
+    assert_eq!(same(&["log", "-1", "--format=%H %s"]).len(), 47);
+    assert_eq!(std::fs::read_to_string(by_gix.join("pulled-1"))?, "mine\n");
+    assert_eq!(success(test.gix(&by_gix).arg("status")), "");
     test.git(&by_gix, &["fsck", "--strict", "--no-dangling"]);
     Ok(())
 }

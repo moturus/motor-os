@@ -16,7 +16,7 @@ use crate::{
     fetch, head_ref,
     merge::{self, Preparation},
     mutation::Guard,
-    network,
+    network, rebase,
     replay::{self, Range},
     repository::OpenedRepository,
 };
@@ -120,7 +120,7 @@ pub fn run(
         ))
         .into())
     };
-    // The commits a rebase left out, once there was a rebase.
+    // The commits a rebase covers and how far their replay got, once there was a rebase.
     let mut rebased = None;
     let shared: &OpenedRepository = opened;
     let planned = merge::plan(
@@ -145,16 +145,9 @@ pub fn run(
                     base,
                 };
                 let replayed = replay::run(shared, &range, None, commit, cancellation)?;
-                if let Some(stopped) = replayed.stopped {
-                    return Err(unsupported(format!(
-                        "could not apply {}: it conflicts with what was pulled; \
-                         nothing was changed; run 'gix pull --no-rebase' to merge",
-                        replay::label(&shared.repo, stopped.commit)?
-                    ))
-                    .into());
-                }
-                rebased = Some(replayed.dropped);
-                Ok(Some(replayed.tip))
+                let tip = replayed.tip;
+                rebased = Some((range, replayed));
+                Ok(Some(tip))
             }
         },
         cancellation,
@@ -163,6 +156,36 @@ pub fn run(
         "pull --rebase"
     } else {
         "pull"
+    };
+    let dropping = |dropped: &[gix::ObjectId]| -> crate::Result<String> {
+        let mut report = String::new();
+        for dropped in dropped {
+            let label = replay::label(&opened.repo, *dropped)?;
+            report.push_str(&format!(
+                "dropping {label} -- patch contents already upstream\n"
+            ));
+        }
+        Ok(report)
+    };
+    // A commit that does not apply stops the rebase where the user can resolve it.
+    let rebased = match rebased {
+        Some((range, replayed)) => match replayed.stopped {
+            Some(stopped) => {
+                write!(out, "{}", dropping(&replayed.dropped)?)?;
+                out.flush()?;
+                return rebase::stop(
+                    opened,
+                    planned.into_guard(),
+                    &current,
+                    &range,
+                    (replayed.tip, stopped),
+                    action,
+                    cancellation,
+                );
+            }
+            None => Some(replayed.dropped),
+        },
+        None => None,
     };
     let mut reflog = format!("{action}: Fast-forward");
     let report = match (planned.preparation(), planned.original_commit()) {
@@ -176,13 +199,7 @@ pub fn run(
         (Preparation::UpToDate, _) => Some("Already up to date.".to_owned()),
         (Preparation::FastForward { .. }, _) if rebased.is_some() => {
             reflog = format!("{action} (finish): {} onto {commit}", current.as_bstr());
-            let mut report = String::new();
-            for dropped in rebased.iter().flatten() {
-                let label = replay::label(&opened.repo, *dropped)?;
-                report.push_str(&format!(
-                    "dropping {label} -- patch contents already upstream\n"
-                ));
-            }
+            let mut report = dropping(rebased.as_deref().unwrap_or_default())?;
             report.push_str(&format!(
                 "Successfully rebased and updated {}.",
                 current.as_bstr()
