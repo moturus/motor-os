@@ -8,6 +8,28 @@ per-operation allocation overhead, were reviewed. Historical timings below
 are not new measurements. An unexplained historical failure stays open
 unless the source establishes that its cause was fixed.
 
+## `full-test.sh --all-debug` stalls uploading the Lorry vendor tree (2026-11-16)
+
+On the debug image, `full_upload_native_inputs` extracts the shared vendor
+tree (`tar -C build/native-test-inputs -cf - vendor` piped over SSH into
+`tar -xf - -C /user/dev/lorry`; about 953 MiB in 36,902 files) more slowly
+the longer it runs. Files extracted per minute of guest uptime: 1,073 at
+17 min, 983 at 19 min, 297 at 21 min, 52 at 23 min. After 8 minutes, 4,843
+files were done, so the upload would have taken hours, and the run was
+stopped. The release image extracts the same tree without trouble.
+
+What was ruled out, on a 4 vCPU, 4 GiB guest: the network (the host's side
+of the connection was `app_limited`, with an empty send queue, an open
+window and no ongoing retransmits), memory (about 80 MiB in use), disk space
+(1.5 of 34 GB), and CPU (tar about 3% of a CPU, russhd about 20%, sys-io
+about 22%). The guest is waiting on something whose cost per file grows with
+the work done. Every file also sends rt.vdso DEBUG lines (`mkdir`,
+`file_open`) back over the same SSH session, as blocking stderr writes.
+
+Not yet known: what grows, and whether the debug gate before
+`--all-debug` existed (the default debug `full-test.sh`) hit the same stall
+after the switch to standard-image runners.
+
 ## No test runs sys-io's self-tests (2026-11-16)
 
 sys-io's unit tests live inside sys-io (`src/sys/sys-io/src/self_test.rs`).
