@@ -2,8 +2,10 @@
 
 Plan, 2026-11-15. Reviewed 2026-11-16: Q1, Q2 and Q3 were answered yes.
 All steps, 0 to 7, are committed. The design as built differs from section 4
-in small ways; the details file has the current description. Still open: the
-Motor run of `tests/cli.rs` (Q2), and W1 and W3.
+in small ways; the details file has the current description. A later commit
+makes the rebase skip commits that the upstream already applied, as Git
+does. The gix tests passed natively on Motor OS on 2026-11-16, at commit
+`09944ed8`. Still open: W1 and W3.
 Follows `AGENTS.md`: 100–300-line patches with tests, one commit per step.
 All changes stay in `src/bin/gix` and `docs`. Nothing changes in the gitoxide
 fork, moto-rt, std or `src/sys`.
@@ -137,8 +139,9 @@ Decided on 2026-11-16:
   That is 16 files with exact formats, and a mistake there can lose work.
 - **Q2. Gate: yes.** Each patch is gated with the gix Cargo tests on Linux,
   debug and release, three times each. `full-test.sh` is being reworked in
-  another session. The Motor run of `tests/cli.rs` follows once, when the
-  gate is usable.
+  another session. The Motor run followed on 2026-11-16, for the gix crate
+  alone: `lorry test --release` in a test VM, as the gate runs it, with both
+  capability sets.
 - **Q3. Commits: yes.** The `gix pull` work is committed first, then one
   commit per step.
 
