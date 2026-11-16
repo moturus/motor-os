@@ -1,4 +1,5 @@
 //! Native command tests run serially, including their subprocess helpers.
+mod sysbox_caps;
 mod sysbox_cat;
 mod sysbox_chmod;
 mod sysbox_diff;
@@ -39,6 +40,7 @@ fn main() {
     if sysbox_less::is_helper(&args) {
         sysbox_less::run_helper(&args);
     }
+    sysbox_caps::run_test();
     sysbox_cat::run_test();
     sysbox_chmod::run_all_tests();
     sysbox_diff::run_test();

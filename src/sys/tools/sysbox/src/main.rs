@@ -4,6 +4,7 @@ mod commands;
 
 fn print_usage_and_exit(exit_code: i32) -> ! {
     println!("sysbox commands:");
+    println!("\tsysbox caps");
     println!("\tsysbox cat");
     println!("\tsysbox chmod");
     println!("\tsysbox cp");
@@ -72,6 +73,7 @@ fn main() {
     }
 
     match args[1].as_str() {
+        "caps" => commands::caps::do_command(&args[1..]),
         "cat" => {
             if !commands::cat::do_command(&args[1..]) {
                 std::process::exit(1);
