@@ -482,6 +482,7 @@ fn pull_rebase_replays_local_commits() -> Result {
         (&["merge", "main"], in_progress),
         (&["recover"], in_progress),
         (&["restore", "base"], in_progress),
+        (&["unstage", "base"], in_progress),
         (
             &["commit", "-m", "resolved"],
             "a rebase is stopped at a conflict",
@@ -573,6 +574,83 @@ fn pull_rebase_replays_local_commits() -> Result {
     assert_eq!(history()[..2], ["topic-6 Test/Test", "topic-5 Test/Test"]);
     assert_eq!(fs::read_to_string(root.join("clash"))?, "theirs again\n");
     assert_eq!(client.ok(&root, &["status"]), "");
+    Ok(())
+}
+
+#[test]
+fn rebase_pauses_before_a_conflict_it_cannot_show() -> Result {
+    let client = Client::new();
+    let root = client.0.join("repository");
+    client.ok(&client.0, &["init", root.to_str().unwrap()]);
+    let identity = [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+    ];
+    let gix = |args: &[&str]| client.ok(&root, &[&identity[..], args].concat());
+    let commit = |message: &str, file: &str, bytes: &[u8]| {
+        fs::write(root.join(file), bytes).unwrap();
+        gix(&["add", file]);
+        gix(&["commit", "-m", message]);
+    };
+    // Both sides change a binary file. Gix cannot write such a conflict into the file.
+    commit("base", "data", &[0, b'b']);
+    gix(&["checkout", "--track", "-b", "topic", "main"]);
+    commit("first", "first", b"first\n");
+    commit("my data", "data", &[0, b'm']);
+    let conflicting = gix::open(&root)?.head_id()?.to_string();
+    commit("last", "last", b"last\n");
+    gix(&["checkout", "main"]);
+    commit("their data", "data", &[0, b't']);
+    gix(&["checkout", "topic"]);
+
+    let cannot_show = format!(
+        "could not apply {} (my data)\n\nGix cannot show this kind of conflict. \
+         The rebase is paused before the commit.",
+        &conflicting[..7]
+    );
+    let paused = || {
+        assert_eq!(client.ok(&root, &["status"]), "operation rebase paused\n");
+        assert_eq!(
+            client.ok(&root, &["branch"]),
+            "* (no branch, rebasing topic)\n  main\n  topic\n"
+        );
+        // The files are those of the last commit that applied, on top of the upstream.
+        assert_eq!(fs::read(root.join("data")).unwrap(), [0, b't']);
+        assert!(root.join("first").is_file() && !root.join("last").exists());
+    };
+    client.error(
+        &root,
+        &[&identity[..], &["pull", "--rebase"]].concat(),
+        &cannot_show,
+    );
+    paused();
+    // Going on meets the same commit again, and nothing can be staged for it.
+    client.error(
+        &root,
+        &[&identity[..], &["rebase", "--continue"]].concat(),
+        &cannot_show,
+    );
+    paused();
+    client.error(&root, &["add", "data"], "a rebase is in progress");
+
+    assert_eq!(
+        gix(&["rebase", "--skip"]),
+        "Successfully rebased and updated refs/heads/topic.\n"
+    );
+    assert_eq!(
+        fs::read(root.join(".git/HEAD"))?,
+        b"ref: refs/heads/topic\n"
+    );
+    assert_eq!(client.ok(&root, &["status"]), "");
+    assert_eq!(fs::read(root.join("data"))?, [0, b't']);
+    assert!(root.join("first").is_file() && root.join("last").is_file());
+    let subjects: Vec<_> = gix(&["log"])
+        .lines()
+        .map(|line| line.split_once(' ').unwrap().1.to_owned())
+        .collect();
+    assert_eq!(subjects, ["last", "first", "their data", "base"]);
     Ok(())
 }
 

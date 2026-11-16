@@ -276,9 +276,23 @@ The rebase may stop again at a later commit. After the last commit, gix
 moves your branch to the new commits and prints `Successfully rebased and
 updated refs/heads/BRANCH.`
 
-While a rebase is stopped, `status`, `diff`, `log`, `branch` and `add` work.
-Commands that change the branch, such as `commit`, `switch`, `merge` and
-`pull`, refuse until the rebase has ended.
+`rebase --skip` and `rebase --abort` discard the conflict, everything
+staged, and the changes to the files that the rebase touched. They keep your
+unstaged changes to other files, and they keep untracked and ignored files.
+`rebase --continue` refuses while a tracked file has changes that are not
+staged.
+
+Gix can show a conflict only where both sides changed the text of the same
+file, as in a merge. For any other conflict, for example in a binary file or
+in a file that one side deleted, the rebase pauses before the commit instead.
+The files are then clean, and `gix status` shows `operation rebase paused`.
+Run `gix rebase --skip` to leave the commit out, or `gix rebase --abort`.
+Gix cannot apply such a commit; use Git for that rebase.
+
+While a rebase is stopped, `status`, `diff`, `log` and `branch` work, and
+`add` works while there is a conflict to resolve. Everything else that
+changes the repository refuses until the rebase has ended: `commit`,
+`restore`, `unstage`, `switch`, `checkout`, `merge`, `pull` and `fetch`.
 
 Git cannot continue a rebase that gix stopped, and gix cannot continue a
 rebase that Git stopped. End the rebase with the program that started it.
@@ -393,8 +407,10 @@ A few more things to know:
 
 - Bare repositories and linked worktrees are not supported. Gix will not
   commit to, merge in or push from a shallow, partial or sparse repository.
-- There is no rebase other than `pull --rebase`. There is no stash,
-  cherry-pick or amend, no annotated tags, no signing and no LFS.
+- There is no rebase other than `pull --rebase`, and that one is plain: it
+  is not interactive, it does not keep merge commits, and it does not stash
+  local changes. There is no stash, cherry-pick or amend, no annotated tags,
+  no signing and no LFS.
 - File names have to be valid UTF-8 and valid Motor OS file names. Names and
   characters that Windows reserves are rejected as well.
 - Motor OS has no symbolic links. A symbolic link in a repository is checked

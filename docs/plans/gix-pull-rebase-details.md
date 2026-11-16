@@ -262,10 +262,11 @@ each.
 author and message. The dropped commit when nothing is staged. The skip. The
 replay of the rest, and the finish. Repair of a `publishing` record.
 
-**Step 6, the rest.** The pause for conflicts gix cannot show. The refusals
-of `commit`, `restore` and `unstage`. `docs/gix.md`: the Pulling section, a
-new Rebasing section, the command table, "When something goes wrong" and
-"What gix does not do".
+**Step 6, the rest.** The pause for conflicts gix cannot show, which steps 4
+and 5 already built, gets its test. `commit` refuses with its own message
+since step 4; `restore` and `unstage` refuse by the rule for unfinished
+operations. `docs/gix.md`: the Pulling section, a new Rebasing section, the
+command table, "When something goes wrong" and "What gix does not do".
 
 **Step 7, fork point.** Collect the commits in the reflog of the tracking
 branch. Take the merge bases of O against all of them with

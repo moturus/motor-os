@@ -1,6 +1,8 @@
 # gix pull --rebase
 
 Plan, 2026-11-15. Reviewed 2026-11-16: Q1, Q2 and Q3 were answered yes.
+Steps 0 to 6 are committed. The design as built differs from section 4 in
+small ways; the details file has the current description.
 Follows `AGENTS.md`: 100–300-line patches with tests, one commit per step.
 All changes stay in `src/bin/gix` and `docs`. Nothing changes in the gitoxide
 fork, moto-rt, std or `src/sys`.
