@@ -19,6 +19,8 @@ type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + 
 
 #[path = "support/push_pack.rs"]
 mod push_pack;
+#[path = "support/rebase.rs"]
+mod rebase;
 #[path = "support/repository.rs"]
 mod repository;
 
@@ -215,6 +217,7 @@ fn run(fixture: &Path, output: &Path) -> Result {
     check_diff_run(&output)?;
     check_merge_policy(&output)?;
     check_merge_prepare(&output)?;
+    rebase::check_replay(output)?;
     check_restore(&output)?;
     check_executable_attributes(&output)?;
     check_unstage(&output)?;

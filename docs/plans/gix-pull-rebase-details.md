@@ -92,10 +92,23 @@ upstream commit. **B** is the base, the merge base of O and U until step 7
 makes it the fork point. **T** is the last replayed commit.
 
 The commits to replay are those reachable from O but not from U or B,
-without merge commits. The order is the fork's topological walk
-(`gix::traverse::commit::topo`, `Sorting::TopoOrder`), reversed. The list
-depends only on O, U and B, so it is computed again whenever it is needed
-and is never stored.
+without merge commits. The order is that of `git rev-list --topo-order`,
+reversed. The list depends only on O, U and B, so it is computed again
+whenever it is needed and is never stored.
+
+Gix finds these commits with a walk of its own in `replay.rs`. The fork has
+two walks, and neither fits:
+
+- Its topological walk reads the whole history when there is no
+  commit-graph, and gix does not use commit-graphs.
+- Its walk with hidden tips can return upstream commits when commits have
+  equal times. A replayed history has many such commits.
+
+The walk in `replay.rs` visits commits newest first, from O and from U and
+B. It stops by Git's rule: no commit of the branch is waiting, and every
+waiting commit is older than all commits of the branch found so far. It
+reads at most 65,536 commits. Like Git without a commit-graph, it trusts
+that no commit is older than its parents.
 
 Replaying commit C onto T is `Repository::merge_trees()` with the tree of
 C's parent as the ancestor, the tree of T as ours, and the tree of C as
@@ -281,7 +294,33 @@ state and refuses to change a repository that has it.
 **R6, more exactly.** Git moves HEAD once per replayed commit, so its HEAD
 reflog has one line per commit. Gix moves HEAD once per stop.
 
-**One more difference, no decision needed.** Git drops a commit that the
-upstream already has by comparing patches before the replay, and prints
-`skipped previously applied commit`. Gix finds it after the replay, when the
-result adds nothing. The resulting history is the same.
+**R8, more exactly.** The limit of 65,536 covers every commit the rebase
+reads: those it replays, and those it visits to find them.
+
+**More differences, no decision needed.** Found while writing step 1.
+
+- Git drops a commit that the upstream already has by comparing patches
+  before the replay, and prints `skipped previously applied commit`. Gix
+  finds it after the replay, when the result adds nothing. The history is
+  the same, with one exception: if the upstream applied the change and later
+  undid it, Git still drops the commit and gix applies it again.
+- A replayed commit keeps its message bytes and its `encoding` header. Git
+  converts the message to UTF-8.
+- A replayed commit has no signature and no other extra header. Git drops
+  them too.
+- The merge of each replay reads `.gitattributes` from the index. Until the
+  first stop that is the index of your branch, not of the upstream. Git
+  reads the attributes of the commit it is replaying onto.
+
+**Messages and reflogs, as Git 2.53 writes them.** Checked for step 2.
+
+- Nothing to do: `Already up to date.` when the upstream is your commit,
+  and `Current branch main is up to date.` when your branch is ahead.
+- A fast-forward: `Updating OLD..NEW` and `Fast-forward`, reflog `pull
+  --rebase: Fast-forward`.
+- A rebase: `Successfully rebased and updated refs/heads/main.`, branch
+  reflog `pull --rebase (finish): refs/heads/main onto <U>`. The words
+  before the bracket are the command that ran, so a later `rebase
+  --continue` writes `rebase (finish)`.
+- A dropped commit: `dropping <id> <subject> -- patch contents already
+  upstream`.

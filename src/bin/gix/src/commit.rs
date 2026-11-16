@@ -21,6 +21,13 @@ pub(crate) struct Identities {
     committer: gix::actor::Signature,
 }
 
+impl Identities {
+    /// Who makes a commit now, with the time at which the identities were read.
+    pub(crate) fn committer(&self) -> &gix::actor::Signature {
+        &self.committer
+    }
+}
+
 /// Commit the held index, completing a validated ready merge when present.
 pub fn run(opened: &OpenedRepository, message: &str, cancellation: &Cancellation) -> crate::Result {
     cancellation.check()?;

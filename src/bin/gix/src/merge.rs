@@ -529,7 +529,7 @@ impl StdError for IncompleteError {
     }
 }
 
-fn supported_text_conflict(conflict: &Conflict) -> bool {
+pub(crate) fn supported_text_conflict(conflict: &Conflict) -> bool {
     let Ok(Resolution::OursModifiedTheirsModifiedThenBlobContentMerge { merged_blob }) =
         &conflict.resolution
     else {

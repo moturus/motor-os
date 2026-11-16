@@ -156,7 +156,7 @@ Routine. Nobody objected in the review, so they stand:
 - **R6.** HEAD's reflog gets one line per stop, not one per commit. The
   branch reflog gets Git's single `rebase (finish)` line.
 - **R7.** `ORIG_HEAD` and `REBASE_HEAD` are not written.
-- **R8.** One rebase replays at most 65,536 commits, the bound that push
+- **R8.** One rebase reads at most 65,536 commits, the bound that push
   already has.
 
 Can wait:

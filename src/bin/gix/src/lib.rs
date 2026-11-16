@@ -36,6 +36,7 @@ pub mod push_report;
 pub mod recover;
 pub mod refs;
 pub mod remotes;
+pub mod replay;
 pub mod repository;
 pub mod restore;
 pub mod selection;
