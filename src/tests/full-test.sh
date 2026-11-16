@@ -6,7 +6,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$ROOT_DIR/src/tests/cross-test.sh"
 
 full_options() {
-  BUILD=debug
+  # The gate builds and boots the release image; --release selects the profile
+  # of the native tests only. --all-debug (manual runs only, never automation)
+  # builds and boots the debug image and runs every check in debug.
+  BUILD=release
+  TEST_BUILD=debug
   VMM=chv
   CPUS="${MOTO_SMP-4}"
   MEMORY_MIB="${MOTO_MEMORY_MIB-4096}"
@@ -18,7 +22,8 @@ full_options() {
     [ -z "${seen[$option]:-}" ] || { echo "duplicate option: $option" >&2; return 2; }
     seen[$option]=1
     case "$option" in
-      --release) [ "$1" = --release ] || return 2; BUILD=release; shift ;;
+      --release) [ "$1" = --release ] || return 2; TEST_BUILD=release; shift ;;
+      --all-debug) [ "$1" = --all-debug ] || return 2; BUILD=debug; shift ;;
       --full) [ "$1" = --full ] || return 2; FULL=1; shift ;;
       --vmm|--cpus|--memory)
         if [[ "$1" == *=* ]]; then value="${1#*=}"; shift
@@ -27,9 +32,12 @@ full_options() {
           value="$2"; shift 2
         fi
         case "$option" in --vmm) VMM="$value" ;; --cpus) CPUS="$value" ;; --memory) MEMORY_MIB="$value" ;; esac ;;
-      *) echo "usage: $0 [--release] [--full] [--vmm chv|qemu|fc] [--cpus N] [--memory MIB]" >&2; return 2 ;;
+      *) echo "usage: $0 [--release | --all-debug] [--full] [--vmm chv|qemu|fc] [--cpus N] [--memory MIB]" >&2; return 2 ;;
     esac
   done
+  if [ "$BUILD:$TEST_BUILD" = debug:release ]; then
+    echo "--all-debug and --release are mutually exclusive" >&2; return 2
+  fi
   case "$VMM" in chv|qemu|fc) ;; *) echo "unsupported VMM: $VMM" >&2; return 2 ;; esac
   for value in "$CPUS" "$MEMORY_MIB"; do
     case "$value" in ''|*[!0-9]*|0*) echo 'CPU and memory values must be positive integers' >&2; return 2 ;; esac
@@ -37,7 +45,8 @@ full_options() {
   export MOTO_SMP="$CPUS" MOTO_MEMORY_MIB="$MEMORY_MIB"
   PROFILE_ARGS=()
   [ "$BUILD" != release ] || PROFILE_ARGS=(--release)
-  NATIVE_ARGS=("${PROFILE_ARGS[@]}")
+  NATIVE_ARGS=()
+  [ "$TEST_BUILD" != release ] || NATIVE_ARGS=(--release)
   [ "$FULL" != 1 ] || NATIVE_ARGS+=(--full)
 }
 
@@ -136,7 +145,7 @@ full_upload_native_inputs() {
   if vm_ssh "MOTOR_OS_CAPS=0x204 /user/bin/rush -c 'echo denied >>/user/dev/lorry/vendor/repository.toml'" >/dev/null 2>&1; then
     cross_fail 'None can modify the Interactive dependency repository'
   fi
-  if [ "$BUILD" = release ]; then
+  if [ "$TEST_BUILD" = release ]; then
     vm_ssh 'MOTOR_OS_CAPS=0x204 mkdir /none/dev/quickjs-test262'
     vm_ssh 'MOTOR_OS_CAPS=0x204 tar -xf - -C /none/dev/quickjs-test262' < "$inputs/quickjs-source.tar"
     vm_ssh 'MOTOR_OS_CAPS=0x204 tar -xf - -C /none/dev/quickjs-test262' < "$inputs/quickjs-test262.tar.zst"
@@ -202,7 +211,7 @@ full_main() {
   else
     full_native_guest
   fi
-  echo "full-test: PASS ($BUILD, $VMM)"
+  echo "full-test: PASS ($BUILD image, $TEST_BUILD tests, $VMM)"
 }
 
 host_build_base_networking() (
@@ -1849,8 +1858,15 @@ host_full_options() (
   invalid --vmm qemu --vmm chv
   invalid --vmm unknown
   invalid --release=bogus
+  invalid --all-debug=bogus
+  invalid --release --all-debug
+  invalid --all-debug --release
+  full_options
+  [ "$BUILD:$TEST_BUILD:${NATIVE_ARGS[*]}" = 'release:debug:' ]
   full_options --release
-  [ "$CPUS:$MEMORY_MIB:$BUILD:$VMM" = '4:4096:release:chv' ]
+  [ "$CPUS:$MEMORY_MIB:$BUILD:$TEST_BUILD:${NATIVE_ARGS[*]}:$VMM" = '4:4096:release:release:--release:chv' ]
+  full_options --all-debug
+  [ "$BUILD:$TEST_BUILD:${PROFILE_ARGS[*]}:${NATIVE_ARGS[*]}" = 'debug:debug::' ]
   MOTO_SMP=2 MOTO_MEMORY_MIB=512 full_options --full --vmm qemu
   [ "$CPUS:$MEMORY_MIB:$FULL:$VMM" = '2:512:1:qemu' ]
   MOTO_SMP=bad MOTO_MEMORY_MIB=bad full_options --cpus=1 --memory 128

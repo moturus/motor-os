@@ -229,14 +229,18 @@ settings do not survive a host reboot; restore them afterwards with
 `vm_images/release/create-tap.sh` (it uses `sudo`), or by re-running
 `src/build-motor-os.sh`.
 
-Run the full debug or release integration suite from the repository root:
+Run the full integration tests from the repository root:
 
 ```sh
 src/tests/full-test.sh
 src/tests/full-test.sh --release
 ```
 
-The suite defaults to Cloud Hypervisor and runs boot-option checks on every
+Both runs build and boot the release image; `--release` selects the profile
+of the native tests only. [testing.md](testing.md) describes every option of
+the test runners, including the manual-only `--all-debug`.
+
+`full-test.sh` defaults to Cloud Hypervisor and runs boot-option checks on every
 available VMM. `--vmm qemu` skips System-console checks; `--vmm fc` skips
 toolchain installation, native guest tests, and cross checks that need
 development tools. Each skip is named. Cloud Hypervisor runs require QEMU for
