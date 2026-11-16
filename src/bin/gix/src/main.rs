@@ -4,7 +4,7 @@ use std::{
     process::ExitCode,
 };
 
-use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
+use clap::{Arg, ArgAction, ArgGroup, ArgMatches, Command, value_parser};
 
 mod log;
 
@@ -274,11 +274,27 @@ fn run() -> Result {
             Command::new("rebase")
                 .about("Go on with a rebase that 'pull --rebase' had to stop")
                 .arg(
+                    Arg::new("continue")
+                        .long("continue")
+                        .action(ArgAction::SetTrue)
+                        .help("Commit the conflicts you resolved and replay the remaining commits"),
+                )
+                .arg(
+                    Arg::new("skip")
+                        .long("skip")
+                        .action(ArgAction::SetTrue)
+                        .help("Leave out the commit that stopped the rebase and replay the rest"),
+                )
+                .arg(
                     Arg::new("abort")
                         .long("abort")
                         .action(ArgAction::SetTrue)
-                        .required(true)
                         .help("Return to the branch as it was before the rebase"),
+                )
+                .group(
+                    ArgGroup::new("action")
+                        .args(["continue", "skip", "abort"])
+                        .required(true),
                 ),
         )
         .subcommand(Command::new("status").about("Show worktree status"))
@@ -479,7 +495,17 @@ fn run() -> Result {
                 )
             }
         }
-        Some("rebase") => rebase::abort(&opened, &cancellation),
+        Some("rebase") => {
+            let command = matches
+                .subcommand_matches("rebase")
+                .expect("matched rebase");
+            if command.get_flag("abort") {
+                rebase::abort(&opened, &cancellation)
+            } else {
+                let skip = command.get_flag("skip");
+                rebase::resume(&opened, skip, io::stdout().lock(), &cancellation)
+            }
+        }
         Some("recover") => {
             let action = recover::run(&opened, &cancellation)?;
             let mut out = io::stdout().lock();

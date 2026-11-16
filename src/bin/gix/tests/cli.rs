@@ -311,17 +311,16 @@ fn pull_rebase_replays_local_commits() -> Result {
         "-c",
         "user.email=other@example.invalid",
     ];
-    // Each commit writes its own name into a file of that name, or `text` into `base`.
-    let commit_as = |who: &[&str], name: &str, text: Option<&str>| {
-        let file = if text.is_some() { "base" } else { name };
-        fs::write(root.join(file), text.unwrap_or(name)).unwrap();
+    let commit_file = |who: &[&str], message: &str, file: &str, text: &str| {
+        fs::write(root.join(file), text).unwrap();
         client.ok(&root, &["add", file]);
-        client.ok(&root, &[who, &["commit", "-m", name]].concat());
+        client.ok(&root, &[who, &["commit", "-m", message]].concat());
     };
-    let commit = |name: &str| commit_as(&identity, name, None);
-    let on_main = |name: &str, text: Option<&str>| {
+    // Most commits write their own name into a file of that name.
+    let commit = |name: &str| commit_file(&identity, name, name, name);
+    let on_main = |message: &str, file: &str, text: &str| {
         client.ok(&root, &["checkout", "main"]);
-        commit_as(&identity, name, text);
+        commit_file(&identity, message, file, text);
         client.ok(&root, &["checkout", "topic"]);
     };
     // Subject, author and committer of every commit on the first-parent line, newest first.
@@ -359,15 +358,15 @@ fn pull_rebase_replays_local_commits() -> Result {
 
     commit("base");
     client.ok(&root, &["checkout", "--track", "-b", "topic", "main"]);
-    commit_as(&other, "topic-1", None);
+    commit_file(&other, "topic-1", "topic-1", "topic-1");
     assert_eq!(
         pull(&["pull", "--rebase"]),
         "Current branch topic is up to date.\n"
     );
 
     // The branch has a commit that the upstream has too, and a merge of its own.
-    on_main("shared", None);
-    on_main("upstream-1", None);
+    on_main("shared", "shared", "shared");
+    on_main("upstream-1", "upstream-1", "upstream-1");
     client.ok(&root, &["checkout", "-b", "side"]);
     commit("side-1");
     client.ok(&root, &["checkout", "topic"]);
@@ -409,7 +408,7 @@ fn pull_rebase_replays_local_commits() -> Result {
     }
 
     // The settings ask for a rebase as well. The one of the branch wins.
-    on_main("upstream-2", None);
+    on_main("upstream-2", "upstream-2", "upstream-2");
     commit("topic-3");
     let configured = ["-c", "pull.rebase=false", "-c", "branch.topic.rebase=true"];
     assert_eq!(
@@ -429,8 +428,8 @@ fn pull_rebase_replays_local_commits() -> Result {
     assert!(last_reflog("HEAD").starts_with("pull (finish): refs/heads/topic onto "));
 
     // A missing identity stops the rebase before anything changes.
-    on_main("theirs", Some("theirs\n"));
-    commit_as(&identity, "mine", Some("mine\n"));
+    on_main("theirs", "base", "theirs\n");
+    commit_file(&identity, "mine", "base", "mine\n");
     let mine = rev("HEAD");
     commit("topic-4");
     let before = rev("HEAD");
@@ -445,18 +444,16 @@ fn pull_rebase_replays_local_commits() -> Result {
 
     // A conflict stops the rebase at the last commit that applied, with the conflict in
     // the files. The branch itself does not move.
-    let output = client
-        .command(&root)
-        .args(identity)
-        .args(["pull", "--rebase"])
-        .output()?;
-    assert_error(
-        &output,
-        &format!(
-            "could not apply {} (mine): the conflict is in your files",
-            &mine[..7]
-        ),
-    );
+    let stops_at = |commit: &str, subject: &str| {
+        let mut pull = client.command(&root);
+        pull.args(identity).args(["pull", "--rebase"]);
+        let expected = format!(
+            "could not apply {} ({subject})\n\nResolve the conflict in your files",
+            &commit[..7]
+        );
+        assert_error(&pull.output().unwrap(), &expected);
+    };
+    stops_at(&mine, "mine");
     assert_eq!(
         fs::read_to_string(root.join("base"))?,
         format!(
@@ -507,7 +504,75 @@ fn pull_rebase_replays_local_commits() -> Result {
         last_reflog("HEAD"),
         "rebase (abort): returning to refs/heads/topic"
     );
-    client.error(&root, &["rebase", "--abort"], "no rebase is in progress");
+    for action in ["--continue", "--skip", "--abort"] {
+        client.error(&root, &["rebase", action], "no rebase is in progress");
+    }
+
+    // Again. This time the conflict is resolved, and the rebase goes on to its end.
+    stops_at(&mine, "mine");
+    client.error(
+        &root,
+        &["rebase", "--continue"],
+        "a conflict is not resolved yet",
+    );
+    fs::write(root.join("base"), "resolved\n")?;
+    client.ok(&root, &["add", "base"]);
+    fs::write(root.join("topic-1"), "not staged")?;
+    client.error(&root, &["rebase", "--continue"], "has local changes");
+    fs::write(root.join("topic-1"), "topic-1")?;
+    let rebased = "Successfully rebased and updated refs/heads/topic.\n";
+    assert_eq!(pull(&["rebase", "--continue"]), rebased);
+    assert_eq!(
+        history()[..3],
+        ["topic-4 Test/Test", "mine Test/Test", "topic-3 Test/Test"]
+    );
+    assert_eq!(fs::read_to_string(root.join("base"))?, "resolved\n");
+    assert_eq!(
+        fs::read(root.join(".git/HEAD"))?,
+        b"ref: refs/heads/topic\n"
+    );
+    assert_eq!(client.ok(&root, &["status"]), "");
+    assert!(!root.join(".git/gix-operation").exists());
+    assert_eq!(
+        last_reflog("HEAD"),
+        "rebase (finish): returning to refs/heads/topic"
+    );
+    assert_eq!(
+        last_reflog("refs/heads/topic"),
+        format!("rebase (finish): refs/heads/topic onto {}", rev("main"))
+    );
+
+    // Both sides add the same file. The commit of the branch is skipped.
+    on_main("their clash", "clash", "theirs\n");
+    commit_file(&identity, "my clash", "clash", "mine\n");
+    let clash = rev("HEAD");
+    commit("topic-5");
+    stops_at(&clash, "my clash");
+    assert_eq!(
+        client.ok(&root, &["status"]),
+        "operation rebase ready\nUU clash\n"
+    );
+    assert_eq!(pull(&["rebase", "--skip"]), rebased);
+    assert_eq!(
+        history()[..3],
+        ["topic-5 Test/Test", "topic-4 Test/Test", "mine Test/Test"]
+    );
+    assert_eq!(fs::read_to_string(root.join("clash"))?, "theirs\n");
+    assert_eq!(client.ok(&root, &["status"]), "");
+
+    // A resolution that takes the upstream version leaves nothing of the commit, so the
+    // commit is dropped.
+    on_main("their change", "clash", "theirs again\n");
+    commit_file(&identity, "my change", "clash", "mine again\n");
+    let change = rev("HEAD");
+    commit("topic-6");
+    stops_at(&change, "my change");
+    fs::write(root.join("clash"), "theirs again\n")?;
+    client.ok(&root, &["add", "clash"]);
+    assert_eq!(pull(&["rebase", "--continue"]), rebased);
+    assert_eq!(history()[..2], ["topic-6 Test/Test", "topic-5 Test/Test"]);
+    assert_eq!(fs::read_to_string(root.join("clash"))?, "theirs again\n");
+    assert_eq!(client.ok(&root, &["status"]), "");
     Ok(())
 }
 

@@ -87,7 +87,8 @@ pub fn check(test: &Test) -> Result {
     stop(test, &server)
 }
 
-/// A rebase that stops at a conflict must leave what host Git leaves, and abort like it.
+/// A rebase that stops at a conflict must leave what host Git leaves. Abort, continue and
+/// skip must then end where host Git ends.
 fn stop(test: &Test, server: &Server) -> Result {
     let (by_gix, by_git) = (test.0.join("stop-gix"), test.0.join("stop-git"));
     success(
@@ -102,6 +103,8 @@ fn stop(test: &Test, server: &Server) -> Result {
         for date in ["GIT_AUTHOR_DATE", "GIT_COMMITTER_DATE"] {
             command.env(date, "2026-01-02T03:04:05+00:00");
         }
+        // `git rebase --continue` must not wait for an editor.
+        command.env("GIT_EDITOR", "true");
         command.args(["-c", "core.hooksPath=/dev/null", "-c", "core.abbrev=12"]);
         command.args(IDENTITY).args(args);
         command
@@ -120,15 +123,21 @@ fn stop(test: &Test, server: &Server) -> Result {
     commit(&update, "pulled-1", "theirs\n", "theirs");
     success(&mut git(&update, &["push", "origin", "main"]));
 
-    let mut pull = test.gix(&by_gix);
-    pull.args(IDENTITY).args(["-c", "core.abbrev=12"]);
-    rejected(pull.args(["pull", "--rebase"]).output()?, "could not apply");
-    assert!(
-        !git(&by_git, &["pull", "--rebase"])
-            .output()?
-            .status
-            .success()
-    );
+    let gix = |args: &[&str]| {
+        let mut command = test.gix(&by_gix);
+        command.args(IDENTITY).args(["-c", "core.abbrev=12"]);
+        command.args(args);
+        command
+    };
+    let both_stop = || {
+        rejected(
+            gix(&["pull", "--rebase"]).output().unwrap(),
+            "could not apply",
+        );
+        let pulled = git(&by_git, &["pull", "--rebase"]).output().unwrap();
+        assert!(!pulled.status.success(), "{pulled:?}");
+    };
+    both_stop();
 
     let same = |args: &[&str]| {
         let ours = success(&mut git(&by_gix, args));
@@ -156,6 +165,53 @@ fn stop(test: &Test, server: &Server) -> Result {
     assert_eq!(same(&["rev-parse", "--abbrev-ref", "HEAD"]), "main\n");
     assert_eq!(same(&["log", "-1", "--format=%H %s"]).len(), 47);
     assert_eq!(std::fs::read_to_string(by_gix.join("pulled-1"))?, "mine\n");
+    assert_eq!(success(test.gix(&by_gix).arg("status")), "");
+
+    // Stop again, resolve the conflict the same way in both, and continue to the end.
+    let rebased = "Successfully rebased and updated refs/heads/main.\n";
+    let log = ["log", "--format=%an|%ae|%ad|%cn|%s|%T"];
+    both_stop();
+    for clone in [&by_gix, &by_git] {
+        std::fs::write(clone.join("pulled-1"), "resolved\n")?;
+    }
+    success(&mut gix(&["add", "pulled-1"]));
+    success(&mut git(&by_git, &["add", "pulled-1"]));
+    assert_eq!(success(&mut gix(&["rebase", "--continue"])), rebased);
+    success(&mut git(&by_git, &["rebase", "--continue"]));
+    let subjects = |log: String| -> Vec<String> {
+        let subject = |line: &str| line.split('|').nth(4).unwrap().to_owned();
+        log.lines().take(4).map(subject).collect()
+    };
+    assert_eq!(subjects(same(&log)), ["after", "clash", "before", "theirs"]);
+    assert_eq!(same(&["rev-parse", "--abbrev-ref", "HEAD"]), "main\n");
+    let finished = same(&["reflog", "-1", "--format=%gs", "main"]);
+    assert!(finished.starts_with("rebase (finish): refs/heads/main onto "));
+    assert_eq!(success(test.gix(&by_gix).arg("status")), "");
+
+    // Now two commits of the branch conflict with the upstream, and both are skipped.
+    // The first skip ends at the second conflict. The twins have other commit names by
+    // now, so the conflict markers are not compared.
+    for clone in [&by_gix, &by_git] {
+        commit(clone, "pulled-1", "mine again\n", "clash again");
+        commit(clone, "last", "last\n", "last");
+    }
+    commit(&update, "pulled-1", "theirs again\n", "theirs again");
+    success(&mut git(&update, &["push", "origin", "main"]));
+    both_stop();
+    rejected(gix(&["rebase", "--skip"]).output()?, "(clash again)");
+    let skipped = git(&by_git, &["rebase", "--skip"]).output()?;
+    assert!(!skipped.status.success(), "{skipped:?}");
+    assert_eq!(same(&["ls-files", "-u"]).lines().count(), 3);
+    assert_eq!(subjects(same(&log))[..2], ["after", "before"]);
+    assert_eq!(success(&mut gix(&["rebase", "--skip"])), rebased);
+    success(&mut git(&by_git, &["rebase", "--skip"]));
+    assert_eq!(
+        subjects(same(&log)),
+        ["last", "after", "before", "theirs again"]
+    );
+    assert_eq!(same(&["rev-parse", "--abbrev-ref", "HEAD"]), "main\n");
+    let skipped = std::fs::read_to_string(by_gix.join("pulled-1"))?;
+    assert_eq!(skipped, "theirs again\n");
     assert_eq!(success(test.gix(&by_gix).arg("status")), "");
     test.git(&by_gix, &["fsck", "--strict", "--no-dangling"]);
     Ok(())

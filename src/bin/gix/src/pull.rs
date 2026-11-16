@@ -144,7 +144,8 @@ pub fn run(
                     onto: commit,
                     base,
                 };
-                let replayed = replay::run(shared, &range, None, commit, cancellation)?;
+                let commits = replay::todo(&shared.repo, &range, cancellation)?;
+                let replayed = replay::run(shared, &commits, commit, cancellation)?;
                 let tip = replayed.tip;
                 rebased = Some((range, replayed));
                 Ok(Some(tip))

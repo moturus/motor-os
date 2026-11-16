@@ -39,9 +39,10 @@ pub fn run(opened: &OpenedRepository, message: &str, cancellation: &Cancellation
     if let Some(ready) = ready {
         if matches!(ready.kind, crate::operation::Kind::Rebase(_)) {
             // Only the rebase knows the author and the message of the commit to make.
-            return Err(
-                invalid("a rebase is stopped at a conflict; run 'gix rebase --abort'").into(),
-            );
+            return Err(invalid(
+                "a rebase is stopped at a conflict; after 'gix add', run 'gix rebase --continue'",
+            )
+            .into());
         }
         guard.require_ready_merge(repo, &ready, cancellation)?;
         let tree = tree_index::write(repo, guard.index(), cancellation)?;

@@ -56,33 +56,21 @@ pub struct Stopped {
     pub shown: Option<(gix::ObjectId, Vec<Conflict>)>,
 }
 
-/// Replay the commits of `range` that follow `after` onto `tip`, oldest first.
+/// Replay `commits` onto `tip` in the given order.
 ///
-/// `after` is the commit an earlier replay stopped at; `None` starts with the first commit.
+/// The commits are those that `todo()` lists, or the rest of them after a stop.
 pub fn run(
     opened: &OpenedRepository,
-    range: &Range,
-    after: Option<gix::ObjectId>,
+    commits: &[gix::ObjectId],
     mut tip: gix::ObjectId,
     cancellation: &Cancellation,
 ) -> crate::Result<Replayed> {
     let repo = &opened.repo;
     let identities = commit::identities(repo)?;
-    let commits = todo(repo, range, cancellation)?;
-    let rest = match after {
-        None => &commits[..],
-        Some(after) => {
-            let position = commits
-                .iter()
-                .position(|id| *id == after)
-                .ok_or_else(|| invalid("the rebase does not have the commit it stopped at"))?;
-            &commits[position + 1..]
-        }
-    };
     let mut tip_tree = repo.find_commit(tip)?.tree_id()?.detach();
     reject_unsupported(opened, tip_tree, cancellation)?;
     let mut dropped = Vec::new();
-    for &id in rest {
+    for &id in commits {
         cancellation.check()?;
         let picked = pick(opened, id, tip_tree)?;
         cancellation.check()?;
@@ -170,7 +158,7 @@ fn pick(
 }
 
 /// Write the replayed form of commit `id`: its author and message, on parent `tip`.
-fn commit_as(
+pub(crate) fn commit_as(
     repo: &gix::Repository,
     id: gix::ObjectId,
     tip: gix::ObjectId,
@@ -357,10 +345,6 @@ pub fn todo(
     }
     commits.reverse();
     Ok(commits)
-}
-
-fn invalid(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
 fn unsupported(message: &str) -> io::Error {

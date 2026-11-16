@@ -128,6 +128,7 @@ pub fn check_replay(output: &Path) -> Result {
     merged[0] = ("a", b"one\n2\n3\n");
     let l4 = commit("l4", tree(&merged)?, &[m])?;
 
+    let todo = |range: &Range| replay::todo(repo, range, &cancellation);
     let range = Range {
         original: l4,
         onto: u,
@@ -144,7 +145,7 @@ pub fn check_replay(output: &Path) -> Result {
     }
     check_todo_boundary(&history, base_tree)?;
 
-    let replayed = replay::run(&opened, &range, None, u, &cancellation)?;
+    let replayed = replay::run(&opened, &todo(&range)?, u, &cancellation)?;
     assert!(replayed.stopped.is_none());
     assert_eq!(replayed.dropped, [l2], "u1 has the change of l2");
     let mut files = files.clone();
@@ -192,7 +193,7 @@ pub fn check_replay(output: &Path) -> Result {
         onto: u,
         base,
     };
-    let replayed = replay::run(&opened, &range, None, u, &cancellation)?;
+    let replayed = replay::run(&opened, &todo(&range)?, u, &cancellation)?;
     let stopped = replayed.stopped.ok_or("the conflict did not stop")?;
     assert_eq!(stopped.commit, x2);
     assert_eq!(history.read(replayed.tip)?.0, "x1");
@@ -209,16 +210,13 @@ pub fn check_replay(output: &Path) -> Result {
             x2.attach(repo).shorten_or_id()
         )
     );
-    let rest = replay::run(&opened, &range, Some(x2), replayed.tip, &cancellation)?;
+    let rest = replay::run(&opened, &todo(&range)?[2..], replayed.tip, &cancellation)?;
     assert!(rest.stopped.is_none() && rest.dropped.is_empty());
     let (message, .., parents) = history.read(rest.tip)?;
     assert_eq!(
         (message.as_str(), &parents[..]),
         ("x3", &[replayed.tip][..])
     );
-    let error = replay::run(&opened, &range, Some(u), u, &cancellation)
-        .expect_err("a commit outside the rebase was accepted as its stopping point");
-    assert!(error.to_string().contains("stopped at"), "{error}");
 
     // Gix cannot show a conflict in a binary file, so it reports the commit only.
     let binary: [(&str, &[u8]); 3] = [("a", lines), ("bin", &[0, b'y']), ("r", b"r\n")];
@@ -228,14 +226,14 @@ pub fn check_replay(output: &Path) -> Result {
         onto: u,
         base,
     };
-    let replayed = replay::run(&opened, &range, None, u, &cancellation)?;
+    let replayed = replay::run(&opened, &todo(&range)?, u, &cancellation)?;
     let stopped = replayed.stopped.ok_or("the binary conflict did not stop")?;
     assert_eq!((replayed.tip, stopped.commit), (u, y1));
     assert!(stopped.shown.is_none());
 
     let anonymous =
         motor_gix::repository::open(&repository, &["user.name=", "user.email="], false)?;
-    let error = replay::run(&anonymous, &range, None, u, &cancellation)
+    let error = replay::run(&anonymous, &todo(&range)?, u, &cancellation)
         .expect_err("a replay without an identity was accepted");
     assert!(error.to_string().contains("author identity"), "{error}");
 
@@ -673,7 +671,8 @@ pub fn check_rebase_record(output: &Path) -> Result {
     Ok(())
 }
 
-/// A branch `topic` whose second commit conflicts with the one commit that `main` has more.
+/// A branch `topic` with five commits. The second and the fourth conflict with the one
+/// commit that `main` has more.
 #[cfg(feature = "native-test-support")]
 struct Conflicting {
     root: std::path::PathBuf,
@@ -701,21 +700,25 @@ impl Conflicting {
             motor_gix::add::run(opened, true, &[], &cancellation)?;
             motor_gix::commit::run(opened, message, &cancellation)
         };
-        commit(&opened, "base", &[("a", "1\n2\n3\n"), ("keep", "k\n")])?;
+        commit(
+            &opened,
+            "base",
+            &[("a", "1\n2\n3\n"), ("b", "b\n"), ("keep", "k\n")],
+        )?;
         opened.repo.reference(
             "refs/heads/topic",
             opened.repo.head_id()?.detach(),
             gix::refs::transaction::PreviousValue::MustNotExist,
             "fixture",
         )?;
-        commit(
-            &opened,
-            "theirs",
-            &[("a", "1\n2\n3\nTHEIRS\n"), ("up", "u\n")],
-        )?;
+        let theirs = [("a", "1\n2\n3\nTHEIRS\n"), ("b", "THEIRS\n"), ("up", "u\n")];
+        commit(&opened, "theirs", &theirs)?;
         motor_gix::switch::run(&mut opened, "topic", &cancellation)?;
         commit(&opened, "t1", &[("t1", "t1\n")])?;
         commit(&opened, "mine", &[("a", "1\n2\n3\nMINE\n")])?;
+        commit(&opened, "t3", &[("t3", "t3\n")])?;
+        commit(&opened, "mine-b", &[("b", "MINE\n")])?;
+        commit(&opened, "t5", &[("t5", "t5\n")])?;
         let original = opened.repo.head_id()?.detach();
         Ok(Conflicting {
             root,
@@ -757,6 +760,43 @@ impl Conflicting {
         std::fs::read_to_string(self.root.join(path)).ok()
     }
 
+    /// `gix rebase --continue` or `--skip`: what it printed, or its error.
+    fn resume(&self, skip: bool) -> std::result::Result<String, String> {
+        let mut out = Vec::new();
+        motor_gix::rebase::resume(&self.opened, skip, &mut out, &self.cancellation)
+            .map_err(|error| error.to_string())?;
+        Ok(String::from_utf8(out).unwrap())
+    }
+
+    /// Write `text` to the conflicted file `path` and stage it.
+    fn resolve(&self, path: &str, text: &str) -> Result {
+        std::fs::write(self.root.join(path), text)?;
+        motor_gix::add::run(&self.opened, true, &[], &self.cancellation)
+    }
+
+    /// The subjects on the first-parent line of HEAD, newest first, without `base`.
+    fn subjects(&self) -> Result<String> {
+        let mut subjects = Vec::new();
+        let mut commit = self.opened.repo.head_commit()?;
+        loop {
+            let parent = commit.parent_ids().next().map(gix::Id::detach);
+            let Some(parent) = parent else {
+                return Ok(subjects.join(" "));
+            };
+            subjects.push(commit.message_raw()?.to_string());
+            commit = self.opened.repo.find_commit(parent)?;
+        }
+    }
+
+    fn head(&self) -> Result<(Option<String>, String)> {
+        let head = motor_gix::head_ref::capture(&self.opened.repo)?;
+        let commit = self.opened.repo.head_commit()?.message_raw()?.to_string();
+        Ok((
+            head.reference.map(|name| name.as_bstr().to_string()),
+            commit,
+        ))
+    }
+
     /// Require the rebase to be paused at the replayed `t1`, with the files of that commit.
     fn require_paused(&self) -> Result {
         use motor_gix::operation::State;
@@ -775,6 +815,14 @@ impl Conflicting {
         assert_eq!(self.file("a").as_deref(), Some("1\n2\n3\nTHEIRS\n"));
         assert_eq!(self.file("up").as_deref(), Some("u\n"));
         assert_eq!(self.file("t1").as_deref(), Some("t1\n"));
+        Ok(())
+    }
+
+    /// Require the rebase to have ended with the branch at a commit named `tip`.
+    fn require_finished(&self, tip: &str) -> Result {
+        assert_eq!(self.head()?, (Some("refs/heads/topic".into()), tip.into()));
+        assert!(!self.opened.repo.git_dir().join("gix-operation").exists());
+        assert_eq!(self.status()?, "");
         Ok(())
     }
 
@@ -879,4 +927,120 @@ pub fn check_rebase_recovery(output: &Path) -> Result {
         "{error}"
     );
     Ok(())
+}
+
+/// Interrupt `rebase --continue` and `--skip` at each point, then finish the rebase.
+#[cfg(feature = "native-test-support")]
+pub fn check_rebase_resume(output: &Path) -> Result {
+    use motor_gix::test_support::{Failure, fail_once};
+
+    let rebased = "Successfully rebased and updated refs/heads/topic.\n";
+    let unpublished = "the resolution commit may not be published";
+
+    // The resolution commit is made, but HEAD does not move to it. Then it does, but the
+    // record does not follow. Each time, `--continue` goes on from where things are.
+    let mut fixture = Conflicting::new(output, "rebase-resume-continue")?;
+    fixture.pull();
+    fixture.resolve("a", "1\n2\n3\nBOTH\n")?;
+    let armed = fail_once(Failure::BeforeResolutionPublished)?;
+    let error = fixture
+        .resume(false)
+        .expect_err("the injected failure was ignored");
+    drop(armed);
+    assert!(error.contains(unpublished), "{error}");
+    assert_eq!(fixture.head()?, (None, "t1".into()));
+    assert_eq!(fixture.status()?, "operation rebase publishing\nM  a\n");
+    let error = fixture
+        .resume(false)
+        .expect_err("the second conflict was not found");
+    assert!(
+        error.contains("could not apply") && error.contains("(mine-b)"),
+        "{error}"
+    );
+    assert_eq!(fixture.subjects()?, "t3 mine t1 theirs");
+    assert_eq!(fixture.status()?, "operation rebase ready\nUU b\n");
+    fixture.resolve("b", "BOTH\n")?;
+    let armed = fail_once(Failure::AfterResolutionPublished)?;
+    let error = fixture
+        .resume(false)
+        .expect_err("the injected failure was ignored");
+    drop(armed);
+    assert!(error.contains(unpublished), "{error}");
+    assert_eq!(fixture.head()?, (None, "mine-b".into()));
+    assert_eq!(fixture.resume(false)?, rebased);
+    fixture.require_finished("t5")?;
+    assert_eq!(fixture.subjects()?, "t5 mine-b t3 mine t1 theirs");
+    assert_eq!(fixture.file("a").as_deref(), Some("1\n2\n3\nBOTH\n"));
+    assert_eq!(fixture.file("b").as_deref(), Some("BOTH\n"));
+    let replayed = fixture.opened.repo.head_commit()?;
+    assert_eq!(replayed.committer()?.name, "Replayer");
+
+    // Both conflicting commits are skipped. The finish is interrupted after the branch
+    // has moved, and `--continue` attaches HEAD.
+    let mut fixture = Conflicting::new(output, "rebase-resume-skip")?;
+    fixture.pull();
+    let error = fixture
+        .resume(true)
+        .expect_err("the second conflict was not found");
+    assert!(error.contains("(mine-b)"), "{error}");
+    assert_eq!(fixture.subjects()?, "t3 t1 theirs");
+    assert_eq!(fixture.file("a").as_deref(), Some("1\n2\n3\nTHEIRS\n"));
+    let armed = fail_once(Failure::BeforeRebaseFinished)?;
+    let error = fixture
+        .resume(true)
+        .expect_err("the injected failure was ignored");
+    drop(armed);
+    assert!(
+        error.contains("before HEAD returned to the branch"),
+        "{error}"
+    );
+    assert_eq!(fixture.head()?, (None, "t5".into()));
+    assert_eq!(fixture.status()?, "operation rebase paused\n");
+    let error = fixture
+        .resume(true)
+        .expect_err("a commit was skipped at the end");
+    assert!(error.contains("no commit is left to skip"), "{error}");
+    assert_eq!(fixture.resume(false)?, rebased);
+    fixture.require_finished("t5")?;
+    assert_eq!(fixture.subjects()?, "t5 t3 t1 theirs");
+    assert_eq!(fixture.file("b").as_deref(), Some("THEIRS\n"));
+
+    // A skip is interrupted while it writes files. `recover` pauses the rebase at the
+    // next conflicting commit, which `--continue` then shows.
+    let mut fixture = Conflicting::new(output, "rebase-resume-recover")?;
+    fixture.pull();
+    let armed = fail_once(Failure::AfterFirstInstallRemoval)?;
+    let error = fixture
+        .resume(true)
+        .expect_err("the injected failure was ignored");
+    drop(armed);
+    assert!(
+        error.contains("a step of the rebase is incomplete"),
+        "{error}"
+    );
+    let error = fixture
+        .resume(false)
+        .expect_err("an interrupted rebase went on");
+    assert!(
+        error.contains("a step of the rebase was interrupted"),
+        "{error}"
+    );
+    motor_gix::recover::run(&fixture.opened, &fixture.cancellation)?;
+    assert_eq!(fixture.head()?, (None, "t3".into()));
+    assert_eq!(fixture.status()?, "operation rebase paused\n");
+    let error = fixture
+        .resume(false)
+        .expect_err("the second conflict was not found");
+    assert!(error.contains("(mine-b)"), "{error}");
+    assert_eq!(fixture.status()?, "operation rebase ready\nUU b\n");
+
+    // An abort also works while a resolution commit is half published.
+    fixture.resolve("b", "BOTH\n")?;
+    let armed = fail_once(Failure::BeforeResolutionPublished)?;
+    fixture
+        .resume(false)
+        .expect_err("the injected failure was ignored");
+    drop(armed);
+    motor_gix::rebase::abort(&fixture.opened, &fixture.cancellation)?;
+    fixture.require_aborted()
 }

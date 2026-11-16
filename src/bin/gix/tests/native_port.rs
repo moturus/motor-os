@@ -221,6 +221,8 @@ fn run(fixture: &Path, output: &Path) -> Result {
     rebase::check_rebase_record(output)?;
     #[cfg(feature = "native-test-support")]
     rebase::check_rebase_recovery(output)?;
+    #[cfg(feature = "native-test-support")]
+    rebase::check_rebase_resume(output)?;
     check_restore(&output)?;
     check_executable_attributes(&output)?;
     check_unstage(&output)?;

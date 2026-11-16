@@ -73,14 +73,14 @@ directory. Put `--` in front of a name that starts with a dash. `gix COMMAND
 | `switch BRANCH`, `checkout BRANCH` | Move to another local branch. |
 | `checkout [--track] -b NEW [START]` | Create a branch and move to it. |
 | `merge REV`, `merge --abort` | Merge a commit into the current branch, or give up on a merge. |
-| `rebase --abort` | Give up on a rebase that `pull --rebase` had to stop. |
+| `rebase --continue`, `rebase --skip`, `rebase --abort` | Go on with a rebase that `pull --rebase` had to stop, or give it up. |
 | `recover` | Finish or undo an operation that was interrupted. |
 | `push [OPTIONS] REMOTE SOURCE:DESTINATION` | Publish one branch or tag over HTTPS or SSH. |
 
 A few things work differently from Git:
 
-- When `pull --rebase` stops at a conflict, you can only go back, with
-  `gix rebase --abort`. Gix cannot continue the rebase yet.
+- A rebase starts only with `pull --rebase`. `rebase --continue` keeps the
+  message of the commit and does not open an editor.
 - To stage a deleted file, delete it in the shell and then run `add` on its
   name.
 - `commit` refuses to make an empty commit, except to conclude a merge, and
@@ -235,10 +235,7 @@ are not replayed:
   your history becomes one line.
 
 If one of your commits conflicts with the remote branch, the rebase stops
-at that commit. The conflict is in your files, and `gix status` shows
-`operation rebase ready`. Your branch has not moved: `gix branch` shows `(no
-branch, rebasing BRANCH)`. Run `gix rebase --abort` to return to your branch
-as it was. You can then merge instead with `gix pull --no-rebase`.
+at that commit. [Rebasing](#rebasing) says how to go on.
 
 Gix can only do this plain rebase. Pull stops on diverged branches when
 `pull.rebase` or `branch.NAME.rebase` is `merges` or `interactive`. Gix also
@@ -247,6 +244,44 @@ false` asks for one and no rebase was asked for.
 
 When pull stops after the fetch, your `origin/…` branches are already
 updated. Fix the problem and pull again, or run `merge origin/BRANCH`.
+
+### Rebasing
+
+A rebase starts with `gix pull --rebase`. When one of your commits does not
+apply on the remote branch, the rebase stops and pull says which commit it
+was:
+
+```text
+gix: could not apply 3256f45 (Fix the parser)
+```
+
+At that point:
+
+- The files that conflict have conflict markers, as after a merge. `gix
+  status` shows `operation rebase ready` and marks the files `UU`.
+- You are on the last of your commits that did apply. `gix branch` shows
+  `(no branch, rebasing BRANCH)`.
+- Your branch has not moved. It still has your commits as they were.
+
+Then do one of these:
+
+- Edit the files, run `gix add` on them, and run `gix rebase --continue`.
+  Gix commits your resolution with the author and message of the commit
+  that stopped the rebase, and replays the commits after it. If your
+  resolution keeps nothing of that commit, the commit is dropped.
+- Run `gix rebase --skip` to leave that commit out and replay the rest.
+- Run `gix rebase --abort` to return to your branch as it was.
+
+The rebase may stop again at a later commit. After the last commit, gix
+moves your branch to the new commits and prints `Successfully rebased and
+updated refs/heads/BRANCH.`
+
+While a rebase is stopped, `status`, `diff`, `log`, `branch` and `add` work.
+Commands that change the branch, such as `commit`, `switch`, `merge` and
+`pull`, refuse until the rebase has ended.
+
+Git cannot continue a rebase that gix stopped, and gix cannot continue a
+rebase that Git stopped. End the rebase with the program that started it.
 
 ### Pushing
 
@@ -311,10 +346,11 @@ while a merge is in progress.
 
 ## When something goes wrong
 
-If a switch, a merge or an abort is interrupted, by an error or by Ctrl+C,
-the repository is left half-way. `gix status` tells you so but does not fix
-it, and gix refuses to change the repository any further. Fix whatever caused
-the problem (a full disk, for instance), then run `gix recover`.
+If a switch, a merge, an abort or a step of a rebase is interrupted, by an
+error or by Ctrl+C, the repository is left half-way. `gix status` tells you
+so but does not fix it, and gix refuses to change the repository any
+further. Fix whatever caused the problem (a full disk, for instance), then
+run `gix recover`.
 
 `recover` normally puts the repository back the way it was before the
 interrupted command. If the command had already moved the branch, `recover`
@@ -325,6 +361,15 @@ same things as `merge --abort`. If `recover` itself fails, it keeps its
 record of the interrupted command, so you can run it again. A merge that is
 waiting for you to resolve conflicts is not a job for `recover`; commit it or
 abort it.
+
+A rebase is different, because it cannot go back to where a step began.
+`recover` finishes the step in the simplest way: it puts the files to the
+last commit that the rebase has replayed and leaves the rebase paused.
+`gix status` then shows `operation rebase paused`, and `gix rebase
+--continue` goes on. A conflict that the interrupted step was showing is
+shown again. If you would rather give up, `gix rebase --abort` works on an
+interrupted rebase too, without `recover`. A rebase that is stopped at a
+conflict is not a job for `recover`; use the three `rebase` commands.
 
 A few more things to know:
 
