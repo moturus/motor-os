@@ -8,6 +8,8 @@ use std::{
 };
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+#[path = "pull_rebase.rs"]
+mod pull_rebase;
 #[path = "push_pack.rs"]
 mod push_pack;
 #[path = "repository.rs"]
@@ -159,6 +161,7 @@ pub fn run() -> Result {
     test.git(&test.0, &["init", "--bare", "push.git"]);
     clone_and_fetch(&test)?;
     pull(&test)?;
+    pull_rebase::check(&test)?;
     push_pack::check_push_pack(&test.0)?;
     push(&test)?;
     println!("gix loopback HTTPS tests PASS");
@@ -480,7 +483,7 @@ fn pull(test: &Test) -> Result {
     let second = advance("pulled-2");
     rejected(
         test.gix(&root).arg("pull").output()?,
-        "run 'gix pull --no-rebase' to merge",
+        "run 'gix pull --rebase' to rebase or 'gix pull --no-rebase' to merge",
     );
     rejected(
         test.gix(&root).args(["pull", "--ff-only"]).output()?,

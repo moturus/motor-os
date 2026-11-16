@@ -225,13 +225,16 @@ fn pull_merges_the_upstream_as_git_does() -> Result {
     commit_on_main("upstream-2");
     let ours = head();
     for (args, message) in [
-        (&["pull"][..], "run 'gix pull --no-rebase' to merge"),
+        (
+            &["pull"][..],
+            "run 'gix pull --rebase' to rebase or 'gix pull --no-rebase' to merge",
+        ),
         (&["pull", "--ff-only"], "a fast-forward is not possible"),
         (
             &["-c", "pull.ff=only", "pull"],
             "a fast-forward is not possible",
         ),
-        (&["-c", "pull.rebase=true", "pull"], "which gix cannot do"),
+        (&["pull", "--rebase", "--no-rebase"], "cannot be used with"),
         (
             &[
                 "-c",
@@ -240,7 +243,7 @@ fn pull_merges_the_upstream_as_git_does() -> Result {
                 "branch.topic.rebase=merges",
                 "pull",
             ],
-            "which gix cannot do",
+            "a kind of rebase that gix cannot do",
         ),
         // Empty values: a user configuration outside the test may name an identity.
         (
@@ -288,6 +291,163 @@ fn pull_merges_the_upstream_as_git_does() -> Result {
         &["pull", ".", "main"],
         "pull requires HEAD attached to a local branch",
     );
+    Ok(())
+}
+
+#[test]
+fn pull_rebase_replays_local_commits() -> Result {
+    let client = Client::new();
+    let root = client.0.join("repository");
+    client.ok(&client.0, &["init", root.to_str().unwrap()]);
+    let identity = [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+    ];
+    let other = [
+        "-c",
+        "user.name=Other",
+        "-c",
+        "user.email=other@example.invalid",
+    ];
+    // Each commit writes its own name into a file of that name, or `text` into `base`.
+    let commit_as = |who: &[&str], name: &str, text: Option<&str>| {
+        let file = if text.is_some() { "base" } else { name };
+        fs::write(root.join(file), text.unwrap_or(name)).unwrap();
+        client.ok(&root, &["add", file]);
+        client.ok(&root, &[who, &["commit", "-m", name]].concat());
+    };
+    let commit = |name: &str| commit_as(&identity, name, None);
+    let on_main = |name: &str, text: Option<&str>| {
+        client.ok(&root, &["checkout", "main"]);
+        commit_as(&identity, name, text);
+        client.ok(&root, &["checkout", "topic"]);
+    };
+    // Subject, author and committer of every commit on the first-parent line, newest first.
+    let history = || {
+        let repo = gix::open(&root).unwrap();
+        let mut commit = repo.head_commit().unwrap();
+        let mut seen = Vec::new();
+        loop {
+            let parent = {
+                let decoded = commit.decode().unwrap();
+                seen.push(format!(
+                    "{} {}/{}",
+                    decoded.message.trim().as_bstr(),
+                    decoded.author().unwrap().name,
+                    decoded.committer().unwrap().name
+                ));
+                decoded.parents().next()
+            };
+            let Some(parent) = parent else {
+                return seen;
+            };
+            commit = repo.find_commit(parent).unwrap();
+        }
+    };
+    let pull = |args: &[&str]| client.ok(&root, &[&identity[..], args].concat());
+    let last_reflog = |name: &str| {
+        let log = fs::read_to_string(root.join(".git/logs").join(name)).unwrap();
+        let line = log.lines().last().unwrap();
+        line.split_once('\t').unwrap().1.to_owned()
+    };
+    let rev = |name: &str| {
+        let repo = gix::open(&root).unwrap();
+        repo.rev_parse_single(name).unwrap().detach().to_string()
+    };
+
+    commit("base");
+    client.ok(&root, &["checkout", "--track", "-b", "topic", "main"]);
+    commit_as(&other, "topic-1", None);
+    assert_eq!(
+        pull(&["pull", "--rebase"]),
+        "Current branch topic is up to date.\n"
+    );
+
+    // The branch has a commit that the upstream has too, and a merge of its own.
+    on_main("shared", None);
+    on_main("upstream-1", None);
+    client.ok(&root, &["checkout", "-b", "side"]);
+    commit("side-1");
+    client.ok(&root, &["checkout", "topic"]);
+    commit("shared");
+    let shared = rev("HEAD");
+    client.ok(&root, &[&identity[..], &["merge", "side"]].concat());
+    commit("topic-2");
+    let upstream = rev("main");
+    // `--rebase` on the command line overrides a configured `pull.ff = only`.
+    assert_eq!(
+        pull(&["-c", "pull.ff=only", "pull", "--rebase"]),
+        format!(
+            "dropping {} (shared) -- patch contents already upstream\n\
+             Successfully rebased and updated refs/heads/topic.\n",
+            &shared[..7]
+        )
+    );
+    assert_eq!(
+        history(),
+        [
+            "topic-2 Test/Test",
+            "side-1 Test/Test",
+            "topic-1 Other/Test",
+            "upstream-1 Test/Test",
+            "shared Test/Test",
+            "base Test/Test",
+        ]
+    );
+    let finished = format!("pull --rebase (finish): refs/heads/topic onto {upstream}");
+    assert_eq!(last_reflog("HEAD"), finished);
+    assert_eq!(last_reflog("refs/heads/topic"), finished);
+    assert_eq!(
+        fs::read(root.join(".git/HEAD"))?,
+        b"ref: refs/heads/topic\n"
+    );
+    assert_eq!(client.ok(&root, &["status"]), "");
+    for file in ["topic-1", "side-1", "topic-2", "shared", "upstream-1"] {
+        assert_eq!(fs::read_to_string(root.join(file))?, file);
+    }
+
+    // The settings ask for a rebase as well. The one of the branch wins.
+    on_main("upstream-2", None);
+    commit("topic-3");
+    let configured = ["-c", "pull.rebase=false", "-c", "branch.topic.rebase=true"];
+    assert_eq!(
+        pull(&[&configured[..], &["-c", "pull.ff=false", "pull"]].concat()),
+        "Successfully rebased and updated refs/heads/topic.\n"
+    );
+    assert_eq!(
+        history()[..5],
+        [
+            "topic-3 Test/Test",
+            "topic-2 Test/Test",
+            "side-1 Test/Test",
+            "topic-1 Other/Test",
+            "upstream-2 Test/Test",
+        ]
+    );
+    assert!(last_reflog("HEAD").starts_with("pull (finish): refs/heads/topic onto "));
+
+    // A conflict, or a missing identity, stops the rebase before anything changes.
+    on_main("theirs", Some("theirs"));
+    commit_as(&identity, "mine", Some("mine"));
+    commit("topic-4");
+    let before = rev("HEAD");
+    let output = client
+        .command(&root)
+        .args(identity)
+        .args(["pull", "--rebase"])
+        .output()?;
+    assert_error(&output, "(mine): it conflicts with what was pulled");
+    client.error(
+        &root,
+        &["-c", "user.name=", "-c", "user.email=", "pull", "--rebase"],
+        "author identity requires a nonempty name and email",
+    );
+    assert_eq!(rev("HEAD"), before);
+    assert_eq!(client.ok(&root, &["status"]), "");
+    assert_eq!(fs::read_to_string(root.join("base"))?, "mine");
+    assert!(!root.join(".git/gix-operation").exists());
     Ok(())
 }
 

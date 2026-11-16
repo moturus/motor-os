@@ -1,4 +1,5 @@
-//! `gix pull [--ff-only | --no-rebase] [REMOTE [BRANCH]]`: fetch, then merge what was fetched.
+//! `gix pull [--ff-only | --rebase | --no-rebase] [REMOTE [BRANCH]]`: fetch, then merge what
+//! was fetched or rebase onto it.
 
 use std::io::{self, Write};
 
@@ -16,6 +17,7 @@ use crate::{
     merge::{self, Preparation},
     mutation::Guard,
     network,
+    replay::{self, Range},
     repository::OpenedRepository,
 };
 
@@ -26,6 +28,7 @@ pub struct Request<'a> {
     /// The remote's branch or tag to merge, instead of the upstream branch.
     pub branch: Option<&'a str>,
     pub ff_only: bool,
+    pub rebase: bool,
     pub no_rebase: bool,
 }
 
@@ -38,8 +41,9 @@ enum Reconcile {
     Merge,
     /// `pull.ff = false`: a merge commit even for a fast-forward, which gix cannot make.
     AlwaysMergeCommit,
-    /// A rebase was configured. Gix has none, so it can only fast-forward.
     Rebase,
+    /// The configuration asks for a rebase that keeps merges or is interactive.
+    OtherRebase,
 }
 
 /// The remote, and the ref on it, to merge.
@@ -116,26 +120,75 @@ pub fn run(
         ))
         .into())
     };
+    // The commits a rebase left out, once there was a rebase.
+    let mut rebased = None;
+    let shared: &OpenedRepository = opened;
     let planned = merge::plan(
-        opened,
+        shared,
         guard,
         commit,
-        || match reconcile {
-            Reconcile::Merge | Reconcile::AlwaysMergeCommit => Ok(()),
+        |original, base| match reconcile {
+            Reconcile::Merge | Reconcile::AlwaysMergeCommit => Ok(None),
             Reconcile::FastForwardOnly => diverged("a fast-forward is not possible"),
-            Reconcile::Rebase => diverged(
-                "the configuration asks for a rebase, which gix cannot do; \
-                 run 'gix pull --no-rebase' to merge",
+            Reconcile::OtherRebase => diverged(
+                "the configuration asks for a kind of rebase that gix cannot do; \
+                 run 'gix pull --rebase' for a plain rebase or 'gix pull --no-rebase' to merge",
             ),
             Reconcile::Unspecified => diverged(
-                "run 'gix pull --no-rebase' to merge, \
-                 or set pull.rebase = false to merge on every pull",
+                "run 'gix pull --rebase' to rebase or 'gix pull --no-rebase' to merge, \
+                 or set pull.rebase to true or false to choose for every pull",
             ),
+            Reconcile::Rebase => {
+                let range = Range {
+                    original,
+                    onto: commit,
+                    base,
+                };
+                let replayed = replay::run(shared, &range, None, commit, cancellation)?;
+                if let Some(stopped) = replayed.stopped {
+                    return Err(unsupported(format!(
+                        "could not apply {}: it conflicts with what was pulled; \
+                         nothing was changed; run 'gix pull --no-rebase' to merge",
+                        replay::label(&shared.repo, stopped.commit)?
+                    ))
+                    .into());
+                }
+                rebased = Some(replayed.dropped);
+                Ok(Some(replayed.tip))
+            }
         },
         cancellation,
     )?;
+    let action = if request.rebase {
+        "pull --rebase"
+    } else {
+        "pull"
+    };
+    let mut reflog = format!("{action}: Fast-forward");
     let report = match (planned.preparation(), planned.original_commit()) {
+        // Git says it this way when a rebase finds the branch ahead of what was pulled.
+        (Preparation::UpToDate, Some(old)) if reconcile == Reconcile::Rebase && old != commit => {
+            Some(format!(
+                "Current branch {} is up to date.",
+                current.shorten()
+            ))
+        }
         (Preparation::UpToDate, _) => Some("Already up to date.".to_owned()),
+        (Preparation::FastForward { .. }, _) if rebased.is_some() => {
+            reflog = format!("{action} (finish): {} onto {commit}", current.as_bstr());
+            let mut report = String::new();
+            for dropped in rebased.iter().flatten() {
+                let label = replay::label(&opened.repo, *dropped)?;
+                report.push_str(&format!(
+                    "dropping {label} -- patch contents already upstream\n"
+                ));
+            }
+            report.push_str(&format!(
+                "Successfully rebased and updated {}.",
+                current.as_bstr()
+            ));
+            Some(report)
+        }
         (Preparation::FastForward { .. }, _) if reconcile == Reconcile::AlwaysMergeCommit => {
             return Err(unsupported(
                 "pull.ff = false asks for a merge commit, which gix cannot make for \
@@ -157,7 +210,7 @@ pub fn run(
         opened,
         planned,
         &message,
-        b"pull: Fast-forward".as_bstr(),
+        reflog.as_bytes().as_bstr(),
         cancellation,
     )?;
     if let Some(report) = report {
@@ -218,23 +271,30 @@ fn reconcile(
     }
     let config = repo.config_snapshot();
     let fast_forward = match config.string("pull.ff") {
-        // On the command line, `--no-rebase` overrides a configured `pull.ff = only`.
-        Some(value) if value.as_bstr() == "only" && !request.no_rebase => {
+        // On the command line, `--rebase` and `--no-rebase` override a configured
+        // `pull.ff = only`.
+        Some(value) if value.as_bstr() == "only" && !request.rebase && !request.no_rebase => {
             return Ok(Reconcile::FastForwardOnly);
         }
         Some(value) if value.as_bstr() == "only" => Some(true),
         Some(value) => Some(gix::config::Boolean::try_from(value.as_bstr())?.0),
         None => None,
     };
-    let rebase = if request.no_rebase {
-        Some(false)
+    let rebase = if request.rebase || request.no_rebase {
+        Some(request.rebase)
     } else {
-        config
+        match config
             .plumbing()
             .string_by("branch", Some(branch), "rebase")
             .or_else(|| config.string("pull.rebase"))
-            // Git also accepts `merges` and `interactive`: all but `false` ask for a rebase.
-            .map(|value| gix::config::Boolean::try_from(value.as_bstr()).map_or(true, |b| b.0))
+        {
+            Some(value) => match gix::config::Boolean::try_from(value.as_bstr()) {
+                Ok(rebase) => Some(rebase.0),
+                // Git also accepts `merges` and `interactive`.
+                Err(_) => return Ok(Reconcile::OtherRebase),
+            },
+            None => None,
+        }
     };
     Ok(match (rebase, fast_forward) {
         (Some(true), _) => Reconcile::Rebase,

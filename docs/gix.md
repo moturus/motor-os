@@ -58,7 +58,7 @@ directory. Put `--` in front of a name that starts with a dash. `gix COMMAND
 | `init [DIR]` | Create a new repository. |
 | `clone URL [DIR]` | Clone over HTTPS or SSH. DIR defaults to the repository name. |
 | `fetch [REMOTE]` | Download new commits and tags from a remote, `origin` by default. Your current branch and your files do not change. |
-| `pull [OPTIONS] [REMOTE [BRANCH]]` | Fetch, then merge the remote branch into the current branch. |
+| `pull [OPTIONS] [REMOTE [BRANCH]]` | Fetch, then merge the remote branch into the current branch or rebase onto it. |
 | `status` | Show what has changed, and whether a merge or another operation is unfinished. |
 | `log` | Show the history of the current branch. |
 | `diff [--staged] [PATH…]` | Show your unstaged changes, or with `--staged` what the next commit will contain. Binary files and mode changes are summarized. |
@@ -78,7 +78,8 @@ directory. Put `--` in front of a name that starts with a dash. `gix COMMAND
 
 A few things work differently from Git:
 
-- `pull` fast-forwards or merges. It cannot rebase.
+- `pull --rebase` cannot stop at a conflict yet. If one of your commits
+  conflicts, it changes nothing and says so.
 - To stage a deleted file, delete it in the shell and then run `add` on its
   name.
 - `commit` refuses to make an empty commit, except to conclude a merge, and
@@ -187,7 +188,8 @@ fails.
 
 ### Pulling
 
-`gix pull` fetches and then merges, like `git pull`. Without arguments it
+`gix pull` fetches and then merges or rebases, like `git pull`. Without
+arguments it
 uses the upstream of the current branch: the remote branch that the current
 branch follows. A clone sets the upstream of its first branch, and `checkout
 -b NEW origin/BRANCH` sets it for a new branch. You can also name what to
@@ -203,24 +205,41 @@ that remote. The fetch is the same as `gix fetch REMOTE`, so it updates all
 your `origin/…` branches. If the upstream is a local branch, as after
 `checkout --track -b NEW BRANCH`, nothing is fetched.
 
-The merge follows the rules under [Merging](#merging), so pull needs a clean
-repository. Pull prints `Already up to date.`, or `Updating OLD..NEW` and
-`Fast-forward`, or `Merge made.`
+Pull needs a clean repository. It prints `Already up to date.`, or
+`Updating OLD..NEW` and `Fast-forward`, when nothing has to be merged or
+rebased.
 
 If your branch and the remote branch both have new commits, they have
 diverged. As in Git, pull then stops unless you have said what to do:
 
+- `gix pull --rebase` rebases. Set `pull.rebase = true` to rebase on every
+  pull, or `branch.NAME.rebase = true` for one branch.
 - `gix pull --no-rebase` merges. Set `pull.rebase = false` to merge on every
   pull.
 - `gix pull --ff-only` stops. Set `pull.ff = only` to stop on every pull.
 
-The merge commit gets the message Git gives it, such as `Merge branch 'main'
-of https://example.test/project`.
+A merge follows the rules under [Merging](#merging), and pull prints `Merge
+made.` The merge commit gets the message Git gives it, such as `Merge branch
+'main' of https://example.test/project`.
 
-Gix cannot rebase. If `pull.rebase` or `branch.NAME.rebase` asks for a
-rebase, pull fast-forwards when it can and stops when the branches have
-diverged. Gix also cannot record a fast-forward as a merge commit, so pull
-stops when `pull.ff = false` asks for one.
+A rebase replays your commits on top of the remote branch, oldest first.
+Each new commit keeps its author and message, and you become its committer.
+So a rebase needs your name and email, as a commit does. Pull prints
+`Successfully rebased and updated refs/heads/BRANCH.` Two kinds of commits
+are not replayed:
+
+- A commit whose changes the remote branch already has. Pull prints
+  `dropping ID (SUBJECT) -- patch contents already upstream`.
+- A merge commit of your own. The commits that it merged are replayed, so
+  your history becomes one line.
+
+If one of your commits conflicts with the remote branch, the rebase stops
+and nothing has changed. You can merge instead with `gix pull --no-rebase`.
+
+Gix can only do this plain rebase. Pull stops on diverged branches when
+`pull.rebase` or `branch.NAME.rebase` is `merges` or `interactive`. Gix also
+cannot record a fast-forward as a merge commit, so pull stops when `pull.ff =
+false` asks for one and no rebase was asked for.
 
 When pull stops after the fetch, your `origin/…` branches are already
 updated. Fix the problem and pull again, or run `merge origin/BRANCH`.
@@ -325,8 +344,8 @@ A few more things to know:
 
 - Bare repositories and linked worktrees are not supported. Gix will not
   commit to, merge in or push from a shallow, partial or sparse repository.
-- There is no rebase, stash, cherry-pick or amend, no annotated tags, no
-  signing and no LFS.
+- There is no rebase other than `pull --rebase`. There is no stash,
+  cherry-pick or amend, no annotated tags, no signing and no LFS.
 - File names have to be valid UTF-8 and valid Motor OS file names. Names and
   characters that Windows reserves are rejected as well.
 - Motor OS has no symbolic links. A symbolic link in a repository is checked

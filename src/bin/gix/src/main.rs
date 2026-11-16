@@ -155,12 +155,19 @@ fn run() -> Result {
         )
         .subcommand(
             Command::new("pull")
-                .about("Fetch a remote and merge its branch into the current branch")
+                .about("Fetch a remote, then merge its branch or rebase onto it")
                 .arg(
                     Arg::new("ff-only")
                         .long("ff-only")
                         .action(ArgAction::SetTrue)
                         .help("Only fast-forward; fail if the branches have diverged"),
+                )
+                .arg(
+                    Arg::new("rebase")
+                        .long("rebase")
+                        .action(ArgAction::SetTrue)
+                        .conflicts_with("no-rebase")
+                        .help("Replay your commits on the remote branch if the branches have diverged"),
                 )
                 .arg(
                     Arg::new("no-rebase")
@@ -403,6 +410,7 @@ fn run() -> Result {
                 remote: command.get_one::<String>("remote").map(String::as_str),
                 branch: command.get_one::<String>("branch").map(String::as_str),
                 ff_only: command.get_flag("ff-only"),
+                rebase: command.get_flag("rebase"),
                 no_rebase: command.get_flag("no-rebase"),
             };
             pull::run(

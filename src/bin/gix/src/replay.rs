@@ -134,11 +134,7 @@ fn pick(
         Some(parent) => repo.find_commit(parent)?.tree_id()?.detach(),
         None => gix::ObjectId::empty_tree(repo.object_hash()),
     };
-    // Git's labels: `<short id> (<subject>)` for the commit, `parent of ...` for its base.
-    let mut label = BString::from(id.attach(repo).shorten_or_id().to_string());
-    label.extend_from_slice(b" (");
-    label.extend_from_slice(subject(commit.message));
-    label.push(b')');
+    let label = label(repo, id)?;
     let mut parent_label = BString::from("parent of ");
     parent_label.extend_from_slice(&label);
     let outcome = repo.merge_trees(
@@ -194,6 +190,16 @@ fn commit_as(
         extra_headers: Vec::new(),
     };
     Ok(repo.write_object(&replayed)?.detach())
+}
+
+/// `<short id> (<subject>)`: Git's name for a commit in conflict markers and messages.
+pub(crate) fn label(repo: &gix::Repository, id: gix::ObjectId) -> crate::Result<BString> {
+    let object = repo.find_commit(id)?;
+    let mut label = BString::from(id.attach(repo).shorten_or_id().to_string());
+    label.extend_from_slice(b" (");
+    label.extend_from_slice(subject(object.decode()?.message));
+    label.push(b')');
+    Ok(label)
 }
 
 /// The first line of a commit message that is not blank, which is how Git names a commit.

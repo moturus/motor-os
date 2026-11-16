@@ -46,26 +46,32 @@ pub fn prepare(
     target_commit: gix::ObjectId,
     cancellation: &Cancellation,
 ) -> crate::Result<Preparation> {
-    prepare_admitted(
+    let prepared = prepare_diverging(
         opened,
         locked_index,
         original,
         target_commit,
-        || Ok(()),
+        |_, _| Ok(None),
         cancellation,
-    )
+    )?;
+    Ok(prepared.0)
 }
 
-/// As `prepare()`. `admit_divergence` runs once both sides are known to have commits of
-/// their own, before the merge engine writes any object; its error refuses the merge.
-fn prepare_admitted(
+/// As `prepare()`, and also return the commit the branch moves to.
+///
+/// `on_divergence` runs once both sides are known to have commits of their own, before the
+/// merge engine writes any object. It gets the commit of the branch and the merge base. Its
+/// error refuses the merge. It may return a commit that holds the history of the branch on
+/// top of the target: the branch then moves to that commit as in a fast-forward, and nothing
+/// is merged.
+fn prepare_diverging(
     opened: &OpenedRepository,
     locked_index: &gix::index::State,
     original: &Original,
     target_commit: gix::ObjectId,
-    admit_divergence: impl FnOnce() -> crate::Result,
+    on_divergence: impl FnOnce(gix::ObjectId, gix::ObjectId) -> crate::Result<Option<gix::ObjectId>>,
     cancellation: &Cancellation,
-) -> crate::Result<Preparation> {
+) -> crate::Result<(Preparation, gix::ObjectId)> {
     cancellation.check()?;
     let repo = &opened.repo;
     if original.reference.as_ref().and_then(|name| name.category())
@@ -85,7 +91,7 @@ fn prepare_admitted(
     transition::ensure_original_index(locked_index, &original_index)?;
 
     let Some(ours) = original.id else {
-        return Ok(Preparation::FastForward { target_tree });
+        return Ok((Preparation::FastForward { target_tree }, target_commit));
     };
     let base = match repo.merge_base(ours, target_commit) {
         Ok(base) => base.detach(),
@@ -95,13 +101,16 @@ fn prepare_admitted(
         Err(error) => return Err(error.into()),
     };
     if base == target_commit {
-        return Ok(Preparation::UpToDate);
+        return Ok((Preparation::UpToDate, target_commit));
     }
     if base == ours {
-        return Ok(Preparation::FastForward { target_tree });
+        return Ok((Preparation::FastForward { target_tree }, target_commit));
     }
 
-    admit_divergence()?;
+    if let Some(rewritten) = on_divergence(ours, base)? {
+        let target_tree = repo.find_commit(rewritten)?.tree_id()?.detach();
+        return Ok((Preparation::FastForward { target_tree }, rewritten));
+    }
     commit::identities(repo)?;
     let target_index = tree_index::build(repo, &target_tree, workdir, cancellation)?;
     // Ancestor cases never invoke the merge engine, so its driver policy applies only here.
@@ -147,10 +156,11 @@ fn prepare_admitted(
     apply_conflicts(&mut conflict_index, &conflicts)?;
     mutation::preflight_index(conflict_index)?;
     cancellation.check()?;
-    Ok(Preparation::Divergent {
+    let preparation = Preparation::Divergent {
         result_tree,
         conflicts,
-    })
+    };
+    Ok((preparation, target_commit))
 }
 
 /// Merge one revision into the exact attached branch while retaining one mutation guard.
@@ -169,7 +179,7 @@ pub fn run(
         .id;
     let message = format!("Merge {target_commit}");
     let reflog = gix::reference::log::message("merge", message.as_bytes().as_bstr(), 1);
-    let planned = plan(opened, guard, target_commit, || Ok(()), cancellation)?;
+    let planned = plan(opened, guard, target_commit, |_, _| Ok(None), cancellation)?;
     install(opened, planned, &message, reflog.as_bstr(), cancellation)
 }
 
@@ -195,12 +205,13 @@ impl Planned {
 
 /// Classify the merge of `target_commit` into the attached branch, as `prepare()` does.
 ///
-/// `admit_divergence` may refuse a merge that needs more than a fast-forward.
+/// `on_divergence` may refuse a merge that needs more than a fast-forward, or replace it:
+/// see `prepare_diverging()`.
 pub(crate) fn plan(
     opened: &OpenedRepository,
     guard: Guard,
     target_commit: gix::ObjectId,
-    admit_divergence: impl FnOnce() -> crate::Result,
+    on_divergence: impl FnOnce(gix::ObjectId, gix::ObjectId) -> crate::Result<Option<gix::ObjectId>>,
     cancellation: &Cancellation,
 ) -> crate::Result<Planned> {
     reject_merge_markers(opened.repo.git_dir())?;
@@ -209,12 +220,12 @@ pub(crate) fn plan(
         Some(id) => opened.repo.find_commit(id)?.tree_id()?.detach(),
         None => gix::ObjectId::empty_tree(opened.repo.object_hash()),
     };
-    let preparation = prepare_admitted(
+    let (preparation, target_commit) = prepare_diverging(
         opened,
         guard.index(),
         &original,
         target_commit,
-        admit_divergence,
+        on_divergence,
         cancellation,
     )?;
     Ok(Planned {
