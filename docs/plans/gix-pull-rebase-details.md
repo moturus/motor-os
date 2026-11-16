@@ -130,32 +130,47 @@ touched, as `pull` does today.
 
 ### 4.2 and 4.3 Stopping, and the branch moves last
 
-The rebase has five moves. Each one goes from a state the user can see to
-another such state.
+While a rebase is stopped, HEAD is detached and the record is in one of
+these states:
 
-| Move | From | To | Files change |
-| --- | --- | --- | --- |
-| stop | start, or paused | stopped at C, or paused before C; HEAD detached at T | yes |
-| continue | stopped at C, resolved | paused after C; HEAD at the new commit | no |
-| skip | stopped at C | paused after C; HEAD stays at T | yes |
-| abort | stopped or paused | HEAD back on the branch at O | yes |
-| finish | start, or paused | branch at the new tip, HEAD on it | yes |
+| State | Files and index | What comes next |
+| --- | --- | --- |
+| `paused` | The commit of HEAD, clean | `rebase --continue` replays the next commit |
+| `ready` | The conflict of the next commit | Resolve, `add`, `rebase --continue` |
+| `publishing` | Your resolution | Gix is moving HEAD to the resolution commit |
+| `incomplete` | Half written | `gix recover`, or `rebase --abort` |
 
-`rebase --continue` and `rebase --skip` do their own move and then replay
-the remaining commits, which ends in another stop or in the finish.
+The rebase moves between these states in six steps:
+
+| Step | What it does | Files change |
+| --- | --- | --- |
+| advance | Moves the files and HEAD to the last replayed commit. Ends `paused`. | yes |
+| show | Writes the conflict of the next commit into the files and the index. Ends `ready`. | yes |
+| skip | Puts the files back to the commit of HEAD. Ends `paused`, one commit further. | yes |
+| abort | Puts the files back to O and attaches HEAD to the branch. Ends the rebase. | yes |
+| continue | Commits your resolution and moves HEAD to it. Ends `paused`, one commit further. | no |
+| finish | Moves the branch to the commit of HEAD and attaches HEAD. Ends the rebase. | no |
+
+A stop is an advance followed by a show. `rebase --continue` and `rebase
+--skip` do their own step and then replay the remaining commits, which ends
+in another stop or in the finish. A rebase that never stops does not use
+these steps: it moves the branch with today's fast-forward code.
 
 New code in `head_ref.rs`:
 
-- Detach HEAD at a commit, or move a detached HEAD.
-- Finish: one reference transaction that moves the branch from O to the new
-  tip and attaches HEAD to it. A rebase that never stopped uses today's
-  `advance_attached()` instead.
+- `detach()` points HEAD at a commit, from a branch or from another commit.
+- `move_branch()` moves a branch that HEAD is not on.
 
-Abort uses today's `attach()`, because the branch never left O.
+The finish is `move_branch()` and then today's `attach()`. If it is
+interrupted between the two, `rebase --continue` does the second.
 
-Reflog lines: `rebase (pick): <subject>` for a stop, `rebase (continue):
-<subject>` for a resolution, `rebase (abort): returning to
-refs/heads/main`, and Git's two `rebase (finish)` lines.
+Reflog lines: `rebase (pick): <subject>` for an advance, `rebase (continue):
+<subject>` for a resolution, `rebase (abort): returning to refs/heads/main`,
+and Git's two `rebase (finish)` lines.
+
+One reflog line differs from Git. When HEAD leaves the branch, its line has
+no old commit id. The fork's reference transaction can record one only for a
+HEAD that is already detached. Changing that would mean changing the fork.
 
 ### 4.4 State and recovery
 
@@ -163,11 +178,13 @@ The record keeps its present fields. For a rebase they mean:
 
 | Field | Meaning for `kind=rebase` |
 | --- | --- |
-| `original-ref`, `original-id` | HEAD before the move in progress |
+| `original-ref`, `original-id` | HEAD before the step in progress |
 | `target-ref` | The branch being rebased |
-| `target-commit` | HEAD after the move in progress |
-| `result-tree` | The tree the move installs |
+| `target-commit` | The commit HEAD is detached at after the step |
+| `result-tree` | The tree the step installs |
 | `intended-commit` | The resolution commit while `--continue` publishes it |
+
+Between steps, `original-id` and `target-commit` name the same commit.
 
 New fields, written only for a rebase:
 
@@ -176,31 +193,34 @@ New fields, written only for a rebase:
 | `rebase-original` | O |
 | `rebase-onto` | U |
 | `rebase-base` | B |
-| `rebase-next` | The commit the rebase stopped at or paused before, or `-` |
-| `rebase-move` | While incomplete: `stop`, `skip`, `abort` or `finish` |
+| `rebase-next` | The commit to replay next, or `-` when none is left. While `ready` it is the commit whose conflict is shown. |
+| `rebase-step` | While `incomplete`: `pause` or `abort`. Otherwise `-`. |
 
 A rebase record has `version=2`. Records of the other kinds stay at
 `version=1` and are byte for byte what they are today. An older gix that
 finds a rebase record refuses to change the repository, which is the safe
 answer.
 
-States: `incomplete` (a move was interrupted), `ready` (stopped at a
-conflict), `publishing` (a resolution commit is being published), and one
-new state, `paused`.
+The steps advance, show and skip are all recorded as `pause`, because their
+recovery is the same. What `gix recover` does:
 
-What `gix recover` does with an interrupted move:
+| `rebase-step` | Recovery |
+| --- | --- |
+| `pause` | Puts the files to `target-commit`, moves HEAD there if it has not moved yet, and leaves the rebase `paused`. |
+| `abort` | Finishes the abort. |
 
-| Move | HEAD has not moved yet | HEAD has moved |
-| --- | --- | --- |
-| stop | Put the files back. The rebase is paused, or not started if this was the first move. | Mark it stopped. |
-| continue | Stopped at the conflict again. The staged resolution is kept. | Paused after the commit. |
-| skip | Finish the skip. | (HEAD does not move.) |
-| abort | Finish the abort. | Clean up. |
-| finish | Put the files back. The rebase is paused. | Clean up. The rebase is done. |
+Recovery always goes forward. So the record does not have to remember where
+the rebase was before the step. `rebase --abort` also works on an
+interrupted rebase, so there is always a way back to the branch.
 
-Putting files back uses `transition::prepare_restore()` and
-`install_restore()`, which exist. The `continue` row is the scheme that a
-merge commit uses today.
+A `publishing` record is repaired by `rebase --continue`, not by `gix
+recover`. If HEAD has moved, the rebase is `paused` after the commit. If
+not, it is `ready` again and the staged resolution is kept. This is the
+scheme that a merge commit uses today.
+
+Putting files to a commit uses `transition::prepare_restore()` and
+`install_restore()`, which exist. They get one new argument: the tree to
+restore.
 
 What other commands do while a rebase is stopped or paused:
 
@@ -229,17 +249,18 @@ Nothing has changed, because step 1 only wrote objects. The `Reconcile`
 enum in `pull.rs` loses its "gix cannot rebase" error here.
 
 **Step 3, record and HEAD.** The version 2 record with encode, parse and
-validation tests. The detach and finish publications in `head_ref.rs`. The
-`status` and `branch` lines. The guard admits the new states for the three
-rebase subcommands only.
+validation tests. `detach()` and `move_branch()` in `head_ref.rs`. The
+`status` and `branch` lines. The guard admits a rebase record for the three
+rebase subcommands only. Until step 4, `gix recover` refuses a rebase
+record, and nothing writes one.
 
-**Step 4, stop and abort.** Install a conflict as the Divergent arm of
-`merge::install()` does, then detach HEAD. `rebase --abort`. Recovery rows
-`stop` and `abort`, with a new injected failure for each.
+**Step 4, stop and abort.** The steps advance and show, and `rebase
+--abort`. Recovery of `pause` and `abort`, with an injected failure for
+each.
 
 **Step 5, continue and skip.** The resolution commit with the original
-author and message. The dropped commit when nothing is staged. The replay of
-the rest. Recovery rows `continue`, `skip` and `finish`.
+author and message. The dropped commit when nothing is staged. The skip. The
+replay of the rest, and the finish. Repair of a `publishing` record.
 
 **Step 6, the rest.** The pause for conflicts gix cannot show. The refusals
 of `commit`, `restore` and `unstage`. `docs/gix.md`: the Pulling section, a

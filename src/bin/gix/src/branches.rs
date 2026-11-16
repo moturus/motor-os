@@ -111,8 +111,13 @@ fn detached_row(
             Some((target.as_bstr().to_owned(), line.new_oid))
         })
     });
-    let name = match last_checkout {
-        Some((target, checked_out)) => {
+    let name = match (
+        crate::mutation::rebased_branch(repo.git_dir())?,
+        last_checkout,
+    ) {
+        // Git's words for a rebase that has stopped.
+        (Some(branch), _) => format!("(no branch, rebasing {})", display(branch.shorten())),
+        (None, Some((target, checked_out))) => {
             // Name the ref only while it still points to what was checked out.
             let named = repo
                 .try_find_reference(target.as_bstr())
@@ -139,7 +144,7 @@ fn detached_row(
             };
             format!("(HEAD detached {relation} {from})")
         }
-        None => "(no branch)".into(),
+        (None, None) => "(no branch)".into(),
     };
     let detail = match head_id {
         Some(id) if options.verbose => Some(commit_detail(repo, &id, "")?),

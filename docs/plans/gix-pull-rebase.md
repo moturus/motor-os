@@ -89,13 +89,12 @@ commit is lost and the branch is still correct.
 ### 4.4 State and recovery
 
 The rebase is recorded in the existing `.git/gix-operation` file as a new
-kind, `rebase`, with five more fields. Records of the existing kinds do not
-change.
+kind, `rebase`, with five more fields and one more state, `paused`. Records
+of the existing kinds do not change.
 
 Every step that writes files is recorded first, as switch and merge do
-today. `gix recover` then either finishes the step or returns to the last
-stopped or paused state. A resolution you have staged is never discarded by
-`recover`.
+today. `gix recover` then finishes the step and leaves the rebase paused.
+A resolution you have staged is never discarded by `recover`.
 
 ## 5. Steps
 

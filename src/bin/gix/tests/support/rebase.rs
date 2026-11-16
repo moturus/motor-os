@@ -287,3 +287,388 @@ fn check_todo_boundary(history: &History<'_>, tree: ObjectId) -> Result {
     assert_eq!(todo(b, r0)?, [p, b]);
     Ok(())
 }
+
+fn id(digit: char) -> ObjectId {
+    ObjectId::from_hex(digit.to_string().repeat(40).as_bytes()).unwrap()
+}
+
+/// The record of a rebase: how it is written, which records are refused, and what the
+/// mutation guard, `status` and `branch` make of it.
+pub fn check_rebase_record(output: &Path) -> Result {
+    use motor_gix::{
+        mutation::Guard,
+        operation::{self, Kind, Original, Rebase, Record, State, Step},
+    };
+
+    let repository = output.join("rebase-record-repository");
+    let cancellation = motor_gix::cancellation::Cancellation::new();
+    motor_gix::init::run(
+        &repository,
+        &["init.defaultBranch=main"],
+        false,
+        &cancellation,
+    )?;
+    let identities = ["user.name=Replayer", "user.email=replayer@example.com"];
+    let mut opened = motor_gix::repository::open(&repository, &identities, false)?;
+    std::fs::write(repository.join("file"), b"content\n")?;
+    motor_gix::add::run(&opened, true, &[], &cancellation)?;
+    motor_gix::commit::run(&opened, "first", &cancellation)?;
+    let first = opened.repo.head_id()?.detach();
+    let tree = opened.repo.head_tree()?.id().detach();
+    let second = opened.repo.new_commit("second", tree, [first])?.id;
+    let third = opened.repo.new_commit("third", tree, [second])?.id;
+    let main: gix::refs::FullName = "refs/heads/main".try_into()?;
+    let path = opened
+        .repo
+        .git_dir()
+        .join(motor_gix::mutation::OPERATION_FILE);
+
+    // Records of the other kinds are written exactly as before.
+    let merge = Record {
+        state: State::Incomplete,
+        kind: Kind::Merge,
+        original: Original {
+            reference: Some(main.clone()),
+            id: Some(id('1')),
+        },
+        target_ref: main.clone(),
+        target_commit: id('2'),
+        result_tree: id('3'),
+        intended_commit: None,
+    };
+    let guard = Guard::acquire(&opened.repo)?;
+    guard.create_operation(&merge)?;
+    assert_eq!(
+        std::fs::read_to_string(&path)?,
+        format!(
+            "version=1\nstate=incomplete\nkind=merge\noriginal-ref=refs/heads/main\n\
+             original-id={}\ntarget-ref=refs/heads/main\ntarget-commit={}\nresult-tree={}\n\
+             intended-commit=-\n",
+            id('1'),
+            id('2'),
+            id('3')
+        )
+    );
+    let mut paused_merge = merge.clone();
+    paused_merge.state = State::Paused;
+    assert!(guard.replace_operation(&merge, &paused_merge).is_err());
+    guard.remove_operation(&merge)?;
+
+    // A rebase from its first step to a stop, through a resolution, to an abort.
+    let rebase = Rebase {
+        original: first,
+        onto: second,
+        base: first,
+        next: Some(third),
+        step: Some(Step::Pause),
+    };
+    let detached = |commit| Original {
+        reference: None,
+        id: Some(commit),
+    };
+    let start = Record {
+        state: State::Incomplete,
+        kind: Kind::Rebase(rebase),
+        original: Original {
+            reference: Some(main.clone()),
+            id: Some(first),
+        },
+        target_ref: main.clone(),
+        target_commit: second,
+        result_tree: tree,
+        intended_commit: None,
+    };
+    let stable = |state, next| Record {
+        state,
+        kind: Kind::Rebase(Rebase {
+            next,
+            step: None,
+            ..rebase
+        }),
+        original: detached(second),
+        ..start.clone()
+    };
+    let paused = stable(State::Paused, Some(third));
+    let ready = stable(State::Ready, Some(third));
+    let showing = Record {
+        state: State::Incomplete,
+        kind: Kind::Rebase(rebase),
+        ..paused.clone()
+    };
+    let publishing = Record {
+        state: State::Publishing,
+        intended_commit: Some(third),
+        ..ready.clone()
+    };
+    let finished = Record {
+        original: detached(third),
+        target_commit: third,
+        ..stable(State::Paused, None)
+    };
+    let aborting = Record {
+        state: State::Incomplete,
+        kind: Kind::Rebase(Rebase {
+            next: None,
+            step: Some(Step::Abort),
+            ..rebase
+        }),
+        target_commit: first,
+        ..finished.clone()
+    };
+    guard.create_operation(&start)?;
+    assert_eq!(
+        std::fs::read_to_string(&path)?,
+        format!(
+            "version=2\nstate=incomplete\nkind=rebase\noriginal-ref=refs/heads/main\n\
+             original-id={first}\ntarget-ref=refs/heads/main\ntarget-commit={second}\n\
+             result-tree={tree}\nintended-commit=-\nrebase-original={first}\n\
+             rebase-onto={second}\nrebase-base={first}\nrebase-next={third}\n\
+             rebase-step=pause\n"
+        )
+    );
+    let steps = [
+        &start,
+        &paused,
+        &showing,
+        &ready,
+        &publishing,
+        &ready,
+        &publishing,
+        &finished,
+        &aborting,
+    ];
+    for pair in steps.windows(2) {
+        guard.replace_operation(pair[0], pair[1])?;
+        assert_eq!(operation::read(&path)?.as_ref(), Some(pair[1]));
+    }
+
+    // Records that no rebase can be in, and changes that no rebase makes.
+    let with = |record: &Record, change: &dyn Fn(&mut Record, &mut Rebase)| {
+        let mut record = record.clone();
+        let Kind::Rebase(mut rebase) = record.kind else {
+            unreachable!("a rebase record");
+        };
+        change(&mut record, &mut rebase);
+        record.kind = Kind::Rebase(rebase);
+        record
+    };
+    let attached = Original {
+        reference: Some(main.clone()),
+        id: Some(second),
+    };
+    for (invalid, why) in [
+        (
+            with(&paused, &|_, rebase| rebase.step = Some(Step::Pause)),
+            "a step while paused",
+        ),
+        (
+            with(&showing, &|_, rebase| rebase.step = None),
+            "no step while incomplete",
+        ),
+        (
+            with(&ready, &|_, rebase| rebase.next = None),
+            "stopped at no commit",
+        ),
+        (
+            with(&paused, &|record, _| record.original = attached.clone()),
+            "paused on a branch",
+        ),
+        (
+            with(&paused, &|record, _| record.original = detached(first)),
+            "paused at another commit",
+        ),
+        (
+            with(&ready, &|record, _| record.intended_commit = Some(third)),
+            "a commit to publish while ready",
+        ),
+        (
+            with(&start, &|record, _| record.original.id = Some(second)),
+            "a first step from another commit",
+        ),
+    ] {
+        assert!(
+            guard.replace_operation(&aborting, &invalid).is_err(),
+            "{why}"
+        );
+    }
+    assert_eq!(operation::read(&path)?, Some(aborting.clone()));
+
+    // The version and the kind must agree, and a rebase record has all its fields.
+    let good = std::fs::read_to_string(&path)?;
+    for (damaged, why) in [
+        (good.replace("version=2", "version=1"), "version 1"),
+        (good.replace("version=2", "version=3"), "version 3"),
+        (
+            good.replace("kind=rebase", "kind=merge"),
+            "a merge in version 2",
+        ),
+        (
+            good.replace("rebase-step=abort", "rebase-step=finish"),
+            "step",
+        ),
+        (good.replace("rebase-step=abort\n", ""), "a missing field"),
+        (format!("{good}rebase-more=-\n"), "a trailing field"),
+        (
+            good.replace(&format!("rebase-onto={second}"), "rebase-onto=-"),
+            "no upstream",
+        ),
+    ] {
+        std::fs::write(&path, damaged)?;
+        assert!(operation::read(&path).is_err(), "{why}");
+    }
+    std::fs::write(&path, &good)?;
+    guard.replace_operation(&aborting, &paused)?;
+    let other_upstream = with(&paused, &|_, rebase| rebase.onto = third);
+    for (to, why) in [
+        (&ready, "paused to ready"),
+        (&other_upstream, "another upstream"),
+        (&merge, "a rebase to a merge"),
+    ] {
+        assert!(guard.replace_operation(&paused, to).is_err(), "{why}");
+    }
+    for pair in [&paused, &showing, &ready, &publishing].windows(2) {
+        guard.replace_operation(pair[0], pair[1])?;
+    }
+    assert!(
+        guard.replace_operation(&publishing, &showing).is_err(),
+        "publishing to incomplete"
+    );
+    guard.replace_operation(&publishing, &ready)?;
+    guard.replace_operation(&ready, &paused)?;
+    drop(guard);
+
+    // Only the rebase commands may go on while a rebase is stopped.
+    let message = |error: Box<dyn std::error::Error + Send + Sync>| error.to_string();
+    let in_progress = "a rebase is in progress; run 'gix rebase --continue'";
+    for error in [
+        Guard::acquire(&opened.repo).err(),
+        Guard::acquire_for_ready_mutation(&opened.repo).err(),
+        Guard::acquire_for_recovery(&opened.repo).err(),
+    ] {
+        let error = message(error.ok_or("a stopped rebase admitted another command")?);
+        assert!(error.contains(in_progress), "{error}");
+    }
+    let (guard, record) = Guard::acquire_rebase(&opened.repo)?;
+    assert_eq!(record, paused);
+    guard.replace_operation(&paused, &showing)?;
+    drop(guard);
+    let error = message(Guard::acquire(&opened.repo).err().ok_or("admitted")?);
+    assert!(
+        error.contains("unfinished gix rebase incomplete"),
+        "{error}"
+    );
+    let (guard, record) = Guard::acquire_for_recovery(&opened.repo)?;
+    assert_eq!(record, showing);
+    guard.replace_operation(&showing, &ready)?;
+    drop(guard);
+    let (guard, record) = Guard::acquire_for_ready_mutation(&opened.repo)?;
+    assert_eq!(record, Some(ready.clone()));
+    drop(guard);
+
+    // HEAD leaves the branch, moves on, and the branch follows at the end.
+    let attached_first = motor_gix::head_ref::capture(&opened.repo)?;
+    let error = motor_gix::head_ref::detach(
+        &mut opened.repo,
+        &detached(first),
+        second,
+        b"wrong".as_bstr(),
+        &cancellation,
+    )
+    .expect_err("HEAD was detached from a state it is not in");
+    assert!(error.to_string().contains("HEAD changed"), "{error}");
+    let at_second = motor_gix::head_ref::detach(
+        &mut opened.repo,
+        &attached_first,
+        second,
+        b"rebase (pick): second".as_bstr(),
+        &cancellation,
+    )?;
+    assert_eq!(at_second, detached(second));
+    let mut listed = Vec::new();
+    motor_gix::branches::list(&opened.repo, Default::default(), &mut listed, &cancellation)?;
+    assert_eq!(listed.as_bstr(), "* (no branch, rebasing main)\n  main\n");
+    let mut status = Vec::new();
+    motor_gix::status::collect(&opened, &cancellation)?.write_to(&mut status, &cancellation)?;
+    assert_eq!(status.as_bstr(), "operation rebase ready\n");
+    let error = motor_gix::head_ref::move_branch(
+        &mut opened.repo,
+        &main,
+        second,
+        third,
+        b"wrong".as_bstr(),
+        &cancellation,
+    )
+    .expect_err("a branch moved from a commit it is not at");
+    assert!(error.to_string().contains("changed"), "{error}");
+    let at_third = motor_gix::head_ref::detach(
+        &mut opened.repo,
+        &at_second,
+        third,
+        b"rebase (continue): third".as_bstr(),
+        &cancellation,
+    )?;
+    motor_gix::head_ref::move_branch(
+        &mut opened.repo,
+        &main,
+        first,
+        third,
+        b"rebase (finish): refs/heads/main onto".as_bstr(),
+        &cancellation,
+    )?;
+    let finished_head = motor_gix::head_ref::attach(
+        &mut opened.repo,
+        &at_third,
+        &main,
+        third,
+        b"rebase (finish): returning to refs/heads/main".as_bstr(),
+        &cancellation,
+    )?;
+    assert_eq!(finished_head.reference.as_ref(), Some(&main));
+    let error = motor_gix::head_ref::move_branch(
+        &mut opened.repo,
+        &main,
+        third,
+        second,
+        b"wrong".as_bstr(),
+        &cancellation,
+    )
+    .expect_err("the branch of HEAD moved");
+    assert!(error.to_string().contains("HEAD is attached"), "{error}");
+
+    let logs = opened.repo.git_dir().join("logs");
+    let null = ObjectId::null(gix::hash::Kind::Sha1);
+    let lines = |name: &str| -> Result<Vec<String>> {
+        let log = std::fs::read_to_string(logs.join(name))?;
+        let line = |line: &str| -> Option<String> {
+            let (ids, message) = line.split_once('\t')?;
+            let mut ids = ids.split(' ');
+            Some(format!("{} {} {message}", ids.next()?, ids.next()?))
+        };
+        Ok(log.lines().skip(1).filter_map(line).collect())
+    };
+    assert_eq!(
+        lines("HEAD")?,
+        [
+            format!("{null} {second} rebase (pick): second"),
+            format!("{second} {third} rebase (continue): third"),
+            format!("{third} {third} rebase (finish): returning to refs/heads/main"),
+        ]
+    );
+    assert_eq!(
+        lines("refs/heads/main")?,
+        [format!(
+            "{first} {third} rebase (finish): refs/heads/main onto"
+        )]
+    );
+
+    let (guard, record) = Guard::acquire_rebase(&opened.repo)?;
+    guard.remove_operation(&record)?;
+    drop(guard);
+    let error = message(
+        Guard::acquire_rebase(&opened.repo)
+            .err()
+            .ok_or("admitted")?,
+    );
+    assert!(error.contains("no rebase is in progress"), "{error}");
+    Ok(())
+}
