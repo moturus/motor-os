@@ -110,6 +110,30 @@ waiting commit is older than all commits of the branch found so far. It
 reads at most 65,536 commits. Like Git without a commit-graph, it trusts
 that no commit is older than its parents.
 
+**Commits that the upstream already has.** Added on 2026-11-16, after the
+user asked for Git's behaviour here. Before the replay, gix leaves out every
+commit of the branch whose patch ID is that of a commit that only the
+upstream has, and prints Git's `skipped previously applied commit`. This is
+what `git rebase` does with `--cherry-mark`. It matters when the upstream
+made the same change and later undid it: the commit stays out.
+
+- `patch_id.rs` hashes what `diff_get_patch_id()` in Git's `diff.c` hashes.
+  The test compares the IDs with `git patch-id --stable` for sixteen kinds
+  of commit, and the skipped commits with those that `git pull --rebase`
+  skips.
+- The diff is the fork's Myers diff with hunks moved down as far as they
+  go, which is what Git uses for a patch ID. The configured algorithm and
+  the indent heuristic play no part, in Git or in gix.
+- Like Git, gix compares the names and modes of the changed files first,
+  and reads file contents only for commits that agree in those.
+- Git compares patches only when the fork point is not used, that is, when
+  the upstream contains B. So does gix. After a rewrite every commit is
+  replayed.
+- A patch ID depends on objects only. So the list of commits is the same
+  each time it is computed while a rebase is stopped.
+- The walk now reads every commit that only the upstream has, because each
+  of them is a candidate. The limit of 65,536 commits covers them.
+
 Replaying commit C onto T is `Repository::merge_trees()` with the tree of
 C's parent as the ancestor, the tree of T as ours, and the tree of C as
 theirs. A root commit uses the empty tree as the ancestor. The marker labels
@@ -334,11 +358,11 @@ reads: those it replays, and those it visits to find them.
 
 **More differences, no decision needed.** Found while writing step 1.
 
-- Git drops a commit that the upstream already has by comparing patches
-  before the replay, and prints `skipped previously applied commit`. Gix
-  finds it after the replay, when the result adds nothing. The history is
-  the same, with one exception: if the upstream applied the change and later
-  undid it, Git still drops the commit and gix applies it again.
+- Gix decides whether a file is binary by its content alone, when it
+  compares patches (see "Commits that the upstream already has" below). Git
+  also reads the `diff` and `binary` attributes.
+- A file of more than 16 MiB counts as binary in that comparison. Git draws
+  the line at 512 MiB.
 - A replayed commit keeps its message bytes and its `encoding` header. Git
   converts the message to UTF-8.
 - A replayed commit has no signature and no other extra header. Git drops
@@ -357,5 +381,7 @@ reads: those it replays, and those it visits to find them.
   reflog `pull --rebase (finish): refs/heads/main onto <U>`. The words
   before the bracket are the command that ran, so a later `rebase
   --continue` writes `rebase (finish)`.
-- A dropped commit: `dropping <id> <subject> -- patch contents already
-  upstream`.
+- A commit left out before the replay: `warning: skipped previously applied
+  commit <short id>`. Gix adds the subject.
+- A commit dropped by its replay: `dropping <id> <subject> -- patch
+  contents already upstream`.

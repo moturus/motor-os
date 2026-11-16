@@ -128,22 +128,27 @@ pub fn check_replay(output: &Path) -> Result {
     merged[0] = ("a", b"one\n2\n3\n");
     let l4 = commit("l4", tree(&merged)?, &[m])?;
 
-    let todo = |range: &Range| replay::todo(repo, range, &cancellation);
+    let todo = |range: &Range| {
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(
+            replay::todo(repo, range, &cancellation)?.commits,
+        )
+    };
     let range = Range {
         original: l4,
         onto: u,
         base,
     };
     assert_eq!(
-        replay::todo(repo, &range, &cancellation)?,
+        replay::todo(repo, &range, &cancellation)?.commits,
         [l1, l2, l3, s1, l4],
         "the order is that of git rev-list --topo-order --reverse --no-merges"
     );
     for (original, expected) in [(base, vec![]), (u, vec![]), (l1, vec![l1])] {
         let range = Range { original, ..range };
-        assert_eq!(replay::todo(repo, &range, &cancellation)?, expected);
+        assert_eq!(replay::todo(repo, &range, &cancellation)?.commits, expected);
     }
     check_todo_boundary(&history, base_tree)?;
+    check_todo_applied(&history)?;
 
     let replayed = replay::run(&opened, &todo(&range)?, u, &cancellation)?;
     assert!(replayed.stopped.is_none());
@@ -269,7 +274,7 @@ fn check_todo_boundary(history: &History<'_>, tree: ObjectId) -> Result {
             onto: u,
             base,
         };
-        replay::todo(history.repo, &range, &history.cancellation)
+        replay::todo(history.repo, &range, &history.cancellation).map(|todo| todo.commits)
     };
 
     // The walk visits x as a commit of the branch and has nothing else of the branch
@@ -1043,4 +1048,94 @@ pub fn check_rebase_resume(output: &Path) -> Result {
     drop(armed);
     motor_gix::rebase::abort(&fixture.opened, &fixture.cancellation)?;
     fixture.require_aborted()
+}
+
+// A commit of the branch is left out when a commit that only the upstream has makes the
+// same change, as long as the upstream still contains the base of the rebase.
+fn check_todo_applied(history: &History<'_>) -> Result {
+    let lines: &[u8] = b"1\n2\n3\n4\n5\n6\n7\n8\n9\n";
+    let changed: &[u8] = b"1\n2\n3\n4\nfive\n6\n7\n8\n9\n";
+    let plain = history.tree(&[("a", lines), ("keep", b"k\n")])?;
+    let with_change = history.tree(&[("a", changed), ("keep", b"k\n")])?;
+    let commit = |message: &str, tree, parents: &[ObjectId]| history.commit(message, tree, parents);
+
+    // The upstream makes the change, makes an empty commit, and takes the change back.
+    let root = commit("applied root", plain, &[])?;
+    let base = commit("applied base", plain, &[root])?;
+    let u1 = commit("upstream change", with_change, &[base])?;
+    let u2 = commit("upstream empty", with_change, &[u1])?;
+    let upstream = commit("upstream revert", plain, &[u2])?;
+    // The branch makes the same change next to another file, then two more commits.
+    let other: [(&str, &[u8]); 3] = [("a", lines), ("keep", b"k\n"), ("more", b"m\n")];
+    let l1 = commit("local other file", history.tree(&other)?, &[base])?;
+    let mut files = other.to_vec();
+    files[0] = ("a", changed);
+    let l2 = commit("local change", history.tree(&files)?, &[l1])?;
+    let l3 = commit("local empty", history.tree(&files)?, &[l2])?;
+    let todo = |onto, base| {
+        let range = Range {
+            original: l3,
+            onto,
+            base,
+        };
+        replay::todo(history.repo, &range, &history.cancellation)
+    };
+
+    // The same change is left out. An empty commit never is, though the upstream has one.
+    let found = todo(upstream, base)?;
+    assert_eq!((found.commits, found.applied), (vec![l1, l3], vec![l2]));
+    // An older base that the upstream contains makes no difference.
+    let found = todo(upstream, root)?;
+    assert_eq!((found.commits, found.applied), (vec![l1, l3], vec![l2]));
+
+    // An upstream that does not contain the base was rewritten. Then nothing is compared,
+    // as in Git, and the commit is replayed.
+    let other_root = commit("rewritten root", plain, &[])?;
+    let r1 = commit("rewritten change", with_change, &[other_root])?;
+    let rewritten = commit("rewritten revert", plain, &[r1])?;
+    let found = todo(rewritten, base)?;
+    assert_eq!(found.commits, [l1, l2, l3]);
+    assert!(found.applied.is_empty());
+
+    // A branch that starts at `u1` takes its change back and makes it again. Taking it
+    // back is what the upstream did after `u1`, so that commit is left out. Making it
+    // again is what `u1` did, but the branch has `u1` too: only commits that the upstream
+    // alone has count, so that commit is replayed.
+    let back = commit("local back", plain, &[u1])?;
+    let again = commit("local again", with_change, &[back])?;
+    let range = Range {
+        original: again,
+        onto: upstream,
+        base: u1,
+    };
+    let found = replay::todo(history.repo, &range, &history.cancellation)?;
+    assert_eq!((found.commits, found.applied), (vec![again], vec![back]));
+
+    // A file of more than 16 MiB is not compared line by line. It counts as binary, so
+    // two commits that change it are the same only if they make the same file of it.
+    let large = |last: &str| [&b"line\n".repeat((16 << 20) / 5 + 1), last.as_bytes()].concat();
+    let large_tree = |last: &str| history.tree(&[("large", &large(last))]);
+    let large_base = commit("large base", large_tree("end\n")?, &[])?;
+    let large_upstream = commit("large upstream", large_tree("upstream\n")?, &[large_base])?;
+    let large_local = commit("large local", large_tree("local\n")?, &[large_base])?;
+    let range = Range {
+        original: large_local,
+        onto: large_upstream,
+        base: large_base,
+    };
+    let found = replay::todo(history.repo, &range, &history.cancellation)?;
+    assert_eq!(found.commits, [large_local]);
+    assert!(found.applied.is_empty());
+
+    // Replaying after the commit was left out keeps the upstream's last word.
+    let found = todo(upstream, base)?;
+    let opened = motor_gix::repository::open(
+        history.repo.workdir().ok_or("no worktree")?,
+        &["user.name=Replayer", "user.email=replayer@example.com"],
+        false,
+    )?;
+    let replayed = replay::run(&opened, &found.commits, upstream, &history.cancellation)?;
+    assert!(replayed.stopped.is_none() && replayed.dropped.is_empty());
+    assert_eq!(history.read(replayed.tip)?.3, history.tree(&other)?);
+    Ok(())
 }

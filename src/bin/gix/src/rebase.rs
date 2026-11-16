@@ -108,7 +108,7 @@ pub fn resume(
         return finish(opened, guard, &record, out, cancellation);
     };
     head_ref::require(repo, &record.original)?;
-    let todo = replay::todo(repo, &range, cancellation)?;
+    let todo = replay::todo(repo, &range, cancellation)?.commits;
     let position = todo
         .iter()
         .position(|id| *id == next)
@@ -279,7 +279,7 @@ fn settle(
             ..record.clone()
         }
     } else if head.reference.is_none() && head.id == Some(intended) {
-        let todo = replay::todo(repo, &range, cancellation)?;
+        let todo = replay::todo(repo, &range, cancellation)?.commits;
         let position = todo.iter().position(|id| Some(*id) == rebase.next);
         let position =
             position.ok_or_else(|| invalid("the rebase does not have the commit it stopped at"))?;

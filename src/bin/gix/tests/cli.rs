@@ -364,24 +364,35 @@ fn pull_rebase_replays_local_commits() -> Result {
         "Current branch topic is up to date.\n"
     );
 
-    // The branch has a commit that the upstream has too, and a merge of its own.
+    // The upstream has two changes that the branch makes too. `shared` is a commit of its
+    // own there, with the same patch. `also` came with another file in one commit.
     on_main("shared", "shared", "shared");
-    on_main("upstream-1", "upstream-1", "upstream-1");
+    client.ok(&root, &["checkout", "main"]);
+    fs::write(root.join("also"), "also")?;
+    client.ok(&root, &["add", "also"]);
+    commit_file(&identity, "also and more", "more", "more");
+    client.ok(&root, &["checkout", "topic"]);
+    // The branch also has a merge of its own.
     client.ok(&root, &["checkout", "-b", "side"]);
     commit("side-1");
     client.ok(&root, &["checkout", "topic"]);
     commit("shared");
     let shared = rev("HEAD");
+    commit("also");
+    let also = rev("HEAD");
     client.ok(&root, &[&identity[..], &["merge", "side"]].concat());
     commit("topic-2");
     let upstream = rev("main");
-    // `--rebase` on the command line overrides a configured `pull.ff = only`.
+    // Git leaves `shared` out before it replays anything, and `also` when its replay
+    // changes nothing. `--rebase` on the command line overrides `pull.ff = only`.
     assert_eq!(
         pull(&["-c", "pull.ff=only", "pull", "--rebase"]),
         format!(
-            "dropping {} (shared) -- patch contents already upstream\n\
+            "warning: skipped previously applied commit {} (shared)\n\
+             dropping {} (also) -- patch contents already upstream\n\
              Successfully rebased and updated refs/heads/topic.\n",
-            &shared[..7]
+            &shared[..7],
+            &also[..7]
         )
     );
     assert_eq!(
@@ -390,7 +401,7 @@ fn pull_rebase_replays_local_commits() -> Result {
             "topic-2 Test/Test",
             "side-1 Test/Test",
             "topic-1 Other/Test",
-            "upstream-1 Test/Test",
+            "also and more Test/Test",
             "shared Test/Test",
             "base Test/Test",
         ]
@@ -403,7 +414,7 @@ fn pull_rebase_replays_local_commits() -> Result {
         b"ref: refs/heads/topic\n"
     );
     assert_eq!(client.ok(&root, &["status"]), "");
-    for file in ["topic-1", "side-1", "topic-2", "shared", "upstream-1"] {
+    for file in ["topic-1", "side-1", "topic-2", "shared", "also", "more"] {
         assert_eq!(fs::read_to_string(root.join(file))?, file);
     }
 

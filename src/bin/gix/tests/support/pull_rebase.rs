@@ -56,7 +56,7 @@ pub fn check(test: &Test) -> Result {
     assert_eq!(
         pulled,
         format!(
-            "dropping {} (both) -- patch contents already upstream\n\
+            "warning: skipped previously applied commit {} (both)\n\
              Successfully rebased and updated refs/heads/main.\n",
             dropped.trim()
         )
@@ -100,11 +100,15 @@ fn rewritten(test: &Test, server: &Server) -> Result {
     test.git(&test.0, &["clone", "remote.git", "fork-git"]);
     let git =
         |directory: &Path, args: &[&str]| test.git(directory, &[&IDENTITY[..], args].concat());
-    for clone in [&by_gix, &by_git] {
-        std::fs::write(clone.join("mine"), "mine\n")?;
-        git(clone, &["add", "mine"]);
+    let add = |directory: &Path, file: &str, text: &str, message: &str| {
+        std::fs::write(directory.join(file), text).unwrap();
+        git(directory, &["add", file]);
         let date = "--date=2026-01-02T03:04:05+00:00";
-        git(clone, &["commit", date, "-m", "mine"]);
+        git(directory, &["commit", date, "-m", message]);
+    };
+    for clone in [&by_gix, &by_git] {
+        add(clone, "mine", "mine\n", "mine");
+        add(clone, "again", "again\n", "again");
     }
     // The new tip changes the same file as the old one, so replaying the old tip on it
     // would stop at a conflict.
@@ -112,6 +116,11 @@ fn rewritten(test: &Test, server: &Server) -> Result {
     std::fs::write(update.join("pulled-1"), "rewritten\n")?;
     git(&update, &["add", "pulled-1"]);
     git(&update, &["commit", "--amend", "-m", "rewritten"]);
+    // The new upstream also makes the change of `again` and takes it back. After a
+    // rewrite Git does not look for such commits: `again` is replayed and its file stays.
+    add(&update, "again", "again\n", "applied");
+    git(&update, &["rm", "-q", "again"]);
+    git(&update, &["commit", "-m", "undone"]);
     git(&update, &["push", "--force", "origin", "main"]);
 
     let pulled = success(test.gix(&by_gix).args(IDENTITY).args(["pull", "--rebase"]));
@@ -125,10 +134,14 @@ fn rewritten(test: &Test, server: &Server) -> Result {
     assert_eq!(ours, theirs);
     let subjects: Vec<_> = ours
         .lines()
-        .take(2)
+        .take(5)
         .map(|line| line.split('|').nth(4).unwrap())
         .collect();
-    assert_eq!(subjects, ["mine", "rewritten"]);
+    assert_eq!(
+        subjects,
+        ["again", "mine", "undone", "applied", "rewritten"]
+    );
+    assert_eq!(std::fs::read(by_gix.join("again"))?, b"again\n");
     assert_eq!(success(test.gix(&by_gix).arg("status")), "");
     test.git(&by_gix, &["fsck", "--strict", "--no-dangling"]);
     Ok(())

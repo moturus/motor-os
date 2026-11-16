@@ -8,6 +8,8 @@ use std::{
 };
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+#[path = "patch_ids.rs"]
+mod patch_ids;
 #[path = "pull_rebase.rs"]
 mod pull_rebase;
 #[path = "push_pack.rs"]
@@ -162,6 +164,7 @@ pub fn run() -> Result {
     clone_and_fetch(&test)?;
     pull(&test)?;
     pull_rebase::check(&test)?;
+    patch_ids::check(&test)?;
     push_pack::check_push_pack(&test.0)?;
     push(&test)?;
     println!("gix loopback HTTPS tests PASS");

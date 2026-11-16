@@ -226,11 +226,18 @@ made.` The merge commit gets the message Git gives it, such as `Merge branch
 A rebase replays your commits on top of the remote branch, oldest first.
 Each new commit keeps its author and message, and you become its committer.
 So a rebase needs your name and email, as a commit does. Pull prints
-`Successfully rebased and updated refs/heads/BRANCH.` Two kinds of commits
-are not replayed:
+`Successfully rebased and updated refs/heads/BRANCH.` Three kinds of commits
+are not replayed, as in Git:
 
-- A commit whose changes the remote branch already has. Pull prints
-  `dropping ID (SUBJECT) -- patch contents already upstream`.
+- A commit that makes the same change as a commit that only the remote
+  branch has. Pull prints `warning: skipped previously applied commit ID
+  (SUBJECT)`. The changes are compared as Git compares them: by the lines
+  they remove and add and the three lines around them, without whitespace
+  and without line numbers. Such a commit stays out even if the remote
+  branch has undone the change since.
+- A commit that changes nothing once it is replayed, because the remote
+  branch has its changes in some other form. Pull prints `dropping ID
+  (SUBJECT) -- patch contents already upstream`.
 - A merge commit of your own. The commits that it merged are replayed, so
   your history becomes one line.
 
@@ -239,7 +246,9 @@ that replaced its last commit. Your branch then still has the commit that
 the remote branch dropped. As in Git, the rebase leaves that commit out. Gix
 knows that it was a commit of the remote branch from the reflog of
 `origin/BRANCH`, so this works only for commits that your repository has
-seen `origin/BRANCH` at.
+seen `origin/BRANCH` at. After such a rewrite the changes of your commits
+are not compared with those of the remote branch, in gix as in Git: every
+commit is replayed.
 
 If one of your commits conflicts with the remote branch, the rebase stops
 at that commit. [Rebasing](#rebasing) says how to go on.

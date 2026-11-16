@@ -24,6 +24,7 @@ pub mod mutation;
 pub mod network;
 pub mod object_database;
 pub mod operation;
+pub mod patch_id;
 pub mod prompt;
 pub mod pull;
 pub mod push;

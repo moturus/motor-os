@@ -151,19 +151,20 @@ pub fn run(
                  or set pull.rebase to true or false to choose for every pull",
             ),
             Reconcile::Rebase => {
-                // If the upstream still has the fork point, it changes nothing: commits
-                // that the upstream has are never replayed. So Git's test for that case
-                // is not needed here.
+                // Git ignores a fork point that the upstream still has. Here such a fork
+                // point changes nothing, so that test is not needed: commits that the
+                // upstream has are never replayed, and patch IDs are compared whenever
+                // the upstream contains the base.
                 let base = fork_point.unwrap_or(base);
                 let range = Range {
                     original,
                     onto: commit,
                     base,
                 };
-                let commits = replay::todo(&shared.repo, &range, cancellation)?;
-                let replayed = replay::run(shared, &commits, commit, cancellation)?;
+                let todo = replay::todo(&shared.repo, &range, cancellation)?;
+                let replayed = replay::run(shared, &todo.commits, commit, cancellation)?;
                 let tip = replayed.tip;
-                rebased = Some((range, replayed));
+                rebased = Some((range, replayed, todo.applied));
                 Ok(Some(tip))
             }
         },
@@ -174,34 +175,42 @@ pub fn run(
     } else {
         "pull"
     };
-    let dropping = |dropped: &[gix::ObjectId]| -> crate::Result<String> {
+    // What the rebase left out, in Git's words: the commits whose change the upstream has
+    // in a commit of its own, then those that changed nothing once they were replayed.
+    let left_out = |applied: &[gix::ObjectId], dropped: &[gix::ObjectId]| {
         let mut report = String::new();
-        for dropped in dropped {
-            let label = replay::label(&opened.repo, *dropped)?;
-            report.push_str(&format!(
-                "dropping {label} -- patch contents already upstream\n"
-            ));
+        for (ids, before, after) in [
+            (applied, "warning: skipped previously applied commit ", ""),
+            (dropped, "dropping ", " -- patch contents already upstream"),
+        ] {
+            for id in ids {
+                let label = replay::label(&opened.repo, *id)?;
+                report.push_str(&format!("{before}{label}{after}\n"));
+            }
         }
-        Ok(report)
+        crate::Result::Ok(report)
     };
     // A commit that does not apply stops the rebase where the user can resolve it.
     let rebased = match rebased {
-        Some((range, replayed)) => match replayed.stopped {
-            Some(stopped) => {
-                write!(out, "{}", dropping(&replayed.dropped)?)?;
-                out.flush()?;
-                return rebase::stop(
-                    opened,
-                    planned.into_guard(),
-                    &current,
-                    &range,
-                    (replayed.tip, stopped),
-                    action,
-                    cancellation,
-                );
+        Some((range, replayed, applied)) => {
+            let left_out = left_out(&applied, &replayed.dropped)?;
+            match replayed.stopped {
+                Some(stopped) => {
+                    write!(out, "{left_out}")?;
+                    out.flush()?;
+                    return rebase::stop(
+                        opened,
+                        planned.into_guard(),
+                        &current,
+                        &range,
+                        (replayed.tip, stopped),
+                        action,
+                        cancellation,
+                    );
+                }
+                None => Some(left_out),
             }
-            None => Some(replayed.dropped),
-        },
+        }
         None => None,
     };
     let mut reflog = format!("{action}: Fast-forward");
@@ -216,7 +225,7 @@ pub fn run(
         (Preparation::UpToDate, _) => Some("Already up to date.".to_owned()),
         (Preparation::FastForward { .. }, _) if rebased.is_some() => {
             reflog = format!("{action} (finish): {} onto {commit}", current.as_bstr());
-            let mut report = dropping(rebased.as_deref().unwrap_or_default())?;
+            let mut report = rebased.clone().unwrap_or_default();
             report.push_str(&format!(
                 "Successfully rebased and updated {}.",
                 current.as_bstr()

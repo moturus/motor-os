@@ -21,7 +21,7 @@ use gix::{
 
 use crate::{
     cancellation::Cancellation, commit, merge, merge_policy, object_database::Reader,
-    repository::OpenedRepository, tracked_filters, tree_index,
+    patch_id::Patch, repository::OpenedRepository, tracked_filters, tree_index,
 };
 
 /// The most commits one rebase reads: those it replays, and those it visits to find them.
@@ -221,12 +221,23 @@ fn reject_unsupported(
     merge_policy::reject_unsupported(opened, &index, cancellation)
 }
 
+/// From which commits of the rebase a commit can be reached.
+const BRANCH: u8 = 1;
+const ONTO: u8 = 2;
+const BASE: u8 = 4;
+
+/// Whether a commit with these flags is on one side only: reachable from the branch, or
+/// from the upstream and the base, but not from both.
+fn one_sided(from: u8) -> bool {
+    (from & BRANCH != 0) != (from & (ONTO | BASE) != 0)
+}
+
 /// A commit reached while looking for the commits to replay.
 struct Seen {
     parents: Vec<gix::ObjectId>,
     time: i64,
-    /// Reachable from the upstream side, so not replayed.
-    hidden: bool,
+    /// `BRANCH`, `ONTO` and `BASE`, for each of them that reaches this commit.
+    from: u8,
     queued: bool,
 }
 
@@ -235,23 +246,24 @@ struct Walk<'a> {
     seen: HashMap<gix::ObjectId, Seen>,
     /// Commits whose parents are still to be reached, newest first.
     queue: BinaryHeap<(i64, gix::ObjectId)>,
-    /// How many queued commits are not hidden.
-    visible_queued: usize,
+    /// How many queued commits are one-sided.
+    one_sided_queued: usize,
 }
 
 impl Walk<'_> {
-    /// Record that commit `id` is reachable, from the upstream side if `hidden`.
-    fn reach(&mut self, id: gix::ObjectId, hidden: bool) -> crate::Result {
+    /// Record that commit `id` is reachable from the commits that the flags `from` name.
+    fn reach(&mut self, id: gix::ObjectId, from: u8) -> crate::Result {
         if let Some(commit) = self.seen.get_mut(&id) {
-            // A commit first reached from the branch can turn out to be upstream as well.
-            if hidden && !commit.hidden {
-                commit.hidden = true;
-                if commit.queued {
-                    self.visible_queued -= 1;
-                } else {
-                    // Visit it again, so that its ancestors become hidden too.
+            let (before, after) = (commit.from, commit.from | from);
+            if before != after {
+                commit.from = after;
+                if !commit.queued {
+                    // Visit it again, so that its ancestors learn what reaches them.
                     commit.queued = true;
                     self.queue.push((commit.time, id));
+                    self.one_sided_queued += usize::from(one_sided(after));
+                } else if one_sided(before) && !one_sided(after) {
+                    self.one_sided_queued -= 1;
                 }
             }
             return Ok(());
@@ -275,61 +287,75 @@ impl Walk<'_> {
         let commit = Seen {
             parents,
             time,
-            hidden,
+            from,
             queued: true,
         };
         self.seen.insert(id, commit);
         self.queue.push((time, id));
-        self.visible_queued += usize::from(!hidden);
+        self.one_sided_queued += 1;
         Ok(())
     }
 }
 
-/// The commits a rebase of `range` replays, oldest first.
+/// What a rebase does with the commits of its branch.
+#[derive(Debug)]
+pub struct Todo {
+    /// The commits to replay, oldest first.
+    pub commits: Vec<gix::ObjectId>,
+    /// Commits left out because the upstream has a commit with the same change.
+    pub applied: Vec<gix::ObjectId>,
+}
+
+/// The commits a rebase of `range` replays, and those it leaves out, as `git rebase` does.
 ///
-/// These are the commits reachable from the original tip but not from `onto` or `base`,
-/// without merge commits, in the reverse of `git rev-list --topo-order`. As Git does without
-/// a commit-graph, this trusts that no commit is older than its parents.
+/// The commits of the branch are those reachable from the original tip but not from `onto`
+/// or `base`, without merge commits, in the reverse of `git rev-list --topo-order`. A
+/// commit whose patch ID is that of a commit that only the upstream has is left out. Git
+/// compares patch IDs only while the upstream contains `base`, and so does this.
+///
+/// As Git does without a commit-graph, this trusts that no commit is older than its parents.
+/// The result depends on the three commits alone, so it is the same each time it is asked
+/// for while a rebase is stopped.
 pub fn todo(
     repo: &gix::Repository,
     range: &Range,
     cancellation: &Cancellation,
-) -> crate::Result<Vec<gix::ObjectId>> {
+) -> crate::Result<Todo> {
     let mut walk = Walk {
         objects: Reader::new(repo, cancellation),
         seen: HashMap::new(),
         queue: BinaryHeap::new(),
-        visible_queued: 0,
+        one_sided_queued: 0,
     };
-    walk.reach(range.original, false)?;
-    walk.reach(range.onto, true)?;
-    walk.reach(range.base, true)?;
-    // Git's rule for the end: no queued commit is visible, and every queued commit is older
-    // than all visible ones, so none of them can have a visible commit as an ancestor.
-    let mut oldest_visible = i64::MAX;
+    walk.reach(range.original, BRANCH)?;
+    walk.reach(range.onto, ONTO)?;
+    walk.reach(range.base, BASE)?;
+    // Git's rule for the end: no queued commit is one-sided, and every queued commit is
+    // older than all one-sided ones, so none of them can have such a commit as an ancestor.
+    let mut oldest_one_sided = i64::MAX;
     while let Some(&(time, id)) = walk.queue.peek() {
-        if walk.visible_queued == 0 && time < oldest_visible {
+        if walk.one_sided_queued == 0 && time < oldest_one_sided {
             break;
         }
         walk.queue.pop();
         let commit = walk.seen.get_mut(&id).expect("queued commits were seen");
         commit.queued = false;
-        let hidden = commit.hidden;
-        if !hidden {
-            walk.visible_queued -= 1;
-            oldest_visible = oldest_visible.min(time);
+        let from = commit.from;
+        if one_sided(from) {
+            walk.one_sided_queued -= 1;
+            oldest_one_sided = oldest_one_sided.min(time);
         }
         for parent in commit.parents.clone() {
-            walk.reach(parent, hidden)?;
+            walk.reach(parent, from)?;
         }
     }
 
     // Git's `--topo-order`: a commit comes after all its children, and the lines of history
     // that a merge joins are not mixed. The line of the last parent comes first.
-    let seen = walk.seen;
-    let visible = |id: &gix::ObjectId| seen.get(id).is_some_and(|commit| !commit.hidden);
+    let Walk { objects, seen, .. } = walk;
+    let visible = |id: &gix::ObjectId| seen.get(id).is_some_and(|commit| commit.from == BRANCH);
     let mut children: HashMap<gix::ObjectId, usize> = HashMap::new();
-    for commit in seen.values().filter(|commit| !commit.hidden) {
+    for commit in seen.values().filter(|commit| commit.from == BRANCH) {
         for parent in commit.parents.iter().filter(|id| visible(id)) {
             *children.entry(*parent).or_default() += 1;
         }
@@ -352,7 +378,75 @@ pub fn todo(
         }
     }
     commits.reverse();
-    Ok(commits)
+
+    // The commits that only the upstream has. They count only if the upstream contains the
+    // base: otherwise the upstream was rewritten, and Git replays every commit as it is.
+    let compare = seen[&range.base].from & ONTO != 0;
+    let upstream = seen.iter().filter(|(_, commit)| commit.from == ONTO);
+    let upstream: Vec<_> = upstream.map(|(id, _)| *id).collect();
+    let applied = match compare {
+        true => applied(&objects, &commits, &upstream)?,
+        false => Vec::new(),
+    };
+    commits.retain(|id| !applied.contains(id));
+    Ok(Todo { commits, applied })
+}
+
+/// The commits among `commits` whose patch ID is that of one of the `upstream` commits.
+///
+/// Like Git, compare the names of the changed files first, and read file contents only
+/// for commits that agree in those. A commit that changes nothing is never left out.
+fn applied(
+    objects: &Reader<'_>,
+    commits: &[gix::ObjectId],
+    upstream: &[gix::ObjectId],
+) -> crate::Result<Vec<gix::ObjectId>> {
+    let mut applied = Vec::new();
+    if commits.is_empty() || upstream.is_empty() {
+        return Ok(applied);
+    }
+    let mut state = gix::diff::tree::State::default();
+    let mut by_header: HashMap<gix::ObjectId, Vec<gix::ObjectId>> = HashMap::new();
+    for &id in upstream {
+        objects.cancellation().check()?;
+        if let Some(patch) = Patch::of(objects, id, &mut state)?
+            && !patch.is_empty()
+        {
+            by_header.entry(patch.header_id()?).or_default().push(id);
+        }
+    }
+    // The full IDs of upstream commits, each computed when it is first needed.
+    let mut full: HashMap<gix::ObjectId, gix::ObjectId> = HashMap::new();
+    for &id in commits {
+        objects.cancellation().check()?;
+        let Some(patch) = Patch::of(objects, id, &mut state)? else {
+            continue;
+        };
+        if patch.is_empty() {
+            continue;
+        }
+        let Some(candidates) = by_header.get(&patch.header_id()?) else {
+            continue;
+        };
+        let patch_id = patch.id(objects)?;
+        for &candidate in candidates {
+            let known = match full.get(&candidate) {
+                Some(known) => *known,
+                None => {
+                    let patch = Patch::of(objects, candidate, &mut state)?;
+                    let patch = patch.expect("the upstream commit had a patch before");
+                    let known = patch.id(objects)?;
+                    full.insert(candidate, known);
+                    known
+                }
+            };
+            if known == patch_id {
+                applied.push(id);
+                break;
+            }
+        }
+    }
+    Ok(applied)
 }
 
 fn unsupported(message: &str) -> io::Error {
