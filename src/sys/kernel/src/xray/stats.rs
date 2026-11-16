@@ -758,8 +758,10 @@ impl KProcessStats {
         dest.parent_pid = self.parent.as_ref().map_or(0, |p| p.user_pid.as_u64());
 
         dest.process_role = moto_sys::caps::ProcessRole::None as u8;
+        dest.capabilities = 0;
         if let Some(proc) = self.owner.upgrade() {
-            dest.process_role = moto_sys::caps::ProcessRole::from_caps(proc.capabilities()) as u8;
+            dest.capabilities = proc.capabilities();
+            dest.process_role = moto_sys::caps::ProcessRole::from_caps(dest.capabilities) as u8;
         };
 
         let debug_name = if self.debug_name.len() > 32 {

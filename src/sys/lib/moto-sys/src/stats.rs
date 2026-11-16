@@ -31,9 +31,10 @@ pub struct ProcessInfoV1 {
     pub debug_name_len: u8,
     pub active: u8,       // 0 => zombie; 1 => active.
     pub process_role: u8, // ProcessRole as u8.
+    pub capabilities: u64,
 }
 
-const _: () = assert!(core::mem::size_of::<ProcessInfoV1>() == 56);
+const _: () = assert!(core::mem::size_of::<ProcessInfoV1>() == 64);
 
 #[cfg(feature = "userspace")]
 impl ProcessInfoV1 {
