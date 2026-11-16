@@ -124,6 +124,8 @@ pub fn resume(
         (_, skip) => (record, position + usize::from(skip), false),
     };
 
+    // A resolution commit has moved the rebase on, so read where it is now.
+    let (rebase, _) = parts(&record)?;
     let head = record.target_commit;
     let replayed = replay::run(opened, &todo[start..], head, cancellation)?;
     for dropped in &replayed.dropped {

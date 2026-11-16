@@ -574,6 +574,29 @@ fn pull_rebase_replays_local_commits() -> Result {
     assert_eq!(history()[..2], ["topic-6 Test/Test", "topic-5 Test/Test"]);
     assert_eq!(fs::read_to_string(root.join("clash"))?, "theirs again\n");
     assert_eq!(client.ok(&root, &["status"]), "");
+
+    // The last commit of the branch conflicts. Resolving it ends the rebase.
+    on_main("their end", "clash", "their end\n");
+    commit_file(&identity, "my end", "clash", "my end\n");
+    stops_at(&rev("HEAD"), "my end");
+    fs::write(root.join("clash"), "both ends\n")?;
+    client.ok(&root, &["add", "clash"]);
+    assert_eq!(pull(&["rebase", "--continue"]), rebased);
+    assert_eq!(history()[..2], ["my end Test/Test", "topic-6 Test/Test"]);
+    assert_eq!(fs::read_to_string(root.join("clash"))?, "both ends\n");
+
+    // Again the last commit conflicts. Skipping it ends the rebase too, and that makes
+    // no commit, so it needs no identity.
+    on_main("their close", "close", "their close\n");
+    commit_file(&identity, "my close", "close", "my close\n");
+    stops_at(&rev("HEAD"), "my close");
+    let replayed = rev("HEAD");
+    let anonymous = ["-c", "user.name=", "-c", "user.email=", "rebase", "--skip"];
+    assert_eq!(client.ok(&root, &anonymous), rebased);
+    assert_eq!(history()[0], "my end Test/Test");
+    assert_eq!(rev("HEAD"), replayed);
+    assert_eq!(fs::read_to_string(root.join("close"))?, "their close\n");
+    assert_eq!(client.ok(&root, &["status"]), "");
     Ok(())
 }
 

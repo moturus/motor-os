@@ -66,10 +66,18 @@ pub fn run(
     cancellation: &Cancellation,
 ) -> crate::Result<Replayed> {
     let repo = &opened.repo;
+    let mut dropped = Vec::new();
+    if commits.is_empty() {
+        // Nothing to commit, so nobody has to be named as the committer.
+        return Ok(Replayed {
+            tip,
+            dropped,
+            stopped: None,
+        });
+    }
     let identities = commit::identities(repo)?;
     let mut tip_tree = repo.find_commit(tip)?.tree_id()?.detach();
     reject_unsupported(opened, tip_tree, cancellation)?;
-    let mut dropped = Vec::new();
     for &id in commits {
         cancellation.check()?;
         let picked = pick(opened, id, tip_tree)?;
