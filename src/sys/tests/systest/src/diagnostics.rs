@@ -28,11 +28,6 @@ pub fn run_child(args: &[String]) -> ! {
             );
             moto_rt::moto_log!("{ORDINARY_MARKER}\n");
             assert_eq!(1, moto_rt::internal_helper(1, 0, 0, 0, 0, 0));
-
-            let path = std::path::Path::new(&args[3]);
-            let _ = std::fs::remove_dir(path);
-            std::fs::create_dir(path).unwrap();
-            std::fs::remove_dir(path).unwrap();
             moto_rt::error::log_backtrace(-1);
             std::process::exit(0)
         }
@@ -121,11 +116,7 @@ fn child(mode: &str, caps: u64) -> Command {
 }
 
 fn test_records_and_panic_use_stderr() {
-    let debug_path = crate::temp_path("rt-diagnostic-debug-marker");
-    let output = child("records", WITHOUT_LOG)
-        .arg(debug_path.to_str().unwrap())
-        .output()
-        .unwrap();
+    let output = child("records", WITHOUT_LOG).output().unwrap();
     assert!(output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains(ORDINARY_MARKER), "{stderr:?}");
@@ -135,11 +126,6 @@ fn test_records_and_panic_use_stderr() {
     );
     assert!(stderr.contains("backtrace:"), "{stderr:?}");
     assert!(stderr.ends_with("\n\n"), "incomplete backtrace: {stderr:?}");
-    #[cfg(debug_assertions)]
-    assert!(
-        stderr.contains(&format!("mkdir({})", debug_path.display())),
-        "debug record missing from stderr: {stderr:?}"
-    );
 
     let output = child("panic", WITHOUT_LOG).output().unwrap();
     assert!(!output.status.success());

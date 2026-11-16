@@ -64,7 +64,6 @@ mod stdio_terminal;
 mod strlen;
 mod subcommand;
 mod swap_cancel;
-mod sys_io_self_test;
 mod sys_tty;
 mod tcp;
 mod temp_dir;
@@ -1409,11 +1408,6 @@ pub fn run() {
         sparse::run_soak_tests();
         return;
     }
-    #[cfg(debug_assertions)]
-    if args.len() == 2 && args[1] == "sys-io-self-test" {
-        sys_io_self_test::run_all_tests();
-        return;
-    }
     if args.len() == 2 && args[1] == "sched-fairness" {
         sched_fairness::run_all_tests();
         return;
@@ -2089,7 +2083,6 @@ pub fn run() {
     test_writable_executable_elf_rejected();
     std::thread::sleep(Duration::new(1, 10_000_000));
     test_rt_mutex();
-    sys_io_self_test::run_all_tests();
     if vsock_tests {
         net_driver::run_vsock_tests();
     } else {

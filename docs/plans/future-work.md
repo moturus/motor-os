@@ -8,6 +8,21 @@ per-operation allocation overhead, were reviewed. Historical timings below
 are not new measurements. An unexplained historical failure stays open
 unless the source establishes that its cause was fixed.
 
+## No test runs sys-io's self-tests (2026-11-16)
+
+sys-io's unit tests live inside sys-io (`src/sys/sys-io/src/self_test.rs`).
+They are compiled into debug builds only and run only on request, over the
+socket-stats service (`runtime/net/stats.rs`); sys-io does not run them at
+boot. systest used to request them whenever systest itself was a debug build.
+Since `full-test.sh` boots the release image by default, a debug systest no
+longer means a debug sys-io, so systest stopped requesting them. Nothing runs
+them now, not even `full-test.sh --all-debug`.
+
+The fix is to run them in sys-io at boot in debug builds and fail loudly, so
+that `--all-debug` covers them, without adding boot-time work to release
+builds. The request path in sys-io and `IoStatsService::run_self_tests` in
+moto-sdk are then unused and can go.
+
 ## `sed -i` lets None read a private file while it runs (2026-11-13)
 
 Motor's sed fork stages an in-place edit in a new file beside the original,

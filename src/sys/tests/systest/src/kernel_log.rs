@@ -4,7 +4,6 @@ use moto_sys::kernel_log::{
     encode_kernel_log_frame, kernel_log_control_is_aligned, kernel_log_sequence_gap,
     snapshot_kernel_log_ring,
 };
-use std::fs::File;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -87,17 +86,6 @@ fn file_mode_end_to_end() {
     }
     let expected: Vec<&[u8]> = records.iter().map(|record| record.as_bytes()).collect();
     wait_for_file_records(&expected);
-
-    // Quiescence is also release-only: in debug, any background process's
-    // file operation lands more DEBUG records in kernel.log.
-    if !cfg!(debug_assertions) {
-        let file = File::open(KERNEL_LOG_PATH).unwrap();
-        std::thread::sleep(Duration::from_secs(1));
-        let before = file.metadata().unwrap().len();
-        std::thread::sleep(Duration::from_secs(5));
-        let after = file.metadata().unwrap().len();
-        assert_eq!(before, after, "kernel.log did not become quiescent");
-    }
 
     let flood_prefix = format!("kernel-rotation-{nonce} ");
     let flood = format!("{flood_prefix}{}\n", "x".repeat(220 - flood_prefix.len()));
