@@ -482,7 +482,7 @@ only.</p>
   <tr><td><code>/user/lib</code>, <code>/user/dev/lorry</code></td><td>Development-tool data and Lorry's Interactive repository and cache. None may read them.</td></tr>
   <tr><td><code>/user/cfg</code></td><td>Interactive configuration, including <code>rush.cfg</code> and <code>sshd.toml</code>. None may traverse this directory and read explicitly shared configuration; private credentials remain closed.</td></tr>
   <tr><td><code>/user/tmp</code></td><td>Interactive scratch, closed to None.</td></tr>
-  <tr><td><code>/none</code></td><td>The None role's home: <code>cfg</code> for configuration, <code>tmp</code> for scratch, and <code>dev</code> for sources and Lorry's None state. All three are writable by None.</td></tr>
+  <tr><td><code>/none</code></td><td>The None role's home: <code>cfg</code> for configuration, <code>tmp</code> for scratch, and <code>dev</code> for sources and Lorry's None state. None may write anywhere under it.</td></tr>
 </table>
 </div>
 

@@ -115,8 +115,8 @@ The initial image policy follows these principles:
   configuration, and replace the toolchain under `/user/lib`.
 - Scripts are writable by Interactive in its trees. Compiled programs there
   remain non-writable, but Interactive may replace them.
-- None may read and execute public installed content, and write its own
-  `/none/cfg`, `/none/dev`, and `/none/tmp`. It can traverse `/user/cfg` and
+- None may read and execute public installed content, and write anywhere
+  under its own `/none`. It can traverse `/user/cfg` and
   read explicitly shared configuration. Private files and subdirectories,
   `/user/tmp`, `/system/tmp`, and `/system/logs` remain closed to None.
 - Host owner/group/other read and write bits do not map to Motor OS roles. Host
@@ -144,11 +144,8 @@ ELF whose type is `ET_EXEC` or `ET_DYN`.
 | `/user/cfg` descendants | `rwxrwx---` | `rw-rw----` | `rwxrwx---` | `r-xr-x---` | Private configuration by default; shared entries override this |
 | `/user/cfg/helix` | `rwxrwxr-x` | `rwxrw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Editor configuration shared with None |
 | `/user/tmp` | `rwxrwx---` | `rw-rw----` | `rwxrwx---` | `r-xr-x---` | Interactive scratch, closed to None |
-| `/none` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | The None role's home; None cannot add entries here |
-| `/none/cfg` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | None-role configuration, which None may write |
-| `/none/tmp` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | None-role scratch |
+| `/none` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | The None role's home: `cfg` for configuration, `tmp` for scratch, `dev` for source trees and the None-role Lorry repository and cache |
 | `/user/dev/lorry` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Interactive Lorry repository and cache, readable by None |
-| `/none/dev` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | Source trees and the None-role Lorry repository and cache |
 
 An exact-entry rule gives the `/system/tmp` directory `rwxr-x---`, permitting
 Interactive traversal without making its scratch files readable. sys-io creates

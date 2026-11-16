@@ -437,6 +437,7 @@ check_guest_image_layout() (
   for path in /system /user /user/bin /user/cfg; do
     denied "MOTOR_OS_CAPS=0x204 /user/bin/mkdir $path/.image-layout-denied"
   done
+  remote 'MOTOR_OS_CAPS=0x204 /user/bin/mkdir /none/.image-layout-none && MOTOR_OS_CAPS=0x204 /user/bin/rmdir /none/.image-layout-none'
   remote '[ ! -e /system/cfg/rush.cfg ] && [ ! -e /system/cfg/sshd.toml ]'
   
   # An Interactive installer can replace its own prior output. The shipped ELF

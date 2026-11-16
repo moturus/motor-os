@@ -536,6 +536,11 @@ trees:
                 mode
             );
         }
+        // None can create entries anywhere in its home.
+        assert_eq!(
+            mode_string(policy.directory_permissions(Path::new("/none"))),
+            "rwxrwxrwx"
+        );
         // Installed tools belong to Interactive; each role can populate its cache.
         for (path, mode) in [
             ("/user/lib/llvm/bin", "rwxrwxr-x"),
