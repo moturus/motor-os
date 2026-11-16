@@ -234,6 +234,13 @@ are not replayed:
 - A merge commit of your own. The commits that it merged are replayed, so
   your history becomes one line.
 
+The remote branch may have been rewritten, for example by a forced push
+that replaced its last commit. Your branch then still has the commit that
+the remote branch dropped. As in Git, the rebase leaves that commit out. Gix
+knows that it was a commit of the remote branch from the reflog of
+`origin/BRANCH`, so this works only for commits that your repository has
+seen `origin/BRANCH` at.
+
 If one of your commits conflicts with the remote branch, the rebase stops
 at that commit. [Rebasing](#rebasing) says how to go on.
 

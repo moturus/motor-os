@@ -655,6 +655,78 @@ fn rebase_pauses_before_a_conflict_it_cannot_show() -> Result {
 }
 
 #[test]
+fn pull_rebase_leaves_out_what_a_rewritten_upstream_dropped() -> Result {
+    let client = Client::new();
+    let root = client.0.join("repository");
+    client.ok(&client.0, &["init", root.to_str().unwrap()]);
+    let identity = [
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+    ];
+    let gix = |args: &[&str]| client.ok(&root, &[&identity[..], args].concat());
+    let commit = |message: &str, file: &str, text: &str| {
+        fs::write(root.join(file), text).unwrap();
+        gix(&["add", file]);
+        gix(&["commit", "-m", message]);
+        gix::open(&root).unwrap().head_id().unwrap().to_string()
+    };
+    // The branch `topic` starts at the commit `dropped` of its upstream `main`.
+    let base = commit("base", "base", "base\n");
+    let dropped = commit("dropped", "file", "old\n");
+    gix(&["checkout", "--track", "-b", "topic", "main"]);
+    commit("mine", "mine", "mine\n");
+    // Then `main` is rewritten, as by a forced fetch: `kept` takes the place of `dropped`
+    // and conflicts with it. Only the reflog of `main` still knows `dropped`.
+    gix(&["checkout", "-b", "rewritten", &base]);
+    let kept = commit("kept", "file", "new\n");
+    gix(&["checkout", "topic"]);
+    fs::write(root.join(".git/refs/heads/main"), format!("{kept}\n"))?;
+    let log = root.join(".git/logs/refs/heads/main");
+    let line = format!("{dropped} {kept} Test <test@example.invalid> 0 +0000\tforced\n");
+    fs::write(&log, fs::read_to_string(&log)? + &line)?;
+
+    // The rebase replays `mine` alone. Replaying `dropped` too would stop at a conflict.
+    assert_eq!(
+        gix(&["pull", "--rebase"]),
+        "Successfully rebased and updated refs/heads/topic.\n"
+    );
+    let subjects: Vec<_> = gix(&["log"])
+        .lines()
+        .map(|line| line.split_once(' ').unwrap().1.to_owned())
+        .collect();
+    assert_eq!(subjects, ["mine", "kept", "base"]);
+    assert_eq!(fs::read_to_string(root.join("file"))?, "new\n");
+    assert_eq!(client.ok(&root, &["status"]), "");
+
+    // A commit counts as dropped by the upstream only if the reflog names it. Here `main`
+    // takes `early` and `ahead` in one step, so its reflog names `ahead` alone. Then
+    // `main` is rewritten without them. The branch `other` has `early`, and nothing shows
+    // that it is not a commit of that branch: it is replayed, and it conflicts.
+    gix(&["checkout", "--track", "-b", "other", "main"]);
+    let early = commit("early", "file", "early\n");
+    commit("late", "late", "late\n");
+    gix(&["checkout", "-b", "ahead", &early]);
+    let ahead = commit("ahead", "ahead", "ahead\n");
+    gix(&["checkout", "-b", "rewritten-again", &kept]);
+    let again = commit("kept again", "file", "newer\n");
+    gix(&["checkout", "other"]);
+    fs::write(root.join(".git/refs/heads/main"), format!("{again}\n"))?;
+    let lines = format!(
+        "{kept} {ahead} Test <test@example.invalid> 0 +0000\tfast-forward\n\
+         {ahead} {again} Test <test@example.invalid> 0 +0000\tforced\n"
+    );
+    fs::write(&log, fs::read_to_string(&log)? + &lines)?;
+    client.error(
+        &root,
+        &[&identity[..], &["pull", "--rebase"]].concat(),
+        &format!("could not apply {} (early)", &early[..7]),
+    );
+    Ok(())
+}
+
+#[test]
 fn relative_paths_are_relative_to_the_invocation_directory() -> Result {
     let client = Client::new();
     let root = client.0.join("repository");

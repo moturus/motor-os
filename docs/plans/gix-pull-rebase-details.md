@@ -274,6 +274,19 @@ branch. Take the merge bases of O against all of them with
 commits, it becomes B. Otherwise B stays the merge base of O and U. This is
 Git's rule. The fork point is read before the fetch, as Git does.
 
+As built, in `pull.rs`:
+
+- The tracking branch is found through the fetch refspecs of the remote,
+  for the configured upstream and for `pull REMOTE BRANCH` alike. For a
+  local upstream it is the local branch itself.
+- Git has one more test: it ignores a fork point that the upstream still
+  contains. Gix does not need it. Commits that the upstream has are never
+  replayed, so such a fork point changes nothing.
+- A commit that the upstream once had, but that the reflog does not name,
+  is replayed like a commit of your own. Git does the same. The other
+  choice would drop a commit that may be yours.
+- Not tested: the rule that several merge bases give no fork point.
+
 ## 6. Tests
 
 The twin-clone test in `tests/support/https.rs`:

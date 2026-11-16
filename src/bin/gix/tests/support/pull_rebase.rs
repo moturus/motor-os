@@ -84,7 +84,54 @@ pub fn check(test: &Test) -> Result {
         git(&by_git, &["reflog", "-1", "--format=%gs", "main"])
     );
     test.git(&by_gix, &["fsck", "--strict", "--no-dangling"]);
-    stop(test, &server)
+    stop(test, &server)?;
+    rewritten(test, &server)
+}
+
+/// The upstream is rewritten by a forced push. Like host Git, gix must leave out the
+/// commit that the upstream dropped: the reflog of `origin/main` shows where the branch
+/// began.
+fn rewritten(test: &Test, server: &Server) -> Result {
+    let (by_gix, by_git) = (test.0.join("fork-gix"), test.0.join("fork-git"));
+    success(
+        test.gix(&test.0)
+            .args(["clone", &server.url("/repo.git"), "fork-gix"]),
+    );
+    test.git(&test.0, &["clone", "remote.git", "fork-git"]);
+    let git =
+        |directory: &Path, args: &[&str]| test.git(directory, &[&IDENTITY[..], args].concat());
+    for clone in [&by_gix, &by_git] {
+        std::fs::write(clone.join("mine"), "mine\n")?;
+        git(clone, &["add", "mine"]);
+        let date = "--date=2026-01-02T03:04:05+00:00";
+        git(clone, &["commit", date, "-m", "mine"]);
+    }
+    // The new tip changes the same file as the old one, so replaying the old tip on it
+    // would stop at a conflict.
+    let update = test.0.join("update");
+    std::fs::write(update.join("pulled-1"), "rewritten\n")?;
+    git(&update, &["add", "pulled-1"]);
+    git(&update, &["commit", "--amend", "-m", "rewritten"]);
+    git(&update, &["push", "--force", "origin", "main"]);
+
+    let pulled = success(test.gix(&by_gix).args(IDENTITY).args(["pull", "--rebase"]));
+    assert_eq!(
+        pulled,
+        "Successfully rebased and updated refs/heads/main.\n"
+    );
+    git(&by_git, &["pull", "--rebase"]);
+    let log = |clone: &Path| git(clone, &["log", "--format=%an|%ae|%ad|%cn|%s|%T"]);
+    let (ours, theirs) = (log(&by_gix), log(&by_git));
+    assert_eq!(ours, theirs);
+    let subjects: Vec<_> = ours
+        .lines()
+        .take(2)
+        .map(|line| line.split('|').nth(4).unwrap())
+        .collect();
+    assert_eq!(subjects, ["mine", "rewritten"]);
+    assert_eq!(success(test.gix(&by_gix).arg("status")), "");
+    test.git(&by_gix, &["fsck", "--strict", "--no-dangling"]);
+    Ok(())
 }
 
 /// A rebase that stops at a conflict must leave what host Git leaves. Abort, continue and

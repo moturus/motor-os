@@ -1,12 +1,15 @@
 //! `gix pull [--ff-only | --rebase | --no-rebase] [REMOTE [BRANCH]]`: fetch, then merge what
 //! was fetched or rebase onto it.
 
-use std::io::{self, Write};
+use std::{
+    collections::HashSet,
+    io::{self, Write},
+};
 
 use gix::{
     bstr::{BStr, ByteSlice},
     prelude::ObjectIdExt,
-    refs::{Category, FullNameRef},
+    refs::{Category, FullName, FullNameRef},
     refspec::{Instruction, instruction, parse::Operation},
     remote::Direction,
 };
@@ -65,12 +68,21 @@ pub fn run(
     cancellation.check()?;
     // One guard covers the fetch and the merge, so nothing changes the repository in between.
     let guard = Guard::acquire(&opened.repo)?;
-    let current = head_ref::capture(&opened.repo)?
+    let head = head_ref::capture(&opened.repo)?;
+    let current = head
         .reference
         .filter(|name| name.category() == Some(Category::LocalBranch))
         .ok_or_else(|| unsupported("pull requires HEAD attached to a local branch"))?;
     let source = source(&opened.repo, current.as_ref(), &request)?;
     let reconcile = reconcile(&opened.repo, current.shorten(), &request)?;
+    // Like Git, look for the fork point before the fetch adds to the reflog it is read from.
+    let fork_point = match (reconcile, head.id) {
+        (Reconcile::Rebase, Some(head)) => match tracking_ref(&opened.repo, &source)? {
+            Some(tracking) => fork_point(&opened.repo, tracking.as_ref(), head, cancellation)?,
+            None => None,
+        },
+        _ => None,
+    };
 
     let (name, id, url) = if source.remote == "." {
         let mut reference = opened.repo.find_reference(source.branch.as_str())?;
@@ -139,6 +151,10 @@ pub fn run(
                  or set pull.rebase to true or false to choose for every pull",
             ),
             Reconcile::Rebase => {
+                // If the upstream still has the fork point, it changes nothing: commits
+                // that the upstream has are never replayed. So Git's test for that case
+                // is not needed here.
+                let base = fork_point.unwrap_or(base);
                 let range = Range {
                     original,
                     onto: commit,
@@ -275,6 +291,99 @@ fn source(
             branch: branch?.as_bstr().to_str()?.to_owned(),
         }),
     }
+}
+
+/// The local ref that follows the branch to pull, as the fetch refspecs of its remote
+/// place it. Its reflog knows which commits the upstream once had.
+fn tracking_ref(repo: &gix::Repository, source: &Source) -> crate::Result<Option<FullName>> {
+    let name = match source.branch.starts_with("refs/") {
+        true => source.branch.clone(),
+        false => format!("refs/heads/{}", source.branch),
+    };
+    let Ok(name) = FullName::try_from(name) else {
+        return Ok(None);
+    };
+    if source.remote == "." {
+        return Ok(repo.try_find_reference(name.as_ref())?.map(|_| name));
+    }
+    let Some(remote) = repo.try_find_remote(source.remote.as_str()) else {
+        return Ok(None);
+    };
+    let remote = remote?;
+    let specs = remote.refspecs(Direction::Fetch).iter();
+    let maps = |spec: &gix::refspec::RefSpecRef<'_>| {
+        spec.source().is_some() && spec.destination().is_some()
+    };
+    let group = gix::refspec::MatchGroup {
+        specs: specs.map(|spec| spec.to_ref()).filter(maps).collect(),
+    };
+    let null = repo.object_hash().null();
+    let item = gix::refspec::match_group::Item {
+        full_ref_name: name.as_bstr(),
+        target: &null,
+        object: None,
+    };
+    let mapping = group
+        .match_lhs(Some(item).into_iter())
+        .mappings
+        .into_iter()
+        .next();
+    Ok(match mapping.and_then(|mapping| mapping.rhs) {
+        Some(tracking) => Some(FullName::try_from(tracking.into_owned())?),
+        None => None,
+    })
+}
+
+/// Where the branch at `head` left `tracking`, even if `tracking` was rewritten since: Git's
+/// `merge-base --fork-point`.
+///
+/// The candidates are the commits that the reflog of `tracking` names. The fork point is
+/// the one merge base of `head` and all of them, if it is one of them.
+fn fork_point(
+    repo: &gix::Repository,
+    tracking: &FullNameRef,
+    head: gix::ObjectId,
+    cancellation: &Cancellation,
+) -> crate::Result<Option<gix::ObjectId>> {
+    let Some(reference) = repo.try_find_reference(tracking)? else {
+        return Ok(None);
+    };
+    // Every commit the ref was at, newest first, and the one before the oldest line.
+    let mut named = Vec::new();
+    let mut log = reference.log_iter();
+    if let Some(lines) = log.rev()? {
+        let mut oldest = None;
+        for line in lines.take(replay::MAX_COMMITS) {
+            cancellation.check()?;
+            let line = line?;
+            named.push(line.new_oid);
+            oldest = Some(line.previous_oid);
+        }
+        named.extend(oldest);
+    }
+    // A reflog may name objects that are gone, and a ref may not point to a commit.
+    let is_commit = |id: gix::ObjectId| -> crate::Result<bool> {
+        let header = repo.try_find_header(id)?;
+        Ok(header.is_some_and(|header| header.kind() == gix::objs::Kind::Commit))
+    };
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+    for id in named {
+        if !id.is_null() && seen.insert(id) && is_commit(id)? {
+            candidates.push(id);
+        }
+    }
+    if let (true, Some(id)) = (candidates.is_empty(), reference.try_id())
+        && is_commit(id.detach())?
+    {
+        candidates.push(id.detach());
+    }
+    let bases = repo.merge_bases_many(head, &candidates)?;
+    let [base] = bases[..] else {
+        return Ok(None);
+    };
+    let base = base.detach();
+    Ok(candidates.contains(&base).then_some(base))
 }
 
 /// Read the options and the `pull.ff`, `branch.<name>.rebase` and `pull.rebase` settings
