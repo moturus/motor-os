@@ -13,10 +13,9 @@ const REGISTRY_VERSION: &str = "1";
 const MAX_USER_NAME_BYTES: usize = 64;
 // russhd refuses a whole registry past this, which denies every login.
 const MAX_USERS: usize = 1024;
-const SERVICE_FIELDS: [&str; 8] = [
+const SERVICE_FIELDS: [&str; 7] = [
     "version",
     "listen_on",
-    "path",
     "host_key",
     "users_file",
     "authorized_keys_dir",
@@ -479,6 +478,8 @@ mod tests {
             SERVICE.replace("version = 2\n", ""),
             format!("{SERVICE}[users.motor]\n"),
             format!("{SERVICE}authorized_key = 'k'\n"),
+            // russhd no longer sets PATH: login shells read /user/cfg/profile.
+            format!("{SERVICE}path = '/user/bin'\n"),
             format!("{SERVICE}[extra]\nvalue = 1\n"),
             SERVICE.replace("/user/cfg/russhd/users.toml", "/user/cfg/elsewhere"),
             SERVICE.replace("/user/cfg/ssh", "/none/cfg"),

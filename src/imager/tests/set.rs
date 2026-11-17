@@ -60,75 +60,73 @@ fn authenticates(registry: &str, name: &str, password: &str) -> bool {
 #[test]
 fn all_commands_preserve_other_credentials_permissions_and_boot_data() {
     for qcow2 in [false, true] {
-        let installed = BASE.replace("path = \"/user/bin\"", "path = \"/user/bin:/user/bin/dev\"");
-        for source in [BASE, installed.as_str()] {
-            let fixture = Fixture::new(qcow2, source);
-            let before = fs::read(fixture.raw()).unwrap();
-            let password = " /not/a/file 'quoted' 雪 ";
-            fixture.succeeds(&["--ssh-password", password]);
-            let raw = fixture.raw();
-            let registry = users(&raw);
-            assert!(authenticates(&registry, "motor", password));
-            assert!(!authenticates(&registry, "motor", "vroomvroom"));
-            assert_eq!(user_field(&registry, "motor", "salt").unwrap().len(), 64);
-            assert!(!registry.contains(password));
-            assert_eq!(read(&raw, USERS).1, credential_permissions());
-            assert_eq!(text(&raw, SSH), source);
-            assert_eq!(text(&raw, MOTOR_KEYS), SHIPPED_KEYS);
+        let source = BASE;
+        let fixture = Fixture::new(qcow2, source);
+        let before = fs::read(fixture.raw()).unwrap();
+        let password = " /not/a/file 'quoted' 雪 ";
+        fixture.succeeds(&["--ssh-password", password]);
+        let raw = fixture.raw();
+        let registry = users(&raw);
+        assert!(authenticates(&registry, "motor", password));
+        assert!(!authenticates(&registry, "motor", "vroomvroom"));
+        assert_eq!(user_field(&registry, "motor", "salt").unwrap().len(), 64);
+        assert!(!registry.contains(password));
+        assert_eq!(read(&raw, USERS).1, credential_permissions());
+        assert_eq!(text(&raw, SSH), source);
+        assert_eq!(text(&raw, MOTOR_KEYS), SHIPPED_KEYS);
 
-            let public_file = fixture.root.join("login key.pub");
-            let public_bytes = format!("{LOGIN_KEY}\r\n");
-            fs::write(&public_file, &public_bytes).unwrap();
-            fixture.succeeds(&["--ssh-key", public_file.to_str().unwrap()]);
-            assert_eq!(fs::read(&public_file).unwrap(), public_bytes.as_bytes());
-            let raw = fixture.raw();
-            assert_eq!(text(&raw, MOTOR_KEYS), format!("{LOGIN_KEY}\n"));
-            assert_eq!(read(&raw, MOTOR_KEYS).1, credential_permissions());
-            assert_eq!(users(&raw), registry);
-            assert_eq!(text(&raw, SSH), source);
+        let public_file = fixture.root.join("login key.pub");
+        let public_bytes = format!("{LOGIN_KEY}\r\n");
+        fs::write(&public_file, &public_bytes).unwrap();
+        fixture.succeeds(&["--ssh-key", public_file.to_str().unwrap()]);
+        assert_eq!(fs::read(&public_file).unwrap(), public_bytes.as_bytes());
+        let raw = fixture.raw();
+        assert_eq!(text(&raw, MOTOR_KEYS), format!("{LOGIN_KEY}\n"));
+        assert_eq!(read(&raw, MOTOR_KEYS).1, credential_permissions());
+        assert_eq!(users(&raw), registry);
+        assert_eq!(text(&raw, SSH), source);
 
-            let host_file = fixture.root.join("host key");
-            fs::write(&host_file, HOST_KEY).unwrap();
-            fixture.succeeds(&["--ssh-server-key", host_file.to_str().unwrap()]);
-            let expected = replace_fixture_field(
-                source,
-                "host_key",
-                &format!("\"{}\"", HOST_KEY.replace('\n', "\\n")),
-            );
-            let raw = fixture.raw();
-            assert_eq!(text(&raw, SSH), expected);
-            assert_eq!(users(&raw), registry);
-            assert_eq!(text(&raw, MOTOR_KEYS), format!("{LOGIN_KEY}\n"));
-            assert_eq!(fs::read(&host_file).unwrap(), HOST_KEY.as_bytes());
-            assert!(!fixture.root.join("host key.pub").exists());
+        let host_file = fixture.root.join("host key");
+        fs::write(&host_file, HOST_KEY).unwrap();
+        fixture.succeeds(&["--ssh-server-key", host_file.to_str().unwrap()]);
+        let expected = replace_fixture_field(
+            source,
+            "host_key",
+            &format!("\"{}\"", HOST_KEY.replace('\n', "\\n")),
+        );
+        let raw = fixture.raw();
+        assert_eq!(text(&raw, SSH), expected);
+        assert_eq!(users(&raw), registry);
+        assert_eq!(text(&raw, MOTOR_KEYS), format!("{LOGIN_KEY}\n"));
+        assert_eq!(fs::read(&host_file).unwrap(), HOST_KEY.as_bytes());
+        assert!(!fixture.root.join("host key.pub").exists());
 
-            fs::write(fixture.root.join("ssl-cert.pem"), NEW_CERT).unwrap();
-            fs::write(fixture.root.join("ssl-key.pem"), NEW_KEY).unwrap();
-            fs::write(fixture.root.join("ca-certificates.crt"), b"do not import").unwrap();
-            fixture.succeeds(&["--ssl-keys", fixture.root.to_str().unwrap()]);
-            let raw = fixture.raw();
-            assert_eq!(text(&raw, SSH), expected);
-            assert_eq!(
-                read(&raw, CERT),
-                (
-                    NEW_CERT.to_vec(),
-                    RolePermissions::all(AccessPermissions::R)
-                )
-            );
-            assert_eq!(read(&raw, KEY), (NEW_KEY.to_vec(), secret_permissions()));
-            assert_eq!(read(&raw, SSH).1, credential_permissions());
-            assert_eq!(read(&raw, CA).0, b"unchanged trust store");
-            assert_eq!(read(&raw, CLIENT_KEY).0, b"client private key");
-            assert_eq!(fs::read(fixture.root.join("ssl-key.pem")).unwrap(), NEW_KEY);
-            let after = fs::read(&raw).unwrap();
-            assert_eq!(after.len(), before.len());
-            assert_eq!(&after[..OFFSET as usize], &before[..OFFSET as usize]);
-            assert_eq!(
-                fs::metadata(&fixture.image).unwrap().permissions().mode() & 0o777,
-                0o640
-            );
-            assert_eq!(&fs::read(&fixture.image).unwrap()[..4] == b"QFI\xfb", qcow2);
-        }
+        fs::write(fixture.root.join("ssl-cert.pem"), NEW_CERT).unwrap();
+        fs::write(fixture.root.join("ssl-key.pem"), NEW_KEY).unwrap();
+        fs::write(fixture.root.join("ca-certificates.crt"), b"do not import").unwrap();
+        fixture.succeeds(&["--ssl-keys", fixture.root.to_str().unwrap()]);
+        let raw = fixture.raw();
+        assert_eq!(text(&raw, SSH), expected);
+        assert_eq!(
+            read(&raw, CERT),
+            (
+                NEW_CERT.to_vec(),
+                RolePermissions::all(AccessPermissions::R)
+            )
+        );
+        assert_eq!(read(&raw, KEY), (NEW_KEY.to_vec(), secret_permissions()));
+        assert_eq!(read(&raw, SSH).1, credential_permissions());
+        assert_eq!(read(&raw, CA).0, b"unchanged trust store");
+        assert_eq!(read(&raw, CLIENT_KEY).0, b"client private key");
+        assert_eq!(fs::read(fixture.root.join("ssl-key.pem")).unwrap(), NEW_KEY);
+        let after = fs::read(&raw).unwrap();
+        assert_eq!(after.len(), before.len());
+        assert_eq!(&after[..OFFSET as usize], &before[..OFFSET as usize]);
+        assert_eq!(
+            fs::metadata(&fixture.image).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert_eq!(&fs::read(&fixture.image).unwrap()[..4] == b"QFI\xfb", qcow2);
     }
 }
 
@@ -290,8 +288,7 @@ fn an_orphaned_key_file_is_not_reactivated() {
 fn repeated_password_updates_use_fresh_salts_and_preserve_custom_records() {
     let extra = "\n[users.other]\nsalt = 'unchanged'\n";
     let source = format!("{SHIPPED_USERS}{extra}");
-    let installed = BASE.replace("path = \"/user/bin\"", "path = \"/user/bin:/user/bin/dev\"");
-    let fixture = Fixture::new(false, &installed);
+    let fixture = Fixture::new(false, BASE);
     let sealed = RolePermissions::new(
         AccessPermissions::R,
         AccessPermissions::R,
@@ -360,6 +357,7 @@ fn unsupported_layouts_fail_before_anything_is_written() {
         format!("{BASE}\n[users.motor]\nsalt = 'private-secret'\n"),
         format!("{BASE}\nauthorized_key = 'private-secret'\n"),
         format!("{BASE}\nextra = 'private-secret'\n"),
+        format!("{BASE}\npath = 'private-secret'\n"),
         BASE.replace("/user/cfg/ssh", "/none/cfg"),
         BASE.replace("/user/cfg/russhd/users.toml", "/none/cfg/users.toml"),
     ] {
