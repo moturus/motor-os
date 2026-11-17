@@ -33,8 +33,8 @@ src/tests/full-test.sh [--release | --all-debug] [--full] [--vmm chv|qemu|fc] [-
 `--option=value`. A repeated option is an error.
 
 The image is release in both standard modes: it hosts the tests, and a debug
-image makes guest file operations, including the toolchain installation, more
-than ten times slower. The two standard runs therefore differ only in the
+image makes guest file operations, including the toolchain installation,
+about ten times slower. The two standard runs therefore differ only in the
 profile of the native tests:
 
 ```sh
@@ -49,9 +49,14 @@ The toolchain archive is always a release build, whatever the options.
 `--all-debug` is the gate as it was before the image became release-only: it
 exercises debug builds of the kernel, sys-io, rt.vdso and the image's tools,
 including their `debug_assertions` and integer overflow checks. Use it by
-hand when a change needs those checks. It is much slower; the toolchain
-installation alone takes several minutes. Automated and CI runs must not use
+hand when a change needs those checks. Automated and CI runs must not use
 it.
+
+It is slower. With 4 vCPUs and 4 GiB, the toolchain installation check takes
+about 13 minutes on the debug image and the upload of the native test inputs
+about 7; on the release image they take 67 and 33 seconds. It also does not
+pass at present: see "`full-test.sh --all-debug` does not pass" in
+[plans/future-work.md](plans/future-work.md).
 
 ## `full-native-test.sh`
 

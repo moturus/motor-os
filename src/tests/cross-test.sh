@@ -2650,7 +2650,13 @@ cross_network_checks() (
   RNETBENCH_SSH_PID=$!
   local rnet_in rnet_out banner server_output server_status=0
   exec {rnet_in}>&"${RNETBENCH_SERVER[1]}" {rnet_out}<&"${RNETBENCH_SERVER[0]}"
-  IFS= read -r banner <&"$rnet_out"
+  # The pty merges both streams, and on a debug image a session starts with
+  # the runtime's DEBUG records: the banner is the first line that is not one.
+  # russhd ends a pty line with "\n\r", so a later line starts with the "\r".
+  while IFS= read -r banner <&"$rnet_out"; do
+    banner="${banner#$'\r'}"
+    [[ "$banner" =~ ^\ *[0-9]+:[0-9]{3}:\ DEBUG\  ]] || break
+  done
   [ "$banner" = 'rnetbench server: listening on 0.0.0.0:40000' ] || fail "rnetbench readiness: $banner"
   for pass in 1 2; do
     timeout 20s "$ROOT_DIR/src/bin/rnetbench/target/release/rnetbench" -c 192.168.4.2:40000 -P 4 -t 1

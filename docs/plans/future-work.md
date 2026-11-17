@@ -8,27 +8,79 @@ per-operation allocation overhead, were reviewed. Historical timings below
 are not new measurements. An unexplained historical failure stays open
 unless the source establishes that its cause was fixed.
 
-## `full-test.sh --all-debug` stalls uploading the Lorry vendor tree (2026-11-16)
+## Debug images: what still slows guest file work (2026-11-16)
 
-On the debug image, `full_upload_native_inputs` extracts the shared vendor
-tree (`tar -C build/native-test-inputs -cf - vendor` piped over SSH into
-`tar -xf - -C /user/dev/lorry`; about 953 MiB in 36,902 files) more slowly
-the longer it runs. Files extracted per minute of guest uptime: 1,073 at
-17 min, 983 at 19 min, 297 at 21 min, 52 at 23 min. After 8 minutes, 4,843
-files were done, so the upload would have taken hours, and the run was
-stopped. The release image extracts the same tree without trouble.
+An earlier entry here said the upload of the Lorry vendor tree in
+`full-test.sh --all-debug` stalled. It did not: the rate was a steady
+0.4 MiB/s, and the file count fell only because the archive reached large
+files. The two causes are fixed: DEBUG lines that sys-io logged per packet
+and per file, each written back into `kernel.log` through sys-io
+(`docs/kernel-logs.md`, "Debug builds: per-packet and per-operation lines"),
+and the 80-byte buffer of the stdio relay in rt.vdso. Rush's `read` also took
+a filesystem request per byte of a file. What remains, on a debug image with
+4 vCPUs and 4 GiB:
 
-What was ruled out, on a 4 vCPU, 4 GiB guest: the network (the host's side
-of the connection was `app_limited`, with an empty send queue, an open
-window and no ongoing retransmits), memory (about 80 MiB in use), disk space
-(1.5 of 34 GB), and CPU (tar about 3% of a CPU, russhd about 20%, sys-io
-about 22%). The guest is waiting on something whose cost per file grows with
-the work done. Every file also sends rt.vdso DEBUG lines (`mkdir`,
-`file_open`) back over the same SSH session, as blocking stderr writes.
+- **Unoptimized code.** The toolchain installer takes about 150 s on its
+  own (19 s on a release image, measured before the Rush changes); copying
+  its trees is 68 s of that. There is no single cause left to fix.
+- **`install.sh` sets the modes of `/user/lib/rust` twice**, once for each
+  overlay that adds to it (rust-analyzer and rustc): 22 s of the 150. The
+  script is `lib/toolchain-native-install.sh` in the toolchain repository.
+- **The installation check's privacy watcher never pauses between scans.**
+  It lengthens a reinstall from 181 s to 230 s, and motor-fs logs one
+  `access denied` DEBUG line for each open it is refused, 24,000 in one
+  check. A pause would make the watcher sample less often on release images.
+- **rt.vdso logs two DEBUG lines per file open** to the process's stderr. An
+  install sends 7.6 MiB of them over SSH, which now costs about 5 s.
+- **A kernel record still costs a filesystem append in file mode.** A new
+  DEBUG line on a per-packet or per-file path brings the slowdown back, and
+  no test would notice.
+- **russhd sends one SSH packet per 256 bytes of command output**
+  (`pump_output` in `src/bin/russhd/src/local_session.rs`). Not measured as a
+  limit.
 
-Not yet known: what grows, and whether the debug gate before
-`--all-debug` existed (the default debug `full-test.sh`) hit the same stall
-after the switch to standard-image runners.
+## Lorry's debug tests do not build in the gate's 4 GiB guest (2026-11-16)
+
+`full-test.sh` without `--release` runs the native tests in the debug
+profile. Inside the guest, `lorry test` for `src/bin/lorry` compiles the
+`lorry` binary and its test build together; with 4 GiB the kernel's OOM
+killing takes a helper process and then `rustc`, and Lorry reports "rustc
+failed with status -1". It happens on the release image with the kernel,
+sys-io and rt.vdso of `af10bc45` as well as with the changes of 2026-11-16,
+and on a fresh boot running that crate alone. With `--memory 8192` the build
+succeeds and `full-test.sh --memory 8192` passes (1 h 44 min).
+
+On the kernel of `85505dbd` the `analyzer` test then failed with "server
+stdout closed": its resource sampler lists processes with the published
+moto-sys, and that commit made the kernel's `ProcessInfoV1` 8 bytes longer
+than the published one. With the record back at 56 bytes (the capability
+mask moved to `ProcessInfoV2`) the test passes as Interactive and as None.
+
+## `full-test.sh --all-debug` does not pass (2026-11-16)
+
+Two checks fail on a debug image. Neither has to do with speed, and both
+fail without the changes of 2026-11-16. The native tests inside the guest,
+which run after them, have not been reached on a debug image.
+
+- **The gix cross check does not build.** `cross_gix` builds the
+  `native-port` test of `src/bin/gix` for the Motor target in the gate's
+  profile. In debug the link fails: zlib-rs's `zalloc_c` and `zfree_c` refer
+  to `malloc` and `free`, which a Rust-only Motor program does not have. A
+  release build drops both functions as unused, and the image's own gix is
+  always a release build, so only this helper is affected. Building the
+  helper in release in every mode, or selecting zlib-rs's Rust allocator,
+  would fix it.
+- **The System OOM fixture fails once the toolchain is installed.**
+  `systest system-oom-tests`, run from the System console by
+  `cross_system_console`, fails at `oom.rs:583` ("the small cleanups must not
+  reach recovery before the large victim"): it expects one round of OOM
+  killing and counts two. The first round ends with 768 to 788 free pages,
+  at the 768-page floor; free memory then drops by about 480 pages, and a
+  second round starts and ends without a kill. On the plain debug image the
+  test passes, 3 runs of 3. On the debug image with the toolchain installed
+  it fails 4 of 4 with the kernel, sys-io and rt.vdso of `af10bc45`, and 3
+  of 4 with the changes of 2026-11-16. Not yet known: what uses more memory
+  on the installed image, and what allocates the 480 pages.
 
 ## No test runs sys-io's self-tests (2026-11-16)
 
