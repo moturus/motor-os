@@ -146,6 +146,57 @@ impl Read for HeredocReader {
     }
 }
 
+/// Reads a regular file for `read`, which takes one line per call. Reading it
+/// a byte at a time, as an unbuffered reader must, costs a request to the
+/// filesystem service per byte. This reads a block instead and, when dropped,
+/// moves the shared file offset back to the first byte `read` did not take, so
+/// the next reader of the file, `read` again or a child, continues there.
+struct LineFileReader {
+    file: File,
+    block: [u8; 512],
+    pos: usize,
+    len: usize,
+}
+
+impl LineFileReader {
+    /// Hands the file back unless it is a regular file: bytes read ahead from
+    /// a pipe or a device could not be returned to it.
+    fn new(file: File) -> Result<Self, File> {
+        if !file.metadata().is_ok_and(|meta| meta.is_file()) {
+            return Err(file);
+        }
+        Ok(Self {
+            file,
+            block: [0; 512],
+            pos: 0,
+            len: 0,
+        })
+    }
+}
+
+impl Read for LineFileReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos == self.len {
+            (self.pos, self.len) = (0, 0);
+            self.len = self.file.read(&mut self.block)?;
+        }
+        let count = buf.len().min(self.len - self.pos);
+        buf[..count].copy_from_slice(&self.block[self.pos..self.pos + count]);
+        self.pos += count;
+        Ok(count)
+    }
+}
+
+impl Drop for LineFileReader {
+    fn drop(&mut self) {
+        let ahead = (self.len - self.pos) as i64;
+        if ahead != 0 {
+            // A failure here has no caller to report to.
+            let _ = self.file.seek(std::io::SeekFrom::Current(-ahead));
+        }
+    }
+}
+
 impl FdSource {
     /// A writer for builtin output, following inherited stream duplication.
     fn out_writer(&self) -> Box<dyn Write> {
@@ -175,15 +226,16 @@ impl FdSource {
 
     /// A reader for this fd used as *standard input* (for `read`): `Inherit` →
     /// the shell's stdin, unbuffered so that the bytes after the line stay for
-    /// the next command; a file → the file; a here-document → what is left of
-    /// its body.
+    /// the next command; a file → the file, read a block at a time when it is
+    /// a regular file; a here-document → what is left of its body.
     fn reader(&self) -> Box<dyn Read> {
         match self {
             FdSource::Inherit(_) => Box::new(crate::sys::RawStdin::default()),
-            FdSource::File(f) => f
-                .try_clone()
-                .map(|x| Box::new(x) as Box<dyn Read>)
-                .unwrap_or_else(|_| Box::new(std::io::empty())),
+            FdSource::File(f) => match f.try_clone().map(LineFileReader::new) {
+                Ok(Ok(reader)) => Box::new(reader),
+                Ok(Err(file)) => Box::new(file),
+                Err(_) => Box::new(std::io::empty()),
+            },
             FdSource::Heredoc(doc) => Box::new(HeredocReader(doc.clone())),
             FdSource::Null => Box::new(std::io::empty()),
         }
