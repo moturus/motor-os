@@ -122,7 +122,7 @@ native_crates() {
   if [ "$OS" = linux ]; then
     test_crate src/sys/lib/frusa
   elif [ "$LIST" != 1 ]; then
-    echo 'SKIP Motor frusa unit tests: NLF-004 in docs/plans/new-layout-followups.md'
+    echo 'SKIP Motor frusa unit tests: the test RNG does not build; see docs/plans/future-work.md'
   fi
   test_crate src/sys/lib/memfs
   test_crate src/sys/tests/unwind
@@ -137,7 +137,7 @@ native_crates() {
     test_crate src/bin/rush --features dev-tty --test phase8
   else
     if [ "$LIST" != 1 ]; then
-      echo 'SKIP Motor motor-fs unit tests: NLF-004 in docs/plans/new-layout-followups.md'
+      echo 'SKIP Motor motor-fs unit tests: the test RNG does not build; see docs/plans/future-work.md'
     fi
     test_crate src/sys/tools/sysbox
     test_crate src/sys/tests/systest
@@ -153,7 +153,7 @@ native_crates() {
     test_crate src/sys/sys-io/netstack --no-default-features --features "$net_features"
     test_crate src/sys/sys-io/netstack --no-default-features --features "$net_features,proto-ipv6-slaac" --lib iface::
   elif [ "$LIST" != 1 ]; then
-    echo 'SKIP Motor netstack unit tests: NLF-004 in docs/plans/new-layout-followups.md'
+    echo 'SKIP Motor netstack unit tests: the test RNG does not build; see docs/plans/future-work.md'
   fi
 }
 

@@ -81,8 +81,8 @@ inputs, and investigate any changed comparison before adjusting a fixture.
 
 The user approved this plan with Motor-specific Git gating and the staged
 validation/commit workflow above. At that point, the full suite remained
-pending the user's Helix push; current image-layout validation is tracked in
-[`docs/plans/new-image-layout.md`](../../../docs/plans/new-image-layout.md).
+pending the user's Helix push. The image-layout work that followed is done;
+[`docs/testing.md`](../../../docs/testing.md) describes the current tests.
 
 ## Focused results
 

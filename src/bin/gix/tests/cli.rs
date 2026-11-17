@@ -903,7 +903,7 @@ fn refs_configuration_policy_and_read_only_status() -> Result {
 #[test]
 #[cfg_attr(
     target_os = "motor",
-    ignore = "NLF-001: pipe closure; see docs/plans/new-layout-followups.md"
+    ignore = "pipe closure is not reported as BrokenPipe; see docs/plans/future-work.md"
 )]
 fn closed_stdout_reports_broken_pipe() -> Result {
     let client = Client::new();
