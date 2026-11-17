@@ -629,6 +629,114 @@ fn a_missing_env_file_is_not_an_error() {
     assert!(run.stdout.contains("alive"), "{}", run.stdout);
 }
 
+/// A fresh `$HOME` holding `.profile`, the host's user login profile. (A host
+/// login shell also reads `/etc/profile`, so these tests check their own marks.)
+#[cfg(unix)]
+fn home_with_profile(tag: &str, profile: &str) -> std::path::PathBuf {
+    let home = temp_path(tag);
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join(".profile"), profile).unwrap();
+    home
+}
+
+#[cfg(unix)]
+#[test]
+fn a_login_shell_reads_the_profile_even_when_not_interactive() {
+    // russhd runs `rush -l -c CMD` for SSH commands: their PATH comes from the profile.
+    let home = home_with_profile("login_c", "FROM_PROFILE=yes\n");
+    let home_var = home.display().to_string();
+    for args in [
+        &["-l", "-c", "echo got=$FROM_PROFILE"][..],
+        &["-lc", "echo got=$FROM_PROFILE"],
+    ] {
+        let run = run_env(args, &[("HOME", &home_var)], "");
+        assert!(
+            run.stdout.ends_with("got=yes\n"),
+            "{args:?}: {}",
+            run.stdout
+        );
+        assert_eq!(run.code, 0, "{args:?}: {}", run.stderr);
+    }
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dash_in_argv0_makes_a_login_shell() {
+    use std::os::unix::process::CommandExt;
+    let home = home_with_profile("login_dash", "FROM_PROFILE=yes\n");
+    let out = Command::new(RUSH)
+        .arg0("-rush")
+        .args(["-c", "echo got=$FROM_PROFILE"])
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).ends_with("got=yes\n"));
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_shell_without_l_ignores_the_profile() {
+    // Scripts and `sh -c` inherit the session's environment instead.
+    let home = home_with_profile("no_login", "echo SHOULD_NOT_RUN\n");
+    let home_var = home.display().to_string();
+    for args in [
+        &["-c", "echo body"][..],
+        &["+l", "-c", "echo body"],
+        &["-l", "+l", "-c", "echo body"],
+    ] {
+        let run = run_env(args, &[("HOME", &home_var)], "");
+        assert_eq!(run.stdout, "body\n", "{args:?}");
+    }
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn an_interactive_login_shell_reads_the_profile_then_env() {
+    let home = home_with_profile("login_env", "ORDER=profile\n");
+    let env = home.join("env.sh");
+    std::fs::write(&env, "ORDER=\"$ORDER,env\"\n").unwrap();
+    let run = run_env(
+        &["-l", "--piped"],
+        &[
+            ("HOME", &home.display().to_string()),
+            ("ENV", &env.display().to_string()),
+            ("PS1", ""),
+        ],
+        "echo order=$ORDER\nexit\n",
+    );
+    assert!(run.stdout.contains("order=profile,env\n"), "{}", run.stdout);
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_profile_is_reported_and_the_session_goes_on() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = home_with_profile("login_unreadable", "echo SHOULD_NOT_RUN\n");
+    let profile = home.join(".profile");
+    std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&profile).is_ok() {
+        // Privileged test runners read it anyway; there is nothing to check.
+        std::fs::remove_dir_all(&home).unwrap();
+        return;
+    }
+    let run = run_env(
+        &["-l", "-c", "echo body"],
+        &[("HOME", &home.display().to_string())],
+        "",
+    );
+    assert!(run.stdout.ends_with("body\n"), "{}", run.stdout);
+    assert!(!run.stdout.contains("SHOULD_NOT_RUN"), "{}", run.stdout);
+    assert!(run.stderr.contains("rush: cannot read"), "{}", run.stderr);
+    assert_eq!(run.code, 0);
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
 #[test]
 fn prompt_variables_have_defaults_and_are_expandable() {
     // PS2/PS4 match dash; PS1 is rush's colored prompt (a documented divergence).

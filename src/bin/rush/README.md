@@ -91,9 +91,11 @@ cannot be quietly fixed or quietly introduced.
 - **POSIX invocation**: `rush [options] script [args…]`, `-c string [name
   [args…]]`, `-s`/stdin, clustered (`-ex`) and `+`-form options, `-o name`,
   `--`; positional parameters from operands in every form;
-- **Startup & prompts**: an interactive shell sources `$ENV` (a login shell also
-  reads `/etc/profile` and `~/.profile`); `PS1`/`PS2`/`PS4` are expanded
-  variables, and `PWD`/`OLDPWD` are maintained.
+- **Startup & prompts**: a login shell (`-l`, or `$0` starting with `-`) first
+  reads its profiles, interactive or not: `/user/cfg/profile` on Motor OS,
+  `/etc/profile` and `~/.profile` elsewhere. An interactive shell then sources
+  `$ENV`. `PS1`/`PS2`/`PS4` are expanded variables, and `PWD`/`OLDPWD` are
+  maintained.
 
 ## Not yet working
 

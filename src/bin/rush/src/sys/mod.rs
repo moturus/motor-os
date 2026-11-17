@@ -39,6 +39,13 @@ pub use unix::{
     set_disposition, wait_child,
 };
 
+/// The profiles a login shell reads, in order. On Motor OS one profile serves
+/// every session, console and SSH alike; it sets `PATH`.
+#[cfg(unix)]
+pub const LOGIN_PROFILES: &[&str] = &["/etc/profile", "$HOME/.profile"];
+#[cfg(not(unix))]
+pub const LOGIN_PROFILES: &[&str] = &["/user/cfg/profile"];
+
 #[cfg(not(unix))]
 mod motor;
 #[cfg(not(unix))]
