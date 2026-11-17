@@ -981,7 +981,7 @@ impl NetRuntime {
             return;
         };
 
-        log::debug!("Got msg {net_cmd:?} for handle 0x{:x}", msg.handle);
+        log::trace!("Got msg {net_cmd:?} for handle 0x{:x}", msg.handle);
 
         if matches!(
             net_cmd,

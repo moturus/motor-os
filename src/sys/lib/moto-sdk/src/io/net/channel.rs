@@ -919,9 +919,9 @@ impl NetChannel {
         #[cfg(debug_assertions)]
         {
             if let Ok(cmd) = api_net::NetCmd::try_from(msg.command) {
-                log::debug!("got msg {}:0x{:x}:{cmd:?}", msg.id, msg.handle,);
+                log::trace!("got msg {}:0x{:x}:{cmd:?}", msg.id, msg.handle,);
             } else {
-                log::debug!("got msg {}:0x{:x}:{}", msg.id, msg.handle, msg.command);
+                log::trace!("got msg {}:0x{:x}:{}", msg.id, msg.handle, msg.command);
             }
         }
 

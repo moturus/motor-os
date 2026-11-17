@@ -1039,7 +1039,7 @@ impl LocalRuntime {
             #[cfg(debug_assertions)]
             {
                 if task.debug_log {
-                    log::debug!("Running task {}", task_id.0);
+                    log::trace!("Running task {}", task_id.0);
                 }
             }
 
@@ -1055,7 +1055,7 @@ impl LocalRuntime {
             #[cfg(debug_assertions)]
             {
                 if task.debug_log {
-                    log::debug!("task {} stopped running", task_id.0);
+                    log::trace!("task {} stopped running", task_id.0);
                 }
             }
 
