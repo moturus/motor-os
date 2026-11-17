@@ -194,7 +194,7 @@ Four credential files override their matching tree mode:
 
 | Entry | Mode | Reason |
 |---|---|---|
-| `/user/cfg/sshd.toml` | `rwxrw----` | Interactive may edit the SSH PATH and host key; None cannot read the key |
+| `/user/cfg/sshd.toml` | `rwxrw----` | Interactive may edit the SSH settings and host key; None cannot read the key |
 | `/system/cfg/ssl/ssl-key.pem` | `rw-r-----` | The Interactive development web-server command needs the key; None does not |
 | `/user/cfg/russhd/users.toml` | `rwxrw----` | SSH login names and password verifiers, which russhd refuses if None can read them |
 | `/user/cfg/ssh/authorized_keys.motor` | `rwxrw----` | SSH public keys of the shipped login name |
@@ -205,11 +205,12 @@ included in every image. `/system/cfg/ssl` and `/user/cfg/russhd` are implicit
 directories created while walking static content, so exact rules and directory
 rules apply equally to implicit and explicitly listed paths.
 
-`/user/cfg` itself is `rwxrwxr-x`, permitting None to traverse it. `rush.cfg`
+`/user/cfg` itself is `rwxrwxr-x`, permitting None to traverse it. `profile`
 and `rush.toml` are `rwxrw-r--`; optional `lorry.toml` and `rmux.toml` use
 file-specific tree profiles with the same mode. Private sibling entries keep
-the default configuration profile. Changing `sshd.toml`'s PATH requires a
-reboot; a new console shell reads `rush.cfg` when it starts.
+the default configuration profile. `profile` sets `PATH`. Login shells read it
+when they start: the console's shell and each SSH session's. A change reaches
+the next session without a reboot.
 
 ## Policy configuration
 

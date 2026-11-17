@@ -425,9 +425,11 @@ tested, so a difference cannot be quietly introduced or quietly fixed.</p>
   <li>The default prompt is <code>motor-os:$PWD$ </code>, colored by the shell's role: red
   for System, amber for Interactive, and light green for None (see
   <a href="capabilities.html#rush">Capabilities in rush</a>). <code>PS1</code>,
-  <code>PS2</code>, and <code>PS4</code> are ordinary expanded variables. An interactive
-  shell sources <code>$ENV</code>; a login shell also reads <code>/etc/profile</code> and
-  <code>~/.profile</code>. On Motor OS, sys-tty sets <code>ENV=/user/cfg/rush.cfg</code>.</li>
+  <code>PS2</code>, and <code>PS4</code> are ordinary expanded variables. A login shell
+  (<code>-l</code>, or <code>$0</code> starting with <code>-</code>) first reads
+  <code>/user/cfg/profile</code>, interactive or not; an interactive shell then sources
+  <code>$ENV</code>. The console and every SSH session start login shells, so the profile
+  sets their <code>PATH</code>.</li>
 </ul>
 
 <h2>The language</h2>

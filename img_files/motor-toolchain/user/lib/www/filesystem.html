@@ -480,7 +480,7 @@ only.</p>
   <tr><td><code>/system/tmp</code></td><td>System scratch. Interactive may traverse the directory and read sys-io's DHCP snapshot; None has no access.</td></tr>
   <tr><td><code>/user/bin</code></td><td>User commands, including rush, sysbox and its wrappers, ripgrep, curl, red, rmux, kibim, httpd, and httpd-axum. Development commands live in <code>dev/</code>. Interactive may replace commands here.</td></tr>
   <tr><td><code>/user/lib</code>, <code>/user/dev/lorry</code></td><td>Development-tool data and Lorry's Interactive repository and cache. None may read them.</td></tr>
-  <tr><td><code>/user/cfg</code></td><td>Interactive configuration, including <code>rush.cfg</code> and <code>sshd.toml</code>. None may traverse this directory and read explicitly shared configuration; private credentials remain closed.</td></tr>
+  <tr><td><code>/user/cfg</code></td><td>Interactive configuration, including <code>profile</code> and <code>sshd.toml</code>. None may traverse this directory and read explicitly shared configuration; private credentials remain closed.</td></tr>
   <tr><td><code>/user/tmp</code></td><td>Interactive scratch, closed to None.</td></tr>
   <tr><td><code>/none</code></td><td>The None role's home: <code>cfg</code> for configuration, <code>tmp</code> for scratch, and <code>dev</code> for sources and Lorry's None state. None may write anywhere under it.</td></tr>
 </table>
@@ -535,11 +535,11 @@ for secrets and shared runtime-directory traversal. Smaller images omit trees; t
 sys-io creates its subdirectory with that same mode and publishes
 <code>sys-io/dhcp.toml</code> as <code>rw-r-----</code>.</p>
 <p><code>/user/cfg</code> itself is <code>rwxrwxr-x</code>. None may read
-<code>rush.cfg</code>, <code>rush.toml</code>, <code>rmux.toml</code>,
+<code>profile</code>, <code>rush.toml</code>, <code>rmux.toml</code>,
 <code>lorry.toml</code>, <code>cargo/config.toml</code>, and the Helix configuration, whose data mode is
 <code>rwxrw-r--</code>. Private siblings retain their closed modes.</p>
 <p><code>/user/cfg/sshd.toml</code> is <code>rwxrw----</code>, allowing Interactive
-to edit its PATH and host key. The TLS key <code>/system/cfg/ssl/ssl-key.pem</code>
+to edit its settings and host key. The TLS key <code>/system/cfg/ssl/ssl-key.pem</code>
 is <code>rw-r-----</code>. Both are invisible to None.
 <code>/user/cfg/russhd/users.toml</code> and <code>/user/cfg/ssh/authorized_keys.motor</code>
 are <code>rwxrw----</code>, the mode SFTP gives a new file, so that shipped and installed

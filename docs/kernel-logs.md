@@ -453,7 +453,7 @@ can replace it) is line-oriented, in the style of `sys-init.cfg`:
 ```
 # Kernel log: console (the compatibility default) or strobe.
 kernel-log:strobe
-ENV=/user/cfg/rush.cfg /user/bin/rush -i
+/user/bin/rush -l -i
 ```
 
 Each line is trimmed. Empty lines and lines whose first non-space byte is

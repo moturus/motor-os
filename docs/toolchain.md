@@ -189,8 +189,10 @@ temporary files, and preserves existing configuration and examples. It sets
 programs to `rwxrwxr-x` and library data to `rwxrw-r--`, so None can use the
 toolchain without changing it. mlibc's `hosts`, `services`, and `shells`
 configuration stays in the image's `/system/cfg/libc`.
-The installer appends `/user/bin/dev` once to the console and SSH PATH settings.
-Reboot after installation to activate those settings.
+The installer appends `/user/bin/dev` once to the `PATH` in `/user/cfg/profile`.
+Login shells read that file: the console's shell and each SSH session's. So new
+sessions find the tools at once, without a reboot. In the shell that ran the
+installer, run `. /user/cfg/profile`.
 
 `src/tests/full-test.sh` installs twice on a copy of the
 standard image, checks replacement of a shipped command, reboots, and builds
