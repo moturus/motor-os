@@ -23,14 +23,18 @@ pub fn fnmatch(pattern: &str, text: &str) -> bool {
     match_here(&p, &t)
 }
 
-/// Is any `*`/`?`/`[` in `s` unescaped (i.e. does `s` need pathname expansion)?
+/// Does `s` need pathname expansion: is any `*` or `?` unescaped, or does an
+/// unescaped `[` open a bracket expression? An unterminated `[` matches only
+/// itself (see [`fnmatch`]), so a word such as the `[` of a test command is
+/// left alone rather than matched against a directory listing.
 pub fn has_magic(s: &str) -> bool {
     let chars: Vec<char> = s.chars().collect();
     let mut i = 0;
     while i < chars.len() {
         match chars[i] {
             '\\' => i += 2, // skip the escaped char
-            '*' | '?' | '[' => return true,
+            '*' | '?' => return true,
+            '[' if match_class(&chars[i..], None).is_some() => return true,
             _ => i += 1,
         }
     }
@@ -278,6 +282,12 @@ mod tests {
         assert!(!has_magic("a\\*b"));
         assert!(has_magic("a*b"));
         assert!(has_magic("f[oo]"));
+        // An unterminated `[` is literal, as in a `[ ... ]` test command.
+        assert!(!has_magic("["));
+        assert!(!has_magic("f[oo"));
+        assert!(!has_magic("[]"));
+        assert!(has_magic("[]a]"));
+        assert!(has_magic("[x*"));
         assert_eq!(unescape("a\\*b\\?"), "a*b?");
     }
 
