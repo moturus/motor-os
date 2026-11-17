@@ -65,8 +65,9 @@ cross_setup() {
   VM_BOOT_COUNT=0
   CROSS_BACKEND_PID=
   CROSS_PEER_PID=
-  CROSS_DAEMON_PIDS=()
-  CROSS_ADMIN_SOCKET=
+  CROSS_KEY_SOCKETS=()
+  CROSS_KEY_LOGINS=()
+  CROSS_KEY_DIR=
   trap cross_cleanup EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
@@ -168,17 +169,22 @@ finish_test_image() {
   esac
 }
 
+# Ends the logins the sshd keys checks left pending and the sessions they hold
+# open: with its VM gone, an ssh client would wait for hours. The sockets are
+# in a directory outside the run's own, where a socket's path would be too long.
 close_sshd_key_sessions() {
-  local pid
-  for pid in "${CROSS_DAEMON_PIDS[@]}"; do
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" || true
+  local login socket
+  for login in "${CROSS_KEY_LOGINS[@]}"; do
+    kill "${login##*:}" 2>/dev/null || true
+    wait "${login##*:}" 2>/dev/null || true
   done
-  CROSS_DAEMON_PIDS=()
-  if [ -n "$CROSS_ADMIN_SOCKET" ]; then
-    ssh "${SSH_OPTIONS[@]}" -S "$CROSS_ADMIN_SOCKET" -O exit motor@192.168.4.2 >/dev/null 2>&1 || true
-    CROSS_ADMIN_SOCKET=
-  fi
+  CROSS_KEY_LOGINS=()
+  for socket in "${CROSS_KEY_SOCKETS[@]}"; do
+    ssh "${SSH_OPTIONS[@]}" -S "$socket" -O exit motor@192.168.4.2 >/dev/null 2>&1 || true
+  done
+  CROSS_KEY_SOCKETS=()
+  [ -z "$CROSS_KEY_DIR" ] || rm -r -- "$CROSS_KEY_DIR"
+  CROSS_KEY_DIR=
 }
 
 cross_cleanup() {
@@ -3901,12 +3907,17 @@ finish_session
   echo 'cross-test: console and SSH terminal size PASS'
 }
 
+# Login names and their credential files, through real logins. The rules for
+# those files are tested where a check costs nothing: src/bin/russhd/tests
+# (auth_store.rs, client_protocol.rs and, for the None role, motor_trust.rs)
+# and src/imager/tests/set.rs.
 cross_sshd_keys() {
   local IMAGER="$ROOT_DIR/build/obj/$BUILD/imager/$BUILD/imager"
   local HOST=192.168.4.2 USERS=/user/cfg/russhd/users.toml KEYS=/user/cfg/ssh
   local GUEST_TMP=/user/tmp/sshd-keys FIXTURE="$RUN_DIR/sshd-keys-data"
-  local SOCKETS ADMIN KEYS_HOME
+  local SOCKETS ADMIN KEYS_HOME LOGIN key standard copy
   SOCKETS="$(mktemp -d /tmp/motor-keys.XXXXXX)"
+  CROSS_KEY_DIR="$SOCKETS"
   ADMIN="$SOCKETS/admin"
   KEYS_HOME="$SOCKETS/home"
   mkdir -p "$FIXTURE" "$KEYS_HOME/.ssh"
@@ -3917,594 +3928,164 @@ cross_sshd_keys() {
     *target_path*) ;;
     *) cross_fail 'ssh-copy-id -t requires OpenSSH 9.4 or newer' ;;
   esac
-  stop_keys_vm() {
-    admin shutdown
-    finish_test_image 20
-    close_sshd_key_sessions
+
+  # The shipped key opens one connection that outlives every credential change
+  # below: russhd checks credentials when a connection authenticates, not
+  # after, and a multiplexed session needs no new authentication.
+  admin() {
+    ssh "${SSH_OPTIONS[@]}" -S "$ADMIN" -o ControlMaster=no "motor@$HOST" "$@"
   }
-# ---- guest access ------------------------------------------------------------
+  put() { admin "/user/bin/cat > $1"; }
+  get() { admin "/user/bin/cat $1"; }
+  public() { cat "$FIXTURE/$1.pub"; }
 
-# The shipped key opens one connection that outlives every credential broken
-# below: russhd checks credentials when a connection authenticates, not after,
-# and a multiplexed session needs no new authentication.
-open_admin() {
-  CROSS_ADMIN_SOCKET="$ADMIN"
-  ssh "${SSH_OPTIONS[@]}" -M -S "$ADMIN" -N -f "motor@$HOST" || cross_fail "cannot open the admin connection"
-}
+  expect_mode() {
+    local mode
+    mode="$(admin "/user/bin/ls -l ${1%/*}" | awk -v name="${1##*/}" '$NF == name { print $1 }')"
+    [ "$mode" = "$2" ] || cross_fail "$1 has mode '$mode', want '$2'"
+  }
 
-admin() {
-  ssh "${SSH_OPTIONS[@]}" -S "$ADMIN" -o ControlMaster=no "motor@$HOST" "$@"
-}
+  expect_lines() {
+    local path="$1" actual expected
+    shift
+    actual="$(get "$path")"
+    expected="$(printf '%s\n' "$@")"
+    [ "$actual" = "$expected" ] || cross_fail "$path holds '$actual', want '$expected'"
+  }
 
-put() { admin "/user/bin/cat > $1"; }
-get() { admin "/user/bin/cat $1"; }
-mode_of() {
-  local entry
-  entry="$(admin "/user/bin/ls -l ${1%/*}" | grep -E " ${1##*/}\$")" || cross_fail "$1 is missing"
-  printf '%s\n' "${entry%% *}"
-}
+  # A login is one command, so that a pending one is a process to stop.
+  key_login() {
+    LOGIN=(ssh "${USER_OPTIONS[@]}" -o BatchMode=yes -o PreferredAuthentications=publickey
+      -i "$FIXTURE/$2" "$1@$HOST" "${3:-/user/bin/rush -c true}")
+  }
 
-expect_mode() {
-  local mode
-  mode="$(mode_of "$1")"
-  [ "$mode" = "$2" ] || cross_fail "$1 has mode '$mode', want '$2'"
-}
+  password_login() {
+    LOGIN=(env "SSHD_KEYS_PASSWORD=$2" "SSH_ASKPASS=$FIXTURE/askpass" SSH_ASKPASS_REQUIRE=force
+      ssh "${USER_OPTIONS[@]}" -o BatchMode=no -o PreferredAuthentications=password
+      -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 "$1@$HOST" /user/bin/rush -c true)
+  }
 
-chmod_guest() { admin "/user/bin/chmod $1 $2"; }
+  works() {
+    "$@"
+    "${LOGIN[@]}" 2> "$FIXTURE/last.err" || cross_fail "$* failed: $(cat "$FIXTURE/last.err")"
+  }
 
-# ---- what a login sees -------------------------------------------------------
+  # russhd answers a refused login after 3 s. Refusals start here, wait side by
+  # side, and are all checked by `refused`.
+  refuse() {
+    local label="$1"
+    shift
+    "$@"
+    "${LOGIN[@]}" > /dev/null 2> "$FIXTURE/refused-$label.err" &
+    CROSS_KEY_LOGINS+=("$label:$!")
+  }
 
-key_attempt() {
-  ssh "${USER_OPTIONS[@]}" -o BatchMode=yes -o PreferredAuthentications=publickey \
-    -i "$2" "$1@$HOST" "${3:-/user/bin/rush -c true}" 2>"$FIXTURE/last.err"
-}
+  # Only a refusal counts: a dead VM must not read as a passing negative check.
+  refused() {
+    local login label status
+    for login in "${CROSS_KEY_LOGINS[@]}"; do
+      label="${login%%:*}"
+      status=0
+      wait "${login##*:}" || status=$?
+      if [ "$status" != 255 ] || ! grep -q 'Permission denied' "$FIXTURE/refused-$label.err"; then
+        cross_fail "the $label login was not refused: status $status: $(cat "$FIXTURE/refused-$label.err")"
+      fi
+    done
+    CROSS_KEY_LOGINS=()
+  }
 
-password_attempt() {
-  SSHD_KEYS_PASSWORD="$2" SSH_ASKPASS="$FIXTURE/askpass" SSH_ASKPASS_REQUIRE=force \
-    ssh "${USER_OPTIONS[@]}" -o BatchMode=no -o PreferredAuthentications=password \
-    -o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 \
-    "$1@$HOST" /user/bin/rush -c true 2>"$FIXTURE/last.err"
-}
-
-# Only a refusal counts: a dead VM must not read as a passing negative check.
-denied() {
-  local status=0
-  "$@" || status=$?
-  [ "$status" -eq 255 ] && grep -q 'Permission denied' "$FIXTURE/last.err"
-}
-
-key_works() { key_attempt "$1" "$FIXTURE/$2" || cross_fail "$1 cannot log in with $2: $(cat "$FIXTURE/last.err")"; }
-key_denied() { denied key_attempt "$1" "$FIXTURE/$2" || cross_fail "$1 was not refused with $2"; }
-password_works() { password_attempt "$1" "$2" || cross_fail "$1 cannot log in with a password: $(cat "$FIXTURE/last.err")"; }
-password_denied() { denied password_attempt "$1" "$2" || cross_fail "$1 was not refused its password"; }
-
-# What the server says can continue, from a client that tries nothing.
-methods_for() {
-  # Trying nothing ends in exit 255; the list is what this is here for.
-  ssh "${USER_OPTIONS[@]}" -v -o BatchMode=yes -o PreferredAuthentications=none \
-    "$1@$HOST" true > "$FIXTURE/methods.log" 2>&1 || true
-  tr -d '\r' < "$FIXTURE/methods.log" |
-    sed -n 's/^debug1: Authentications that can continue: //p' | head -n 1
-}
-
-expect_methods() {
-  local name methods
-  for name in "$@"; do
-    methods="$(methods_for "$name")"
-    [ "$methods" = "password,publickey" ] ||
-      cross_fail "'$name' was offered methods '$methods'"
-  done
-}
-
-# ---- fixtures ----------------------------------------------------------------
-
-new_key() { ssh-keygen -q -t ed25519 -N '' -C "$1" -f "$FIXTURE/$1"; }
-public() { cat "$FIXTURE/$1.pub"; }
-
-# One registry record: SHA-256 of the salt's bytes followed by the password.
-record() {
-  local name="$1" password="$2" salt hash
-  salt="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
-  hash="$( { printf "$(printf '%s' "$salt" | sed 's/../\\x&/g')"; printf '%s' "$password"; } |
-    sha256sum | cut -d' ' -f1)"
-  printf "[users.%s]\nsalt = '%s'\npassword_hash = '%s'\n" "$name" "$salt" "$hash"
-}
-
-# As docs/ssh-client.md says to edit it: a whole new file, renamed into place.
-# A file a shell creates starts None-readable, which russhd refuses in a registry.
-install_registry() {
-  put "$USERS.new" < "$1"
-  chmod_guest rwxrw---- "$USERS.new"
-  admin "/user/bin/mv $USERS.new $USERS"
-}
-
-cat > "$FIXTURE/askpass" <<'SH'
+  cat > "$FIXTURE/askpass" <<'SH'
 #!/bin/sh
 printf '%s\n' "$SSHD_KEYS_PASSWORD"
 SH
-chmod 700 "$FIXTURE/askpass"
-
-for key in alice-1 alice-2 bob-1 bob-2 shared carol installed-1 installed-2 \
-  motor-client forced bootstrap host-installed; do
-  new_key "$key"
-done
-
-# ---- provisioning ------------------------------------------------------------
-
-echo "-- imager provisions several names --"
-local standard="$ROOT_DIR/vm_images/$BUILD/motor-os.qcow2"
-[ "$VMM" != fc ] || standard="$ROOT_DIR/vm_images/$BUILD/motor-os.img"
-copy_test_image "$standard" sshd-keys
-local copy="$VM_DIR/$MOTO_IMAGE"
-"$IMAGER" set --ssh-new-user alice --ssh-password alice-password -i "$copy"
-"$IMAGER" set --ssh-user alice --ssh-key "$FIXTURE/alice-1.pub" -i "$copy"
-"$IMAGER" set --ssh-new-user bob --ssh-key "$FIXTURE/bob-1.pub" -i "$copy"
-if "$IMAGER" set --ssh-user nobody --ssh-password x -i "$copy" 2>/dev/null; then
-  cross_fail "imager accepted a name with no record"
-fi
-
-boot_test_image sshd-keys-1
-wait_vm_ssh
-open_admin
-admin "/user/bin/mkdir $GUEST_TMP"
-
-echo "-- images ship the credential layout --"
-expect_mode "$USERS" -rwxrw----
-expect_mode "$KEYS/authorized_keys.motor" -rwxrw----
-expect_mode "$KEYS/authorized_keys.alice" -rwxrw----
-expect_mode /user/cfg/ssh drwxrwx---
-expect_mode /user/cfg/russhd drwxrwx---
-expect_mode /user/cfg/sshd.toml -rwxrw----
-if get /user/cfg/sshd.toml | grep -Eq '^\[users|^authorized_key[ =]|^password_hash|^salt'; then
-  cross_fail "the service configuration still holds user credentials"
-fi
-
-# ---- logins ------------------------------------------------------------------
-
-echo "-- two names, two keys each --"
-# The form for clients without env HOME="$KEYS_HOME" ssh-copy-id -t: it appends, and needs nothing else.
-ssh "${USER_OPTIONS[@]}" -o BatchMode=yes -i "$FIXTURE/alice-1" "alice@$HOST" \
-  "/user/bin/cat >> $KEYS/authorized_keys.alice" < "$FIXTURE/alice-2.pub" ||
-  cross_fail "cat >> did not install a key"
-ssh "${USER_OPTIONS[@]}" -o BatchMode=yes -i "$FIXTURE/bob-1" "bob@$HOST" \
-  "/user/bin/cat >> $KEYS/authorized_keys.bob" < "$FIXTURE/bob-2.pub" ||
-  cross_fail "cat >> did not install a key for the second name"
-expect_mode "$KEYS/authorized_keys.bob" -rwxrw----
-for key in alice-1 alice-2; do key_works alice "$key"; done
-for key in bob-1 bob-2; do key_works bob "$key"; done
-key_denied alice bob-1
-key_denied nobody alice-1
-password_works alice alice-password
-password_denied bob alice-password
-password_denied '../ssh/authorized_keys.alice' alice-password
-expect_methods alice bob nobody
-
-echo "-- a key listed for two names --"
-{ public shared; } | put "$GUEST_TMP/shared"
-admin "/user/bin/rush -c '/user/bin/cat $GUEST_TMP/shared >> $KEYS/authorized_keys.alice'"
-admin "/user/bin/rush -c '/user/bin/cat $GUEST_TMP/shared >> $KEYS/authorized_keys.bob'"
-key_works alice shared
-key_works bob shared
-{ public alice-1; public alice-2; } | put "$KEYS/authorized_keys.alice"
-key_denied alice shared
-key_works bob shared
-key_works alice alice-1
-
-# ---- live updates ------------------------------------------------------------
-
-echo "-- changes apply to the next authentication --"
-public alice-1 | put "$KEYS/authorized_keys.alice"
-key_denied alice alice-2
-key_works alice alice-1
-
-{
-  printf 'version = 1\n\n'
-  record motor vroomvroom
-  record alice changed-password
-  printf '[users.bob]\n'
-} > "$FIXTURE/users.1"
-install_registry "$FIXTURE/users.1"
-password_denied alice alice-password
-password_works alice changed-password
-
-public carol | put "$KEYS/authorized_keys.carol"
-{ cat "$FIXTURE/users.1"; record carol carol-password; } > "$FIXTURE/users.2"
-install_registry "$FIXTURE/users.2"
-key_works carol carol
-password_works carol carol-password
-
-CAROL_SESSION="$SOCKETS/carol"
-ssh "${USER_OPTIONS[@]}" -o BatchMode=yes -i "$FIXTURE/carol" -M -S "$CAROL_SESSION" -N -f "carol@$HOST" ||
-  cross_fail "cannot hold a session for carol"
-install_registry "$FIXTURE/users.1"
-key_denied carol carol
-password_denied carol carol-password
-[ "$(ssh "${USER_OPTIONS[@]}" -S "$CAROL_SESSION" -o ControlMaster=no "carol@$HOST" /user/bin/echo still-here)" = still-here ] ||
-  cross_fail "removing a name ended its established session"
-ssh "${USER_OPTIONS[@]}" -S "$CAROL_SESSION" -O exit "carol@$HOST" >/dev/null 2>&1 || true
-
-# ---- failures ----------------------------------------------------------------
-
-echo "-- a bad key file costs one name its key method --"
-good_alice="$(public alice-1)"
-printf '%s\n\0' "$good_alice" | put "$KEYS/authorized_keys.alice"
-key_denied alice alice-1
-password_works alice changed-password
-key_works bob bob-1
-{
-  printf '# comment\r\n\r\nrestrict %s\n' "$(public alice-2)"
-  printf 'from="10.0.0.1" %s\n' "$(public alice-2)"
-  printf 'not a key\n%s' "$good_alice"
-} | put "$KEYS/authorized_keys.alice"
-key_works alice alice-1
-key_denied alice alice-2
-public alice-1 | put "$KEYS/authorized_keys.alice"
-if ! get "$KEYS/authorized_keys.alice" | grep -Fqx "$good_alice"; then
-  cross_fail "the key file was not restored"
-fi
-
-echo "-- a bad registry denies new authentication, with no fallback --"
-printf 'version = 1\n[users.alice]\npassword_hash = "not hexadecimal"\n' > "$FIXTURE/users.bad"
-install_registry "$FIXTURE/users.bad"
-key_denied alice alice-1
-password_denied alice changed-password
-expect_methods alice nobody
-admin "/user/bin/rm $USERS"
-key_denied bob bob-1
-install_registry "$FIXTURE/users.1"
-key_works alice alice-1
-
-# ---- installers --------------------------------------------------------------
-
-# Everything an installer must leave alone, as guest-side text.
-snapshot() {
-  local name
-  for name in "$@"; do
-    printf '%s: %s\n' "$name" "$(mode_of "$name")"
-    get "$name"
+  chmod 700 "$FIXTURE/askpass"
+  for key in alice bob carol installed; do
+    ssh-keygen -q -t ed25519 -N '' -C "$key" -f "$FIXTURE/$key"
   done
-  admin "/user/bin/ls -l /user/cfg/ssh" | grep -v "authorized_keys\.$SELECTED\$"
-}
 
-motor_copy_id() {
-  local name="$1" identity="$2" public_key="$3" target="$4"
-  admin "/user/bin/ssh-copy-id -F /dev/null -p 2222 -o IdentityFile=$GUEST_TMP/$identity \
+  echo "-- names set by the imager log in --"
+  standard="$ROOT_DIR/vm_images/$BUILD/motor-os.qcow2"
+  [ "$VMM" != fc ] || standard="$ROOT_DIR/vm_images/$BUILD/motor-os.img"
+  copy_test_image "$standard" sshd-keys
+  copy="$VM_DIR/$MOTO_IMAGE"
+  "$IMAGER" set --ssh-new-user alice --ssh-password alice-password -i "$copy"
+  "$IMAGER" set --ssh-user alice --ssh-key "$FIXTURE/alice.pub" -i "$copy"
+  "$IMAGER" set --ssh-new-user bob --ssh-key "$FIXTURE/bob.pub" -i "$copy"
+  "$IMAGER" set --ssh-new-user carol --ssh-password carol-password -i "$copy"
+  boot_test_image sshd-keys
+  wait_vm_ssh
+  CROSS_KEY_SOCKETS+=("$ADMIN")
+  ssh "${SSH_OPTIONS[@]}" -M -S "$ADMIN" -N -f "motor@$HOST" || cross_fail "cannot open the admin connection"
+  works key_login alice alice
+  works key_login bob bob
+  works password_login alice alice-password
+
+  echo "-- Motor ssh-copy-id -t gives a name its first key --"
+  admin "/user/bin/mkdir $GUEST_TMP"
+  put "$GUEST_TMP/bob" < "$FIXTURE/bob"
+  admin "/user/bin/chmod rwxrw---- $GUEST_TMP/bob"
+  put "$GUEST_TMP/carol.pub" < "$FIXTURE/carol.pub"
+  admin "/user/bin/ssh-copy-id -F /dev/null -p 2222 -o IdentityFile=$GUEST_TMP/bob \
     -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-    -o UserKnownHostsFile=$GUEST_TMP/known_hosts -i $GUEST_TMP/$public_key.pub \
-    -t $target $name@127.0.0.1"
-}
+    -o UserKnownHostsFile=$GUEST_TMP/known_hosts -i $GUEST_TMP/carol.pub \
+    -t $KEYS/authorized_keys.carol bob@127.0.0.1" > /dev/null ||
+    cross_fail "Motor ssh-copy-id -t failed"
+  expect_lines "$KEYS/authorized_keys.carol" "$(public carol)"
+  expect_mode "$KEYS/authorized_keys.carol" -rwxrw----
+  # This session is held open: it has to outlive its name.
+  CROSS_KEY_SOCKETS+=("$SOCKETS/carol")
+  ssh "${USER_OPTIONS[@]}" -o BatchMode=yes -i "$FIXTURE/carol" -M -S "$SOCKETS/carol" -N -f "carol@$HOST" ||
+    cross_fail "carol cannot log in with the key Motor ssh-copy-id installed"
 
-stage_identity() {
-  put "$GUEST_TMP/$1" < "$FIXTURE/$1"
-  chmod_guest rwxrw---- "$GUEST_TMP/$1"
-  put "$GUEST_TMP/$1.pub" < "$FIXTURE/$1.pub"
-}
-
-# OpenSSH 9.4's installer. Its duplicate probe would log in with any key that
-# works and call the new one installed, so this passes it no alternate identity:
-# it finds the key missing and installs it with the password.
-openssh_copy_id() {
-  local name="$1" password="$2" public_key="$3" target="$4"
-  shift 4
-  SSHD_KEYS_PASSWORD="$password" SSH_ASKPASS="$FIXTURE/askpass" SSH_ASKPASS_REQUIRE=force \
-    env HOME="$KEYS_HOME" ssh-copy-id "$@" -t "$target" -i "$FIXTURE/$public_key.pub" -p 2222 -F /dev/null \
-    -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+  echo "-- refused logins, and OpenSSH ssh-copy-id -s -t --"
+  # carol's record goes, as docs/ssh-client.md says to edit the registry: a
+  # whole new file, closed to None, renamed into place.
+  get "$USERS" | awk '/^\[/ { skip = ($0 == "[users.carol]") } !skip' > "$FIXTURE/users.toml"
+  if grep -q carol "$FIXTURE/users.toml" || ! grep -qx '\[users\.alice\]' "$FIXTURE/users.toml"; then
+    cross_fail "the registry without carol is wrong: $(cat "$FIXTURE/users.toml")"
+  fi
+  put "$USERS.new" < "$FIXTURE/users.toml"
+  admin "/user/bin/chmod rwxrw---- $USERS.new"
+  admin "/user/bin/mv $USERS.new $USERS"
+  refuse another-names-key key_login alice bob
+  refuse wrong-password password_login alice wrong-password
+  refuse unknown-name key_login nobody alice
+  refuse path-as-name password_login ../ssh/authorized_keys.alice alice-password
+  refuse removed-name key_login carol carol
+  # OpenSSH's installer first tries the new key, and would call it installed
+  # if an identity it was given logged in. It gets none: that login is refused
+  # along with those above, and the password then installs the key.
+  SSHD_KEYS_PASSWORD=alice-password SSH_ASKPASS="$FIXTURE/askpass" SSH_ASKPASS_REQUIRE=force \
+    env HOME="$KEYS_HOME" ssh-copy-id -s -t "$KEYS/authorized_keys.alice" -i "$FIXTURE/installed.pub" \
+    -p 2222 -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
     -o UserKnownHostsFile="$KNOWN_HOSTS" -o PreferredAuthentications=password \
-    "$name@$HOST" </dev/null
-}
-
-expect_lines() {
-  local path="$1" actual expected
-  shift
-  actual="$(get "$path")"
-  expected="$(printf '%s\n' "$@")"
-  [ "$actual" = "$expected" ] || cross_fail "$path holds '$actual', want '$expected'"
-}
-
-stage_identity motor-client
-stage_identity installed-1
-stage_identity alice-1
-public motor-client | put "$KEYS/authorized_keys.bob"
-put "$KEYS/id_ed25519" < "$FIXTURE/carol"
-chmod_guest rwxrw---- "$KEYS/id_ed25519"
-
-echo "-- Motor ssh-copy-id -t --"
-SELECTED=bob
-before="$(snapshot "$USERS" "$KEYS/authorized_keys.motor" "$KEYS/authorized_keys.alice" "$KEYS/id_ed25519")"
-motor_copy_id bob motor-client installed-1 "$KEYS/authorized_keys.bob" >/dev/null ||
-  cross_fail "Motor ssh-copy-id -t failed"
-expect_lines "$KEYS/authorized_keys.bob" "$(public motor-client)" "$(public installed-1)"
-expect_mode "$KEYS/authorized_keys.bob" -rwxrw----
-key_works bob installed-1
-motor_copy_id bob motor-client installed-1 "$KEYS/authorized_keys.bob" >/dev/null ||
-  cross_fail "repeating Motor ssh-copy-id -t failed"
-expect_lines "$KEYS/authorized_keys.bob" "$(public motor-client)" "$(public installed-1)"
-
-# The name's own file need not exist, or may be empty, and a missing final
-# newline or a comment is no reason to lose anything.
-admin "/user/bin/rm $KEYS/authorized_keys.alice"
-motor_copy_id bob motor-client installed-1 "$KEYS/authorized_keys.alice" >/dev/null ||
-  cross_fail "Motor ssh-copy-id -t failed on a missing file"
-expect_lines "$KEYS/authorized_keys.alice" "$(public installed-1)"
-expect_mode "$KEYS/authorized_keys.alice" -rwxrw----
-: | put "$KEYS/authorized_keys.alice"
-motor_copy_id bob motor-client installed-1 "$KEYS/authorized_keys.alice" >/dev/null ||
-  cross_fail "Motor ssh-copy-id -t failed on an empty file"
-expect_lines "$KEYS/authorized_keys.alice" "$(public installed-1)"
-printf '# keep this\n%s' "$(public alice-1)" | put "$KEYS/authorized_keys.alice"
-motor_copy_id bob motor-client installed-1 "$KEYS/authorized_keys.alice" >/dev/null ||
-  cross_fail "Motor ssh-copy-id -t failed on a file with no final newline"
-expect_lines "$KEYS/authorized_keys.alice" '# keep this' "$(public alice-1)" "$(public installed-1)"
-key_works alice alice-1
-key_works alice installed-1
-
-restricted="$(printf 'from="10.0.0.1" %s' "$(public installed-1)")"
-printf '%s\n' "$restricted" | put "$KEYS/authorized_keys.alice"
-if output="$(motor_copy_id bob motor-client installed-1 "$KEYS/authorized_keys.alice" 2>&1)"; then
-  cross_fail "Motor ssh-copy-id widened a restricted key"
-fi
-case "$output" in
-  *"not as a plain record"*) ;;
-  *) cross_fail "Motor ssh-copy-id reported '$output' for a restricted key" ;;
-esac
-expect_lines "$KEYS/authorized_keys.alice" "$restricted"
-public alice-1 | put "$KEYS/authorized_keys.alice"
-after="$(snapshot "$USERS" "$KEYS/authorized_keys.motor" "$KEYS/authorized_keys.alice" "$KEYS/id_ed25519")"
-[ "$before" = "$after" ] || cross_fail "an installer changed something else: '$before' became '$after'"
-expect_mode /user/cfg/ssh drwxrwx---
-expect_mode "$KEYS/id_ed25519" -rwxrw----
-
-echo "-- OpenSSH ssh-copy-id -s -t --"
-SELECTED=alice
-before="$(snapshot "$USERS" "$KEYS/authorized_keys.motor" "$KEYS/authorized_keys.bob" "$KEYS/id_ed25519")"
-openssh_copy_id alice changed-password installed-2 "$KEYS/authorized_keys.alice" -s \
-  > "$FIXTURE/openssh-copy-id.log" 2>&1 || cross_fail "ssh-copy-id -s -t failed"
-expect_lines "$KEYS/authorized_keys.alice" "$(public alice-1)" "$(public installed-2)"
-expect_mode "$KEYS/authorized_keys.alice" -rwxrw----
-key_works alice installed-2
-
-# The duplicate probe sees the key and leaves the file alone.
-env HOME="$KEYS_HOME" ssh-copy-id -s -t "$KEYS/authorized_keys.alice" -i "$FIXTURE/installed-2.pub" -p 2222 -F /dev/null \
-  -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
-  -o UserKnownHostsFile="$KNOWN_HOSTS" "alice@$HOST" </dev/null \
-  > "$FIXTURE/openssh-copy-id-repeat.log" 2>&1 || cross_fail "a repeated ssh-copy-id -s -t failed"
-expect_lines "$KEYS/authorized_keys.alice" "$(public alice-1)" "$(public installed-2)"
-
-for state in missing empty comment; do
-  case "$state" in
-    missing) admin "/user/bin/rm $KEYS/authorized_keys.alice" ;;
-    empty) : | put "$KEYS/authorized_keys.alice" ;;
-    comment) printf '# keep this\n%s' "$(public alice-1)" | put "$KEYS/authorized_keys.alice" ;;
-  esac
-  openssh_copy_id alice changed-password installed-2 "$KEYS/authorized_keys.alice" -s \
-    > "$FIXTURE/openssh-copy-id-$state.log" 2>&1 || cross_fail "ssh-copy-id -s -t failed on a $state file"
-  case "$state" in
-    comment) expect_lines "$KEYS/authorized_keys.alice" '# keep this' "$(public alice-1)" "$(public installed-2)" ;;
-    *) expect_lines "$KEYS/authorized_keys.alice" "$(public installed-2)" ;;
-  esac
+    "alice@$HOST" < /dev/null > "$FIXTURE/openssh-copy-id.log" 2>&1 ||
+    cross_fail "ssh-copy-id -s -t failed: $(cat "$FIXTURE/openssh-copy-id.log")"
+  refused
+  expect_lines "$KEYS/authorized_keys.alice" "$(public alice)" "$(public installed)"
   expect_mode "$KEYS/authorized_keys.alice" -rwxrw----
-done
-public alice-1 | put "$KEYS/authorized_keys.alice"
-after="$(snapshot "$USERS" "$KEYS/authorized_keys.motor" "$KEYS/authorized_keys.bob" "$KEYS/id_ed25519")"
-[ "$before" = "$after" ] || cross_fail "ssh-copy-id changed something else: '$before' became '$after'"
-expect_mode /user/cfg/ssh drwxrwx---
-expect_mode "$KEYS/id_ed25519" -rwxrw----
+  # The installer also runs `chmod 700` on the directory, whose mode must stay.
+  expect_mode "$KEYS" drwxrwx---
+  [ "$(ssh "${USER_OPTIONS[@]}" -S "$SOCKETS/carol" -o ControlMaster=no "carol@$HOST" /user/bin/echo still-here)" = still-here ] ||
+    cross_fail "removing a name ended its established session"
 
-echo "-- forced OpenSSH installation --"
-env HOME="$KEYS_HOME" ssh-copy-id -f -s -t "$KEYS/authorized_keys.bob" -i "$FIXTURE/forced.pub" -p 2222 -F /dev/null \
-  -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityFile="$FIXTURE/bob-1" \
-  -o IdentityFile="$FIXTURE/motor-client" -o StrictHostKeyChecking=yes \
-  -o UserKnownHostsFile="$KNOWN_HOSTS" "bob@$HOST" </dev/null \
-  > "$FIXTURE/openssh-copy-id-forced.log" 2>&1 || cross_fail "ssh-copy-id -f -s -t failed"
-key_works bob forced
+  echo "-- ssh, scp and sftp under another name --"
+  [ "$(works key_login alice installed '/user/bin/echo as-alice')" = as-alice ] ||
+    cross_fail "ssh as alice returned the wrong output"
+  printf 'payload\n' > "$FIXTURE/payload"
+  scp -F /dev/null -P 2222 -q -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
+    -o UserKnownHostsFile="$KNOWN_HOSTS" -i "$FIXTURE/alice" \
+    "$FIXTURE/payload" "alice@$HOST:$GUEST_TMP/payload" || cross_fail "scp as alice failed"
+  printf 'get %s/payload %s/returned\n' "$GUEST_TMP" "$FIXTURE" |
+    sftp -q -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
+      -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$KNOWN_HOSTS" \
+      -i "$FIXTURE/alice" "alice@$HOST" > /dev/null || cross_fail "sftp as alice failed"
+  cmp -s "$FIXTURE/payload" "$FIXTURE/returned" || cross_fail "the transfers changed the data"
 
-echo "-- a password-only name bootstraps its first key --"
-{ cat "$FIXTURE/users.1"; record dana dana-password; } > "$FIXTURE/users.3"
-install_registry "$FIXTURE/users.3"
-key_denied dana bootstrap
-openssh_copy_id dana dana-password bootstrap "$KEYS/authorized_keys.dana" -s \
-  > "$FIXTURE/openssh-copy-id-bootstrap.log" 2>&1 || cross_fail "password bootstrap failed"
-key_works dana bootstrap
-if env HOME="$KEYS_HOME" ssh-copy-id -s -n -t "$KEYS/authorized_keys.dana" -i "$FIXTURE/bootstrap.pub" -p 2222 -F /dev/null \
-  -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
-  -o UserKnownHostsFile="$KNOWN_HOSTS" "dana@$HOST" </dev/null 2>&1 |
-  grep -q 'would have added'; then
-  cross_fail "the duplicate probe did not see the installed key"
-fi
-install_registry "$FIXTURE/users.1"
-admin "/user/bin/rm $KEYS/authorized_keys.dana"
-
-echo "-- other installer forms fail and install nothing --"
-SELECTED=none
-before="$(snapshot "$USERS" "$KEYS/authorized_keys.motor" "$KEYS/authorized_keys.alice" "$KEYS/authorized_keys.bob")"
-# $2 is why it has to cross_fail: not logging in at all would prove nothing here.
-installer_refused() {
-  local label="$1" reason="$2" output status=0
-  shift 2
-  output="$("$@" 2>&1 </dev/null)" || status=$?
-  printf '%s\n' "$output" > "$FIXTURE/refused-$label.log"
-  [ "$status" -ne 0 ] || cross_fail "$label reported success"
-  case "$output" in
-    *"Number of key(s) added"*|*"Key installed"*) cross_fail "$label reported an installed key" ;;
-    *"(password,publickey)"*) cross_fail "$label did not log in: $output" ;;
-    *"$reason"*) ;;
-    *) cross_fail "$label failed for another reason: $output" ;;
-  esac
-  admin "[ ! -e /user/.ssh ]" || cross_fail "$label created /user/.ssh"
-}
-installer_refused openssh-sftp-default 'Permission denied' env HOME="$KEYS_HOME" ssh-copy-id -f -s -i "$FIXTURE/forced.pub" -p 2222 \
-  -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityFile="$FIXTURE/motor-client" \
-  -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$KNOWN_HOSTS" "bob@$HOST"
-installer_refused openssh-shell dirname env HOME="$KEYS_HOME" ssh-copy-id -f -t "$KEYS/authorized_keys.bob" \
-  -i "$FIXTURE/forced.pub" -p 2222 -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes \
-  -o IdentityFile="$FIXTURE/motor-client" -o StrictHostKeyChecking=yes \
-  -o UserKnownHostsFile="$KNOWN_HOSTS" "bob@$HOST"
-installer_refused openssh-shell-default dirname env HOME="$KEYS_HOME" ssh-copy-id -f -i "$FIXTURE/forced.pub" -p 2222 \
-  -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityFile="$FIXTURE/motor-client" \
-  -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$KNOWN_HOSTS" "bob@$HOST"
-installer_refused motor-default 'Permission denied' admin "/user/bin/ssh-copy-id -F /dev/null -p 2222 \
-  -o IdentityFile=$GUEST_TMP/motor-client -o IdentitiesOnly=yes -o BatchMode=yes \
-  -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$GUEST_TMP/known_hosts \
-  -i $GUEST_TMP/installed-1.pub bob@127.0.0.1"
-after="$(snapshot "$USERS" "$KEYS/authorized_keys.motor" "$KEYS/authorized_keys.alice" "$KEYS/authorized_keys.bob")"
-[ "$before" = "$after" ] || cross_fail "a refused installer changed something: '$before' became '$after'"
-
-# ---- trust -------------------------------------------------------------------
-
-echo "-- Motor roles decide what is trusted --"
-key_list="$KEYS/authorized_keys.alice"
-# None can read a key file without harm, but not a registry.
-chmod_guest rwxrw-r-- "$key_list"
-key_works alice alice-1
-chmod_guest rwxrw---- "$key_list"
-chmod_guest rwxrw-r-- "$USERS"
-key_denied alice alice-1
-password_denied alice changed-password
-chmod_guest rwxrw---- "$USERS"
-key_works alice alice-1
-
-chmod_guest rwxrw-rw- "$key_list"
-key_denied alice alice-1
-password_works alice changed-password
-chmod_guest rwxrw---- "$key_list"
-
-chmod_guest rwxrwxrwx /user/cfg/ssh
-key_denied alice alice-1
-password_works alice changed-password
-chmod_guest rwxrwx--- /user/cfg/ssh
-
-chmod_guest rwxrwxrwx /user/cfg/russhd
-password_denied alice changed-password
-chmod_guest rwxrwx--- /user/cfg/russhd
-
-chmod_guest rwxrwxrwx /user/cfg
-password_denied alice changed-password
-chmod_guest rwxrwxr-x /user/cfg
-key_works alice alice-1
-
-admin "/user/bin/rm $key_list"
-admin "/user/bin/mkdir $key_list"
-key_denied alice alice-1
-password_works alice changed-password
-admin "/user/bin/rmdir $key_list" 2>/dev/null || admin "/user/bin/rm -r $key_list"
-public alice-1 | put "$key_list"
-key_works alice alice-1
-
-echo "-- the size limit, through the guest's own read path --"
-padded() {
-  local size="$1" line
-  line="$(public alice-1)"
-  # Comment lines up to the size, the key last: a match needs the whole file.
-  awk -v size="$((size - ${#line} - 1))" 'BEGIN {
-    while (size > 1000) { printf "#%998s\n", ""; size -= 1000 }
-    if (size > 0) { printf "#%*s\n", size - 2, "" }
-  }'
-  printf '%s\n' "$line"
-}
-padded 1048576 > "$FIXTURE/keys.exact"
-[ "$(stat -c %s "$FIXTURE/keys.exact")" = 1048576 ] || cross_fail "the 1 MiB fixture is the wrong size"
-put "$key_list" < "$FIXTURE/keys.exact"
-key_works alice alice-1
-{ printf '#\n'; cat "$FIXTURE/keys.exact"; } | put "$key_list"
-key_denied alice alice-1
-password_works alice changed-password
-public alice-1 | put "$key_list"
-
-# ---- a second daemon ---------------------------------------------------------
-
-# A daemon on port $1 reading configuration $2. OpenSSH keeps the first -p it
-# sees, so another port needs its own options and its own pin of the same host
-# key. Nothing here can stop a daemon: each gets a port, and the reboot ends it.
-second_daemon() {
-  local port="$1" config="$2" attempt
-  sed "s/:2222/:$port/" "$KNOWN_HOSTS" > "$FIXTURE/known-hosts-$port"
-  DAEMON_OPTIONS=(
-    -F /dev/null -p "$port" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes
-    -o UserKnownHostsFile="$FIXTURE/known-hosts-$port" -o ConnectTimeout=20
-  )
-  # On a terminal russhd logs to it: the system log takes one russhd.
-  ssh "${SSH_OPTIONS[@]}" -tt "motor@$HOST" "/system/services/russhd $config" \
-    > "$FIXTURE/daemon-$port.log" 2>&1 </dev/null &
-  CROSS_DAEMON_PIDS+=("$!")
-  for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-    ssh "${DAEMON_OPTIONS[@]}" -o BatchMode=yes -o PreferredAuthentications=none \
-      "probe@$HOST" true > "$FIXTURE/probe.log" 2>&1 || true
-    grep -q 'Permission denied' "$FIXTURE/probe.log" && return 0
-    sleep 1
-  done
-  cross_fail "the daemon on port $port did not start: $(cat "$FIXTURE/daemon-$port.log")"
-}
-
-# One step at a time: russhd refuses overlapping channels on a connection.
-guest_config() {
-  get /user/cfg/sshd.toml > "$FIXTURE/sshd.toml"
-  sed -e "s/0\.0\.0\.0:2222/0.0.0.0:$1/" -e "s#^users_file = .*#users_file = '$2'#" \
-    -e "s#^authorized_keys_dir = .*#authorized_keys_dir = '$3'#" "$FIXTURE/sshd.toml" |
-    put "$4"
-}
-
-echo "-- a location outside /user is checked through the root --"
-none_dir=/none/tmp/sshd-keys
-admin "/user/bin/mkdir $none_dir"
-put "$none_dir/users.toml" < "$FIXTURE/users.1"
-public alice-1 | put "$none_dir/authorized_keys.alice"
-guest_config 2223 "$none_dir/users.toml" "$none_dir" "$GUEST_TMP/outside.toml"
-# Private as files, but None could replace them: /none/tmp is None's own.
-chmod_guest rwxrw---- "$none_dir/users.toml"
-chmod_guest rwxrw---- "$none_dir/authorized_keys.alice"
-chmod_guest rwxrwx--- "$none_dir"
-second_daemon 2223 "$GUEST_TMP/outside.toml"
-if ssh "${DAEMON_OPTIONS[@]}" -o BatchMode=yes -o PreferredAuthentications=publickey \
-  -i "$FIXTURE/alice-1" "alice@$HOST" true 2>"$FIXTURE/last.err"; then
-  cross_fail "a location under None's own directory was trusted"
-fi
-grep -q 'Permission denied' "$FIXTURE/last.err" || cross_fail "the outside location was not refused"
-
-echo "-- a daemon started now sees every change --"
-key_list_now="$(get "$key_list")"
-guest_config 2224 "$USERS" "$KEYS" "$GUEST_TMP/restarted.toml"
-second_daemon 2224 "$GUEST_TMP/restarted.toml"
-ssh "${DAEMON_OPTIONS[@]}" -o BatchMode=yes -i "$FIXTURE/alice-1" "alice@$HOST" \
-  /user/bin/rush -c true 2>"$FIXTURE/last.err" || cross_fail "a new daemon refused alice: $(cat "$FIXTURE/last.err")"
-if ssh "${DAEMON_OPTIONS[@]}" -o BatchMode=yes -o PreferredAuthentications=publickey \
-  -i "$FIXTURE/alice-2" "alice@$HOST" true 2>"$FIXTURE/last.err"; then
-  cross_fail "a new daemon accepted a removed key"
-fi
-
-# ---- ordinary use under a second name ----------------------------------------
-
-echo "-- ssh, scp and sftp under another name --"
-[ "$(key_attempt alice "$FIXTURE/alice-1" '/user/bin/echo as-alice')" = as-alice ] ||
-  cross_fail "ssh as alice returned the wrong output"
-printf 'payload\n' > "$FIXTURE/payload"
-scp -F /dev/null -P 2222 -q -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
-  -o UserKnownHostsFile="$KNOWN_HOSTS" -i "$FIXTURE/alice-1" \
-  "$FIXTURE/payload" "alice@$HOST:$GUEST_TMP/payload" || cross_fail "scp as alice failed"
-printf 'get %s/payload %s/returned\n' "$GUEST_TMP" "$FIXTURE" |
-  sftp -q -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
-    -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$KNOWN_HOSTS" \
-    -i "$FIXTURE/alice-1" "alice@$HOST" >/dev/null || cross_fail "sftp as alice failed"
-cmp -s "$FIXTURE/payload" "$FIXTURE/returned" || cross_fail "the transfers changed the data"
-
-# ---- a clean reboot ----------------------------------------------------------
-
-echo "-- every change survives a clean reboot --"
-mode_now="$(mode_of "$key_list")"
-stop_keys_vm || cross_fail "the VM did not shut down cleanly"
-boot_test_image sshd-keys-2
-wait_vm_ssh
-open_admin
-key_works alice alice-1
-key_works bob motor-client
-password_works alice changed-password
-key_denied alice alice-2
-password_denied alice alice-password
-[ "$(get "$key_list")" = "$key_list_now" ] || cross_fail "alice's key list did not survive the reboot"
-expect_mode "$key_list" "$mode_now"
-
-stop_keys_vm || cross_fail "the VM did not shut down cleanly"
-echo "test-sshd-keys: PASS"
-  rm -r "$SOCKETS"
+  admin shutdown
+  finish_test_image 20
+  close_sshd_key_sessions
+  echo "test-sshd-keys: PASS"
 }
 
 cross_upload_wasm_inputs() {
