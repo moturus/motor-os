@@ -72,19 +72,18 @@ cannot be quietly fixed or quietly introduced.
   `shift` `unset` `times` `trap` `break` `continue` `return`; regular — `cd`
   (full) `pwd` `echo` `printf` `test`/`[` `read` `true` `false` `getopts`
   `command` `type` `hash` `alias`/`unalias` `umask` `wait` `jobs` `fg` `bg`
-  `kill`;
+  `kill` (Unix only; Motor OS uses the external `sysbox kill` wrapper);
 - **Signals & traps**: `trap` on `EXIT` and any signal (by name, `SIG`-prefixed
   name, or number), `trap ''` to ignore and `trap -` to restore; `^C` at the
   prompt raises `INT` (rush detects the byte itself — no platform generates the
-  signal); `kill` with `-s`/`-NAME`/`-N`/`%job`/`-l`/`-0`;
+  signal); on Unix, `kill` with `-s`/`-NAME`/`-N`/`%job`/`-l`/`-0`;
 - **Background jobs**: `cmd &` runs concurrently, with `$!`, `wait`
   (pid/`%job`/all), `jobs`, and `fg`. `$!` is the child's real pid on both
   platforms; a job that is not a process (a backgrounded builtin or compound
   command) gets rush's own identity instead. A background command reads from
   nothing unless it redirects its own standard input, so it cannot take input
   from the terminal or from a loop around it. On Motor OS, which has no signals,
-  `kill` can only terminate — see the plan's Phase 7 for the exact
-  degradations;
+  the external `kill PID` command terminates a process directly;
 - **Shell options**, enforced: `set -e` (errexit, with the POSIX condition-context
   rules), `-u` (nounset), `-x` (xtrace via `PS4`), `-n` (noexec), `-f` (noglob),
   `-C` (noclobber, with `>|`), `-a` (allexport), `-v` (verbose), `-o pipefail`,

@@ -10,6 +10,10 @@ name = "timeout"
 harness = false
 
 [[test]]
+name = "kill"
+harness = false
+
+[[test]]
 name = "utilities"
 harness = false
 

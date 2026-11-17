@@ -43,7 +43,7 @@ pub use unix::{
 mod motor;
 #[cfg(not(unix))]
 pub use motor::{
-    CAPS_ENV_KEY, ProcessRole, detach_cap_grant, exit_status_code, kill, ordinary_child_cap_grant,
+    CAPS_ENV_KEY, ProcessRole, detach_cap_grant, exit_status_code, ordinary_child_cap_grant,
     own_role, set_disposition, wait_child,
 };
 
@@ -173,12 +173,12 @@ pub enum Disposition {
 }
 
 /// Why a [`kill`] failed.
+#[cfg(unix)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum KillError {
     NoSuchProcess,
     PermissionDenied,
-    /// The platform cannot deliver this signal — always the case on Motor OS for
-    /// anything but a terminate.
+    /// The platform cannot deliver this signal.
     Unsupported,
 }
 

@@ -457,9 +457,9 @@ tested, so a difference cannot be quietly introduced or quietly fixed.</p>
   detects the byte itself, and a foreground child that exits 130 is treated as
   interrupted.</li>
   <li>Background jobs with <code>cmd &amp;</code>, <code>$!</code>, <code>wait</code>,
-  <code>jobs</code>, and <code>fg</code>; <code>kill</code> with <code>-s</code>,
-  <code>-NAME</code>, <code>-N</code>, <code>%job</code>, <code>-l</code>, and
-  <code>-0</code>. On Motor OS, <code>kill</code> can only terminate.</li>
+  <code>jobs</code>, and <code>fg</code>. On Motor OS, the external
+  <code>kill PID</code> wrapper invokes <code>sysbox kill PID</code> to terminate
+  a process directly.</li>
   <li>Shell options, enforced: <code>set -e</code> (with the POSIX condition-context rules),
   <code>-u</code>, <code>-x</code> via <code>PS4</code>, <code>-n</code>, <code>-f</code>,
   <code>-C</code> with <code>&gt;|</code>, <code>-a</code>, <code>-v</code>,
@@ -472,7 +472,7 @@ tested, so a difference cannot be quietly introduced or quietly fixed.</p>
 <h3>Builtins</h3>
 <p>Special: <code>: . eval exec exit export readonly set shift unset times trap break
 continue return</code>. Regular: <code>cd pwd echo printf test [ read true false getopts
-command type hash alias unalias umask wait jobs fg bg kill</code>. Extensions:
+command type hash alias unalias umask wait jobs fg bg</code>. Extensions:
 <code>history</code>, <code>clear</code>, and <code>quit</code>.</p>
 
 <h2>Deliberate differences from dash</h2>

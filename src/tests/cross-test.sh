@@ -3528,12 +3528,12 @@ end_guest_process() {
   out="$(vm_ssh "/user/bin/rush -c 'kill $pid'" 2>&1)" ||
     [[ "$out" == *"no such process"* ]] ||
     cross_fail "$label: cannot kill guest process $pid: '$out'"
-  while out="$(vm_ssh "/user/bin/rush -c 'kill -0 $pid'" 2>&1)"; do
+  while out="$(vm_ssh "/user/bin/sysbox caps $pid" 2>&1)"; do
     [ "$SECONDS" -lt "$deadline" ] ||
       cross_fail "$label: guest process $pid is still running after kill"
     sleep 0.1
   done
-  [[ "$out" == *"no such process"* ]] ||
+  [[ "$out" == *"no such process: $pid"* || "$out" == *"process $pid has exited"* ]] ||
     cross_fail "$label: cannot check guest process $pid: '$out'"
 }
 

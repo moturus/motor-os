@@ -293,19 +293,6 @@ impl PumpedChild {
         }
     }
 
-    /// Terminate the child through its handle.
-    ///
-    /// Motor OS only: it has no pid to aim a kill at, so this is the sole way to
-    /// stop a job there. The Unix host signals by pid instead, so that
-    /// `kill -USR1 %1` can mean what it says (see [`Jobs::signal`]).
-    #[cfg(not(unix))]
-    pub fn kill(&mut self) -> std::io::Result<()> {
-        match self.child.as_mut() {
-            Some(child) => child.kill(),
-            None => Ok(()),
-        }
-    }
-
     /// Join the pump threads and flush any captured output to its file.
     ///
     /// Must be called on the main thread, and only once the child has exited:
@@ -529,36 +516,14 @@ impl Jobs {
 
     /// Send a signal to a job's process. `None` if the job has no process (see
     /// [`Job::child`]) or has already finished.
+    #[cfg(unix)]
     pub fn signal(&mut self, idx: usize, signo: i32) -> Option<Result<(), sys::KillError>> {
         let job = self.jobs.get_mut(idx)?;
         if job.done().is_some() {
             return Some(Err(sys::KillError::NoSuchProcess));
         }
-        let pid = job.pid;
-        let child = job.child.as_mut()?;
-        Some(Self::signal_child(child, pid, signo))
-    }
-
-    /// Deliver a signal to one running child.
-    ///
-    /// Split per platform because the two have nothing in common: the Unix host
-    /// signals by pid, so `kill -USR1 %1` means what it says, while Motor OS
-    /// has exactly one thing it can do to a child — so a KILL/TERM goes through
-    /// the handle rush already owns (no pid to race with reuse) and anything
-    /// else is refused rather than quietly turned into a kill.
-    #[cfg(unix)]
-    fn signal_child(_child: &mut PumpedChild, pid: u64, signo: i32) -> Result<(), sys::KillError> {
-        sys::kill(pid, signo)
-    }
-
-    #[cfg(not(unix))]
-    fn signal_child(child: &mut PumpedChild, _pid: u64, signo: i32) -> Result<(), sys::KillError> {
-        const SIGKILL: i32 = 9;
-        const SIGTERM: i32 = 15;
-        if signo != SIGKILL && signo != SIGTERM {
-            return Err(sys::KillError::Unsupported);
-        }
-        child.kill().map_err(|_| sys::KillError::NoSuchProcess)
+        job.child.as_ref()?;
+        Some(sys::kill(job.pid, signo))
     }
 
     /// Forget finished jobs. POSIX has the shell report and then discard a
