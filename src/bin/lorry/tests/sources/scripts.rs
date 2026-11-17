@@ -193,7 +193,7 @@ fn value(p: &Project, name: &str, expected: &str) {
 
 fn scripts_run(p: &Project, input: &str) -> Vec<String> {
     let output = p
-        .command(&["build", "--offline", "-j1"])
+        .command(&["build", "--offline", "-j1", "-v"])
         .env("SCRIPT_INPUT", input)
         .output()
         .unwrap();

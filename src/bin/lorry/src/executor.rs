@@ -17,6 +17,7 @@ use crate::hash::sha256_file;
 use crate::manifest::Manifest;
 use crate::policy::Admission;
 use crate::process::RustcCommand;
+use crate::progress::{Progress, package_label};
 use crate::resolver::{CompileKind, PackageKey, PackageSourceKey};
 use crate::run_record;
 use crate::source_tree::Limits as TreeLimits;
@@ -465,7 +466,7 @@ pub fn execute(
     let workers = options.jobs.clamp(1, total.max(1));
     let state = std::sync::Mutex::new(state);
     let wakeup = std::sync::Condvar::new();
-    let print = std::sync::Mutex::new(());
+    let print = std::sync::Mutex::new(BTreeSet::<(PackageKey, bool)>::new());
     let (stores, store_queue) = std::sync::mpsc::channel::<CacheStore<'_>>();
     let store_queue = std::sync::Mutex::new(store_queue);
     let store_failures = std::sync::Mutex::new(Vec::new());
@@ -657,7 +658,7 @@ fn execute_unit<'a>(
     planned: &'a crate::unit::PlannedUnit,
     linked: &[UnitKey],
     outputs: &Outputs,
-    print: &std::sync::Mutex<()>,
+    print: &std::sync::Mutex<BTreeSet<(PackageKey, bool)>>,
     stores: &std::sync::mpsc::Sender<CacheStore<'a>>,
     on_metadata: &dyn Fn(Executed),
 ) -> Result<Executed> {
@@ -838,7 +839,6 @@ fn execute_unit<'a>(
                         }
                         None => run_build_script(
                             key,
-                            manifest,
                             options,
                             &run_options,
                             root,
@@ -1098,7 +1098,7 @@ fn execute_unit<'a>(
                 } else {
                     (invocation, Some(staging))
                 };
-                if restorable && !options.quiet && caches.report_shared_rebuild(planned) {
+                if restorable && options.verbose && caches.report_shared_rebuild(planned) {
                     let _guard = print
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1107,46 +1107,7 @@ fn execute_unit<'a>(
                 if restorable && options.verbose {
                     eprintln!("Cache miss {} v{}", key.package.name, key.package.version);
                 }
-                if !options.quiet {
-                    let _guard = print
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    let unit = match key.kind {
-                        UnitKind::Library => "library".to_owned(),
-                        UnitKind::Binary => format!(
-                            "binary `{}`",
-                            key.target.as_deref().ok_or_else(|| Error::failure(
-                                "selected binary has no target name"
-                            ))?
-                        ),
-                        UnitKind::LibraryHarness
-                        | UnitKind::BinaryHarness
-                        | UnitKind::IntegrationHarness => format!(
-                            "test `{}`",
-                            key.target.as_deref().ok_or_else(|| Error::failure(
-                                "selected harness has no target name"
-                            ))?
-                        ),
-                        UnitKind::ProcMacro => "proc macro".to_owned(),
-                        UnitKind::Example | UnitKind::Bench => format!(
-                            "{} `{}`",
-                            if key.kind == UnitKind::Example {
-                                "example"
-                            } else {
-                                "bench"
-                            },
-                            key.target.as_deref().unwrap()
-                        ),
-                        UnitKind::BuildScriptCompile => "build script".to_owned(),
-                        UnitKind::BuildScriptRun => unreachable!(),
-                    };
-                    eprintln!(
-                        "Compiling {} v{} ({}) [{unit}]",
-                        key.package.name,
-                        key.package.version,
-                        manifest.root.display()
-                    );
-                }
+                report_package(key, options, print)?;
                 let command = RustcCommand {
                     child_lease_fd: options.child_lease_fd,
                     program: driver.map_or(&options.toolchain.rustc, |driver| &driver.path),
@@ -1865,28 +1826,48 @@ fn sandbox_inputs(
     paths
 }
 
+fn report_package(
+    key: &UnitKey,
+    options: &Options<'_>,
+    print: &std::sync::Mutex<BTreeSet<(PackageKey, bool)>>,
+) -> Result<()> {
+    if !options.quiet {
+        let mut printed = print
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let checking = key.kind != UnitKind::BuildScriptRun
+            && matches!(key.mode, UnitMode::Check | UnitMode::CheckTest);
+        if printed.insert((key.package.clone(), checking)) {
+            Progress::new(true).status(
+                options.color,
+                if checking { "Checking" } else { "Compiling" },
+                package_label(&key.package),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Runs a build script that has no fresh record and records the run.
 #[allow(clippy::too_many_arguments)]
 fn run_build_script(
     key: &UnitKey,
-    manifest: &Manifest,
     options: &Options<'_>,
     run_options: &RunOptions<'_>,
     directory: &Path,
     run_key: &[u8; 32],
     package_sources: Option<[u8; 32]>,
-    print: &std::sync::Mutex<()>,
+    print: &std::sync::Mutex<BTreeSet<(PackageKey, bool)>>,
 ) -> Result<build_script::Output> {
     run_record::remove(directory)?;
-    if !options.quiet {
+    report_package(key, options, print)?;
+    if options.verbose {
         let _guard = print
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         eprintln!(
-            "Running build script {} v{} ({})",
-            key.package.name,
-            key.package.version,
-            manifest.root.display()
+            "Running build script {} v{}",
+            key.package.name, key.package.version
         );
     }
     let started = run_record::now();

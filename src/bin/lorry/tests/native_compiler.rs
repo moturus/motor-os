@@ -100,7 +100,7 @@ fn main() {
         build(&["check", "--offline"], through_path);
     }
     p.write("grammar/scanner.h", "#define GRAMMAR_VALUE 42 // edited\n");
-    let rebuilt = build(&["build", "--offline"], false);
+    let rebuilt = build(&["build", "--offline", "-v"], false);
     assert!(String::from_utf8_lossy(&rebuilt.stderr).contains("Running build script grammar"));
     build(&["run", "--offline"], false);
     drop(tools);

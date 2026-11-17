@@ -763,6 +763,10 @@ is the duration of the preceding phase.
 Global options precede the command; `-q`, `-v`, and `--color` may also follow
 it. Long value options accept `--name value` and `--name=value`.
 
+Build progress uses Cargo's package labels and profile summary, with amber
+status words. Registry packages omit source paths; path and Git dependencies
+show their Cargo source. Preparation and cache details require `--verbose`.
+
 Command-line usage errors return 1. Build, vendoring, policy, and operational
 failures return 101, including a failed write to stdout or stderr. Help and
 version return 0. Run and test return the executed program or harness status;

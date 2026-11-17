@@ -18,7 +18,7 @@ pub fn run_all(repo: &Path, work: &Path) -> io::Result<()> {
         config(&repo.join(".helix/languages.toml"))?["check"],
         json!({"workspace":false})
     );
-    let toolchain = toolchain(&repo)?;
+    let toolchain = toolchain(repo)?;
     for (custom, member) in [(false, false), (true, false), (true, true)] {
         run(lorry, &toolchain, work, &shipped, custom, member)?;
     }
