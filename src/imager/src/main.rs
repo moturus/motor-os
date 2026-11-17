@@ -82,8 +82,12 @@ struct ImageFile {
     permissions: moto_sdk::async_fs::RolePermissions,
 }
 
+/// Creates the filesystem in place, in the partition at `offset` of `disk`.
+/// Blocks that it does not write stay holes of the disk file: copying a
+/// separately built partition would write out all of its unused space.
 async fn create_motorfs_partition_async(
-    result_path: &Path,
+    disk: &Path,
+    offset: u64,
     directories: &[String],
     files: &[ImageFile],
     policy: &permissions::PermissionPolicy,
@@ -91,15 +95,14 @@ async fn create_motorfs_partition_async(
 ) -> io::Result<()> {
     use moto_sdk::async_fs::FileSystem;
 
-    let data_partition_size = data_partition_size_mb * 1024 * 1024;
-
-    let bd = moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice::create(
-        result_path.to_str().unwrap().into(),
-        data_partition_size / 4096,
+    let bd = moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice::open_region(
+        disk.to_str().unwrap().into(),
+        offset,
+        data_partition_size_mb * 1024 * 1024,
     )
     .await?;
     let mut fs = motor_fs::MotorFs::format(Box::new(bd)).await?;
-    println!("creating Motor FS in {:?}", result_path);
+    println!("creating Motor FS in {:?}", disk);
 
     fs.set_all_permissions_image_admin(
         moto_sdk::async_fs::Role::System,
@@ -182,7 +185,8 @@ async fn create_motorfs_partition_async(
 }
 
 fn create_motorfs_partition(
-    result_path: &Path,
+    disk: &Path,
+    offset: u64,
     directories: &[String],
     files: &[ImageFile],
     policy: &permissions::PermissionPolicy,
@@ -191,7 +195,8 @@ fn create_motorfs_partition(
     let rt = tokio::runtime::LocalRuntime::new().unwrap();
 
     rt.block_on(create_motorfs_partition_async(
-        result_path,
+        disk,
+        offset,
         directories,
         files,
         policy,
@@ -295,12 +300,10 @@ fn create_initrd(result: &Path, kloader: &Path, kernel: &Path, sys_io: &Path) {
 fn set_partition(
     mbr: &mut mbrman::MBR,
     idx: usize,
-    partition: &Path,
+    size: u64,
     start_sector: u32,
     fs: Option<&str>,
 ) -> u32 {
-    let data = File::open(partition).unwrap();
-    let size = data.metadata().unwrap().len();
     let sectors = size.div_ceil(u64::from(SECTOR_SIZE)).try_into().unwrap();
 
     mbr[idx] = mbrman::MBRPartitionEntry {
@@ -335,14 +338,16 @@ fn write_partition(mbr: &mbrman::MBR, idx: usize, partition: &Path, disk: &mut F
     }
 }
 
+/// Writes the boot sector and the two boot partitions, and leaves the last
+/// partition, of `part3_len` bytes, as a hole. Returns that partition's offset.
 fn create_mbr_disk(
     mbr: &Path,
     part1: &Path,
     part2: &Path,
-    part3: &Path,
+    part3_len: u64,
     part3_fs: Option<&str>,
     result: &Path,
-) {
+) -> u64 {
     let mut boot_sector = File::open(mbr).unwrap();
     let mut mbr = mbrman::MBR::read_from(&mut boot_sector, SECTOR_SIZE).unwrap();
 
@@ -352,10 +357,12 @@ fn create_mbr_disk(
         }
     }
 
+    let file_len = |path: &Path| fs::metadata(path).unwrap().len();
     let mut current_sector = 1_u32;
-    current_sector += set_partition(&mut mbr, 1, part1, current_sector, None);
-    current_sector += set_partition(&mut mbr, 2, part2, current_sector, None);
-    set_partition(&mut mbr, 3, part3, current_sector, part3_fs);
+    current_sector += set_partition(&mut mbr, 1, file_len(part1), current_sector, None);
+    current_sector += set_partition(&mut mbr, 2, file_len(part2), current_sector, None);
+    let part3_sectors = set_partition(&mut mbr, 3, part3_len, current_sector, part3_fs);
+    let part3_offset = u64::from(current_sector) * u64::from(SECTOR_SIZE);
 
     let mut disk = fs::OpenOptions::new()
         .create(true)
@@ -369,7 +376,9 @@ fn create_mbr_disk(
 
     write_partition(&mbr, 1, part1, &mut disk);
     write_partition(&mbr, 2, part2, &mut disk);
-    write_partition(&mbr, 3, part3, &mut disk);
+    disk.set_len(part3_offset + u64::from(part3_sectors) * u64::from(SECTOR_SIZE))
+        .unwrap();
+    part3_offset
 }
 
 fn convert_image(
@@ -906,17 +915,8 @@ fn main() {
 
     std::fs::copy(bin_dir.join("kloader"), img_dir.join("kloader")).unwrap();
 
-    let fs_partition = tmp_img_dir.join("fs_part");
-    match config.filesystem.as_str() {
-        "motor-fs" => create_motorfs_partition(
-            &fs_partition,
-            &config.directories,
-            &files,
-            &policy,
-            config.data_partition_size_mb,
-        )
-        .unwrap_or_else(|error| panic!("failed to create Motor FS partition: {error}")),
-        _ => panic!("Unknown filesystem: {}", config.filesystem),
+    if config.filesystem != "motor-fs" {
+        panic!("Unknown filesystem: {}", config.filesystem);
     }
 
     let result = img_dir.join(&config.img_name);
@@ -924,14 +924,27 @@ fn main() {
         ImageFormat::Raw => result.clone(),
         ImageFormat::Qcow2 => tmp_img_dir.join("disk.raw"),
     };
-    create_mbr_disk(
+    let fs_offset = create_mbr_disk(
         &bin_dir.join("mbr.bin"),
         &bin_dir.join("boot.bin"),
         &initrd,
-        &fs_partition,
+        config.data_partition_size_mb * 1024 * 1024,
         Some(&config.filesystem),
         &raw,
     );
+    create_motorfs_partition(
+        &raw,
+        fs_offset,
+        &config.directories,
+        &files,
+        &policy,
+        config.data_partition_size_mb,
+    )
+    .unwrap_or_else(|error| {
+        // Do not leave a disk without its filesystem where an image belongs.
+        let _ = fs::remove_file(&raw);
+        panic!("failed to create Motor FS partition: {error}")
+    });
     if config.image_format == ImageFormat::Qcow2 {
         let qcow2 = tmp_img_dir.join("disk.qcow2");
         convert_raw_to_qcow2(&raw, &qcow2)
@@ -1409,16 +1422,49 @@ entries: []
             "/user/bin/dev".to_owned(),
         ];
         let files = resolve_image_files(&raw_files, &directories, &policy).unwrap();
-        let partition = root.join("partition");
-        create_motorfs_partition(&partition, &directories, &files, &policy, 1).unwrap();
+        // A disk laid out as in an image: the boot sector, two boot partitions
+        // that end inside a sector, then the filesystem, created in place.
+        let mut boot_sector = [0_u8; 512];
+        boot_sector[510..].copy_from_slice(&[0x55, 0xaa]);
+        fs::write(root.join("mbr"), boot_sector).unwrap();
+        fs::write(root.join("boot"), [1_u8; 700]).unwrap();
+        fs::write(root.join("initrd"), [2_u8; 1300]).unwrap();
+        const SIZE_MB: u64 = 64;
+        let disk = root.join("disk");
+        let offset = create_mbr_disk(
+            &root.join("mbr"),
+            &root.join("boot"),
+            &root.join("initrd"),
+            SIZE_MB << 20,
+            Some("motor-fs"),
+            &disk,
+        );
+        assert_eq!(offset, 512 * (1 + 2 + 3));
+        create_motorfs_partition(&disk, offset, &directories, &files, &policy, SIZE_MB).unwrap();
+
+        // The unused part of the partition is a hole: it was never written.
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(&disk).unwrap();
+        assert_eq!(metadata.len(), offset + (SIZE_MB << 20));
+        assert!(
+            metadata.blocks() * 512 < (SIZE_MB << 20) / 4,
+            "the disk takes {} sectors",
+            metadata.blocks()
+        );
+        let contents = fs::read(&disk).unwrap();
+        assert_eq!(contents[512..512 + 700], [1_u8; 700]);
+        assert_eq!(contents[3 * 512..3 * 512 + 1300], [2_u8; 1300]);
 
         tokio::runtime::LocalRuntime::new()
             .unwrap()
             .block_on(async {
-                let device = moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice::open(
-                    camino::Utf8Path::from_path(&partition).unwrap(),
-                )
-                .await?;
+                let device =
+                    moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice::open_region(
+                        camino::Utf8Path::from_path(&disk).unwrap(),
+                        offset,
+                        SIZE_MB << 20,
+                    )
+                    .await?;
                 let fs = motor_fs::MotorFs::open(Box::new(device)).await?;
 
                 async fn entry(
