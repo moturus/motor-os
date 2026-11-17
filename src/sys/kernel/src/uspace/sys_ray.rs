@@ -1,4 +1,6 @@
-use moto_sys::stats::{MetricDescWire, MetricEntry, ProcessInfoV1, PID_KERNEL, PID_SYSTEM};
+use moto_sys::stats::{
+    MetricDescWire, MetricEntry, ProcessInfoV1, ProcessInfoV2, PID_KERNEL, PID_SYSTEM,
+};
 use moto_sys::{syscalls::SyscallResult, SysHandle, SysRay};
 
 use crate::xray::stats::{KProcessStats, MetricType};
@@ -48,12 +50,19 @@ fn sys_query_process_pid(thread: &super::process::Thread, args: &SyscallArgs) ->
 }
 
 fn sys_query_process_list(thread: &super::process::Thread, args: &SyscallArgs) -> SyscallResult {
-    if args.version > 1 {
-        return ResultBuilder::version_too_high();
-    } else if args.version == 0 {
-        return ResultBuilder::invalid_argument();
+    match args.version {
+        0 => ResultBuilder::invalid_argument(),
+        1 => sys_query_process_list_impl::<ProcessInfoV1>(thread, args, KProcessStats::into_v1),
+        2 => sys_query_process_list_impl::<ProcessInfoV2>(thread, args, KProcessStats::into_v2),
+        _ => ResultBuilder::version_too_high(),
     }
+}
 
+fn sys_query_process_list_impl<T: Default>(
+    thread: &super::process::Thread,
+    args: &SyscallArgs,
+    convert: fn(&KProcessStats, &mut T),
+) -> SyscallResult {
     let flat_list = match args.flags {
         SysRay::F_QUERY_LIST => true,
         SysRay::F_QUERY_LIST_CHILDREN => false,
@@ -76,14 +85,14 @@ fn sys_query_process_list(thread: &super::process::Thread, args: &SyscallArgs) -
     let error_ref = &mut error;
 
     let func = |val: &KProcessStats| -> bool {
-        let mut stats = ProcessInfoV1::default();
-        val.into_v1(&mut stats);
+        let mut stats = T::default();
+        convert(val, &mut stats);
 
         unsafe {
-            let dest_ptr = dest_addr + *counter_ref * core::mem::size_of::<ProcessInfoV1>();
+            let dest_ptr = dest_addr + *counter_ref * core::mem::size_of::<T>();
             let buf: &[u8] = core::slice::from_raw_parts(
                 &stats as *const _ as *const u8,
-                core::mem::size_of::<ProcessInfoV1>(),
+                core::mem::size_of::<T>(),
             );
             if let Err(err) = address_space.copy_to_user(buf, dest_ptr as u64) {
                 *error_ref = Some(err);

@@ -118,3 +118,16 @@ Russhd now uses both published versions. Applications that need the new API
 use `moto-sdk = "0.2"` and update their registry lockfiles. Existing `0.1`
 consumers keep their current requirement until they migrate. These releases
 did not change runtime or kernel implementations.
+
+### Not yet published: moto-sys 0.4.1
+
+`moto-sys 0.4.1` adds `stats::ProcessInfoV2`, which is `ProcessInfoV1` plus
+the capability mask, and `SysRay::list_processes_v2()`, which calls version 2
+of the process list query. `ProcessInfoV1` keeps its 56-byte layout and
+version 1 of the query still returns it, so programs built against 0.3.2 and
+0.4.0 run unchanged. The addition is compatible, so the version stays in the
+0.4 range.
+
+Crates in `src/sys` use 0.4.1 by path. `moto-sdk` still names `moto-sys 0.4.0`
+as its floor, and crates outside `src/sys` stay on the published versions:
+none of them needs the new record.

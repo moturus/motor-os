@@ -1973,6 +1973,8 @@ pub fn run() {
 
     println!("Systest starting...");
     let boot_random_id = boot_identity::run_tests();
+    // Before any test that leaves children: it expects exactly its own two.
+    stats::test_process_info();
 
     assert!(!args.is_empty());
     assert_eq!(

@@ -748,12 +748,23 @@ impl KProcessStats {
         SYSTEM_STATS.active_threads.fetch_sub(1, Ordering::Relaxed);
     }
 
+    pub fn into_v1(&self, dest: &mut ProcessInfoV1) {
+        let mut info = ProcessInfoV2::default();
+        self.into_v2(&mut info);
+        dest.pid = info.pid;
+        dest.parent_pid = info.parent_pid;
+        dest.debug_name_bytes = info.debug_name_bytes;
+        dest.debug_name_len = info.debug_name_len;
+        dest.active = info.active;
+        dest.process_role = info.process_role;
+    }
+
     /// Snapshot the process's identity into `dest`. Counters and measurements
     /// are intentionally NOT here — they are the kernel's `MetricType` catalog,
     /// fetched per process via the federated query ([`collect_metrics`]).
     ///
     /// [`collect_metrics`]: KProcessStats::collect_metrics
-    pub fn into_v1(&self, dest: &mut ProcessInfoV1) {
+    pub fn into_v2(&self, dest: &mut ProcessInfoV2) {
         dest.pid = self.user_pid.as_u64();
         dest.parent_pid = self.parent.as_ref().map_or(0, |p| p.user_pid.as_u64());
 

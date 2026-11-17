@@ -1,5 +1,5 @@
 use moto_sys::caps::*;
-use moto_sys::stats::ProcessInfoV1;
+use moto_sys::stats::ProcessInfoV2;
 
 const CAP_NAMES: [(u64, &str); 10] = [
     (CAP_SYS, "CAP_SYS"),
@@ -39,10 +39,10 @@ pub fn format_caps(caps: u64) -> String {
     format!("{caps:#x} = {}", names.join(" | "))
 }
 
-fn process_info(pid: u64) -> Option<ProcessInfoV1> {
-    let mut info = [ProcessInfoV1::default()];
+fn process_info(pid: u64) -> Option<ProcessInfoV2> {
+    let mut info = [ProcessInfoV2::default()];
     // The listing starts at the first process at or after `pid`.
-    match ProcessInfoV1::list(pid, &mut info) {
+    match ProcessInfoV2::list(pid, &mut info) {
         Ok(1) if info[0].pid == pid => Some(info[0]),
         _ => None,
     }

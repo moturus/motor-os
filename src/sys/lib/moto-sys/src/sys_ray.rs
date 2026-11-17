@@ -160,6 +160,38 @@ impl SysRay {
         }
     }
 
+    #[cfg(feature = "userspace")]
+    pub fn list_processes_v2(
+        pid: u64,
+        flat_list: bool,
+        buf: &mut [super::stats::ProcessInfoV2],
+    ) -> Result<usize, ErrorCode> {
+        if buf.is_empty() {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+
+        let flags = if flat_list {
+            Self::F_QUERY_LIST
+        } else {
+            Self::F_QUERY_LIST_CHILDREN
+        };
+        let result = do_syscall(
+            pack_nr_ver(SYS_RAY, Self::OP_QUERY_PROCESS, flags, 2),
+            pid,
+            buf.as_mut_ptr() as usize as u64,
+            buf.len() as u64,
+            0,
+            0,
+            0,
+        );
+
+        if result.is_ok() {
+            Ok(result.data[0] as usize)
+        } else {
+            Err(result.error_code())
+        }
+    }
+
     /// Describe the kernel's metric catalog into `buf`. Returns
     /// `(written, total)`: if `total > buf.len()`, retry with a larger buffer.
     #[cfg(feature = "userspace")]
