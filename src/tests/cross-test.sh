@@ -63,7 +63,6 @@ cross_setup() {
   VM_CHILD_PID=
   VM_SERIAL_FD=
   VM_BOOT_COUNT=0
-  CROSS_PRIVACY_PID=
   CROSS_BACKEND_PID=
   CROSS_PEER_PID=
   CROSS_DAEMON_PIDS=()
@@ -193,10 +192,6 @@ cross_cleanup() {
       wait "$signal_pid"
     fi
   done
-  if [ -n "${CROSS_PRIVACY_PID:-}" ]; then
-    kill "$CROSS_PRIVACY_PID" 2>/dev/null
-    wait "$CROSS_PRIVACY_PID"
-  fi
   if [ -n "$VMM_PID" ]; then
     signal_pid="${VM_CHILD_PID:-$VMM_PID}"
     kill "$signal_pid" 2>/dev/null

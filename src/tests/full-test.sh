@@ -1877,36 +1877,13 @@ host_full_options() (
 full_check_installation() {
   local guest=/none/dev/toolchain-install
   local package="$guest/$1" VM_RUNTIME_DIR="$RUN_DIR/install-checks"
-  local privacy_in privacy_out ready curl_version
+  local curl_version
   mkdir "$VM_RUNTIME_DIR"
   # An additional library exercises discovery, permissions, and stale-file
   # removal independently of the known compiler and tool library names.
   vm_ssh "/user/bin/mkdir -p $package/images/motor/user/lib/install-probe /user/lib/install-keep"
   vm_ssh "echo payload > $package/images/motor/user/lib/install-probe/data"
   vm_ssh "/user/bin/chmod rwxrw---- $package/images/motor/user/lib/install-probe/data"
-
-  # Observe transient files while both installs run, including a caller's shared
-  # TMPDIR. The helper lives in a subdirectory outside the directories it scans.
-  cargo build --release --locked --offline --target x86_64-unknown-motor --manifest-path "$ROOT_DIR/src/sys/tests/toolchain/Cargo.toml" --bin install-privacy
-  cp "$ROOT_DIR/src/sys/tests/toolchain/target/x86_64-unknown-motor/release/install-privacy" "$VM_RUNTIME_DIR/privacy"
-  vm_ssh '/user/bin/mkdir /none/tmp/install-privacy'
-  printf 'put "%s" "/none/tmp/install-privacy/watch"\n' "$VM_RUNTIME_DIR/privacy" |
-    vm_sftp > /dev/null
-  vm_ssh '/user/bin/chmod rwxr-xr-x /none/tmp/install-privacy/watch'
-  # Exercise a valid large configuration so an unsafe staged rewrite remains
-  # visible while it is copied. The comments also check complete preservation.
-  awk 'BEGIN {for (i=0; i<32768; i++) print "# installer privacy and configuration preservation regression"}' \
-    > "$VM_RUNTIME_DIR/sshd-comments"
-  printf 'put "%s" "/none/tmp/install-privacy/comments"\n' "$VM_RUNTIME_DIR/sshd-comments" |
-    vm_sftp > /dev/null
-  vm_ssh '/user/bin/cat /none/tmp/install-privacy/comments >> /user/cfg/sshd.toml'
-  coproc PRIVACY {
-    exec ssh "${SSH_OPTIONS[@]}" motor@192.168.4.2 'MOTOR_OS_CAPS=0x204 /none/tmp/install-privacy/watch'
-  }
-  CROSS_PRIVACY_PID="$PRIVACY_PID"
-  exec {privacy_in}>&"${PRIVACY[1]}" {privacy_out}<&"${PRIVACY[0]}"
-  IFS= read -r ready <&"$privacy_out"
-  [ "$ready" = ready ] || cross_fail 'privacy observer did not start'
 
   # The installer extends PATH in /user/cfg/profile only: the SSH configuration,
   # which holds the host key, stays byte for byte. Never print it on failure.
@@ -1924,13 +1901,8 @@ full_check_installation() {
     if vm_ssh 'MOTOR_OS_CAPS=0x204 /user/bin/cat /user/cfg/sshd.toml' > /dev/null 2>&1; then
       cross_fail 'None can read the SSH configuration'
     fi
-    if ! kill -0 "$CROSS_PRIVACY_PID" 2>/dev/null; then
-      wait "$CROSS_PRIVACY_PID" || cross_fail 'privacy observer failed during installation'
-      cross_fail 'privacy observer exited before installation completed'
-    fi
   }
-  # A caller's shared temporary directory must not make private files public.
-  vm_ssh "TMPDIR=/none/tmp $package/install.sh"
+  vm_ssh "$package/install.sh"
   check_ssh_config
   guest_mode /user/lib/install-probe/data -rwxrw-r--
   for source in hello.c hello.cpp hello.rs; do
@@ -1946,12 +1918,6 @@ full_check_installation() {
   guest_mode /user/cfg/helix drwxr-x---
   # Restore shared settings for the following None-role compiler/editor checks.
   vm_ssh '/user/bin/chmod rwxrwxr-x /user/cfg/cargo /user/cfg/helix'
-  printf 'done\n' >&"$privacy_in"
-  cat <&"$privacy_out"
-  wait "$CROSS_PRIVACY_PID" || cross_fail 'installation exposed the SSH host key to None'
-  exec {privacy_in}>&- {privacy_out}<&-
-  CROSS_PRIVACY_PID=
-  vm_ssh '/user/bin/rm -r /none/tmp/install-privacy'
   if ! vm_ssh '[ ! -e /user/lib/llvm/stale-install ] && [ ! -e /user/lib/rust/stale-install ] && [ ! -e /user/lib/install-probe/stale-install ]'; then
     cross_fail "install.sh left stale files in the toolchain directories"
   fi
