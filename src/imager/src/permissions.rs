@@ -637,7 +637,7 @@ trees:
                 kind: ImageEntryKind::Directory,
             },
             ImageEntry {
-                path: PathBuf::from("/user/cfg/rush.cfg"),
+                path: PathBuf::from("/user/cfg/profile"),
                 kind: ImageEntryKind::File(FileClass::Regular),
             },
             ImageEntry {
@@ -730,7 +730,7 @@ trees:
             );
         }
         for path in [
-            "rush.cfg",
+            "profile",
             "rush.toml",
             "rmux.toml",
             "lorry.toml",

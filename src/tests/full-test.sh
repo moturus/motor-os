@@ -800,7 +800,7 @@ done
 printf 'launcher\n' > "$defaults/user/bin/dev/www"
 printf 'documentation\n' > "$defaults/user/lib/www/index.html"
 printf 'Cargo defaults\n' > "$defaults/user/cfg/cargo/config.toml"
-printf 'user PATH\n' > "$defaults/user/cfg/rush.cfg"
+printf 'user PATH\n' > "$defaults/user/cfg/profile"
 printf 'SSH PATH\n' > "$defaults/user/cfg/sshd.toml"
 printf 'None defaults\n' > "$defaults/none/cfg/lorry.toml"
 for overlay in "${MOTOR_TOOLCHAIN_OVERLAYS[@]}"; do
@@ -815,7 +815,7 @@ for path in user/bin/dev/lorry user/bin/dev/gix user/bin/dev/mdbg user/bin/dev/w
     none/cfg/lorry.toml; do
     [ -f "$WORK/current/motor/$path" ] || fail "missing $path"
 done
-for path in user/bin/dev/ar user/cfg/rush.cfg user/cfg/sshd.toml; do
+for path in user/bin/dev/ar user/cfg/profile user/cfg/sshd.toml; do
     [ ! -e "$WORK/current/motor/$path" ] || fail "unexpected replacement of $path"
 done
 # Exercise the shared packager with real tar archives, including its standalone
@@ -1908,15 +1908,19 @@ full_check_installation() {
   IFS= read -r ready <&"$privacy_out"
   [ "$ready" = ready ] || cross_fail 'privacy observer did not start'
 
-  # Keep a private expected copy to check that extending PATH preserves the host
-  # key and every other setting. Never print either configuration on failure.
+  # The installer extends PATH in /user/cfg/profile only: the SSH configuration,
+  # which holds the host key, stays byte for byte. Never print it on failure.
   vm_ssh '/user/bin/cat /user/cfg/sshd.toml' > "$VM_RUNTIME_DIR/sshd-before.toml"
-  sed -E 's|^(path[[:space:]]*=[[:space:]]*")([^"]*)(".*)$|\1\2:/user/bin/dev\3|' \
-    "$VM_RUNTIME_DIR/sshd-before.toml" > "$VM_RUNTIME_DIR/sshd-expected.toml"
+  [ "$(vm_ssh /user/bin/printenv PATH)" = 'PATH=/user/bin' ] || cross_fail 'wrong SSH PATH before installation'
   check_ssh_config() {
     vm_ssh '/user/bin/cat /user/cfg/sshd.toml' > "$VM_RUNTIME_DIR/sshd-after.toml"
-    cmp -s "$VM_RUNTIME_DIR/sshd-expected.toml" "$VM_RUNTIME_DIR/sshd-after.toml" ||
-      cross_fail 'installation changed SSH configuration beyond extending PATH'
+    cmp -s "$VM_RUNTIME_DIR/sshd-before.toml" "$VM_RUNTIME_DIR/sshd-after.toml" ||
+      cross_fail 'installation changed the SSH configuration'
+    [ "$(vm_ssh '/user/bin/cat /user/cfg/profile' | grep -cx '# Motor toolchain PATH')" = 1 ] ||
+      cross_fail 'installation did not extend the profile PATH exactly once'
+    # Each SSH session starts a login shell, so no reboot is needed.
+    [ "$(vm_ssh /user/bin/printenv PATH)" = 'PATH=/user/bin:/user/bin/dev' ] ||
+      cross_fail 'a new SSH session did not get the development PATH'
     if vm_ssh 'MOTOR_OS_CAPS=0x204 /user/bin/cat /user/cfg/sshd.toml' > /dev/null 2>&1; then
       cross_fail 'None can read the SSH configuration'
     fi
@@ -1925,7 +1929,7 @@ full_check_installation() {
       cross_fail 'privacy observer exited before installation completed'
     fi
   }
-  # A caller's shared temporary directory must not make private edits public.
+  # A caller's shared temporary directory must not make private files public.
   vm_ssh "TMPDIR=/none/tmp $package/install.sh"
   check_ssh_config
   guest_mode /user/lib/install-probe/data -rwxrw-r--

@@ -96,7 +96,6 @@ impl Fixture {
         let config = std::fs::read_to_string(source)
             .unwrap()
             .replace("0.0.0.0:2222", "127.0.0.1:0")
-            .replace("/user/bin", "/bin:/usr/bin")
             .replace(
                 "/user/cfg/russhd/users.toml",
                 root.join("users.toml").to_str().unwrap(),
@@ -109,6 +108,8 @@ impl Fixture {
             .arg(&config_path)
             .current_dir(&root)
             .env("HOME", &root)
+            // Sessions inherit it: the host build starts no login shell.
+            .env("PATH", "/bin:/usr/bin")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())

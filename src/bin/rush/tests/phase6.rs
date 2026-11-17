@@ -737,6 +737,22 @@ fn an_unreadable_profile_is_reported_and_the_session_goes_on() {
     std::fs::remove_dir_all(&home).unwrap();
 }
 
+#[cfg(target_os = "motor")]
+#[test]
+fn a_motor_login_shell_reads_the_user_profile() {
+    // /user/cfg/profile is the one login profile, whatever it holds here.
+    let login = run_env(&["-l", "-c", "echo [$PATH]"], &[("PATH", "/x")], "");
+    let sourced = run_env(
+        &["-c", ". /user/cfg/profile; echo [$PATH]"],
+        &[("PATH", "/x")],
+        "",
+    );
+    assert_eq!(login.stdout, sourced.stdout, "{}", login.stderr);
+    assert!(login.stdout.starts_with("[/user/bin"), "{}", login.stdout);
+    let plain = run_env(&["-c", "echo [$PATH]"], &[("PATH", "/x")], "");
+    assert_eq!(plain.stdout, "[/x]\n");
+}
+
 #[test]
 fn prompt_variables_have_defaults_and_are_expandable() {
     // PS2/PS4 match dash; PS1 is rush's colored prompt (a documented divergence).

@@ -301,7 +301,6 @@ impl ConnectionHandler {
                 session,
                 receive_credit,
                 close_guard,
-                &self.config,
             )
             .await?,
         );
@@ -412,7 +411,6 @@ impl ConnectionHandler {
                 session,
                 receive_credit,
                 close_guard,
-                &self.config,
             )
             .await?,
         );

@@ -423,10 +423,10 @@ check_guest_image_layout() (
   mode /user/bin/sh -rwxrwxr-x
   mode /none/dev drwxrwxrwx
   mode /user/cfg drwxrwxr-x
-  mode /user/cfg/rush.cfg -rwxrw-r--
+  mode /user/cfg/profile -rwxrw-r--
   mode /user/cfg/rush.toml -rwxrw-r--
   mode /user/cfg/sshd.toml -rwxrw----
-  for path in /user/cfg/rush.cfg /user/cfg/rush.toml; do
+  for path in /user/cfg/profile /user/cfg/rush.toml; do
     remote "MOTOR_OS_CAPS=0x204 /user/bin/cat $path" > /dev/null
     # Opening a readable file alone need not check write access; send bytes.
     denied "MOTOR_OS_CAPS=0x204 /user/bin/rush -c 'echo denied >>$path'"
@@ -438,7 +438,7 @@ check_guest_image_layout() (
     denied "MOTOR_OS_CAPS=0x204 /user/bin/mkdir $path/.image-layout-denied"
   done
   remote 'MOTOR_OS_CAPS=0x204 /user/bin/mkdir /none/.image-layout-none && MOTOR_OS_CAPS=0x204 /user/bin/rmdir /none/.image-layout-none'
-  remote '[ ! -e /system/cfg/rush.cfg ] && [ ! -e /system/cfg/sshd.toml ]'
+  remote '[ ! -e /system/cfg/profile ] && [ ! -e /user/cfg/rush.cfg ] && [ ! -e /system/cfg/sshd.toml ]'
   
   # An Interactive installer can replace its own prior output. The shipped ELF
   # remains immutable; a copied ELF and script use the runtime installation modes.

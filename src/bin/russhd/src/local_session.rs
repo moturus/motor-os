@@ -55,11 +55,14 @@ impl ChannelCloseGuard {
     }
 }
 
-/// The shell that runs client sessions and commands.
+/// The shell that runs client sessions and commands. On Motor OS it is a login
+/// shell: it reads `/user/cfg/profile` at the start of each session, as the
+/// console's shell does, so the profile alone sets `PATH`. The host build leaves
+/// the caller's environment to the shell.
 #[cfg(target_os = "motor")]
-pub const SHELL: &str = "/user/bin/rush";
+pub const SHELL: &[&str] = &["/user/bin/rush", "-l"];
 #[cfg(not(target_os = "motor"))]
-pub const SHELL: &str = "/bin/bash";
+pub const SHELL: &[&str] = &["/bin/bash"];
 
 #[cfg(target_os = "motor")]
 const USER_HOME: &str = "/user";
@@ -259,9 +262,7 @@ pub struct Command {
 impl Command {
     /// An interactive session: RFC 4254 6.5 `shell`.
     pub fn shell() -> Self {
-        Self {
-            argv: vec![SHELL.to_owned(), "-i".to_owned()],
-        }
+        Self::shell_with(&["-i"])
     }
 
     /// A client command: RFC 4254 6.5 `exec`.
@@ -270,8 +271,16 @@ impl Command {
     /// verbatim: clients expect `ssh host 'ls *.rs | wc -l'` to work, and
     /// OpenSSH likewise runs the user's login shell with `-c`.
     pub fn exec(cmdline: &str) -> Self {
+        Self::shell_with(&["-c", cmdline])
+    }
+
+    fn shell_with(args: &[&str]) -> Self {
         Self {
-            argv: vec![SHELL.to_owned(), "-c".to_owned(), cmdline.to_owned()],
+            argv: SHELL
+                .iter()
+                .chain(args)
+                .map(|arg| (*arg).to_owned())
+                .collect(),
         }
     }
 }
@@ -305,7 +314,6 @@ pub async fn spawn(
     session: russh::server::Handle,
     receive_credit: russh::ReceiveCredit,
     close_guard: ChannelCloseGuard,
-    cfg: &Arc<crate::config::Config>,
 ) -> Result<StdinTx, russh::Error> {
     use std::process::Stdio;
     use tokio::io::AsyncWriteExt;
@@ -317,9 +325,6 @@ pub async fn spawn(
 
     let mut cmd = tokio::process::Command::new(program);
     cmd.args(args);
-    if !cfg.path().is_empty() {
-        cmd.env("PATH", cfg.path());
-    }
     #[cfg(target_os = "motor")]
     {
         cmd.current_dir(USER_HOME);
@@ -628,7 +633,8 @@ mod tests {
         // and spawning argv[0] would make every pipe, redirection, glob and
         // variable in it either a literal argument or an error.
         let cmd = Command::exec("ls *.rs | wc -l");
-        assert_eq!(cmd.argv, [SHELL, "-c", "ls *.rs | wc -l"]);
+        assert_eq!(cmd.argv[..SHELL.len()], *SHELL);
+        assert_eq!(cmd.argv[SHELL.len()..], ["-c", "ls *.rs | wc -l"]);
     }
 
     #[test]
@@ -636,12 +642,25 @@ mod tests {
         // Quoting is the shell's job: whatever the client sent has to reach it
         // byte for byte.
         let cmdline = r#"echo "a  b" '$X' \& > /tmp/f"#;
-        assert_eq!(Command::exec(cmdline).argv[2], cmdline);
+        assert_eq!(Command::exec(cmdline).argv.last().unwrap(), cmdline);
     }
 
     #[test]
     fn a_shell_session_is_interactive() {
-        assert_eq!(Command::shell().argv, [SHELL, "-i"]);
+        let cmd = Command::shell();
+        assert_eq!(cmd.argv[..SHELL.len()], *SHELL);
+        assert_eq!(cmd.argv[SHELL.len()..], ["-i"]);
+    }
+
+    #[cfg(target_os = "motor")]
+    #[test]
+    fn sessions_start_login_shells() {
+        // The login shell reads /user/cfg/profile, the one source of PATH.
+        assert_eq!(Command::shell().argv, ["/user/bin/rush", "-l", "-i"]);
+        assert_eq!(
+            Command::exec("true").argv,
+            ["/user/bin/rush", "-l", "-c", "true"]
+        );
     }
 
     fn pty(cols: u32, rows: u32, width_px: u32, height_px: u32) -> PtyGeometry {

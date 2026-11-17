@@ -20,8 +20,8 @@ toolchain_collect_overlays() (
     cp -a "$defaults/user/bin/dev" "$motor/user/bin/"
     cp -a "$defaults/user/lib/www" "$motor/user/lib/"
     cp -a "$defaults/user/cfg" "$motor/user/"
-    # The installer extends the user's PATH instead of replacing these files.
-    rm -f "$motor/user/cfg/rush.cfg" "$motor/user/cfg/sshd.toml"
+    # The image owns these; the installer extends the profile's PATH instead.
+    rm -f "$motor/user/cfg/profile" "$motor/user/cfg/sshd.toml"
     cp -a "$defaults/none/cfg" "$motor/none/"
     for command in lorry gix mdbg; do
         install -m 755 "$binaries/$command" "$motor/user/bin/dev/$command"

@@ -80,7 +80,7 @@ entries:
     mode: "rwxrw----"
   - path: "/user/cfg"
     mode: "rwxrwxr-x"
-  - path: "/user/cfg/rush.cfg"
+  - path: "/user/cfg/profile"
     mode: "rwxrw-r--"
   - path: "/user/cfg/rush.toml"
     mode: "rwxrw-r--"

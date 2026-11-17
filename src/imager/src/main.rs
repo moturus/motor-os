@@ -990,11 +990,11 @@ mod tests {
                 add_static_dir(&mut files, Path::new("../..").join(overlay), Path::new("/"));
             }
             assert!(!files.keys().any(|path| path.starts_with("/system/bin/")));
-            for path in ["/user/cfg/rush.cfg", "/user/cfg/sshd.toml"] {
+            for path in ["/user/cfg/profile", "/user/cfg/sshd.toml"] {
                 let contents = fs::read_to_string(&files[path]).unwrap();
                 assert!(!contents.contains("/system/bin"));
             }
-            assert!(!files.contains_key("/system/cfg/rush.cfg"));
+            assert!(!files.contains_key("/system/cfg/profile"));
             assert!(!files.contains_key("/system/cfg/sshd.toml"));
             assert!(config.source_dirs.is_empty());
             let paths = config
@@ -1297,8 +1297,8 @@ mod tests {
         }
         fs::create_dir_all(root.join("first/user/cfg")).unwrap();
         fs::create_dir_all(root.join("second/user/cfg")).unwrap();
-        fs::write(root.join("first/user/cfg/rush.cfg"), "first\n").unwrap();
-        fs::write(root.join("second/user/cfg/rush.cfg"), "second\n").unwrap();
+        fs::write(root.join("first/user/cfg/profile"), "first\n").unwrap();
+        fs::write(root.join("second/user/cfg/profile"), "second\n").unwrap();
 
         let mut files = BTreeMap::new();
         add_static_dir(&mut files, root.join("first"), Path::new("/"));
@@ -1306,8 +1306,8 @@ mod tests {
 
         assert_eq!(files.len(), 1);
         assert_eq!(
-            files.get("/user/cfg/rush.cfg").unwrap(),
-            &root.join("second/user/cfg/rush.cfg")
+            files.get("/user/cfg/profile").unwrap(),
+            &root.join("second/user/cfg/profile")
         );
 
         let policy_path = root.join("permissions.yaml");
@@ -1330,7 +1330,7 @@ entries: []
         .unwrap();
         let resolved = resolve_image_files(&files, &[], &policy).unwrap();
         assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].source, root.join("second/user/cfg/rush.cfg"));
+        assert_eq!(resolved[0].source, root.join("second/user/cfg/profile"));
         assert_eq!(
             permissions::mode_string(resolved[0].permissions),
             "rw-r--r--"

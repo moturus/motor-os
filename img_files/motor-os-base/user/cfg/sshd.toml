@@ -8,7 +8,6 @@
 
 version = 2
 listen_on = '0.0.0.0:2222'
-path = "/user/bin"
 allow_tcp_forwarding = true
 gateway_ports = false
 
