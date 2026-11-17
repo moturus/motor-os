@@ -180,8 +180,6 @@ Copy the native archive into `/user/` on the VM first, then extract into an
 empty directory:
 
 ```sh
-mkdir /user/toolchain
-cd /user/toolchain
 tar -x -f /user/motor-toolchain-x86_64-unknown-motor-1.99.1-3.tar.zst
 motor-toolchain-x86_64-unknown-motor-1.99.1-3/install.sh
 ```

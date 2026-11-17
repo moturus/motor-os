@@ -448,7 +448,7 @@ command.</p>
   <tr><td><code>add PATH…</code>, <code>add -A</code></td><td>Stage the named files, or with <code>-A</code> every new, changed and deleted file. <code>-A</code> skips new files that match an ignore rule; naming such a file yourself is an error.</td></tr>
   <tr><td><code>unstage PATH…</code></td><td>Take files out of the next commit without touching the files themselves.</td></tr>
   <tr><td><code>restore PATH…</code></td><td>Throw away your unstaged changes to the named files.</td></tr>
-  <tr><td><code>commit -m MSG</code></td><td>Commit what is staged to the current branch.</td></tr>
+  <tr><td><code>commit [-m MSG]</code></td><td>Commit what is staged to the current branch. Without <code>-m</code>, edit the message in <code>vim</code> on Linux or <code>red</code> on Motor OS.</td></tr>
   <tr><td><code>branch [-a] [-v]</code></td><td>List branches.</td></tr>
   <tr><td><code>branch list</code>, <code>branch create NAME [REV]</code></td><td>Print the branch names only, or create a branch without switching to it.</td></tr>
   <tr><td><code>tag list</code>, <code>tag create NAME [REV]</code></td><td>List tags, or create a lightweight tag.</td></tr>
@@ -467,7 +467,9 @@ command.</p>
   <li>To stage a deleted file, delete it in the shell and then run <code>add</code> on its
   name.</li>
   <li><code>commit</code> refuses to make an empty commit, except to conclude a merge, and
-  refuses while a merge still has unresolved conflicts.</li>
+  refuses while a merge still has unresolved conflicts. Without <code>-m</code>, it opens
+  <code>.git/COMMIT_EDITMSG</code>; save and quit to commit, or leave the message empty
+  to abort. Lines starting with <code>#</code> are ignored.</li>
   <li><code>unstage</code> on a branch that has no commits yet simply removes the files
   from the index.</li>
   <li><code>restore</code> will not touch a file that is in conflict.</li>
@@ -521,9 +523,12 @@ variables; use <code>-r</code> instead.</p>
 <p>Gix never runs other programs on a repository's behalf. Hooks, credential helpers,
 external filters, diff and merge drivers and signing programs are all ignored. If a
 repository cannot be handled without one of them, for example a file that needs an external
-filter, the command stops with an error instead of guessing. The only programs gix starts
-are <code>/user/bin/curl</code> for HTTPS and <code>/user/bin/ssh</code> for SSH, and
-their paths cannot be configured.</p>
+filter, the command stops with an error instead of guessing. Gix starts
+<code>/user/bin/curl</code> for HTTPS, <code>/user/bin/ssh</code> for SSH, and
+<code>/user/bin/red</code> for commit messages (<code>/usr/bin/curl</code>,
+<code>/usr/bin/ssh</code>, and <code>/usr/bin/vim</code> on Linux). Their paths cannot be
+configured; <code>GIT_EDITOR</code>, <code>VISUAL</code>, <code>EDITOR</code>, and
+<code>core.editor</code> do not change the editor.</p>
 
 <h2 id="remotes">Remotes</h2>
 <h3>HTTPS</h3>

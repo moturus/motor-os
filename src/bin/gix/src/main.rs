@@ -120,7 +120,7 @@ fn run() -> Result {
             Command::new("commit").about("Commit the staged index").arg(
                 Arg::new("message")
                     .short('m')
-                    .required(true)
+                    .help("Commit message; otherwise open vim on Linux or red on Motor OS")
                     .value_name("MSG"),
             ),
         )
@@ -393,13 +393,13 @@ fn run() -> Result {
                 ),
             }
         }
-        Some("commit") => commit::run(
+        Some("commit") => commit::run_or_edit(
             &opened,
             matches
                 .subcommand_matches("commit")
                 .expect("matched commit")
                 .get_one::<String>("message")
-                .expect("required message"),
+                .map(String::as_str),
             &cancellation,
         ),
         Some("diff") => {

@@ -65,7 +65,7 @@ directory. Put `--` in front of a name that starts with a dash. `gix COMMAND
 | `add PATH…`, `add -A` | Stage the named files, or with `-A` every new, changed and deleted file. `-A` skips new files that match an ignore rule; naming such a file yourself is an error. |
 | `unstage PATH…` | Take files out of the next commit without touching the files themselves. |
 | `restore PATH…` | Throw away your unstaged changes to the named files. |
-| `commit -m MSG` | Commit what is staged to the current branch. |
+| `commit [-m MSG]` | Commit what is staged to the current branch. Without `-m`, edit the message in `vim` on Linux or `red` on Motor OS. |
 | `branch [-a] [-v]` | List branches. |
 | `branch list`, `branch create NAME [REV]` | Print the branch names only, or create a branch without switching to it. |
 | `tag list`, `tag create NAME [REV]` | List tags, or create a lightweight tag. |
@@ -85,6 +85,8 @@ A few things work differently from Git:
   name.
 - `commit` refuses to make an empty commit, except to conclude a merge, and
   refuses while a merge still has unresolved conflicts.
+  Without `-m`, it opens `.git/COMMIT_EDITMSG`; save and quit to commit, or
+  leave the message empty to abort. Lines starting with `#` are ignored.
 - `unstage` on a branch that has no commits yet simply removes the files from
   the index.
 - `restore` will not touch a file that is in conflict.
@@ -145,8 +147,10 @@ Gix never runs other programs on a repository's behalf. Hooks, credential
 helpers, external filters, diff and merge drivers and signing programs are
 all ignored. If a repository cannot be handled without one of them, for
 example a file that needs an external filter, the command stops with an error
-instead of guessing. The only programs gix starts are `/user/bin/curl` for
-HTTPS and `/user/bin/ssh` for SSH, and their paths cannot be configured.
+instead of guessing. Gix starts `/user/bin/curl` for HTTPS, `/user/bin/ssh`
+for SSH, and `/user/bin/red` for commit messages (`/usr/bin/curl`,
+`/usr/bin/ssh`, and `/usr/bin/vim` on Linux). Their paths cannot be configured;
+`GIT_EDITOR`, `VISUAL`, `EDITOR`, and `core.editor` do not change the editor.
 
 ## Remotes
 

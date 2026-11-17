@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
 };
@@ -34,7 +35,10 @@ impl Client {
     }
 
     fn command(&self, directory: &Path) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_gix"));
+        // Cross-compiled tests can select the executable uploaded to the guest.
+        let executable =
+            std::env::var_os("GIX_TEST_BIN").unwrap_or_else(|| env!("CARGO_BIN_EXE_gix").into());
+        let mut command = Command::new(executable);
         command
             .current_dir(directory)
             .env_clear()
@@ -55,6 +59,26 @@ impl Client {
     fn error(&self, directory: &Path, args: &[&str], message: &str) {
         let output = self.command(directory).args(args).output().unwrap();
         assert_error(&output, message);
+    }
+
+    fn edit_commit(&self, directory: &Path, vim_command: &str, red_keys: &[u8]) -> Output {
+        let mut child = self
+            .command(directory)
+            .args(["commit"])
+            .env("TERM", "xterm")
+            .env("MOTURUS_STDIO_NO_TERMINAL", "true")
+            .env(
+                "VIMINIT",
+                format!("set noswapfile viminfo= nomore | autocmd VimEnter * {vim_command}"),
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Red reads the scripted keys on Motor; Vim uses VimEnter on Linux.
+        child.stdin.take().unwrap().write_all(red_keys).unwrap();
+        child.wait_with_output().unwrap()
     }
 }
 
@@ -83,6 +107,83 @@ fn lines(text: &str, expected: &[&str]) {
             "{line:?}: {text}"
         );
     }
+}
+
+#[test]
+fn commit_edits_the_message_and_preserves_staging_on_abort() -> Result {
+    let client = Client::new();
+    let root = client.0.join("repository with spaces");
+    client.ok(&client.0, &["init", root.to_str().unwrap()]);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(root.join(".git/config"))?
+        .write_all(b"\n[user]\nname = Test\nemail = test@example.invalid\n")?;
+    fs::write(root.join("file"), "first\n")?;
+    client.ok(&root, &["add", "file"]);
+    let output = client.edit_commit(
+        &root,
+        "call setline(1, ['Subject  ', '', '', '# comment', 'Body', '', '']) | wq",
+        // CSI-u encodes Escape unambiguously even when all keys arrive together.
+        b"iSubject  \r\r\r# comment\rBody\r\r\x1b[27u:wq\r",
+    );
+    assert!(output.status.success(), "{output:?}");
+    let repo = gix::open(&root)?;
+    let head = repo.head_id()?.detach();
+    assert_eq!(
+        repo.head_commit()?.message_raw()?.as_bytes(),
+        b"Subject\n\nBody\n"
+    );
+    assert_eq!(client.ok(&root, &["status"]), "");
+
+    fs::write(root.join("file"), "second\n")?;
+    client.ok(&root, &["add", "file"]);
+    let index = fs::read(root.join(".git/index"))?;
+    let output = client.edit_commit(&root, "q!", b":q!\r");
+    assert_error(&output, "empty commit message");
+    assert_eq!(repo.head_id()?.detach(), head);
+    assert_eq!(fs::read(root.join(".git/index"))?, index);
+    assert_eq!(client.ok(&root, &["status"]), "M  file\n");
+    assert!(!root.join(".git/index.lock").exists());
+
+    #[cfg(not(target_os = "motor"))]
+    {
+        let output = client.edit_commit(&root, "cquit 9", b"");
+        assert_error(&output, "commit aborted");
+        assert_eq!(repo.head_id()?.detach(), head);
+        assert_eq!(fs::read(root.join(".git/index"))?, index);
+        assert!(!root.join(".git/index.lock").exists());
+    }
+
+    // An explicit message bypasses the editor and leaves its last file alone.
+    let last_message = fs::read(root.join(".git/COMMIT_EDITMSG"))?;
+    client.ok(&root, &["commit", "-m", "explicit message"]);
+    assert_eq!(
+        repo.head_commit()?.message_raw()?.as_bytes(),
+        b"explicit message"
+    );
+    assert_eq!(fs::read(root.join(".git/COMMIT_EDITMSG"))?, last_message);
+    client.error(&root, &["commit"], "nothing to commit");
+
+    client.ok(&root, &["checkout", "-b", "topic"]);
+    fs::write(root.join("file"), "topic\n")?;
+    client.ok(&root, &["add", "file"]);
+    client.ok(&root, &["commit", "-m", "topic"]);
+    client.ok(&root, &["checkout", "main"]);
+    fs::write(root.join("file"), "main\n")?;
+    client.ok(&root, &["add", "file"]);
+    client.ok(&root, &["commit", "-m", "main"]);
+    client.error(&root, &["merge", "topic"], "merge has conflicts");
+    fs::write(root.join("file"), "resolved\n")?;
+    client.ok(&root, &["add", "file"]);
+    let merge_message = fs::read(root.join(".git/MERGE_MSG"))?;
+    let output = client.edit_commit(&root, "wq", b":wq\r");
+    assert!(output.status.success(), "{output:?}");
+    let commit = repo.head_commit()?;
+    assert_eq!(commit.parent_ids().count(), 2);
+    assert_eq!(commit.message_raw()?.as_bytes(), merge_message);
+    assert!(!root.join(".git/gix-operation").exists());
+    assert!(!root.join(".git/MERGE_MSG").exists());
+    Ok(())
 }
 
 #[test]
