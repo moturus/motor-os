@@ -1,4 +1,8 @@
 //! Native command tests run serially, including their subprocess helpers.
+#[path = "../../src/format.rs"]
+mod format;
+use format::format_bytes;
+
 mod sysbox_caps;
 mod sysbox_cat;
 mod sysbox_chmod;
