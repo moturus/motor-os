@@ -83,7 +83,9 @@ pub fn read_until(path: &Path, deadline: Option<moto_sdk::rt::time::Instant>) ->
     let path = absolute(path)?;
     LocalRuntime::new().block_on(crate::motor_ipc::until(
         async {
-            let fs = FsClient::connect().map_err(|_| "cannot connect to filesystem service")?;
+            let fs = FsClient::connect_with_backoff()
+                .await
+                .map_err(|_| "cannot connect to filesystem service")?;
             directory(&fs, Path::new(&path).parent().unwrap()).await?;
             let (entry, kind) = fs
                 .stat(&path)
@@ -145,7 +147,9 @@ impl Destination {
             return Err("cannot preserve restricted System permissions in a replacement file");
         }
         LocalRuntime::new().block_on(async {
-            let fs = FsClient::connect().map_err(|_| "cannot connect to filesystem service")?;
+            let fs = FsClient::connect_with_backoff()
+                .await
+                .map_err(|_| "cannot connect to filesystem service")?;
             let create_directory = parent_path == Path::new(CONFIG_DIR)
                 && matches!(
                     fs.stat(CONFIG_DIR).await,
@@ -197,7 +201,9 @@ impl Destination {
             return Err("configuration is limited to 64 KiB");
         }
         LocalRuntime::new().block_on(async {
-            let fs = FsClient::connect().map_err(|_| "cannot connect to filesystem service")?;
+            let fs = FsClient::connect_with_backoff()
+                .await
+                .map_err(|_| "cannot connect to filesystem service")?;
             let parent = if self.create_directory {
                 fs.create_entry_with_permissions(
                     self.parent,

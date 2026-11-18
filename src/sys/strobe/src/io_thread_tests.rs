@@ -242,7 +242,25 @@ fn log_mount_capacity() {
     assert_eq!(log_available_bytes(&mounts), Some(291));
 }
 
+/// Every look at the free space opens its own filesystem connection, and
+/// more of them start together here than sys-io keeps listeners waiting.
+fn callers_that_start_together_all_connect() {
+    const THREADS: usize = 32;
+    for _ in 0..8 {
+        let barrier = std::sync::Barrier::new(THREADS);
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                scope.spawn(|| {
+                    barrier.wait();
+                    assert!(available_bytes().is_some());
+                });
+            }
+        });
+    }
+}
+
 pub fn run() {
+    callers_that_start_together_all_connect();
     log_mount_capacity();
     write_progress_and_flush_policy();
     empty_records_and_disconnect();

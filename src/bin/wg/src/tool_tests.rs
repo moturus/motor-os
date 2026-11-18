@@ -72,6 +72,23 @@ pub(super) fn pid(output: &str) -> u64 {
         .unwrap()
 }
 
+/// Every read opens its own filesystem connection, and more of them start
+/// together here than sys-io keeps listeners waiting.
+fn readers_that_start_together_all_connect(path: &Path) {
+    const THREADS: usize = 32;
+    for _ in 0..8 {
+        let barrier = std::sync::Barrier::new(THREADS);
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                scope.spawn(|| {
+                    barrier.wait();
+                    files::read(path).unwrap();
+                });
+            }
+        });
+    }
+}
+
 pub fn run() {
     assert_eq!(ipc::own_caps() & TOOL_CAPS, TOOL_CAPS);
     assert!(provider_pids().is_empty());
@@ -93,6 +110,7 @@ pub fn run() {
     let renamed = "/user/cfg/wireguard/office.toml";
     let document = files::read(Path::new(original)).unwrap();
     assert_eq!(document.permissions, files::FILE_PERMISSIONS);
+    readers_that_start_together_all_connect(Path::new(original));
     let config = Config::parse(&document.text).unwrap();
     assert!(!output.contains(&STANDARD.encode(config.private_key)));
     assert!(config.peers.is_empty());
