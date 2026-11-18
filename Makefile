@@ -170,16 +170,16 @@ rush:
 
 wg:
 	mkdir -p $(BIN_DIR)
-	cd src/bin/wg && CC_x86_64_unknown_motor="$(MOTOR_SYSROOT)/bin/motor-clang" \
-		AR_x86_64_unknown_motor=ar CARGO_TARGET_DIR="$(OBJ_DIR)/wg" $(DO_BUILD) --locked
+	cd src/sys/tools/wg && CC_x86_64_unknown_motor="$(MOTOR_SYSROOT)/bin/motor-clang" \
+		AR_x86_64_unknown_motor=ar CARGO_TARGET_DIR="$(OBJ_DIR)/wg" $(DO_BUILD)
 	strip -o "$(BIN_DIR)/wg" "$(OBJ_DIR)/wg/$(SUB_DIR)/wg"
 	strip -o "$(BIN_DIR)/wg-tool" "$(OBJ_DIR)/wg/$(SUB_DIR)/wg-tool"
 
 wg-self-test:
 	mkdir -p $(BIN_DIR)
-	cd src/bin/wg && CC_x86_64_unknown_motor="$(MOTOR_SYSROOT)/bin/motor-clang" \
+	cd src/sys/tools/wg && CC_x86_64_unknown_motor="$(MOTOR_SYSROOT)/bin/motor-clang" \
 		AR_x86_64_unknown_motor=ar CARGO_TARGET_DIR="$(OBJ_DIR)/wg" $(DO_BUILD) \
-		--locked --features native-tests --bin wg-self-test
+		--features native-tests --bin wg-self-test
 	strip -o "$(BIN_DIR)/wg-self-test" "$(OBJ_DIR)/wg/$(SUB_DIR)/wg-self-test"
 
 russhd:
@@ -319,6 +319,8 @@ clippy: vdso
 	cd src/sys/dns-resolver && $(DO_CLIPPY)
 	cd src/sys/tools/sysbox && $(DO_CLIPPY)
 	cd src/sys/tools/mdbg && $(DO_CLIPPY)
+	cd src/sys/tools/wg && CC_x86_64_unknown_motor="$(MOTOR_SYSROOT)/bin/motor-clang" \
+		AR_x86_64_unknown_motor=ar $(DO_CLIPPY)
 	cd src/sys/tests/systest && $(DO_CLIPPY)
 	cd src/sys/tests/crossbench && $(DO_CLIPPY)
 	cd src/sys/tests/mio-test && $(DO_CLIPPY)
@@ -326,8 +328,6 @@ clippy: vdso
 	cd src/sys/tests/tokio-tests && $(DO_CLIPPY)
 	cd src/bin/rush && $(DO_CLIPPY)
 	cd src/bin/russhd && $(DO_CLIPPY)
-	cd src/bin/wg && CC_x86_64_unknown_motor="$(MOTOR_SYSROOT)/bin/motor-clang" \
-		AR_x86_64_unknown_motor=ar $(DO_CLIPPY) --locked
 	cd src/bin/httpd && $(DO_CLIPPY)
 	cd src/bin/httpd-axum && $(DO_CLIPPY) --locked
 	cd src/bin/kibim && $(DO_CLIPPY)

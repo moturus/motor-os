@@ -10,7 +10,7 @@ publish = false
 base64 = "0.22"
 boringtun = "=0.7.1"
 getrandom = "0.2"
-moto-netstack = { path = "../../../sys/sys-io/netstack", default-features = false, features = [
+moto-netstack = { path = "../../../sys-io/netstack", default-features = false, features = [
     "medium-ip", "medium-ethernet", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp", "socket-icmp",
     "proto-ipv4-fragmentation", "proto-ipv6-fragmentation",
     "fragmentation-buffer-size-65536", "reassembly-buffer-size-65536", "reassembly-buffer-count-4",

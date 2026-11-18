@@ -288,9 +288,9 @@ released.
 
 ## Design decisions
 
-* `wg` retains boringtun's upstream `ring` backend. The separate `wg`
-  workspace owns its crypto dependencies and C/assembly build requirements;
-  they stay outside the core workspace.
+* `wg` retains boringtun's upstream `ring` backend. `wg` is a member of the
+  `src/sys` workspace, whose lockfile holds its crypto dependencies; only `wg`
+  builds them and their C/assembly sources.
 * Configs with inline keys default to `/user/cfg/wireguard/`; explicit paths
   elsewhere are supported. The binaries ship as `/user/bin/wg` and
   `/user/bin/wg-tool`.
@@ -556,10 +556,11 @@ ordinary sys-io client-channel cleanup.
 
 ## WireGuard process and protocol
 
-`wg` has a separate `src/bin/wg` workspace and lockfile, using standard Rust
-and native Motor OS APIs. Each process loads one inline-key config and registers
-one device; multiple processes provide independently managed devices.
-boringtun and its crypto dependencies stay outside the core sys workspace.
+`wg` lives in `src/sys/tools/wg` and is a member of the `src/sys` workspace,
+using standard Rust and native Motor OS APIs. Each process loads one inline-key
+config and registers one device; multiple processes provide independently
+managed devices. boringtun and its crypto dependencies are in the workspace
+lockfile; only `wg` builds them.
 
 The process uses boringtun 0.7.1's `noise` protocol implementation, with one
 `Tunn` per peer and its platform-specific `device` daemon feature disabled.
@@ -575,8 +576,9 @@ bounded I/O and timer scheduling as specified below.
 The dependency is maintained outside this repository in
 [moturus/boringtun](https://github.com/moturus/boringtun), branch `motor-os`,
 based on the 0.7.1 release commit
-`253f7afb2b3df9e952065d10bf2af19913cb176b`. `wg`'s manifest and lockfile pin
-revision `dcad5645547a89b278b346a399dbc0fae19a02f4`. The fork has two changes:
+`253f7afb2b3df9e952065d10bf2af19913cb176b`. `wg`'s manifest and the workspace
+lockfile pin revision `dcad5645547a89b278b346a399dbc0fae19a02f4`. The fork has
+two changes:
 
 1. A `std::time::Instant` fallback in `sleepyinstant` for targets that
    are neither Unix nor Windows, including Motor OS. Suspend-time accounting
@@ -589,18 +591,17 @@ revision `dcad5645547a89b278b346a399dbc0fae19a02f4`. The fork has two changes:
    check or limiter charge. Normal public `decapsulate` checks remain intact.
 
 boringtun's crypto implementation is unchanged. The independent reference
-peer in `src/bin/wg/host-peer` uses upstream 0.7.1 with `ring` and a separate
-workspace/lockfile.
+peer in `src/sys/tools/wg/host-peer` uses upstream 0.7.1 with `ring` and a
+separate workspace/lockfile.
 
 `getrandom` 0.2 uses a custom backend over
 `moto_sdk::rt::fill_random_bytes`, following
-[russhd's adapter](../src/bin/russhd/src/lib.rs). The standalone workspace
-uses the existing Motor OS `ring` port from
-[russhd's manifest](../src/bin/russhd/Cargo.toml), plus the Motor OS
-`parking_lot` and `parking_lot_core` patches already used in
-[the core manifest](../src/sys/Cargo.toml); these patches are not
-inherited from other workspaces. The Makefile builds `ring`'s C/assembly
-sources with the selected Motor OS toolchain's `motor-clang` and `ar`.
+[russhd's adapter](../src/bin/russhd/src/lib.rs).
+[The workspace manifest](../src/sys/Cargo.toml) patches `ring` to the Motor OS
+port that [russhd's manifest](../src/bin/russhd/Cargo.toml) also uses, next to
+its `parking_lot` and `parking_lot_core` patches. The Makefile builds `ring`'s
+C/assembly sources with the selected Motor OS toolchain's `motor-clang` and
+`ar`.
 
 ### Peer ownership, dispatch and roaming
 
@@ -790,8 +791,8 @@ disconnects on completion or failure. Messages fit the 4 KiB channel. Shared
 input is copied before validating versions, flags, lengths, counts and
 indices, and response reserved fields are initialized. Only explicitly
 redacted interface and peer fields cross IPC. See
-[`control.rs`](../src/bin/wg/src/control.rs) for payloads and
-[`motor_ipc.rs`](../src/bin/wg/src/motor_ipc.rs) for framing and authentication.
+[`control.rs`](../src/sys/tools/wg/src/control.rs) for payloads and
+[`motor_ipc.rs`](../src/sys/tools/wg/src/motor_ipc.rs) for framing and authentication.
 The existing statistics protocol remains separate.
 
 ### Managed startup
@@ -811,7 +812,7 @@ exit, connection loss or deadline expiry releases provisional resources and
 ends the daemon. After acknowledgment, the daemon survives launcher exit;
 it sends `COMMITTED`, and a lost final receipt does not undo activation.
 The startup deadline is five seconds, and uncertain outcomes retain the PID
-for inspection with `status`. See [`launch.rs`](../src/bin/wg/src/launch.rs).
+for inspection with `status`. See [`launch.rs`](../src/sys/tools/wg/src/launch.rs).
 
 ## Validation
 
@@ -831,7 +832,7 @@ The cross runner's System-console phase covers System-role
 rejection, including a System caller that also has `CAP_INTERACTIVE`.
 
 Host parser, prompt, editor, redacted-protocol and interoperability tests run
-with `cargo test --manifest-path src/bin/wg/Cargo.toml --locked`; add
+with `cargo test --manifest-path src/sys/tools/wg/Cargo.toml --locked`; add
 `--release` for the release build. These checks and the native discovery
 API tests are reached through `src/tests/full-test.sh` in the selected build
 mode. WireGuard uses Cargo on Linux and Lorry on Motor; Linux `cdylib`

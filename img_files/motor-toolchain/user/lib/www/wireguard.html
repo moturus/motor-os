@@ -578,13 +578,13 @@ src/tests/full-test.sh --release</code></pre>
 <p>It covers config creation and edits, permissions and capabilities, discovery,
 malformed IPC, startup/stop failures, detached lifetime, and IPv4/IPv6 interoperability.
 The host tests run with
-<code>cargo test --manifest-path src/bin/wg/Cargo.toml --locked</code> (add
+<code>cargo test --manifest-path src/sys/tools/wg/Cargo.toml --locked</code> (add
 <code>--release</code> for release). These checks are included in
 <code>src/tests/full-test.sh</code> and do not require Internet access.</p>
 <p>The repository's
 <a href="https://github.com/moturus/motor-os/blob/main/docs/wireguard.md">WireGuard design and usage document</a>
 has the full configuration, ownership, bounded I/O and control-protocol details.
-Implementation lives in <code>src/bin/wg</code>.</p>
+Implementation lives in <code>src/sys/tools/wg</code>.</p>
 <nav class="pager">
 <a class="pager-prev" href="dns.html"><span>Previous</span>DNS resolver</a>
 <a class="pager-next" href="terminals.html"><span>Next</span>Terminals</a>

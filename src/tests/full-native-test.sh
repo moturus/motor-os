@@ -84,7 +84,7 @@ test_crate() (
   echo "full-native-test: $OS $crate $* ($BUILD)"
   if [ "$OS" = linux ]; then
     cargo test --locked --offline $profile "$@"
-    if [ "$crate" = src/bin/wg ]; then
+    if [ "$crate" = src/sys/tools/wg ]; then
       # Linux cdylib support in Lorry is outside the image-layout migration.
       echo 'full-native-test: WireGuard uses Cargo only on Linux'
       exit
@@ -108,12 +108,13 @@ native_crates() {
     test_crate src/bin/gix --test https-server
   fi
   test_crate src/sys/tests/rust-analyzer
-  for crate in red rmux rush russhd wg curl lorry; do
+  for crate in red rmux rush russhd curl lorry; do
     test_crate "src/bin/$crate"
   done
   test_crate src/bin/httpd-axum --tests
   test_crate src/bin/gix --features native-test-support --lib --test native-port --test cli
   test_crate src/bin/rnetbench
+  test_crate src/sys/tools/wg
   test_crate src/sys/sys-init --lib
   test_crate src/sys/lib/moto-rt
   test_crate src/sys/lib/moto-sys

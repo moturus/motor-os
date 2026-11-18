@@ -1922,7 +1922,7 @@ cross_prepare_programs() {
   (cd "$ROOT_DIR/src/bin/russhd" && cargo build --locked --offline "${profile[@]}" --features cross-test-support --target x86_64-unknown-motor --bin ssh-socks-probe)
   (cd "$ROOT_DIR/src/sys/tests/cross-peer" && cargo build --locked --offline "${profile[@]}")
   (cd "$ROOT_DIR/src/bin/rnetbench" && cargo build --release --locked --offline)
-  (cd "$ROOT_DIR/src/bin/wg/host-peer" && cargo build --release --locked --offline)
+  (cd "$ROOT_DIR/src/sys/tools/wg/host-peer" && cargo build --release --locked --offline)
   (cd "$ROOT_DIR/src/bin/rush" && cargo test --no-run --locked --offline "${profile[@]}" \
     --target x86_64-unknown-motor --test motor_caps --message-format=json) > "$RUN_DIR/rush-caps.json"
   RUSH_CAPS_PROBE="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "motor_caps") | .executable' "$RUN_DIR/rush-caps.json")"
@@ -2247,7 +2247,7 @@ test_wireguard_case() (
   local work peer_pid="" wg_pid="" stale_pid="" peer_in peer_out wg_in wg_out
   local stale_in stale_out guest_pid="" line provider_id learned_endpoint=""
   local name="wg_gate_${BASHPID}" config uploaded=0
-  local peer_binary="${WG_PEER_BINARY:-$ROOT_DIR/src/bin/wg/host-peer/target/release/wg-peer}"
+  local peer_binary="${WG_PEER_BINARY:-$ROOT_DIR/src/sys/tools/wg/host-peer/target/release/wg-peer}"
   local bind=192.168.4.1:0 roam='[2001:db8::1]:0'
   local roam_endpoint='[2001:db8::2]:51820'
   local guest_endpoint=192.168.4.2:51820 role="$2"
@@ -5144,7 +5144,7 @@ cross_benchmark() {
   fail() { cross_fail "$@"; }
   local host_binary="${WG_RNETBENCH_BINARY:-$ROOT_DIR/src/bin/rnetbench/target/release/rnetbench}"
   local banner host_output reader_pid role
-  cargo build --release --locked --offline --manifest-path "$ROOT_DIR/src/bin/wg/host-peer/Cargo.toml"
+  cargo build --release --locked --offline --manifest-path "$ROOT_DIR/src/sys/tools/wg/host-peer/Cargo.toml"
   if [ "$BENCHMARK" = physical ] && [ -z "${WG_RNETBENCH_BINARY:-}" ]; then
     cargo build --release --locked --offline --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml"
   fi

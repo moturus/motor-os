@@ -60,7 +60,7 @@ full_prepare() {
     make -C "$ROOT_DIR" -j"$(nproc)" BUILD=release toolchain-archive
   fi
   "$ROOT_DIR/src/build-scripts/native-test-inputs.sh" "${NATIVE_ARGS[@]}"
-  for crate in src/imager src/bin/wg/host-peer; do
+  for crate in src/imager src/sys/tools/wg/host-peer; do
     cargo fetch --locked --manifest-path "$ROOT_DIR/$crate/Cargo.toml"
   done
   host_sdk_package --prepare "${PROFILE_ARGS[@]}"
@@ -171,7 +171,7 @@ full_host_checks() {
   (cd "$ROOT_DIR/src/imager" && cargo test --locked --offline "${PROFILE_ARGS[@]}")
   (cd "$ROOT_DIR/src/imager" && cargo test --locked --offline "${PROFILE_ARGS[@]}" resize -- --ignored)
   # The independent upstream WireGuard peer is a Linux-only cross-test tool.
-  (cd "$ROOT_DIR/src/bin/wg/host-peer" && cargo test --locked --offline "${PROFILE_ARGS[@]}")
+  (cd "$ROOT_DIR/src/sys/tools/wg/host-peer" && cargo test --locked --offline "${PROFILE_ARGS[@]}")
   host_build_base_networking
   host_make_driver
   host_kloader_image "${PROFILE_ARGS[@]}"
@@ -1015,7 +1015,7 @@ no_test_support() {
 # Each production package builds independently, just as in the Makefile.
 # Including systest here would unify its test features into the services.
 MOTOR=x86_64-unknown-motor
-for package in rt sys-io sys-init sys-tty strobe dns-resolver sysbox; do
+for package in rt sys-io sys-init sys-tty strobe dns-resolver sysbox wg; do
   no_test_support "$ROOT_DIR/src/sys/Cargo.toml" "$MOTOR" "$package"
 done
 # Programs outside src/sys take the same SDK.
