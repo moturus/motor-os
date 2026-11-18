@@ -33,6 +33,9 @@
 //! the typical/standard/legacy I/O paradigms, such as file systems and standard
 //! networking protocols.
 
+mod connect_backoff;
 pub mod fs;
 pub mod ip_device;
 pub mod net;
+
+pub use connect_backoff::ConnectBackoff;

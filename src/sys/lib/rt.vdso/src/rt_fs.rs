@@ -232,8 +232,25 @@ impl AsyncFsClient {
         }
     }
 
+    /// Connects to sys-io's filesystem service, waiting for a free listener
+    /// as `ConnectBackoff` says. The calling thread has no async runtime to
+    /// wait on, so it sleeps.
+    fn connect() -> Result<Rc<FsClient>> {
+        let mut backoff = moto_sdk::io::ConnectBackoff::default();
+        loop {
+            match FsClient::connect() {
+                Err(moto_rt::Error::NotReady) => {}
+                result => return result,
+            }
+            match backoff.next_wake() {
+                Some(wake) => super::rt_thread::sleep(wake.as_u64()),
+                None => return Err(moto_rt::Error::NotReady),
+            }
+        }
+    }
+
     fn create() -> Result<&'static Self> {
-        let fs_client = moto_sdk::io::fs::FsClient::connect()?;
+        let fs_client = Self::connect()?;
         let (tasks_tx, tasks_rx) = moto_sdk::async_runtime::channel(8);
 
         let this = alloc::boxed::Box::leak(alloc::boxed::Box::new(AsyncFsClient {

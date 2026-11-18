@@ -1794,6 +1794,10 @@ pub fn run() {
         spawn_wait_kill::test_shared_listener_restart();
         return;
     }
+    if args.len() == 2 && args[1] == "test-first-calls" {
+        spawn_wait_kill::test_first_calls_at_once();
+        return;
+    }
     if args.len() == 2 && args[1] == "test-kill-paused" {
         debugger::test_kill_paused();
         return;
@@ -2073,6 +2077,7 @@ pub fn run() {
     process_permissions::test_debug_attach_permissions();
     debugger::test_kill_paused();
     spawn_wait_kill::test_shared_listener_restart();
+    spawn_wait_kill::test_first_calls_at_once();
     ipc_service::run_tests();
     spawn_wait_kill::test_thread_creation_exit_rollback();
     spawn_wait_kill::test_exit_releases_memory();

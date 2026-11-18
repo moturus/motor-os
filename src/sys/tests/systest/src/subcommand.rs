@@ -90,6 +90,28 @@ impl Subcommand {
         self.stdin.flush().unwrap();
     }
 
+    /// Returns once the child is reading its commands.
+    pub fn wait_ready(&mut self) {
+        use std::io::{BufRead, BufReader, Write};
+        self.stdin.write_all(b"echo1 ready\n").unwrap();
+        self.stdin.flush().unwrap();
+        let mut line = String::new();
+        BufReader::new(self.inst.stdout.as_mut().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line.trim(), "echo1 ready");
+    }
+
+    /// Has the child make one call, then exit with status 0. One write: after
+    /// a failed call the child would not be there for a second.
+    pub fn call_and_exit(&mut self, call: &str) {
+        use std::io::Write;
+        self.stdin
+            .write_all(format!("{call}\nexit 0\n").as_bytes())
+            .unwrap();
+        self.stdin.flush().unwrap();
+    }
+
     pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
         self.inst.try_wait()
     }
@@ -193,6 +215,9 @@ fn do_command(cmd: String) {
             }
             println!("exec_stack: still alive (NX not enforced)");
             std::process::exit(0);
+        }
+        "stat_cwd" => {
+            std::fs::metadata(".").unwrap();
         }
         "spin" => {
             assert_eq!(2, words.len());

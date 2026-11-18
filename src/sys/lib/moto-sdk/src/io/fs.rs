@@ -272,6 +272,13 @@ impl FsClient {
         }))
     }
 
+    /// Connects, and while sys-io has no listener free waits for one as
+    /// [`ConnectBackoff`](super::ConnectBackoff) says, on the caller's async
+    /// runtime. [`Self::connect`] answers `NotReady` at once instead.
+    pub async fn connect_with_backoff() -> Result<Rc<Self>> {
+        super::connect_backoff::retry_not_ready(Self::connect).await
+    }
+
     pub fn enable_response_pump(&self) {
         assert!(!self.response_pump.replace(true));
     }
