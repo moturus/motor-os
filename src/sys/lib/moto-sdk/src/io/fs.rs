@@ -12,6 +12,7 @@ extern crate alloc;
 
 use crate::ipc::io_channel::Msg;
 use crate::sys_io::api_fs;
+#[doc(hidden)]
 pub use crate::sys_io::api_fs::{MountBlockSource, MountInfo, MountKind};
 use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
@@ -133,6 +134,10 @@ impl Future for ResponseFuture {
 
 impl FsClient {
     /// All boot mounts in table order, with per-mount sampled statistics.
+    ///
+    /// Private API, subject to change: for Motor OS system components
+    /// (`src/sys`) only; see `MountInfo`.
+    #[doc(hidden)]
     pub async fn mounts(self: &Rc<Self>) -> Result<alloc::vec::Vec<MountInfo>> {
         let mut mounts = alloc::vec::Vec::new();
         let mut cursor = 0;
