@@ -1,12 +1,6 @@
 # Future work -- recorded, deliberately not scheduled
 
-Source review: 2026-10-28, Motor OS `8bb9345c`. Non-memory issues were
-checked against source only, without builds, tests, or runtime validation.
-Memory capacity, allocation failure, reclamation, and accounting entries
-were skipped and left unchanged. Runtime and I/O latency items, including
-per-operation allocation overhead, were reviewed. Historical timings below
-are not new measurements. An unexplained historical failure stays open
-unless the source establishes that its cause was fixed.
+## lorry builds on 12 vCPUs run slower than on 4 vCPUs
 
 ## A failed output relay loses the output without an error (2026-11-17)
 
