@@ -320,7 +320,7 @@ build_sed() {
 
 validate_helix_elf() {
 	local binary="$1" stack
-	"$LLVM_TOOLS/llvm-readelf" -h "$binary" | grep -Eq 'Type:.*DYN' ||
+	"$LLVM_TOOLS/llvm-readelf" -h "$binary" | awk '/Type:.*DYN/ { found = 1 } END { exit !found }' ||
 		die "Helix is not a static PIE (ELF DYN): $binary"
 	if "$LLVM_TOOLS/llvm-readelf" -d "$binary" | grep -q '(NEEDED)'; then
 		die "Helix has a dynamic library dependency: $binary"
