@@ -290,9 +290,10 @@ pub(super) struct NetStats {
     pub tcp_accept_backlog: Cell<u64>,
     /// Completed connections reset because that backlog was full.
     pub tcp_accept_overflow: Cell<u64>,
-    /// io_channel listeners currently armed and parked for a client. Zero is
-    /// the state where a connect would answer `NotFound`; the accept path's
-    /// floor refuses its client rather than serve from it.
+    /// io_channel listeners armed and parked for a client, or requested and
+    /// about to be. Zero is the state where a connect would answer
+    /// `NotReady`; the accept path's floor refuses its client rather than
+    /// serve from it.
     pub net_listeners_armed: Cell<u64>,
     /// Clients answered with an explicit `E_OUT_OF_MEMORY` refusal -- the
     /// armed-listener floor -- instead of being served.
