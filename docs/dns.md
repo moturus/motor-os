@@ -17,10 +17,17 @@ Rust application
 
 Numeric addresses and `localhost` retain their VDSO fast paths. Other names use
 a fresh `moto_dns::Client` per lookup, so a dead resolver connection is not
-cached and a restarted service is discoverable by the next call. The service
-keeps four fixed IPC workers and the versioned, pointer-free request/response
-contract in `moto-dns`. The loopback listener has two UDP and two TCP workers.
-It is optional: listener startup failures are logged and IPC startup continues.
+cached and a restarted service is discoverable by the next call. When all
+listeners are busy, the runtime uses `Client::connect_with_backoff` to retry.
+If they stay busy, it sleeps for a total of 10 to 15 seconds before the final
+attempt. `ping` uses this path for its initial hostname lookup. Its fallback
+to the other address family calls `Client::connect` once and reports
+`ServiceUnavailable` if all listeners are busy.
+
+The service keeps four fixed IPC workers and the versioned, pointer-free
+request/response contract in `moto-dns`. The optional loopback listener has
+two UDP and two TCP workers. Listener startup failures are logged and IPC
+startup continues.
 Workers already started remain running if a later spawn fails. A UDP receive or
 TCP accept error is logged and stops only the affected worker while IPC continues.
 Unmodified mlibc uses this listener through its default nameserver when

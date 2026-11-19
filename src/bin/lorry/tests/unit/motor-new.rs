@@ -26,6 +26,24 @@ fn set_none_access(path: &Path, access: Access) {
     .unwrap();
 }
 
+/// Every thread opens its own connection, and more of them start together
+/// here than sys-io keeps listeners waiting.
+#[test]
+fn threads_that_start_together_all_connect() {
+    const THREADS: usize = 32;
+    for _ in 0..8 {
+        let barrier = std::sync::Barrier::new(THREADS);
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                scope.spawn(|| {
+                    barrier.wait();
+                    with_client(async |client| client.stat("/").await.map(|_| ())).unwrap();
+                });
+            }
+        });
+    }
+}
+
 #[test]
 fn build_state_does_not_change_existing_ancestor_modes() {
     let fixture = PathBuf::from("/none/tmp");

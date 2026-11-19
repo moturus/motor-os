@@ -5,6 +5,8 @@ pub mod client;
 pub mod config;
 pub mod forward;
 pub mod local_session;
+#[cfg(target_os = "motor")]
+pub mod motor_fs;
 pub mod permissions;
 pub mod sftp_extensions;
 pub mod sftp_session;

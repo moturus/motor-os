@@ -8,6 +8,8 @@ use russh_sftp::protocol::{
 use std::collections::HashMap;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
+#[cfg(target_os = "motor")]
+use crate::motor_fs::{io_error, with_client};
 #[cfg(unix)]
 use crate::permissions::unix_mode;
 #[cfg(target_os = "motor")]
@@ -211,7 +213,7 @@ async fn create_directory(path: &str, mode: Option<u32>) -> std::io::Result<()> 
 }
 
 #[cfg(unix)]
-fn file_attributes(
+async fn file_attributes(
     _path: &str,
     metadata: &std::fs::Metadata,
 ) -> Result<FileAttributes, StatusCode> {
@@ -352,31 +354,24 @@ fn would_expose_private_data(permissions: moto_sdk::io::fs::RolePermissions, mod
 }
 
 #[cfg(target_os = "motor")]
-fn motor_io<T>(operation: impl Future<Output = moto_sdk::rt::Result<T>>) -> std::io::Result<T> {
-    moto_sdk::async_runtime::LocalRuntime::new()
-        .block_on(operation)
-        .map_err(|error| {
-            std::io::Error::from_raw_os_error(i32::from(moto_sdk::rt::ErrorCode::from(error)))
-        })
-}
-
-#[cfg(target_os = "motor")]
-fn path_permissions(path: &str) -> std::io::Result<moto_sdk::io::fs::RolePermissions> {
-    motor_io(async {
-        let client = moto_sdk::io::fs::FsClient::connect()?;
-        let (entry_id, _) = client.stat(&canonicalize_lexical(path)).await?;
+async fn path_permissions(path: &str) -> std::io::Result<moto_sdk::io::fs::RolePermissions> {
+    let path = canonicalize_lexical(path);
+    with_client(async move |client| {
+        let (entry_id, _) = client.stat(&path).await?;
         client.metadata(entry_id).await
-    })?
+    })
+    .await?
     .permissions()
 }
 
 #[cfg(target_os = "motor")]
 async fn set_path_permissions(path: &str, permissions: SavedPermissions) -> std::io::Result<()> {
-    motor_io(async {
-        let client = moto_sdk::io::fs::FsClient::connect()?;
-        let (entry_id, _) = client.stat(&canonicalize_lexical(path)).await?;
+    let path = canonicalize_lexical(path);
+    with_client(async move |client| {
+        let (entry_id, _) = client.stat(&path).await?;
         client.set_all_permissions(entry_id, permissions).await
     })
+    .await
 }
 
 #[cfg(target_os = "motor")]
@@ -384,15 +379,12 @@ async fn set_file_permissions(
     file: &OpenFile,
     permissions: SavedPermissions,
 ) -> std::io::Result<()> {
-    motor_io(async {
-        moto_sdk::io::fs::FsClient::connect()?
-            .set_all_permissions(file.entry_id, permissions)
-            .await
-    })
+    let entry_id = file.entry_id;
+    with_client(async move |client| client.set_all_permissions(entry_id, permissions).await).await
 }
 
 #[cfg(target_os = "motor")]
-fn create_motor_entry(
+async fn create_motor_entry(
     path: &str,
     kind: moto_sdk::io::fs::EntryKind,
     permissions: moto_sdk::io::fs::RolePermissions,
@@ -410,17 +402,19 @@ fn create_motor_entry(
         .ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid SFTP file name")
         })?;
-    motor_io(async {
-        let client = moto_sdk::io::fs::FsClient::connect()?;
-        let (parent_id, parent_kind) = client.stat(parent).await?;
+    let parent = parent.to_owned();
+    let name = name.to_owned();
+    with_client(async move |client| {
+        let (parent_id, parent_kind) = client.stat(&parent).await?;
         if parent_kind != moto_sdk::io::fs::EntryKind::Directory {
             return Err(moto_sdk::rt::Error::InvalidArgument);
         }
         client
-            .create_entry_with_permissions(parent_id, kind, name, permissions)
+            .create_entry_with_permissions(parent_id, kind, &name, permissions)
             .await
             .map(|_| ())
     })
+    .await
 }
 
 #[cfg(target_os = "motor")]
@@ -431,10 +425,10 @@ async fn open_file(
     preserve_attributes: bool,
 ) -> std::io::Result<OpenFile> {
     let writable = pflags.intersects(OpenFlags::WRITE);
-    let mut original = match path_permissions(path) {
+    let mut original = match path_permissions(path).await {
         Ok(permissions) => Some(permissions),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) if !std::path::Path::new(path).exists() => None,
+        Err(_) if !tokio::fs::try_exists(path).await.unwrap_or(false) => None,
         Err(error) => return Err(error),
     };
     if original.is_some() && pflags.contains(OpenFlags::CREATE | OpenFlags::EXCLUDE) {
@@ -448,12 +442,15 @@ async fn open_file(
             path,
             moto_sdk::io::fs::EntryKind::File,
             staging_permissions(),
-        ) {
+        )
+        .await
+        {
             Ok(()) => {}
             Err(_error)
-                if !pflags.contains(OpenFlags::EXCLUDE) && std::path::Path::new(path).exists() =>
+                if !pflags.contains(OpenFlags::EXCLUDE)
+                    && tokio::fs::try_exists(path).await.unwrap_or(false) =>
             {
-                original = Some(path_permissions(path)?);
+                original = Some(path_permissions(path).await?);
             }
             Err(error) => return Err(error),
         }
@@ -470,8 +467,9 @@ async fn open_file(
     let (file, entry_id) = tokio::task::spawn_blocking(move || {
         use std::os::fd::AsRawFd;
         let file = options.open(path_owned)?;
-        let entry_id =
-            motor_io(async { moto_sdk::rt::fs::get_file_attr(file.as_raw_fd()) })?.entry_id;
+        let entry_id = moto_sdk::rt::fs::get_file_attr(file.as_raw_fd())
+            .map_err(io_error)?
+            .entry_id;
         Ok::<_, std::io::Error>((tokio::fs::File::from_std(file), entry_id))
     })
     .await
@@ -532,11 +530,15 @@ async fn create_directory(path: &str, mode: Option<u32>) -> std::io::Result<()> 
         moto_sdk::io::fs::EntryKind::Directory,
         new_permissions(mode.unwrap_or(0o700), true),
     )
+    .await
 }
 
 #[cfg(target_os = "motor")]
-fn file_attributes(path: &str, metadata: &std::fs::Metadata) -> Result<FileAttributes, StatusCode> {
-    let permissions = path_permissions(path).map_err(|error| {
+async fn file_attributes(
+    path: &str,
+    metadata: &std::fs::Metadata,
+) -> Result<FileAttributes, StatusCode> {
+    let permissions = path_permissions(path).await.map_err(|error| {
         log::warn!("stat permissions for {path}: {error}");
         io_status(&error)
     })?;
@@ -606,12 +608,10 @@ async fn installed_permissions(file: &OpenFile) -> std::io::Result<SavedPermissi
 
 #[cfg(target_os = "motor")]
 async fn installed_permissions(file: &OpenFile) -> std::io::Result<SavedPermissions> {
-    motor_io(async {
-        moto_sdk::io::fs::FsClient::connect()?
-            .metadata(file.entry_id)
-            .await
-    })?
-    .permissions()
+    let entry_id = file.entry_id;
+    with_client(async move |client| client.metadata(entry_id).await)
+        .await?
+        .permissions()
 }
 
 #[cfg(unix)]
@@ -676,7 +676,7 @@ async fn apply_path_mode(path: &str, mode: u32, directory: bool) -> std::io::Res
     #[cfg(unix)]
     let _ = directory;
     #[cfg(target_os = "motor")]
-    let permissions = translated_permissions(path_permissions(path)?, mode, directory);
+    let permissions = translated_permissions(path_permissions(path).await?, mode, directory);
     set_path_permissions(path, permissions).await
 }
 
@@ -770,7 +770,7 @@ impl russh_sftp::server::Handler for SftpSession {
                     };
                     let attrs = match entry.metadata().await {
                         Ok(metadata) => match entry.path().to_str() {
-                            Some(path) => file_attributes(path, &metadata),
+                            Some(path) => file_attributes(path, &metadata).await,
                             None => continue,
                         },
                         Err(err) => Err(io_status(&err)),
@@ -941,13 +941,12 @@ impl russh_sftp::server::Handler for SftpSession {
             return Ok(ok_status(id));
         };
         #[cfg(target_os = "motor")]
-        let entry_id = motor_io(async {
-            moto_sdk::io::fs::FsClient::connect()?
-                .stat(&canonicalize_lexical(&path))
+        let entry_id = {
+            let absolute = canonicalize_lexical(&path);
+            with_client(async move |client| client.stat(&absolute).await.map(|(id, _)| id))
                 .await
-                .map(|(id, _)| id)
-        })
-        .map_err(|error| io_status(&error))?;
+                .map_err(|error| io_status(&error))?
+        };
         // An open upload installs the mode at close, after its contents. The
         // handles on one entry share its staging chmod and deferred mode.
         let mut uploads = self.open_files.values_mut().filter(|file| {
@@ -1141,7 +1140,7 @@ impl russh_sftp::server::Handler for SftpSession {
 
         Ok(russh_sftp::protocol::Attrs {
             id,
-            attrs: file_attributes(&path, &metadata)?,
+            attrs: file_attributes(&path, &metadata).await?,
         })
     }
 }

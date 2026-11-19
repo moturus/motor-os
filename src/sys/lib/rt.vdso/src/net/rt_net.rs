@@ -107,7 +107,7 @@ pub unsafe extern "C" fn dns_lookup(
     } else if let Ok(addr_v6) = Ipv6Addr::from_str(host) {
         addresses.push(SocketAddr::V6(SocketAddrV6::new(addr_v6, port, 0, 0)).into());
     } else {
-        let mut client = match moto_dns::Client::connect() {
+        let mut client = match moto_dns::Client::connect_with_backoff() {
             Ok(client) => client,
             Err(error) => return error_code(error),
         };

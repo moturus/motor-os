@@ -34,6 +34,8 @@ General guidelines:
   make sure src/tests/full-test.sh passes consistently as both debug and release
   builds/runs at least three times each before committing a patch. If this step fails, please make
   a reasonable effort to root cause the failure, don't just stop.
+  * NOTE: this 3+3 rule is temporarily disabled, as a full test takes 2 hours, so 3+3 will be 12 hours,
+          which is unacceptable.
 * If you work on a non-core OS component (e.g. src/bin/red, src/bin/lorry, etc.) please gate your
   work with tests specific to your component, unless instructed otherwise.
 * `src/tests/full-test.sh` includes host checks, native crate tests on Linux,

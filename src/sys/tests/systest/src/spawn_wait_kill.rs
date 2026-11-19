@@ -405,13 +405,13 @@ pub fn test_shared_listener_restart() {
     println!("test_shared_listener_restart PASS");
 }
 
-/// Many new processes at once make their first filesystem call or open their
-/// first socket. Each needs a connection to sys-io, which keeps fewer
-/// listeners waiting than there are callers here: the runtime has to wait
-/// for one, not fail the call.
+/// Many new processes at once make their first filesystem call, open their
+/// first socket, or look a name up. Each needs a connection to sys-io or to
+/// the DNS resolver, which keep fewer listeners waiting than there are
+/// callers here: the runtime has to wait for one, not fail the call.
 pub fn test_first_calls_at_once() {
     const CHILDREN: usize = 32;
-    for call in ["stat_cwd", "bind_udp"] {
+    for call in ["stat_cwd", "bind_udp", "dns_lookup"] {
         for _ in 0..4 {
             let mut children: Vec<_> = (0..CHILDREN).map(|_| subcommand::spawn()).collect();
             for child in &mut children {

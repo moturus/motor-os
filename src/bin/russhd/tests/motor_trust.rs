@@ -4,11 +4,12 @@
 //! to a credential file and to the directories above it. tests/auth_store.rs
 //! has the Unix half, and everything that is the same on both platforms.
 //!
-//! One test, a step at a time: every read opens its own filesystem connection.
+//! The rules are one test, a step at a time: each step changes the tree the
+//! next one reads.
 
 use std::path::{Path, PathBuf};
 
-use moto_sdk::io::fs::{AccessPermissions as Access, FsClient};
+use moto_sdk::io::fs::AccessPermissions as Access;
 use moto_sdk::sys::caps::ProcessRole;
 use russh::keys::PublicKey;
 use russhd::auth_store::AuthStore;
@@ -81,12 +82,32 @@ fn registry() -> String {
 /// Changes what None may do with `path`, and nothing else.
 fn set_none(path: &Path, access: Access) {
     moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
-        let client = FsClient::connect().unwrap();
+        let client = russhd::motor_fs::connect().unwrap();
         let (id, _) = client.stat(path.to_str().unwrap()).await.unwrap();
         let mut permissions = client.metadata(id).await.unwrap().permissions().unwrap();
         permissions.none = access;
         client.set_all_permissions(id, permissions).await.unwrap();
     })
+}
+
+/// Logins that arrive together each read their credentials over a connection
+/// of their own, and more of them start together here than sys-io keeps
+/// listeners waiting.
+#[test]
+fn reads_that_start_together_all_connect() {
+    const THREADS: usize = 32;
+    let missing = Path::new("/none/tmp/russhd-trust-missing");
+    for _ in 0..8 {
+        let barrier = std::sync::Barrier::new(THREADS);
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                scope.spawn(|| {
+                    barrier.wait();
+                    assert_eq!(trusted_file::read(missing, None, Readers::Anyone), Ok(None));
+                });
+            }
+        });
+    }
 }
 
 #[test]

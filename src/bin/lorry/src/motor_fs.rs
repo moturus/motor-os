@@ -14,6 +14,40 @@ thread_local! {
     static CLIENT: RefCell<Option<(LocalRuntime, Rc<FsClient>)>> = const { RefCell::new(None) };
 }
 
+/// Connects to sys-io's filesystem service. It keeps a few listeners waiting
+/// and adds one only when a client takes one, so threads that connect together
+/// can find none left, which it reports as NotReady. rt.vdso waits for its own
+/// connection; this one gets the same waits: 50 usec at first, four times as
+/// long after each refusal, every wait +/-50%. A wait that would take the
+/// total past 10 seconds is the last: it ends at a random moment between 10
+/// and 15 seconds in all, and the next refusal stands. moto-sdk 0.2, which
+/// lorry builds with, has no call that does this.
+fn connect() -> moto_sdk::rt::Result<Rc<FsClient>> {
+    // The last wait ends between these two totals.
+    const MIN_WAITED_USEC: u64 = 10_000_000;
+    const MAX_WAITED_USEC: u64 = 15_000_000;
+
+    let mut wait_usec = 50;
+    let mut waited_usec = 0;
+    loop {
+        match FsClient::connect() {
+            Err(moto_sdk::rt::Error::NotReady) if waited_usec < MIN_WAITED_USEC => {}
+            result => return result,
+        }
+        // The timestamp counter is the random number: it differs between
+        // threads that were refused at the same moment.
+        let random = moto_sdk::rt::time::Instant::now().as_u64();
+        let mut wait = wait_usec / 2 + random % (wait_usec + 1);
+        if waited_usec + wait > MIN_WAITED_USEC {
+            let waited = MIN_WAITED_USEC + random % (MAX_WAITED_USEC - MIN_WAITED_USEC + 1);
+            wait = waited - waited_usec;
+        }
+        std::thread::sleep(std::time::Duration::from_micros(wait));
+        waited_usec += wait;
+        wait_usec *= 4;
+    }
+}
+
 fn with_client<T>(
     operation: impl AsyncFnOnce(Rc<FsClient>) -> moto_sdk::rt::Result<T>,
 ) -> Result<T> {
@@ -21,9 +55,7 @@ fn with_client<T>(
         let mut slot = slot.borrow_mut();
         if slot.is_none() {
             let mut runtime = LocalRuntime::try_new().map_err(failure)?;
-            let client = runtime
-                .block_on(async { FsClient::connect() })
-                .map_err(failure)?;
+            let client = runtime.block_on(async { connect() }).map_err(failure)?;
             *slot = Some((runtime, client));
         }
         let (runtime, client) = slot.as_mut().unwrap();

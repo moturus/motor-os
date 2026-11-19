@@ -8,6 +8,39 @@ per-operation allocation overhead, were reviewed. Historical timings below
 are not new measurements. An unexplained historical failure stays open
 unless the source establishes that its cause was fixed.
 
+## A failed output relay loses the output without an error (2026-11-17)
+
+A process whose standard output or error is a file relays the output of a
+child that inherits it: rt.vdso copies the child's pipe into the file
+(`transfer_file_output` in `src/sys/lib/rt.vdso/src/stdio.rs`). When that
+write fails, rt.vdso logs `child file-stdio relay failed: <code>` and ends
+the relay. The child is not told. A child that writes little has had every
+write succeed, exits with status 0, and its output is gone.
+
+Seen over SSH, though nothing in it depends on SSH:
+
+    MOTOR_OS_CAPS=0x204 cat > /none/tmp/a.txt
+
+leaves `a.txt` empty and reports status 0. The Interactive shell creates the
+file, so None may only read it (`rwxrw-r--`). `/user/bin/cat` is a Rush
+script that runs `sysbox cat`; that Rush runs as None, relays for sysbox, and
+its write is refused (`NotAllowed`, 9). The only trace is the warning on the
+session's standard error. `MOTOR_OS_CAPS=0x204 rush -c 'sysbox echo x' > file`
+loses its output the same way.
+
+A program that writes the file itself is told: `MOTOR_OS_CAPS=0x204 sysbox
+cat > file` ends with "failed printing to stdout: NotAllowed", and `sysbox
+echo` with "write error: Permission denied" and status 1. With the
+redirection inside the None shell the file is None's own and the write
+succeeds: `MOTOR_OS_CAPS=0x204 rush -c 'cat > file'`.
+
+Not tried: a write that fails for another reason, a full filesystem among
+them, which takes the same path in the code; and a child that keeps writing
+after the relay has ended. No fix is chosen: the relay could end the pipe
+with an error for the child's next write, and the relaying process could
+fail when its relay did. Until then a test that uploads a file this way gets
+an empty file and a passing status.
+
 ## Debug images: what still slows guest file work (2026-11-16)
 
 An earlier entry here said the upload of the Lorry vendor tree in

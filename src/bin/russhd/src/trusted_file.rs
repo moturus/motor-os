@@ -36,11 +36,11 @@ pub fn read(
     trust_root: Option<&Path>,
     readers: Readers,
 ) -> Result<Option<Vec<u8>>, Reason> {
-    use moto_sdk::io::fs::{EntryKind, FsClient};
+    use moto_sdk::io::fs::EntryKind;
 
     let text = path.to_str().ok_or("the path is not UTF-8")?;
     moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
-        let client = FsClient::connect().map_err(|_| "cannot reach the filesystem")?;
+        let client = crate::motor_fs::connect().map_err(|_| "cannot reach the filesystem")?;
         let (id, kind) = match client.stat(text).await {
             Ok(entry) => entry,
             Err(moto_sdk::rt::Error::NotFound) => return Ok(None),

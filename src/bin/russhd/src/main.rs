@@ -372,8 +372,8 @@ impl ConnectionHandler {
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
                 // The kernel stops at once, so persist what sys-io still holds.
-                if let Err(err) = moto_sdk::async_runtime::LocalRuntime::new()
-                    .block_on(async { moto_sdk::io::fs::FsClient::connect()?.flush().await })
+                if let Err(err) =
+                    russhd::motor_fs::with_client(async |client| client.flush().await).await
                 {
                     log::error!("shutdown: filesystem flush failed: {err:?}");
                 }

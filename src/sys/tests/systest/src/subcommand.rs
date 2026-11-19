@@ -222,6 +222,11 @@ fn do_command(cmd: String) {
         "bind_udp" => {
             std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         }
+        // A name from the image's hosts file: the resolver answers it itself.
+        "dns_lookup" => {
+            use std::net::ToSocketAddrs;
+            ("motor-dns-test", 0).to_socket_addrs().unwrap();
+        }
         "spin" => {
             assert_eq!(2, words.len());
             let ms = words[1].parse::<u128>().unwrap();
