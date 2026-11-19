@@ -3,6 +3,31 @@ mod support;
 use support::{Project, artifacts};
 
 #[test]
+fn package_with_only_an_integration_test() {
+    let p = Project::new();
+    p.package(
+        ".",
+        "probe",
+        "[[test]]\nname = \"installed\"\npath = \"checks/installed.rs\"\nharness = false\n",
+    );
+    p.write(
+        "checks/installed.rs",
+        "fn main() { println!(\"installed test ran\"); }\n",
+    );
+    p.lock(&[("probe", &[])]);
+    p.success(&["fetch", "--locked", "--offline"]);
+    p.admit();
+    assert_eq!(
+        p.success(&["test", "--locked", "--offline"]).stdout,
+        b"installed test ran\n"
+    );
+
+    // Removing the sole target leaves a genuinely empty package.
+    p.package(".", "probe", "");
+    p.fails(&["fetch", "--locked", "--offline"], "has no targets");
+}
+
+#[test]
 fn explicit_inferred_disabled_and_harness_free_test_targets() {
     let p = Project::new();
     p.write("src/lib.rs", "pub fn answer() -> u32 { 42 }\n");

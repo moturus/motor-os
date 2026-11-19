@@ -1265,17 +1265,11 @@ fn resolve_target_defaults(manifest: &mut Manifest, check_sources: bool) -> Resu
             )));
         }
     }
-    if manifest.library.is_none()
-        && manifest
-            .targets
-            .iter()
-            .all(|target| target.kind == TargetKind::Test)
-    {
-        return Err(Error::failure(format!(
-            "package `{}` has no supported library or binary target",
-            manifest.name
-        ))
-        .with_help("add `src/lib.rs`, `src/main.rs`, or one supported `[[bin]]`"));
+    if manifest.library.is_none() && manifest.targets.is_empty() {
+        return Err(
+            Error::failure(format!("package `{}` has no targets", manifest.name))
+                .with_help("add a library, binary, integration test, example, or benchmark target"),
+        );
     }
     if let Some(default) = &manifest.default_run
         && manifest.target(TargetKind::Bin, default).is_none()
