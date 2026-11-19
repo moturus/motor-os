@@ -43,6 +43,12 @@ src/tests/full-test.sh --release
 ```
 
 The toolchain archive is always a release build, whatever the options.
+Before building, the gate checks the installed rustc, Clang, and LLD build
+identities against those recorded in the native release's Lorry executable.
+It also compares the Motor target's Rust libraries and C startup object byte
+for byte. The reference archive comes from `$MOTORH` (the checkout's parent
+directory by default) and the channel in `rust-toolchain.toml`. On a mismatch,
+select the Linux-host toolchain from the same release build.
 
 ### `--all-debug`
 

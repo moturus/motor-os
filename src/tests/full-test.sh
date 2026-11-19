@@ -55,6 +55,60 @@ full_options() {
   [ "$FULL" != 1 ] || NATIVE_ARGS+=(--full)
 }
 
+full_check_toolchain() (
+  local channel="$1" package="motor-toolchain-$1"
+  local archive="${MOTORH:-$ROOT_DIR/..}/$package.tar.zst"
+  local rustlib=lib/rustlib/x86_64-unknown-motor crt=user/lib/llvm/lib/crt1.o
+  local sysroot rustc_version clang_version lld_version expected work images
+  local rustup_compiler compiler checked_sysroot=
+  fail() { echo "full-test: $*" >&2; exit 1; }
+
+  [ -f "$archive" ] || fail "missing native toolchain archive: $archive"
+  rustup_compiler="$(rustup which rustc)" || fail "cannot locate the installed $channel toolchain"
+  mismatch() {
+    fail "toolchain at $sysroot differs from $archive. Install the matching $package-x86_64-linux.tar.zst (see docs/toolchain.md)."
+  }
+  # The native archive carries the same Motor Rust libraries and C startup
+  # object as the host cross sysroot. Read the original release before repackaging.
+  work="$(mktemp -d)" || return 1
+  trap 'rm -r -- "$work"' EXIT
+  images="$work/$package/images"
+  tar -xf "$archive" -C "$work" "$package/images/rustc/user/lib/rust/$rustlib/lib" \
+    "$package/images/llvm/$crt" "$package/images/motor/user/bin/dev/lorry" ||
+    fail "cannot read the toolchain reference files from $archive"
+
+  # Lorry in the release records the full rustc, Clang and LLD producer
+  # strings, including the LLVM repository even for builds of the same commit.
+  expected="$(LC_ALL=C readelf -p .comment "$images/motor/user/bin/dev/lorry" |
+    sed -n 's/^ *\[[^]]*\]  //p')" || fail "cannot read compiler identities from $archive"
+  [ -n "$expected" ] || fail "release Lorry has no compiler identities in $archive"
+  check_stamp() {
+    if ! grep -Fxq -- "$1" <<< "$expected"; then
+      printf 'Installed: %s\nArchive compiler identities:\n%s\n' "$1" "$expected" >&2
+      mismatch
+    fi
+  }
+
+  # Make uses rustc on PATH, the native tests ask rustup, and Cargo honors RUSTC.
+  local compilers=(rustc "$rustup_compiler")
+  [ -z "${RUSTC:-}" ] || compilers+=("$RUSTC")
+  for compiler in "${compilers[@]}"; do
+    sysroot="$("$compiler" --print sysroot)" || fail "cannot locate the sysroot for $compiler"
+    rustc_version="$("$compiler" --version)" || mismatch
+    [[ "$rustc_version" == *" ($channel)" ]] || { echo "$rustc_version" >&2; mismatch; }
+    check_stamp "rustc version ${rustc_version#rustc }"
+    [[ "$sysroot" -ef "$checked_sysroot" ]] && continue
+    checked_sysroot="$sysroot"
+    clang_version="$("$sysroot/$rustlib/sysroot/bin/motor-clang" --version)" || mismatch
+    lld_version="$("$sysroot/lib/rustlib/x86_64-unknown-linux-gnu/bin/ld.lld" --version)" || mismatch
+    check_stamp "${clang_version%%$'\n'*}"
+    check_stamp "Linker: ${lld_version% (compatible with GNU linkers)}"
+    cmp "$images/llvm/$crt" "$sysroot/$rustlib/sysroot/$crt" || mismatch
+    diff -qr "$images/rustc/user/lib/rust/$rustlib/lib" "$sysroot/$rustlib/lib" || mismatch
+  done
+  echo "full-test: installed toolchain matches $channel"
+)
+
 full_prepare() {
   local targets=(images raw.img systest crossterm-smoke wg-self-test rnetbench)
   local crate
@@ -102,9 +156,7 @@ host_resolution_oracles() (
 )
 
 full_install_toolchain() {
-  local version archive package
-  version="$(sed -n 's/^channel = "\(.*\)"/\1/p' "$ROOT_DIR/rust-toolchain.toml")"
-  package="motor-toolchain-$version"
+  local package="motor-toolchain-$1" archive
   archive="$ROOT_DIR/build/toolchain/release/$package.tar.zst"
   [ -f "$archive" ] || cross_fail "missing toolchain archive: $archive"
   copy_test_image "$CROSS_IMAGE" installed
@@ -182,6 +234,7 @@ full_host_checks() {
   host_kloader_image "${PROFILE_ARGS[@]}"
   host_external_sources
   host_toolchain_archive
+  host_full_toolchain
   host_toolchain_bootstrap
   host_net_contract
   host_vm_image_format
@@ -198,6 +251,10 @@ full_host_checks() {
 full_main() {
   full_options "$@"
   cd "$ROOT_DIR"
+  local channel
+  channel="$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' rust-toolchain.toml)"
+  [[ "$channel" =~ ^[A-Za-z0-9._-]+$ ]] || cross_fail 'expected one toolchain channel in rust-toolchain.toml'
+  full_check_toolchain "$channel" || return 1
   full_prepare
   full_host_checks
   "$ROOT_DIR/src/tests/full-native-test.sh" "${NATIVE_ARGS[@]}"
@@ -207,7 +264,7 @@ full_main() {
     FULL_IMAGE="$CROSS_IMAGE"
     echo 'SKIP Firecracker: toolchain archive installation'
   else
-    full_install_toolchain
+    full_install_toolchain "$channel"
   fi
   CROSS_IMAGE="$FULL_IMAGE"
   cross_run
@@ -1841,6 +1898,75 @@ host_tool_sizes() (
   bytes_without="$(stat -c %s "$evidence/without-formatter.qcow2")"
   check_size rustfmt-qcow2-growth "$((bytes_with - bytes_without))" 22020096
   echo 'tool size contracts: PASS'
+)
+
+host_full_toolchain() (
+  local work channel=x86_64-unknown-motor-test
+  unset RUSTC
+  work="$(mktemp -d)"
+  trap 'rm -r -- "$work"' EXIT
+  local ROOT_DIR="$work/checkout" MOTORH="$work/releases" installed="$work/custom prefix"
+  local package="motor-toolchain-$channel" rustlib=lib/rustlib/x86_64-unknown-motor
+  local images="$work/$package/images" crt=user/lib/llvm/lib/crt1.o
+  local clang="$installed/$rustlib/sysroot/bin/motor-clang"
+  local lld="$installed/lib/rustlib/x86_64-unknown-linux-gnu/bin/ld.lld"
+  local rust_version="1.0 (abc123) ($channel)" llvm_version='23.1.1 (release abc123)'
+  mkdir -p "$ROOT_DIR" "$MOTORH" "${clang%/*}" "${lld%/*}" "$installed/$rustlib/lib" \
+    "$installed/$rustlib/sysroot/${crt%/*}" "$images/llvm/${crt%/*}" \
+    "$images/rustc/user/lib/rust/$rustlib/lib" "$images/motor/user/bin/dev"
+  printf '[toolchain]\nchannel = "%s"\n' "$channel" > "$ROOT_DIR/rust-toolchain.toml"
+  rustc() {
+    case "$*" in
+      '--print sysroot') echo "$installed" ;;
+      --version) echo "rustc $rust_version" ;;
+      *) cross_fail "unexpected rustc arguments: $*" ;;
+    esac
+  }
+  local fixture_rustup_compiler=rustc
+  rustup() { [ "$*" = 'which rustc' ] && echo "$fixture_rustup_compiler"; }
+  version_script() {
+    printf '#!/bin/sh\necho "%s"\n' "$2" > "$1"
+    chmod +x "$1"
+  }
+  version_script "$clang" "clang version $llvm_version"
+  version_script "$lld" "LLD $llvm_version (compatible with GNU linkers)"
+  as -o "$images/motor/user/bin/dev/lorry" - <<EOF
+.ident "rustc version $rust_version"
+.ident "clang version $llvm_version"
+.ident "Linker: LLD $llvm_version"
+EOF
+  echo startup > "$images/llvm/$crt"
+  echo library > "$images/rustc/user/lib/rust/$rustlib/lib/libstd.rlib"
+  cp "$images/llvm/$crt" "$installed/$rustlib/sysroot/$crt"
+  cp "$images/rustc/user/lib/rust/$rustlib/lib/libstd.rlib" "$installed/$rustlib/lib/"
+  tar --zstd -cf "$MOTORH/$package.tar.zst" -C "$work" "$package"
+
+  full_prepare() { touch "$work/prepared"; exit 0; }
+  (full_main --release)
+  [ -e "$work/prepared" ] || cross_fail 'matching toolchain did not reach build preparation'
+  rm "$work/prepared"
+  rejected() {
+    if (full_main --release) > "$work/log" 2>&1; then cross_fail 'accepted a mismatched toolchain'; fi
+    [ ! -e "$work/prepared" ] && grep -Fq -- "$1" "$work/log" ||
+      { cat "$work/log" >&2; cross_fail "missing toolchain diagnostic: $1"; }
+  }
+  other_rustc() { rust_version="1.0 (other) ($channel)" rustc "$@"; }
+  fixture_rustup_compiler=other_rustc rejected "rustc version 1.0 (other) ($channel)"
+  RUSTC=other_rustc rejected "rustc version 1.0 (other) ($channel)"
+  # Same release and commits, different embedded LLVM repository.
+  version_script "$clang" 'clang version 23.1.1 (local abc123)'
+  rejected 'clang version 23.1.1 (local abc123)'
+  version_script "$clang" "clang version $llvm_version"
+  version_script "$lld" 'LLD 23.1.1 (local abc123) (compatible with GNU linkers)'
+  rejected 'Linker: LLD 23.1.1 (local abc123)'
+  version_script "$lld" "LLD $llvm_version (compatible with GNU linkers)"
+  echo stale > "$installed/$rustlib/sysroot/$crt"
+  rejected crt1.o
+  cp "$images/llvm/$crt" "$installed/$rustlib/sysroot/$crt"
+  echo stale > "$installed/$rustlib/lib/libstd.rlib"
+  rejected libstd.rlib
+  MOTORH="$work/missing" rejected 'missing native toolchain archive'
+  echo 'full-test toolchain check: PASS'
 )
 
 host_full_options() (
