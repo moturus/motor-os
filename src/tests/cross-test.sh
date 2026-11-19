@@ -615,11 +615,10 @@ write_ssh_client_host_config() {
   local path="$1"
   local address="$2"
   local host_key="$3"
-  local command_path="${4:-/bin:/usr/bin}"
   local credentials="$SSH_CLIENT_HOST_ROOT/credentials"
   mkdir -m 700 -p "$credentials"
   {
-    printf "version = 2\nlisten_on = '%s'\npath = '%s'\n" "$address" "$command_path"
+    printf "version = 2\nlisten_on = '%s'\n" "$address"
     printf 'allow_tcp_forwarding = true\n'
     printf 'host_key = """%s"""\n\n' "$(cat "$host_key")"
     printf "users_file = '%s'\nauthorized_keys_dir = '%s'\n" \
@@ -645,10 +644,11 @@ start_ssh_client_host() {
   local deadline
 
   [ -x "$host_bin" ] || fail "host russhd is missing at $host_bin"
-  write_ssh_client_host_config "$config" "$listen_host:$requested_port" "$host_key" "$command_path"
+  write_ssh_client_host_config "$config" "$listen_host:$requested_port" "$host_key"
   coproc SSH_CLIENT_HOST_SERVER {
     cd "$SSH_CLIENT_HOST_ROOT"
-    exec env HOME="$SSH_CLIENT_HOST_ROOT" "$host_bin" "$config" </dev/null 2>&1
+    # Linux SSH sessions inherit PATH, including the Git helpers in the gix test.
+    exec env HOME="$SSH_CLIENT_HOST_ROOT" PATH="$command_path" "$host_bin" "$config" </dev/null 2>&1
   }
   SSH_CLIENT_HOST_PROCESS="$SSH_CLIENT_HOST_SERVER_PID"
   exec {SSH_CLIENT_HOST_OUTPUT_FD}<&"${SSH_CLIENT_HOST_SERVER[0]}"
