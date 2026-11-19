@@ -78,7 +78,6 @@ fn pane_terminal_screen_titles_scrollback_and_disconnect() {
     });
     client.send(b"\x01r");
     client.wait("background title", |c| c.grid.line(23).contains("0:rush"));
-    client.send(b"kill $!\nwait\n");
 
     let numbers = (1..=30)
         .map(|n| n.to_string())
@@ -105,6 +104,11 @@ fn pane_terminal_screen_titles_scrollback_and_disconnect() {
     client.send(b"qexit\n");
     let output = client.finish(0);
     assert!(output.windows(8).any(|part| part == b"\x1b[?1049l"));
+    // Reaping the pane shell terminates its ordinary background child.
+    until("background sleep exited with its shell", || {
+        !s.success("/user/bin/ps", &[], caps())
+            .contains("sleep 271828")
+    });
 
     let mut client = s.client(RMUX, &["new", "-s", "hangup"], caps());
     client.text("motor-os");
