@@ -433,11 +433,10 @@ impl NetRuntime {
     }
 
     /// The explicit no. This client connected, so it must never see the
-    /// kernel's `NotFound` -- that is the one error its connect backoff
-    /// retries through 10 s budgets (the 2026-08-10 bind-at-exhaustion
-    /// crawl). Its first RPC is answered with `E_OUT_OF_MEMORY` and the
-    /// channel closes; the wait is bounded so a client that never sends
-    /// cannot pin the slot.
+    /// kernel's `NotReady` -- that is the one answer its connect waits on,
+    /// for 10 to 15 seconds (the 2026-08-10 bind-at-exhaustion crawl). Its
+    /// first RPC is answered with `E_OUT_OF_MEMORY` and the channel closes;
+    /// the wait is bounded so a client that never sends cannot pin the slot.
     async fn refuse_client(
         sender: moto_sdk::ipc::io_channel::Sender,
         mut receiver: moto_sdk::ipc::io_channel::Receiver,

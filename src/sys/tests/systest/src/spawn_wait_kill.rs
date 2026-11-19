@@ -405,24 +405,27 @@ pub fn test_shared_listener_restart() {
     println!("test_shared_listener_restart PASS");
 }
 
-/// Many new processes at once make their first filesystem call. Each needs a
-/// connection to sys-io, which keeps fewer listeners waiting than there are
-/// callers here: the runtime has to wait for one, not fail the call.
+/// Many new processes at once make their first filesystem call or open their
+/// first socket. Each needs a connection to sys-io, which keeps fewer
+/// listeners waiting than there are callers here: the runtime has to wait
+/// for one, not fail the call.
 pub fn test_first_calls_at_once() {
     const CHILDREN: usize = 32;
-    for _ in 0..4 {
-        let mut children: Vec<_> = (0..CHILDREN).map(|_| subcommand::spawn()).collect();
-        for child in &mut children {
-            child.wait_ready();
-        }
-        // One short write each, in a tight loop: the children reach the
-        // service far closer together than it adds listeners.
-        for child in &mut children {
-            child.call_and_exit("stat_cwd");
-        }
-        for mut child in children {
-            let status = child.wait().unwrap();
-            assert!(status.success(), "a first filesystem call: {status:?}");
+    for call in ["stat_cwd", "bind_udp"] {
+        for _ in 0..4 {
+            let mut children: Vec<_> = (0..CHILDREN).map(|_| subcommand::spawn()).collect();
+            for child in &mut children {
+                child.wait_ready();
+            }
+            // One short write each, in a tight loop: the children reach the
+            // service far closer together than it adds listeners.
+            for child in &mut children {
+                child.call_and_exit(call);
+            }
+            for mut child in children {
+                let status = child.wait().unwrap();
+                assert!(status.success(), "a first {call}: {status:?}");
+            }
         }
     }
     println!("test_first_calls_at_once PASS");

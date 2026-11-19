@@ -8,6 +8,7 @@
 //! move to moto-io together in Stage F.
 
 use crate::async_runtime::AsFuture;
+use crate::io::connect_backoff::retry_not_ready;
 use crate::ipc::io_channel;
 use crate::sys_io::api_net;
 use crate::sys_io::api_net::IO_SUBCHANNELS;
@@ -29,76 +30,18 @@ use super::udp::UdpSocket;
 use super::vsock::VsockStream;
 use super::wait::{WaitSet, WaiterId};
 
-/// The sys-io connect retry policy, shared by the sync and async connect
-/// paths so neither can drift from it.
-///
-/// It exists to absorb the transient `NotFound` that sys-io's per-accept
-/// listener re-arm briefly exposes under connection churn: sys-io spawns its
-/// replacement listener only after accepting the previous client, so a
-/// `connect` landing in that window finds no registered URL and fails with
-/// `NotFound` instead of waiting (see io_channel's listen/connect race note).
-///
-/// A bare `sched_yield()` spin recovers the microsecond window, but under a
-/// sustained connection/process storm a herd of spinning clients starves
-/// sys-io's single-threaded runtime of the CPU it needs to re-arm the
-/// listener, so the window never closes and the retry budget is burned (a
-/// stress soak panicked systest/mio-test this way). We instead sleep with
-/// exponential backoff (10ms, 100ms, then 1s, capped) and +/-50% jitter,
-/// handing sys-io the CPU and de-synchronising the herd. `NotFound`
-/// persisting past a ~10s budget means sys-io is genuinely gone.
-struct ConnectBackoff {
-    deadline: moto_rt::time::Instant,
-    backoff_ms: u64,
-}
-
-impl ConnectBackoff {
-    fn new() -> Self {
-        Self {
-            deadline: moto_rt::time::Instant::now() + core::time::Duration::from_secs(10),
-            backoff_ms: 10,
-        }
-    }
-
-    /// When to retry next, or `None` once the budget is spent.
-    fn next_wake(&mut self) -> Option<moto_rt::time::Instant> {
-        let now = moto_rt::time::Instant::now();
-        if now >= self.deadline {
-            return None;
-        }
-        // +/-50% jitter, seeded from the TSC (which also differs across
-        // processes), spreads the retrying herd instead of lock-stepping it.
-        let delay_ms = self.backoff_ms / 2 + now.as_u64() % (self.backoff_ms + 1);
-        let wake = now + core::time::Duration::from_millis(delay_ms);
-        self.backoff_ms = (self.backoff_ms * 10).min(1000);
-        Some(if wake < self.deadline {
-            wake
-        } else {
-            self.deadline
-        })
-    }
-}
-
 /// Connect one new channel to sys-io (design section 4).
 ///
 /// Returns the host-facing pair: the `NetClient` handle and the `NetDriver`
 /// the host must drive on its `crate::async_runtime::LocalRuntime` for the channel to
 /// make progress. No thread is spawned, no global state is touched, and no
-/// caller thread sleeps: transient `NotFound` retries follow the documented
-/// [`ConnectBackoff`] policy through `crate::async_runtime::sleep_until`, and budget
-/// exhaustion or any other error is returned rather than panicked -- the
-/// host decides what sys-io being unavailable means for it.
+/// caller thread sleeps: while sys-io has no listener free this waits as
+/// [`ConnectBackoff`](crate::io::ConnectBackoff) says, through
+/// `crate::async_runtime::sleep_until`. A refusal that outlasts those waits,
+/// or any other error, is returned rather than panicked -- the host decides
+/// what sys-io being unavailable means for it.
 pub async fn connect() -> Result<(NetClient, NetDriver), moto_rt::Error> {
-    let mut backoff = ConnectBackoff::new();
-    let conn = loop {
-        match io_channel::ClientConnection::connect("sys-io") {
-            Ok(conn) => break conn,
-            Err(moto_rt::Error::NotFound) => match backoff.next_wake() {
-                Some(wake) => crate::async_runtime::sleep_until(wake).await,
-                None => return Err(moto_rt::Error::NotFound),
-            },
-            Err(err) => return Err(err),
-        }
-    };
+    let conn = retry_not_ready(|| io_channel::ClientConnection::connect("sys-io")).await?;
 
     let channel = NetChannel::with_conn(conn)?;
     Ok((

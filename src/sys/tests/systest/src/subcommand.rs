@@ -219,6 +219,9 @@ fn do_command(cmd: String) {
         "stat_cwd" => {
             std::fs::metadata(".").unwrap();
         }
+        "bind_udp" => {
+            std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        }
         "spin" => {
             assert_eq!(2, words.len());
             let ms = words[1].parse::<u128>().unwrap();
