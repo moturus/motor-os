@@ -236,8 +236,8 @@ src/tests/full-test.sh
 src/tests/full-test.sh --release
 ```
 
-Both runs build and boot the release image; `--release` selects the profile
-of the native tests only. [testing.md](testing.md) describes every option of
+Both runs build and boot the release image. `--release` selects the release
+profile for native tests. [testing.md](testing.md) describes every option of
 the test runners, including the manual-only `--all-debug`.
 
 `full-test.sh` defaults to Cloud Hypervisor and runs boot-option checks on every

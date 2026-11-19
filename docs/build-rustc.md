@@ -221,8 +221,9 @@ though rustc may run an admitted static helper during a Lorry check.
 
 Native acceptance runs through `src/tests/full-native-test.sh`, reached by
 `src/tests/full-test.sh` on a standard image with the toolchain installed.
-The full gate defaults to 4096 MiB; `--memory` or `MOTO_MEMORY_MIB` overrides
-it. Lorry's analyzer harness exercises project loading, build-script
+The full gate defaults to 8 GiB for debug tests and 4 GiB for release tests.
+Override guest memory with `--memory` or `MOTO_MEMORY_MIB`.
+Lorry's analyzer harness exercises project loading, build-script
 results, semantic requests, saved diagnostics and clearing, multiple roots,
 and shutdown. String hover exercises MIR evaluation and is sensitive to the
 [allocator's](frusa.md) performance; it is included in the native gate.

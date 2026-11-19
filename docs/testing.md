@@ -27,15 +27,15 @@ src/tests/full-test.sh [--release | --all-debug] [--full] [--vmm chv|qemu|fc] [-
 | `--full` | off | Adds the optional native Helix build. |
 | `--vmm chv\|qemu\|fc` | `chv` | VMM for the gate's VMs. `qemu` skips System-console checks. `fc` skips toolchain installation, the native guest tests and the cross checks that need development tools. Each skip is named in the output. Boot-option checks run on every available VMM regardless. |
 | `--cpus N` | `$MOTO_SMP`, else 4 | vCPUs per VM. |
-| `--memory MIB` | `$MOTO_MEMORY_MIB`, else 4096 | Memory per VM, in MiB. |
+| `--memory MIB` | `$MOTO_MEMORY_MIB`, else 8192 for debug tests or 4096 for release tests | Memory per VM, in MiB. |
 
 `--vmm`, `--cpus` and `--memory` accept either `--option value` or
 `--option=value`. A repeated option is an error.
 
-The image is release in both standard modes: it hosts the tests, and a debug
-image makes guest file operations, including the toolchain installation,
-about ten times slower. The two standard runs therefore differ only in the
-profile of the native tests:
+Both standard modes use the release image because guest file operations,
+including toolchain installation, take about ten times longer on a debug
+image. The debug test profile defaults to 8 GiB so Lorry can compile its
+binary and test harness together inside the guest.
 
 ```sh
 src/tests/full-test.sh

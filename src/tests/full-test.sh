@@ -6,14 +6,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$ROOT_DIR/src/tests/cross-test.sh"
 
 full_options() {
-  # The gate builds and boots the release image; --release selects the profile
-  # of the native tests only. --all-debug (manual runs only, never automation)
+  # The gate builds and boots the release image. --release selects the release
+  # profile for native tests. --all-debug (manual runs only, never automation)
   # builds and boots the debug image and runs every check in debug.
   BUILD=release
   TEST_BUILD=debug
   VMM=chv
   CPUS="${MOTO_SMP-4}"
-  MEMORY_MIB="${MOTO_MEMORY_MIB-4096}"
   FULL=0
   local option value
   local -A seen=()
@@ -37,6 +36,12 @@ full_options() {
   done
   if [ "$BUILD:$TEST_BUILD" = debug:release ]; then
     echo "--all-debug and --release are mutually exclusive" >&2; return 2
+  fi
+  if [ -z "${seen[--memory]:-}" ]; then
+    case "$TEST_BUILD" in
+      debug) MEMORY_MIB="${MOTO_MEMORY_MIB-8192}" ;;
+      release) MEMORY_MIB="${MOTO_MEMORY_MIB-4096}" ;;
+    esac
   fi
   case "$VMM" in chv|qemu|fc) ;; *) echo "unsupported VMM: $VMM" >&2; return 2 ;; esac
   for value in "$CPUS" "$MEMORY_MIB"; do
@@ -1861,15 +1866,21 @@ host_full_options() (
   invalid --all-debug=bogus
   invalid --release --all-debug
   invalid --all-debug --release
-  full_options
-  [ "$BUILD:$TEST_BUILD:${NATIVE_ARGS[*]}" = 'release:debug:' ]
-  full_options --release
-  [ "$CPUS:$MEMORY_MIB:$BUILD:$TEST_BUILD:${NATIVE_ARGS[*]}:$VMM" = '4:4096:release:release:--release:chv' ]
-  full_options --all-debug
-  [ "$BUILD:$TEST_BUILD:${PROFILE_ARGS[*]}:${NATIVE_ARGS[*]}" = 'debug:debug::' ]
+  (
+    full_options
+    [ "$MEMORY_MIB:$BUILD:$TEST_BUILD:${NATIVE_ARGS[*]}" = '8192:release:debug:' ]
+  )
+  (
+    full_options --release
+    [ "$CPUS:$MEMORY_MIB:$BUILD:$TEST_BUILD:${NATIVE_ARGS[*]}:$VMM" = '4:4096:release:release:--release:chv' ]
+  )
+  (
+    full_options --all-debug
+    [ "$MEMORY_MIB:$BUILD:$TEST_BUILD:${PROFILE_ARGS[*]}:${NATIVE_ARGS[*]}" = '8192:debug:debug::' ]
+  )
   MOTO_SMP=2 MOTO_MEMORY_MIB=512 full_options --full --vmm qemu
   [ "$CPUS:$MEMORY_MIB:$FULL:$VMM" = '2:512:1:qemu' ]
-  MOTO_SMP=bad MOTO_MEMORY_MIB=bad full_options --cpus=1 --memory 128
+  MOTO_SMP=bad MOTO_MEMORY_MIB=bad full_options --cpus=1 --memory 128 --release
   [ "$CPUS:$MEMORY_MIB" = '1:128' ]
   echo 'full-test options: PASS'
 )
