@@ -156,13 +156,14 @@ fn abandoned_staging_count(root: &Path) -> Result<usize, String> {
 }
 
 fn process_alive(pid: u32) -> Result<bool, String> {
-    Command::new("/user/bin/rush")
-        .args(["-c", &format!("kill -0 {pid}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .map_err(|error| error.to_string())
+    use moto_sdk::sys::stats::ProcessInfoV1;
+
+    let pid = u64::from(pid);
+    let mut entry = [ProcessInfoV1::default(); 1];
+    let count = ProcessInfoV1::list(pid, &mut entry)
+        .map_err(|error| format!("could not query process {pid}: {error}"))?;
+    // The ordered list can start at a later PID or still contain a zombie.
+    Ok(count == 1 && entry[0].pid == pid && entry[0].active != 0)
 }
 
 fn wait_success(child: &mut Child, deadline: Instant) -> Result<bool, String> {
