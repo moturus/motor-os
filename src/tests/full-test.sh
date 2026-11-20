@@ -981,7 +981,7 @@ mkdir -p "$seed/src" "$WORK"
 git init -q -b main "$seed"
 cat > "$seed/src/build-motor-os.sh" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "$@" > "$HANDOFF"
+printf '%s\n' "$@" >> "$HANDOFF"
 EOF
 git -C "$seed" add src
 git -C "$seed" -c user.name=Test -c user.email=test@example.com commit -qm fixture
@@ -1003,9 +1003,11 @@ fetch_motor_source
 export HANDOFF="$temporary/handoff"
 TOOLCHAIN_PREFIX="$temporary/new compiler"
 TOOLCHAIN_IMAGES="$temporary/images"
+run_motor_cargo() { printf '%s\n' "$@" >> "$HANDOFF"; }
 build_motor_tools
-printf '%s\n' --toolchain-overlays "$TOOLCHAIN_PREFIX" "$TOOLCHAIN_IMAGES" > "$temporary/expected"
-cmp "$temporary/expected" "$HANDOFF" || fail 'build did not receive the new compiler and output paths'
+printf '%s\n' fetch --locked --manifest-path "$seed/src/sys/tests/javy-smoke/Cargo.toml" \
+    --toolchain-overlays "$TOOLCHAIN_PREFIX" "$TOOLCHAIN_IMAGES" > "$temporary/expected"
+cmp "$temporary/expected" "$HANDOFF" || fail 'wrong dependency fetch or overlay handoff'
 
 if (parse_options --motor-os "$WORK/motor-os") > "$temporary/error" 2>&1; then
     fail 'accepted a local checkout that the build would delete'
