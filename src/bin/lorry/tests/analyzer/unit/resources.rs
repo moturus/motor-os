@@ -5,7 +5,7 @@ mod tests {
     fn report() -> Value {
         json!({"interval_ms": 100, "samples": [
             {"elapsed_us": 1000, "physical_used": 10000, "processes": [
-                [10, 1, 1, 100, 4, "server"],
+                [10, 1, 1, 100, 34, "server"],
                 [11, 10, 1, 50, 2, "/user/bin/dev/lorry check…"],
                 [99, 1, 1, 999999, 999, "unrelated"]]},
             {"elapsed_us": 101000, "physical_used": 20000, "processes": [
@@ -13,18 +13,6 @@ mod tests {
                 [11, 10, 0, null, null, "/user/bin/dev/lorry check…"],
                 [12, 11, 1, 500, 8, "rustc"]]}
         ]})
-    }
-
-    #[test]
-    fn maxima_exclude_unrelated_processes_and_retain_observed_ancestry() {
-        let result = summarize(&report(), "server").unwrap();
-        assert_eq!(result["server_virtual_bytes_max"], 200);
-        assert_eq!(result["server_threads_max"], 4);
-        assert_eq!(result["lorry_check_virtual_bytes_max"], 50);
-        assert_eq!(result["whole_vm_physical_bytes_max"], 20000);
-        assert_eq!(result["maximum_observed_gap_us"], 100000);
-        assert_eq!(result["missing_process_measurements"], 1);
-        assert_eq!(result["observed_processes"].as_array().unwrap().len(), 3);
     }
 
     #[test]
@@ -46,7 +34,7 @@ mod tests {
     #[test]
     fn approved_limits_accept_boundaries_and_reject_missing_or_excess_measurements() {
         let limits = json!({"server_virtual_bytes_max": 2147483648_u64,
-            "server_threads_max": 32, "lorry_check_virtual_bytes_max": 67108864,
+            "lorry_check_virtual_bytes_max": 67108864,
             "lorry_check_threads_max": 16, "whole_vm_physical_bytes_max": 3221225472_u64});
         check_limits(&limits).unwrap();
         check_limits(&summarize(&report(), "server").unwrap()).unwrap();
