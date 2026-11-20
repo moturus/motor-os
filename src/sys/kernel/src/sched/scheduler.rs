@@ -513,6 +513,8 @@ impl Scheduler {
                 continue;
             }
 
+            // Let the last process's TLB shootdowns skip this idle CPU.
+            crate::arch::install_kernel_page_table();
             self.idle_start();
             if nosleep {
                 self.program_idle_timer();
