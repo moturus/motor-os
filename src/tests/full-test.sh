@@ -885,7 +885,7 @@ done
 toolchain_source="${MOTOR_TOOLCHAIN_SOURCE:-$ROOT/../motor-os-toolchain}"
 package_script="$toolchain_source/lib/toolchain-package.sh"
 images="$WORK/current"
-mkdir -p "$images/libc/system/cfg/libc" "$WORK/host/bin"
+mkdir -p "$images/libc/system/cfg/libc" "$WORK/host/bin" "$WORK/host/lib"
 for path in llvm/user/lib/llvm/bin/llvm rustc/user/lib/rust/bin/rustc \
     rustc/user/lib/rust/bin/rustfmt rustc/user/lib/rust/bin/clippy-driver \
     rust-analyzer/user/lib/rust/bin/rust-analyzer helix/user/lib/helix/hx \
@@ -896,7 +896,8 @@ for path in llvm/user/lib/llvm/bin/llvm rustc/user/lib/rust/bin/rustc \
     printf '#!/user/bin/rush\nexit 0\n' > "$images/$path"
     chmod 755 "$images/$path"
 done
-printf 'host compiler\n' > "$WORK/host/bin/rustc"
+printf '#!/bin/sh\necho "host compiler"\n' > "$WORK/expected-rustc"
+install -m 755 "$WORK/expected-rustc" "$WORK/host/bin/rustc"
 # LLVM's Android linker names are unrelated to the retired Motor layout.
 printf '/system/bin/linker64\0' >> "$images/llvm/user/lib/llvm/bin/llvm"
 name=x86_64-unknown-motor-1.99.1-3
@@ -908,13 +909,33 @@ mkdir "$WORK/extracted"
 tar -xaf "$WORK/output/$package.tar.zst" -C "$WORK/extracted"
 tar -xaf "$WORK/output/$package-x86_64-linux.tar.zst" -C "$WORK/extracted"
 diff -r "$WORK/expected-images" "$WORK/extracted/$package/images"
-[ "$(cat "$WORK/extracted/$package-x86_64-linux/toolchain/bin/rustc")" = 'host compiler' ] ||
+cmp "$WORK/expected-rustc" "$WORK/extracted/$package-x86_64-linux/toolchain/bin/rustc" ||
     fail 'host payload changed'
 grep -qx '#!/user/bin/rush' "$WORK/extracted/$package/install.sh" || fail 'wrong installer shell'
 if grep -Eq '/devtools|/system/bin' "$WORK/extracted/$package/install.sh"; then
     fail 'installer contains an obsolete path'
 fi
 [ ! -e "$images" ] && [ ! -e "$WORK/host" ] || fail 'packaging did not consume its input trees'
+
+# A freshly provisioned shell can still have its old PATH. Exercise the
+# packaged installer with real rustup and a disposable toolchain registry.
+(
+    export CARGO_HOME="$WORK/cargo home" RUSTUP_HOME="$WORK/rustup home"
+    installer="$WORK/extracted/$package-x86_64-linux/install.sh"
+    mkdir -p "$CARGO_HOME/bin" "$WORK/install-bin"
+    for tool in dirname mkdir cp; do
+        ln -s "$(command -v "$tool")" "$WORK/install-bin/$tool"
+    done
+    if PATH="$WORK/install-bin" "$installer" --prefix "$WORK/installed" > "$WORK/error" 2>&1; then
+        fail 'host installer succeeded without rustup'
+    fi
+    grep -Fq "$CARGO_HOME/bin/rustup" "$WORK/error" && grep -Fq 'https://rustup.rs' "$WORK/error" ||
+        fail 'missing rustup diagnostic did not explain where to find or install it'
+    [ ! -e "$WORK/installed" ] || fail 'installer copied the payload before finding rustup'
+    ln -s "$(command -v rustup)" "$CARGO_HOME/bin/rustup"
+    PATH="$WORK/install-bin" "$installer" --prefix "$WORK/installed"
+    [ "$(rustup run "$name" rustc)" = 'host compiler' ] || fail 'rustup did not run the installed host compiler'
+)
 
 # A failed validation leaves the previous archive intact.
 before="$(sha256sum "$WORK/output/$package.tar.zst")"
@@ -1022,6 +1043,16 @@ fi
 # native archive is required for this mode.
 (
     source "$ROOT/src/build-motor-os.sh"
+    if (
+        export RUSTUP_HOME="$temporary/empty-rustup"
+        prepare_external_sources() { fail 'reached external sources without a host toolchain'; }
+        main --javy-only
+    ) > "$temporary/error" 2>&1; then
+        fail 'accepted an uninstalled host toolchain'
+    fi
+    package="motor-toolchain-$TOOLCHAIN-x86_64-linux"
+    grep -Fq "$package.tar.zst" "$temporary/error" && grep -Fq "$package/install.sh" "$temporary/error" ||
+        fail 'missing host toolchain diagnostic did not name the archive and its installer'
     selected="$(rustc --print sysroot)"
     build_toolchain_overlays() {
         [ "$RUSTUP_TOOLCHAIN" = "$selected" ] || fail 'used the checkout toolchain selector'

@@ -52,8 +52,9 @@ describes changing them, including unpublished runtime work in a local
 
 ## 2. Installing a toolchain
 
-The host installer requires rustup on `PATH` before it copies the toolchain.
-If rustup is not installed yet, install it without selecting a default:
+Load rustup into the current shell with `. "$HOME/.cargo/env"` after
+`--provision`. This also works with older installers that look for rustup
+only on `PATH`. To install rustup without selecting a default, run
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
@@ -68,9 +69,9 @@ with its `build-toolchain.sh`, which writes them next to its checkout: in
 
 ```sh
 cd "$MOTORH"
-tar -xaf motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux.tar.zst
-motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux/install.sh
-rm -rf motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux
+tar -xaf motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux.tar.zst &&
+  motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux/install.sh &&
+  rm -rf motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux
 ```
 
 GNU tar needs the `zstd` program for `-a` with a `.zst` archive.
@@ -284,8 +285,9 @@ run `src/build-motor-os.sh`, then the same validation gates.
 - `rustc is not on PATH` (Makefile): the build script installed rustup, and
   the shell it was started from still has the old `PATH`. Open a new shell or
   run `. "$HOME/.cargo/env"`.
-- rustup's `toolchain '<version>' is not installed`: install the host
-  archive of the version `rust-toolchain.toml` names.
+- If rustup cannot find the compiler named in `rust-toolchain.toml`, extract
+  the matching Linux-host archive and run its `install.sh`. The installer
+  prints `installed <version> in <directory>` after it registers the compiler.
 - `the native toolchain archive is missing`: put
   `motor-toolchain-<version>.tar.zst` in `$MOTORH`.
 - `static image directory ".../build/assembly/images/..." is absent` (imager):

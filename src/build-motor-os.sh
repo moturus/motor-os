@@ -512,10 +512,18 @@ main() {
 		command -v rustup >/dev/null 2>&1 || caller_has_rustup=false
 		MOTOR_BUILD_ORCHESTRATOR=1 "$base"
 		[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-		command -v rustup >/dev/null || die "rustup is unavailable after host provisioning"
 	fi
+	command -v rustup >/dev/null ||
+		die 'The build needs rustup. Load it with . "$HOME/.cargo/env" or install rustup as described in docs/toolchain.md.'
 	# Helix and Javy pin toolchains of their own; the exported name overrides them.
 	export RUSTUP_TOOLCHAIN="${BOOTSTRAP_TOOLCHAIN:-$TOOLCHAIN}"
+	if [ -z "$BOOTSTRAP_TOOLCHAIN" ] && ! rustup which rustc >/dev/null; then
+		local host_package="motor-toolchain-$TOOLCHAIN-x86_64-linux"
+		die "rustup cannot find the Linux-host compiler '$TOOLCHAIN' required by $MOTOR/rust-toolchain.toml.
+If provisioning just installed rustup, load it in your shell with . \"\$HOME/.cargo/env\".
+From the directory containing the Linux-host archive (usually $MOTORH), run
+  tar -xaf $host_package.tar.zst && ./$host_package/install.sh"
+	fi
 	local toolchain_sysroot
 	toolchain_sysroot="$(rustc --print sysroot)"
 	SYSROOT="$toolchain_sysroot/lib/rustlib/$TARGET/sysroot"

@@ -63,11 +63,11 @@ verify both archives, install the host toolchain, and build Motor OS:
 sha256sum -c motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux.tar.zst.sha256
 sha256sum -c motor-toolchain-x86_64-unknown-motor-1.99.1-3.tar.zst.sha256
 git clone https://github.com/moturus/motor-os.git
-tar -xaf motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux.tar.zst
-motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux/install.sh
-rm -rf motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux
-cd motor-os
-src/build-motor-os.sh
+tar -xaf motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux.tar.zst &&
+  motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux/install.sh &&
+  rm -rf motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux &&
+  cd motor-os &&
+  src/build-motor-os.sh
 ```
 
 `install.sh` installs the Linux-host toolchain and links it into rustup; the
