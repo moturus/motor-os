@@ -1,7 +1,7 @@
 # WebAssembly on Motor OS
 
-The developer image (`make dev.img BUILD=release`, producing
-`motor-os-dev.qcow2`) includes Javy 9.1.0, Wasmi 1.1.0 and full and runtime-only
+The native toolchain archive (`make toolchain-archive BUILD=release`)
+includes Javy 9.1.0, Wasmi 1.1.0 and full and runtime-only
 Wasmtime 50.0.0. Javy also uses v50 Wizer through its Wasmi backend. Javy compiles
 JavaScript into a WebAssembly module containing the QuickJS runtime.
 Wasmi interprets that module using the Motor OS port's WASI
@@ -13,21 +13,20 @@ linking a compiler.
 
 | Path | Contents |
 | --- | --- |
-| `/devtools/bin/javy` | JavaScript-to-WebAssembly compiler. |
-| `/devtools/bin/wasmi` | WebAssembly interpreter and command runner. |
-| `/devtools/javy/plugins/default.wasm` | Default QuickJS plugin for explicit plugin selection and dynamic modules; also embedded in Javy. |
-| `/devtools/javy/sources.txt`, `SHA256SUMS` | Build provenance, source revisions, and staged-file checksums. |
-| `/devtools/bin/wasmtime` | Native Wasmtime `run`, `serve` and `compile` commands with Cranelift. |
-| `/devtools/bin/wasmtime-rt` | Runtime-only Wasmtime: precompiled native execution with WASI. |
-| `/devtools/wasmtime/sources.txt`, `SHA256SUMS` | Wasmtime build provenance and checksums. |
-| `/devtools/src/wasm/` | `hello.js` and a README with compile/run instructions. |
-| `/devtools/www/wasm.html` | This guide in the image's HTML documentation. |
+| `/user/bin/dev/javy` | JavaScript-to-WebAssembly compiler. |
+| `/user/bin/dev/wasmi` | WebAssembly interpreter and command runner. |
+| `/user/lib/javy/plugins/default.wasm` | Default QuickJS plugin for explicit plugin selection and dynamic modules; also embedded in Javy. |
+| `/user/lib/javy/sources.txt`, `SHA256SUMS` | Build provenance, source revisions, and staged-file checksums. |
+| `/user/bin/dev/wasmtime` | Native Wasmtime `run`, `serve` and `compile` commands with Cranelift. |
+| `/user/bin/dev/wasmtime-rt` | Runtime-only Wasmtime: precompiled native execution with WASI. |
+| `/user/lib/wasmtime/sources.txt`, `SHA256SUMS` | Wasmtime build provenance and checksums. |
+| `/user/lib/www/wasm.html` | This guide in the image's HTML documentation. |
 
-The smaller `wasm.img` also includes the four tools and their data
-directories. The test inputs (the TypeScript workload, the Linux identity
+Install the archive onto the standard image to use these tools.
+The test inputs (the TypeScript workload, the Linux identity
 digests, two custom Javy plugins and the precompiled Wasmtime fixtures) are
 not installed;
-`src/tests/test-wasm.sh` uploads them to `/none/wasm-tests` on every VM boot
+`src/tests/cross-test.sh` uploads them to `/none/dev/wasm-tests` on disposable VMs
 during tests. The low-RAM qualification keeps these fixtures and retained
 outputs on disk; the tools' None-role `TMPDIR` still uses memfs at `/none/tmp`.
 
@@ -56,7 +55,7 @@ Store limits use upstream defaults and explicit `-W max-instances`,
 `-W max-tables` and `-W max-table-elements` overrides, with no Motor-only caps.
 `-W timeout=DURATION` interrupts a guest compiled with epoch interruption.
 Native code uses explicit bounds/trap checks because Motor has no Unix signal
-handlers. The example and HTML documentation are part of `dev.img`.
+handlers. The HTML documentation is part of the toolchain archive.
 
 Both Wasmtime CLIs run asynchronous calls, such as each `serve` request, on fiber
 stacks that are lazy guarded mappings: a stack uses RAM only for the pages it
@@ -124,21 +123,27 @@ What differs is forced by the platform:
 
 ## Run the example
 
-In the developer VM's shell:
+In a standard VM with the toolchain installed:
 
 ```sh
-cd /devtools/src/wasm
-/devtools/bin/javy build hello.js -o "$TMPDIR/hello.wasm"
-/devtools/bin/wasmi "$TMPDIR/hello.wasm"
+mkdir -p /none/dev/wasm
+cd /none/dev/wasm
+cat > hello.js <<'JS'
+console.log('Hello from WebAssembly on Motor OS!');
+const squares = [1, 2, 3, 4].map(n => n * n);
+console.log(JSON.stringify({squares, total: squares.reduce((a, b) => a + b, 0)}));
+JS
+/user/bin/dev/javy build hello.js -o "$TMPDIR/hello.wasm"
+/user/bin/dev/wasmi "$TMPDIR/hello.wasm"
 ```
 
 The same Wasm can run directly with Wasmtime, or be compiled once and loaded
 by either Wasmtime CLI:
 
 ```sh
-/devtools/bin/wasmtime run "$TMPDIR/hello.wasm"
-/devtools/bin/wasmtime compile "$TMPDIR/hello.wasm" -o "$TMPDIR/hello.cwasm"
-/devtools/bin/wasmtime-rt run --allow-precompiled "$TMPDIR/hello.cwasm"
+/user/bin/dev/wasmtime run "$TMPDIR/hello.wasm"
+/user/bin/dev/wasmtime compile "$TMPDIR/hello.wasm" -o "$TMPDIR/hello.cwasm"
+/user/bin/dev/wasmtime-rt run --allow-precompiled "$TMPDIR/hello.cwasm"
 ```
 
 `wasmtime serve handler.wasm` likewise compiles a WASI HTTP component and
@@ -163,9 +168,9 @@ offline. Edit `hello.js` and repeat the commands to try changes.
 See [Building Motor OS](build.md) for image construction and the focused
 installed-tool checks, and [capabilities](caps.md) for the masks.
 
-The host-side `src/tests/test-wasm.sh` checks the installed tools.
-`src/tests/full-test-dev.sh --release` runs these checks on the wasm image at
-256 MiB and the developer image at 256 MiB. Javy's Linux byte-identity checks
-run on the first VM only; Wasmtime service-mask checks and compile/run/plugin/
-serve checks under all process roles run on both images.
-Debug runs skip these Wasm checks.
+`src/tests/full-native-test.sh` runs the installed-tool Cargo harnesses on
+Motor. `src/tests/cross-test.sh` compares host and guest output and qualifies
+the installed release tools at 256 MiB on a disposable standard image. It also
+checks Wasmtime service masks and the process-role matrix; QEMU skips the
+System-role cases. Firecracker skips installed development tools. Both runners
+are included in `src/tests/full-test.sh`.

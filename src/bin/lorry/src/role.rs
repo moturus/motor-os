@@ -1,7 +1,7 @@
 //! Where Lorry keeps per-user state on Motor OS.
 //!
 //! Each process role has its own configuration, repository, cache, and scratch
-//! directories, so a None-role Lorry never reads or writes Interactive state.
+//! directories. Interactive's repository is readable by None, but not writable.
 //! System has none: Lorry refuses to run as System.
 
 use std::path::{Path, PathBuf};
@@ -20,8 +20,8 @@ impl Role {
     /// runs. Off Motor OS no role-based path is used.
     pub fn current() -> Self {
         #[cfg(target_os = "motor")]
-        if moto_sys::ProcessStaticPage::get().capabilities
-            & (moto_sys::caps::CAP_SYS | moto_sys::caps::CAP_INTERACTIVE)
+        if moto_sdk::sys::ProcessStaticPage::get().capabilities
+            & (moto_sdk::sys::caps::CAP_SYS | moto_sdk::sys::caps::CAP_INTERACTIVE)
             == 0
         {
             return Self::None;
@@ -40,9 +40,13 @@ impl Role {
     /// This role's repository and cache.
     pub fn state_directory(self) -> &'static Path {
         Path::new(match self {
-            Self::Interactive => "/devtools/lorry/user",
-            Self::None => "/devtools/lorry/none",
+            Self::Interactive => "/user/dev/lorry",
+            Self::None => "/none/dev/lorry",
         })
+    }
+
+    pub fn cache_directory(self) -> PathBuf {
+        self.state_directory().join("cache")
     }
 
     /// This role's temporary directory.
@@ -61,7 +65,7 @@ impl Role {
 /// Refuses a System-role process on Motor OS.
 pub(crate) fn refuse_system() -> Result<()> {
     #[cfg(target_os = "motor")]
-    if moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_SYS != 0 {
+    if moto_sdk::sys::ProcessStaticPage::get().capabilities & moto_sdk::sys::caps::CAP_SYS != 0 {
         return Err(
             crate::diagnostic::Error::failure("Lorry does not run as System")
                 .with_help("run Lorry from an Interactive shell, or as None"),
@@ -82,8 +86,17 @@ mod tests {
         );
         assert_eq!(Role::None.config_file(), Path::new("/none/cfg/lorry.toml"));
         assert_eq!(
-            Role::None.state_directory(),
-            Path::new("/devtools/lorry/none")
+            Role::Interactive.state_directory(),
+            Path::new("/user/dev/lorry")
+        );
+        assert_eq!(Role::None.state_directory(), Path::new("/none/dev/lorry"));
+        assert_eq!(
+            Role::None.cache_directory(),
+            Path::new("/none/dev/lorry/cache")
+        );
+        assert_eq!(
+            Role::Interactive.cache_directory(),
+            Path::new("/user/dev/lorry/cache")
         );
         assert_eq!(Role::None.temp_directory(), Path::new("/none/tmp"));
         refuse_system().unwrap();

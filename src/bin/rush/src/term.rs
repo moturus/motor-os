@@ -62,7 +62,7 @@ use crate::shell::Shell;
 const DEFAULT_COLS: usize = 80;
 
 /// How many completions are listed without asking first, so that a stray Tab in
-/// `/system/bin` does not dump hundreds of names down a slow console.
+/// `/user/bin` does not dump hundreds of names down a slow console.
 const MAX_UNASKED_CANDIDATES: usize = 100;
 
 // ---- keys ------------------------------------------------------------------
@@ -1287,7 +1287,7 @@ impl Term {
         self.write(out.as_bytes());
     }
 
-    /// bash's "Display all 400 possibilities?" — a Tab in `/system/bin` should not
+    /// bash's "Display all 400 possibilities?" — a Tab in `/user/bin` should not
     /// bury the prompt under hundreds of names, least of all down a serial line.
     fn confirm_listing(&mut self, n: usize) -> bool {
         self.write(format!("Display all {n} possibilities? (y or n) ").as_bytes());
@@ -1588,7 +1588,8 @@ mod tests {
         // which a stripper that stopped at the first `m` would measure wrong,
         // and a prompt measured wrong is a line edited in the wrong column.
         let ps1 = crate::shell::default_prompt("PS1").replace("$PWD", "/tmp");
-        assert_eq!(display_width(&ps1), 11, "{ps1:?}");
+        let width = if cfg!(target_os = "motor") { 15 } else { 11 };
+        assert_eq!(display_width(&ps1), width, "{ps1:?}");
     }
 
     fn chars(s: &str) -> Vec<char> {

@@ -1,0 +1,31 @@
+[package]
+name = "wg"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+native-tests = ["moto-sdk/test-support"]
+
+[[bin]]
+name = "wg-tool"
+path = "src/tool_main.rs"
+
+[[bin]]
+name = "wg-self-test"
+path = "src/native_main.rs"
+required-features = ["native-tests"]
+
+[dependencies]
+base64 = "0.22"
+boringtun = { git = "https://github.com/moturus/boringtun.git", rev = "dcad5645547a89b278b346a399dbc0fae19a02f4" }
+ipnetwork = "0.20"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.9"
+
+[target.'cfg(target_os = "motor")'.dependencies]
+getrandom = { version = "=0.2.17", features = ["custom"] }
+moto-sdk = { path = "../../lib/moto-sdk" }
+
+[dev-dependencies]
+boringtun = { git = "https://github.com/moturus/boringtun.git", rev = "dcad5645547a89b278b346a399dbc0fae19a02f4", features = ["mock-instant"] }
+mock_instant = "0.3"

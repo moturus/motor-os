@@ -67,6 +67,8 @@ pub(super) fn extract_tree(
                     "failed to create Git source directory `{relative}`: {error}"
                 ))
             })?;
+            #[cfg(target_os = "motor")]
+            crate::motor_fs::directory_mode(&path)?;
         }
     }
 

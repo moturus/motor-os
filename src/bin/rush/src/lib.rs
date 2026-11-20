@@ -15,7 +15,8 @@
 //!
 //! rush extensions, deliberately outside POSIX and documented as such:
 //! `--piped` (an internal mode: the interactive loop over a pipe, with no
-//! terminal control) and the colored default `PS1`.
+//! terminal control), `-l` (a login shell, as in bash and dash), and the
+//! colored default `PS1`.
 
 mod arith;
 mod ast;
@@ -83,6 +84,8 @@ pub struct Invocation {
     opts: Options,
     /// `--piped`: run the interactive loop without terminal control.
     piped: bool,
+    /// `-l`, or `$0` starting with `-`: read the login profiles first.
+    login: bool,
 }
 
 fn exit(code: i32) -> ! {
@@ -111,6 +114,7 @@ fn usage_error(msg: &str) -> ! {
 pub fn parse_args(argv: Vec<String>) -> Invocation {
     let mut opts = Options::new();
     let mut piped = false;
+    let mut login = false;
     let mut want_command = false;
     let mut i = 1;
 
@@ -155,6 +159,8 @@ pub fn parse_args(argv: Vec<String>) -> Invocation {
                 // That is what makes `rush -c -- 'echo hi'` — the form libc's
                 // system()/popen() emit — parse correctly.
                 'c' => want_command = true,
+                // An invocation flag like `-c`, not a `set` option.
+                'l' => login = on,
                 _ => match Options::by_letter(ch) {
                     Some(opt) => opts.set(opt, on),
                     None => {
@@ -172,6 +178,7 @@ pub fn parse_args(argv: Vec<String>) -> Invocation {
     // `$0` is the command name for `-c` (operand 2), the script path for a
     // command_file, and the shell's own name otherwise.
     let self_name = argv.first().cloned().unwrap_or_else(|| "rush".to_string());
+    let login = login || self_name.starts_with('-');
     if want_command {
         if operands.is_empty() {
             usage_error("-c requires an argument");
@@ -187,6 +194,7 @@ pub fn parse_args(argv: Vec<String>) -> Invocation {
             params: rest.collect(),
             opts,
             piped,
+            login,
         };
     }
     if opts.get(Opt::Stdin) || operands.is_empty() {
@@ -198,6 +206,7 @@ pub fn parse_args(argv: Vec<String>) -> Invocation {
             params: operands,
             opts,
             piped,
+            login,
         };
     }
     // `command_file [args…]`: the script names the shell (`$0`) too.
@@ -208,6 +217,7 @@ pub fn parse_args(argv: Vec<String>) -> Invocation {
         params: operands,
         opts,
         piped,
+        login,
     }
 }
 
@@ -249,9 +259,7 @@ pub fn execute(inv: Invocation) {
         exit(1);
     }
 
-    if interactive {
-        source_startup_files(&mut sh);
-    }
+    source_startup_files(&mut sh, inv.login, interactive);
 
     let status = match inv.mode {
         Mode::Command(string) => exec::run_source(&string, &mut sh),
@@ -295,20 +303,18 @@ pub(crate) fn verbose_echo(src: &str, sh: &Shell) {
     }
 }
 
-/// An interactive shell expands `$ENV` and sources the file it names (POSIX
-/// §2.5.3); a *login* shell (conventionally, `$0` starting with `-`) first reads
-/// the system and user profiles. Missing files are not an error.
-///
-/// This replaces rush's old `-i <script>` flag:
-/// `ENV=/system/cfg/rush.cfg rush -i`
-/// is the portable spelling of what that flag did.
-fn source_startup_files(sh: &mut Shell) {
-    if sh.name().starts_with('-') {
-        for profile in ["/etc/profile", "$HOME/.profile"] {
+/// A *login* shell reads the login profiles first, interactive or not: it starts
+/// a session, as the console and russhd start theirs, and what the profiles
+/// export reaches every command of that session. Then an interactive shell
+/// expands `$ENV` and sources the file it names (POSIX §2.5.3). Missing files
+/// are not an error.
+fn source_startup_files(sh: &mut Shell, login: bool, interactive: bool) {
+    if login {
+        for profile in sys::LOGIN_PROFILES {
             source_if_present(profile, sh);
         }
     }
-    if let Some(env) = sh.get("ENV") {
+    if interactive && let Some(env) = sh.get("ENV") {
         source_if_present(&env, sh);
     }
 }
@@ -319,7 +325,15 @@ fn source_if_present(raw: &str, sh: &mut Shell) {
     if path.is_empty() || !std::path::Path::new(&path).is_file() {
         return;
     }
-    exec::run_script(&path, sh);
+    // A startup file that cannot be read is reported, and the session goes on:
+    // an SSH session must not end because of its profile.
+    match std::fs::read_to_string(&path) {
+        Ok(text) => {
+            verbose_echo(&text, sh);
+            exec::run_source(&text, sh);
+        }
+        Err(err) => eprintln!("rush: cannot read {path}: {err}"),
+    }
 }
 
 /// The programs `rush.toml` lists under `spawn-detached` — the ones the shell

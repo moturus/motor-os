@@ -301,10 +301,11 @@ This syscall returns the mask of the process owning the peer endpoint of
 the shared object. Servers should authorize the actual connected peer using
 this kernel-supplied value, as sys-io and strobe do.
 
-Process statistics expose the derived role through
-`ProcessInfoV1.process_role`, not the full capability mask. Statistics are
-for observation; use the connection-bound capability query for peer
-authorization.
+Process statistics expose the derived role as `process_role`, and
+`ProcessInfoV2` (version 2 of the process list query) also carries the full
+capability mask; `sysbox caps [PID]` prints it. Statistics are for
+observation: a PID can be reused between a listing and its use, so use the
+connection-bound capability query for peer authorization.
 
 ## Named IPC services
 

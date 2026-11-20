@@ -1,23 +1,23 @@
 # Hello Motor OS, natively
 
 Build and run the [Hello Motor OS](hello-motor-os.md) web server entirely
-inside a Motor OS developer VM using Lorry.
+inside Motor OS using Lorry.
 
-You need the developer image, `motor-os-dev.qcow2`; see
+Install the native toolchain archive on the standard image; see
 [Building Motor OS](../build.md).
 
 ## Start the VM
 
-Stop any other Motor OS VM before starting the developer image; the launch
+Stop any other Motor OS VM before starting the standard image; the launch
 scripts share a VM lock and network configuration. On the host, start from
 the Motor OS checkout:
 
 ```sh
 cd vm_images/release
-./run-dev.sh
+./run-chv.sh
 ```
 
-The terminal that runs `run-dev.sh` becomes the VM's console, with a `rush`
+The terminal that runs `run-chv.sh` becomes the VM's console, with a `rush`
 prompt. You can type the commands below there. Or open an SSH session from a
 second host terminal, again starting from the Motor OS checkout:
 
@@ -33,12 +33,12 @@ Either shell works for every step, including pasting the files.
 In the VM:
 
 ```sh
-cd /devtools/src
+cd /none/dev
 lorry new hello
 cd hello
 ```
 
-`/devtools/src` is the developer image's writable workspace. `lorry new`
+`/none/dev` is writable by Interactive and None. `lorry new`
 writes `Cargo.toml`, `Cargo.lock`, and `src/main.rs`.
 
 ## The program

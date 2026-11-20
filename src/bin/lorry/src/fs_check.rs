@@ -53,7 +53,10 @@ pub(crate) fn require_real_file_if_present(path: &Path, context: &str) -> Result
 /// a real directory.
 pub(crate) fn create_real_directory(path: &Path, context: &str) -> Result<()> {
     match fs::create_dir(path) {
-        Ok(()) => {}
+        Ok(()) => {
+            #[cfg(target_os = "motor")]
+            crate::motor_fs::directory_mode(path)?;
+        }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
         Err(error) => {
             return Err(Error::failure(format!(
@@ -62,7 +65,16 @@ pub(crate) fn create_real_directory(path: &Path, context: &str) -> Result<()> {
             )));
         }
     }
-    require_real_directory(path, context)
+    require_real_directory(path, context)?;
+    Ok(())
+}
+
+/// Create missing parents without changing permissions of existing entries.
+pub(crate) fn create_dir_all(path: &Path) -> Result<()> {
+    #[cfg(target_os = "motor")]
+    return crate::motor_fs::create_dir_all(path);
+    #[cfg(not(target_os = "motor"))]
+    Ok(fs::create_dir_all(path)?)
 }
 
 /// Requires `path` to still name the real regular file that `file` opened.
@@ -138,8 +150,8 @@ pub(crate) fn file_identity(_file: &File, _metadata: &Metadata) -> Result<(u128,
     ))
 }
 
-/// Makes `file` owner-only: readable and writable, or readable and
-/// executable with `executable`.
+/// Applies private source modes on Unix and the role-sharing source modes on
+/// Motor, preserving whether the file is executable.
 pub(crate) fn set_file_mode(_file: &File, _path: &Path, executable: bool) -> Result<()> {
     #[cfg(unix)]
     {
@@ -152,13 +164,9 @@ pub(crate) fn set_file_mode(_file: &File, _path: &Path, executable: bool) -> Res
     #[cfg(target_os = "motor")]
     {
         use std::os::fd::AsRawFd;
-        let permissions = if executable {
-            moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC
-        } else {
-            moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE
-        };
-        moto_rt::fs::set_file_perm(_file.as_raw_fd(), permissions)
+        let attr = moto_rt::fs::get_file_attr(_file.as_raw_fd())
             .map_err(|error| permission_error(_path, error))?;
+        crate::motor_fs::source_mode(attr.entry_id, _path, executable)?;
     }
     Ok(())
 }
@@ -178,6 +186,7 @@ pub(crate) fn set_directory_private(_path: &Path) -> Result<()> {
             moto_rt::fs::PERM_READ | moto_rt::fs::PERM_WRITE | moto_rt::fs::PERM_EXEC,
         )
         .map_err(|error| permission_error(_path, error))?;
+        crate::motor_fs::directory_mode(_path)?;
     }
     Ok(())
 }

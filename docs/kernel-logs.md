@@ -372,12 +372,12 @@ the RPCs; nothing else blocks on strobe.
   old file never passes the size limit; records wait in the backlog until
   the replacement is open. The first open of a tag runs the same steps,
   moving a previous file of the tag aside. Cost:
-  one rename and one create per 4 MiB. Without a cap, a debug build under
-  network load writes `kernel.log` at roughly 200 KiB/s per thousand TCP
-  segments per second (sys-io logs two or three DEBUG lines per data segment,
-  `src/sys/sys-io/src/runtime/net/socket/tcp.rs:1226,1324,1363`), which fills
-  the main image's 256 MiB data partition (`src/imager/motor-os.yaml:39`) during
-  one debug `full-test.sh`.
+  one rename and one create per 4 MiB. Without a cap, a chatty debug build
+  fills the main image's 256 MiB data partition
+  (`src/imager/motor-os.yaml:39`) during one debug `full-test.sh`: while
+  sys-io still logged every packet at DEBUG (see "Debug builds: per-packet
+  and per-operation lines"), network load wrote `kernel.log` at roughly
+  200 KiB/s per thousand TCP segments per second.
 - **Disk-space rule.** Whenever strobe creates a log file -- at connection start
   and at rotation -- it first reads the mount listing (`FsClient::mounts()`,
   the data `findmnt` and `df` print) and takes capacity minus usage of the
@@ -453,7 +453,7 @@ can replace it) is line-oriented, in the style of `sys-init.cfg`:
 ```
 # Kernel log: console (the compatibility default) or strobe.
 kernel-log:strobe
-ENV=/system/cfg/rush.cfg /system/bin/rush -i
+/user/bin/rush -l -i
 ```
 
 Each line is trimmed. Empty lines and lines whose first non-space byte is
@@ -486,14 +486,36 @@ Left alone, every flush of `kernel.log` produces a debug line, which becomes
 the content of the next flush: the file never stops growing. All three lines
 are trace-level. The other sources on the path
 were checked: sys-io's FS server (`src/sys/sys-io/src/runtime/fs.rs`) logs
-only on create, on a stat miss, and when it refuses a client; the vdso logs
+only on a stat miss and when it refuses a client; the vdso logs
 only on open, so rotation costs a few lines; netstack's per-packet lines cause
 no disk writes; sys-tty's and strobe's own diagnostics land in the kernel ring
 (both run with null stdio,
 `src/sys/sys-init/src/main.rs:84-95,135-143`) and so in the same file, a
-handful of lines per boot. Quiescence -- an idle VM's
-`kernel.log` stops growing -- is a test, not an assumption, so a future debug
-line on the write path is caught.
+handful of lines per boot. No test checks that an idle VM's `kernel.log`
+stops growing, so a new debug line on the write path has to be checked by
+hand.
+
+### Debug builds: per-packet and per-operation lines
+
+In file mode a kernel record is not free: the kernel wakes sys-tty, sys-tty
+sends the record to strobe, and strobe appends it to `kernel.log` through
+sys-io's filesystem service. A DEBUG line on a path that runs once per
+packet, per task poll or per file therefore adds filesystem work to that
+path, in the service every other filesystem client is waiting for. sys-io
+used to log about thirty such lines per TCP segment, and two per file
+created. On a debug image that made a 25 MiB, 2,439-file tar stream piped
+over SSH take between 70 and 488 seconds; with those lines at trace level it
+takes 12.
+
+Lines of this kind are therefore trace-level, in sys-io
+(`runtime/net/device.rs`, `runtime/net/socket/tcp.rs`, the message dispatch
+in `runtime/net.rs`, file and directory creation in `runtime/fs.rs`),
+motor-fs (creating, moving and deleting an entry) and moto-sdk (the task poll in
+`async_runtime/local_runtime.rs`, the network client's incoming-message
+lines in `io/net/channel.rs` and `io/net/tcp.rs`). Lines that run once per
+connection, per mount or per error stay at DEBUG. To see where a debug
+build's records come from, count `/system/logs/kernel.log` by source
+location.
 
 ### What does not change
 
@@ -557,13 +579,17 @@ Console arbitration:
   prompt that passes waiting stderr that way), a full pipe emptied by one
   read, unread EOF tails, UART completion, and a message wake sent before
   polling;
-- `test-system-tty.sh` checks short error bursts and one larger than 16 KiB
+- The System-console phase of `cross-test.sh` checks short error bursts and one larger than 16 KiB
   against a unique next-prompt marker. A blocking stdin handshake separates
   command echo from the checked output. The checked text must otherwise be
-  exact, except for whole log records on lines of their own: the image logs to
-  the console, and sys-tty may fit a record between any two chunks, moving to
-  a fresh line first. The host checker also tests fixed transcripts with early
-  prompts, missing lines, unexpected prefixes, and records in each position;
+  exact, except for whole log records on lines of their own: sys-tty may fit
+  a record between any two chunks, moving to a fresh line first. Which records
+  can appear depends on the VMM. On QEMU the test boots its own image, which
+  logs to the console, so any record can. On Cloud Hypervisor and Firecracker
+  it boots the standard image with `--system-tty`, which logs to strobe, so
+  only WARN and ERROR records can. The host checker also tests fixed
+  transcripts with early prompts, missing lines, unexpected prefixes, and
+  records in each position;
 - sanitizer cases cover every `ESC` position and all 32 UTF-8 C1 controls.
   The console copy contains the exact diagnostic literal and no unsafe control
   introducer, while the file copy remains byte-for-byte identical.
@@ -603,9 +629,6 @@ File mode, using the shipped `kernel-log:strobe` configuration:
   temporary file until `fs.available_bytes` is below 50 MiB, floods its own
   tag past 4 MiB, checks that the oldest `.prev` is gone, and removes the
   temporary file before returning;
-- quiescence: after five idle seconds the file size is unchanged, in release
-  builds only — in debug, background file operations keep landing DEBUG
-  records in `kernel.log`;
 - native sys-tty self-tests cover forwarder backlog drops and the recovery
   marker, the disabled/no-retry state, and every configuration-parser success
   and error path. Live connect or RPC failure uses that same disabled state and
@@ -622,7 +645,7 @@ message remains.
 
 The feature gate is the complete main-image `src/tests/full-test.sh`, three
 successful runs in debug and three in release for each core patch. It is not
-gated by `full-test-dev.sh`. Relevant native focused tests run first; formatting
+included through `full-native-test.sh`. Relevant native focused tests run first; formatting
 and strict clippy must be clean. The tests use no new Internet resource.
 
 ## Chosen defaults

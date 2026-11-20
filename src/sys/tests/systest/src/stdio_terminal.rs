@@ -490,7 +490,7 @@ impl RushOnTerminal {
     fn spawn() -> Self {
         use std::process::{Command, Stdio};
 
-        let mut child = Command::new("/system/bin/rush")
+        let mut child = Command::new("/user/bin/rush")
             .env(moto_rt::process::STDIO_NO_TERMINAL_ENV_KEY, "true")
             .env(moto_rt::process::STDIO_IS_TERMINAL_ENV_KEY, "true")
             .env("PS1", "$ ")

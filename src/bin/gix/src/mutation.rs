@@ -69,6 +69,15 @@ impl Guard {
         Ok((guard, record))
     }
 
+    /// Acquire the mutation locks for the rebase in progress, whatever its state.
+    pub fn acquire_rebase(repo: &gix::Repository) -> crate::Result<(Self, Record)> {
+        let (guard, record) = Self::acquire_with(repo, Admission::Rebase)?;
+        let Some(record) = record else {
+            return unsupported("no rebase is in progress");
+        };
+        Ok((guard, record))
+    }
+
     fn acquire_with(
         repo: &gix::Repository,
         admission: Admission,
@@ -107,23 +116,26 @@ impl Guard {
             return unsupported("repository has a stale gix operation update lock");
         }
         let record = operation::read(&operation_path)?;
+        let is_rebase = |record: &Record| matches!(record.kind, Kind::Rebase(_));
         let allow_merge_head = match (admission, record.as_ref()) {
-            (Admission::Ordinary, Some(record)) => {
-                return unsupported(format!(
-                    "repository has unfinished gix {} operation",
-                    record.description()
-                ));
+            (Admission::Rebase, Some(record)) if is_rebase(record) => false,
+            (Admission::Rebase, None) => return unsupported("no rebase is in progress"),
+            (Admission::Ordinary | Admission::Rebase, Some(record)) => {
+                return unsupported(unfinished(record));
             }
             (Admission::Ordinary, None) | (Admission::ReadyMutation, None) => false,
-            (Admission::ReadyMutation, Some(record)) if record.state == State::Ready => true,
-            (Admission::ReadyMutation, Some(record)) => {
-                return unsupported(format!(
-                    "repository has unfinished gix {} operation",
-                    record.description()
-                ));
+            (Admission::ReadyMutation, Some(record)) if record.state == State::Ready => {
+                record.kind == Kind::Merge
             }
+            (Admission::ReadyMutation, Some(record)) => return unsupported(unfinished(record)),
             (Admission::Recovery, None) => {
                 return unsupported("repository has no interrupted gix operation");
+            }
+            (Admission::Recovery, Some(record))
+                if is_rebase(record) && record.state != State::Incomplete =>
+            {
+                // A stopped rebase is finished by its own commands, also while publishing.
+                return unsupported(unfinished(record));
             }
             (Admission::Recovery, Some(record)) if record.state == State::Ready => {
                 crate::head_ref::require(repo, &record.original)?;
@@ -200,14 +212,30 @@ impl Guard {
         expected: &Record,
         cancellation: &crate::cancellation::Cancellation,
     ) -> crate::Result {
-        cancellation.check()?;
-        if expected.kind != Kind::Merge || expected.state != State::Ready {
+        if expected.kind != Kind::Merge {
             return unsupported("operation is not a ready merge");
+        }
+        self.require_ready(repo, expected, cancellation)
+    }
+
+    /// Require the exact live state of installed conflicts, of a merge or of a rebase,
+    /// before editing the index that holds them.
+    pub(crate) fn require_ready(
+        &self,
+        repo: &gix::Repository,
+        expected: &Record,
+        cancellation: &crate::cancellation::Cancellation,
+    ) -> crate::Result {
+        cancellation.check()?;
+        if expected.state != State::Ready {
+            return unsupported("operation is not ready");
         }
         self.require_operation(expected)?;
         operation::require_objects(repo, expected, cancellation)?;
         crate::head_ref::require(repo, &expected.original)?;
-        self.require_merge_head(expected)?;
+        if expected.kind == Kind::Merge {
+            self.require_merge_head(expected)?;
+        }
         cancellation.check()
     }
 
@@ -311,6 +339,24 @@ enum Admission {
     Ordinary,
     ReadyMutation,
     Recovery,
+    /// `rebase --continue`, `--skip` and `--abort`: a rebase record in any state.
+    Rebase,
+}
+
+/// Why a command cannot run while `record` exists, and what to run first.
+fn unfinished(record: &Record) -> String {
+    match (record.kind, record.state) {
+        (Kind::Rebase(_), State::Incomplete)
+        | (Kind::Switch | Kind::FastForward | Kind::Merge, _) => {
+            format!(
+                "repository has unfinished gix {} operation",
+                record.description()
+            )
+        }
+        (Kind::Rebase(_), _) => "a rebase is in progress; run 'gix rebase --continue', \
+                                 'gix rebase --skip' or 'gix rebase --abort'"
+            .into(),
+    }
 }
 
 fn operation_lock(path: &Path) -> crate::Result<gix::lock::File> {
@@ -470,6 +516,14 @@ pub(crate) fn owned_operation(git_dir: &Path) -> io::Result<Option<String>> {
         return Ok(Some("incomplete-clone".into()));
     }
     Ok(operation::read(&git_dir.join(OPERATION_FILE))?.map(|record| record.description()))
+}
+
+/// The branch that a rebase in progress will move when it ends.
+pub(crate) fn rebased_branch(git_dir: &Path) -> io::Result<Option<gix::refs::FullName>> {
+    let record = operation::read(&git_dir.join(OPERATION_FILE))?;
+    Ok(record
+        .filter(|record| matches!(record.kind, Kind::Rebase(_)))
+        .map(|record| record.target_ref))
 }
 
 fn reject_non_file(path: &Path) -> crate::Result {

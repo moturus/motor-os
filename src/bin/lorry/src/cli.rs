@@ -96,7 +96,7 @@ pub struct BuildOptions {
     pub jobs: Option<Jobs>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Jobs {
     Default,
     Number(i32),

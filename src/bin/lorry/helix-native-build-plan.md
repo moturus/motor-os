@@ -1,10 +1,13 @@
 # Native Helix builds on Motor OS
 
-Status: implemented and lightly tested; full developer-image gate awaits push.
+Status: implemented and lightly tested. The image-layout migration replaces
+the former developer-image gate with `src/tests/full-test.sh --release --full`.
+The focused results below describe this plan's original validation.
 
 ## Outcome
 
-The Motor Helix branch must build and run inside the developer image with:
+The Motor Helix branch must build and run on a standard image with the
+toolchain installed:
 
 ```sh
 lorry vendor --accept-all
@@ -70,15 +73,16 @@ inputs, and investigate any changed comparison before adjusting a fixture.
 - Rebuild Helix natively, offline, through the fixed Lorry. Check `hx --version`
   and grammar health, including grammars using C++ scanners. Confirm a warm
   build succeeds and exercise an actual edit/save in the native binary.
-- After the user pushes Helix, run `src/tests/full-test-dev.sh --release`.
+- After the user pushes Helix, run `src/tests/full-test.sh --release --full`.
   Per the user's instructions, defer the full suite until then; no 3+3 core OS
   gate is required because `src/sys` is unchanged.
 - Diagnose further failures and fix clear issues within this build path.
   Stop for review if the scope grows or a non-obvious choice is required.
 
 The user approved this plan with Motor-specific Git gating and the staged
-validation/commit workflow above. The full developer-image suite remains
-pending the user's Helix push.
+validation/commit workflow above. At that point, the full suite remained
+pending the user's Helix push. The image-layout work that followed is done;
+[`docs/testing.md`](../../../docs/testing.md) describes the current tests.
 
 ## Focused results
 

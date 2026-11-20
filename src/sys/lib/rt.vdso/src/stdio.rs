@@ -564,6 +564,14 @@ fn apply_child_ctrl_c(
     }
 }
 
+// What an inherited-stdio relay moves per step: the whole ring of a default
+// (one-page) stdio pipe. A relay forwards whatever has arrived, so a short
+// interactive write is not held back; a smaller buffer only caps bulk
+// transfers, at two wake syscalls and a yield per step. `ssh host 'wc -c'`
+// through a shell's relay ran at 14 MiB/s with an 80-byte buffer and at
+// 93 MiB/s with this one.
+const INHERITED_RELAY_BUFFER_SIZE: usize = moto_sys::sys_mem::PAGE_SIZE_SMALL as usize / 2;
+
 /// Relays this process's stdin into an inherited-stdio child, as a
 /// task on the relay runtime. Owns the stdin reader until the child has
 /// drained all it was sent or has exited, even if the source ends first;
@@ -616,7 +624,7 @@ async fn relay_in(
     let mut ctrl_c = ctrl_c_process.map(|process| CtrlCRelay::new(owned.pipe.clone(), process));
     let mut source_signal = owned.pipe.handle().as_future();
     let mut source_alive = true;
-    let mut buf = [0_u8; 80];
+    let mut buf = [0_u8; INHERITED_RELAY_BUFFER_SIZE];
     // The relay ends with what it took from the source but never published.
     let mut unwritten = 'relay: loop {
         if let Some(ctrl_c) = ctrl_c.as_mut() {
@@ -725,7 +733,7 @@ async fn relay_in(
 async fn relay_out(stdio: Arc<SelfStdio>, dest: StdioPipe) {
     use moto_sdk::async_runtime::AsFuture;
 
-    let mut buf = [0_u8; 80];
+    let mut buf = [0_u8; INHERITED_RELAY_BUFFER_SIZE];
     let mut dest_dead = false;
     // See relay_in: one future per handle, re-armed before each wait. The
     // one on this process's own pipe is registered now, so that a write

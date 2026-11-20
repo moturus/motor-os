@@ -226,7 +226,7 @@ mod tests {
     /// A pane running `true`, which exits at once and exists long enough to be
     /// named and counted.
     fn opts() -> PaneOpts {
-        PaneOpts::new("true")
+        PaneOpts::new(&crate::test_programs::program("true"))
     }
 
     #[test]

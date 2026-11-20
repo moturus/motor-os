@@ -128,6 +128,7 @@ pub fn run_without_vsock_child(args: &[String]) -> ! {
 }
 
 fn spawn_child(mode: &str, port: u16, caps: u64) {
+    let caps = caps & moto_sys::ProcessStaticPage::get().capabilities;
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args([mode, &port.to_string()])
         .env(MOTOR_OS_CAPS_ENV_KEY, format!("0x{caps:x}"))

@@ -100,7 +100,7 @@ fn shared_host_and_guest_probe_checks_the_real_dynamic_listener() {
     let fixture = Fixture::configured("allow_tcp_forwarding = true");
     let (mut client, _stdout, local, _port_guard) = start(&fixture);
     let binary = fixture.root.join("socks-probe");
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/ssh-socks-probe.rs");
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/helpers/socks.rs");
     let build = Command::new("rustc")
         .args(["--edition=2024", "-D", "warnings"])
         .arg(source)

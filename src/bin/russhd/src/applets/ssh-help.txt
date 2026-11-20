@@ -58,7 +58,7 @@ Configuration (Motor OS):
 
 Examples:
   ssh motor@host
-  ssh -p 2222 motor@host /system/bin/echo hello
+  ssh -p 2222 motor@host /user/bin/echo hello
   ssh -i /user/cfg/ssh/id_ed25519 -o BatchMode=yes motor@host command
   ssh -J motor@gateway motor@private-host
   ssh -N -L 8080:localhost:80 motor@host

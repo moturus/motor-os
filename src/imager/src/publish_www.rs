@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 const WWW_HOME: &str = "/user/www-home";
 const WWW_SCRIPT: &str = "/user/bin/www";
 const HTTPD: &str = "/user/bin/httpd-axum";
-const SCRIPT: &str = "#!/system/bin/rush\n\
+const SCRIPT: &str = "#!/user/bin/rush\n\
 /user/bin/httpd-axum -a 0.0.0.0:443 -d /user/www-home \
 --ssl-cert /system/cfg/ssl/ssl-cert.pem --ssl-key /system/cfg/ssl/ssl-key.pem\n";
 

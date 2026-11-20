@@ -219,6 +219,126 @@ pub fn attach(
     })
 }
 
+/// Point HEAD directly at `new_commit`, leaving every branch where it is.
+///
+/// HEAD may be attached or detached before. The caller retains its mutation guard and
+/// operation record through this publication. When HEAD was attached, its reflog line has no
+/// previous commit: the reference transaction records one only for a detached HEAD.
+pub fn detach(
+    repo: &mut gix::Repository,
+    expected_head: &Original,
+    new_commit: gix::ObjectId,
+    message: &BStr,
+    cancellation: &Cancellation,
+) -> crate::Result<Original> {
+    cancellation.check()?;
+    let new_commit = require_commit(repo, &new_commit)?;
+    require(repo, expected_head)?;
+    let expected_target = raw_target(expected_head)?;
+    let (file_lock_fail, packed_lock_fail) = preflight_publication(repo)?;
+    let committer = repo
+        .committer()
+        .expect("generic committer fallback was installed")?;
+    let edit = RefEdit {
+        name: "HEAD".try_into().expect("HEAD is a valid reference name"),
+        deref: false,
+        change: Change::Update {
+            log: LogChange {
+                mode: RefLog::AndReference,
+                force_create_reflog: false,
+                message: message.to_owned(),
+            },
+            expected: PreviousValue::MustExistAndMatch(expected_target),
+            new: Target::Object(new_commit),
+        },
+    };
+    let expected = Original {
+        reference: None,
+        id: Some(new_commit),
+    };
+    let result: crate::Result<Original> = (|| {
+        let transaction =
+            repo.refs
+                .transaction()
+                .prepare(Some(edit), file_lock_fail, packed_lock_fail)?;
+        require(repo, expected_head)?;
+        cancellation.check()?;
+        transaction.commit(Some(committer))?;
+
+        let actual = capture(repo)?;
+        if actual != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("published HEAD state differs: expected {expected:?}, observed {actual:?}"),
+            )
+            .into());
+        }
+        cancellation.check()?;
+        Ok(actual)
+    })();
+    result.map_err(|source| {
+        let head = capture(repo).map_err(|error| error.to_string());
+        Box::new(PublicationError {
+            source: cancellation.normalize_error(source),
+            observed: format!("HEAD {head:?}"),
+        }) as Box<dyn StdError + Send + Sync>
+    })
+}
+
+/// Move local branch `name`, which HEAD is not attached to, from `expected` to `new_commit`.
+///
+/// The caller retains its mutation guard and operation record through this publication.
+pub fn move_branch(
+    repo: &mut gix::Repository,
+    name: &gix::refs::FullName,
+    expected: gix::ObjectId,
+    new_commit: gix::ObjectId,
+    message: &BStr,
+    cancellation: &Cancellation,
+) -> crate::Result {
+    cancellation.check()?;
+    let new_commit = require_commit(repo, &new_commit)?;
+    require_local_branch(repo, name.as_ref(), Some(expected))?;
+    if capture(repo)?.reference.as_ref() == Some(name) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "HEAD is attached to the branch that would move",
+        )
+        .into());
+    }
+    let (file_lock_fail, packed_lock_fail) = preflight_publication(repo)?;
+    let committer = repo
+        .committer()
+        .expect("generic committer fallback was installed")?;
+    let edit = RefEdit {
+        name: name.clone(),
+        deref: false,
+        change: Change::Update {
+            log: LogChange {
+                mode: RefLog::AndReference,
+                force_create_reflog: false,
+                message: message.to_owned(),
+            },
+            expected: PreviousValue::MustExistAndMatch(Target::Object(expected)),
+            new: Target::Object(new_commit),
+        },
+    };
+    let result: crate::Result = (|| {
+        let transaction =
+            repo.refs
+                .transaction()
+                .prepare(Some(edit), file_lock_fail, packed_lock_fail)?;
+        require_local_branch(repo, name.as_ref(), Some(expected))?;
+        cancellation.check()?;
+        transaction.commit(Some(committer))?;
+        require_local_branch(repo, name.as_ref(), Some(new_commit))?;
+        cancellation.check()
+    })();
+    result.map_err(|source| {
+        publication_error(repo, name.as_ref(), cancellation.normalize_error(source))
+    })
+}
+
 fn direct_branch_id(
     repo: &gix::Repository,
     name: &gix::refs::FullNameRef,

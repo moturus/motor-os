@@ -101,5 +101,6 @@ fn configured_remote_forwards_run_only_on_the_final_ssh_hop_and_never_for_copy_a
     stdout.read_to_end(&mut output).unwrap();
     assert_eq!(output, b"still-alive");
     assert!(client.wait().success());
-    assert!(TcpStream::connect(remote).is_err());
+    // Client exit does not acknowledge remote listener teardown. remote_relay
+    // checks cleanup after observing the server close its pending relays.
 }

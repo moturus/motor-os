@@ -37,8 +37,14 @@ pub fn query(program: &Path, arguments: &[&str], description: &str) -> Result<Ou
     Ok(output)
 }
 
-pub fn query_rustc(program: &Path, arguments: &[&str], description: &str) -> Result<Output> {
+pub fn query_rustc(
+    program: &Path,
+    arguments: &[&str],
+    description: &str,
+    environment: &BTreeMap<String, OsString>,
+) -> Result<Output> {
     let mut command = Command::new(program);
+    command.envs(environment);
     remove_cargo_client_environment(&mut command);
     let output = command
         .args(arguments)
@@ -216,7 +222,7 @@ pub fn command_failure(status: std::process::ExitStatus, message: impl Into<Stri
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
 pub enum ChildKind {
     Program,
     Test,
@@ -230,6 +236,17 @@ pub fn run_child(
     kind: ChildKind,
     verbose: bool,
 ) -> Result<i32> {
+    #[cfg(target_os = "motor")]
+    if crate::motor_child::is_child() {
+        return crate::motor_child::run_program(
+            program,
+            arguments,
+            current_dir,
+            environment,
+            kind,
+            verbose,
+        );
+    }
     if verbose {
         eprintln!("Running {}", display_command(program, arguments));
     }

@@ -23,7 +23,7 @@ pub fn run_all_tests() {
     std::fs::create_dir(&root).unwrap();
 
     let interpreter = root.join("rush");
-    std::fs::copy("/system/bin/rush", &interpreter).unwrap();
+    std::fs::copy("/user/bin/rush", &interpreter).unwrap();
 
     let script = root.join("script");
     std::fs::write(

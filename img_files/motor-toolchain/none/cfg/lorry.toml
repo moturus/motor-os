@@ -1,0 +1,19 @@
+config-version = 1
+cargo-compat-version = "1.99"
+
+# Motor repository paths have defaults; compilers come from PATH and the
+# caller's environment. Per-workspace rules go in [workspaces."<root>"].
+
+[policy]
+default = "allow"
+path-roots = []
+
+[policy.limits]
+max-packages = 384
+max-package-bytes = 16777216
+max-extracted-package-bytes = 134217728
+max-package-files = 20000
+max-transaction-bytes = 268435456
+max-extracted-transaction-bytes = 1073741824
+build-script-seconds = 300
+build-script-output-bytes = 8388608

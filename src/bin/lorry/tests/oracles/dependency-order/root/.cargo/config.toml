@@ -1,5 +1,0 @@
-[source.crates-io]
-replace-with = "oracle"
-
-[source.oracle]
-directory = "../registry"

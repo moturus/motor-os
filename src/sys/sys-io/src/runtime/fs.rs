@@ -956,7 +956,7 @@ async fn on_cmd_create_file(
         .map_err(map_native_error)?;
     let entry_id = parent.export(entry_id)?;
     core::mem::drop(fs);
-    log::debug!("created file {parent_id:x}:{fname} => {entry_id:x}");
+    log::trace!("created file {parent_id:x}:{fname} => {entry_id:x}");
 
     let resp = api_fs::stat_resp_encode(msg, runtime.entry_ids.encode(entry_id), EntryKind::File);
     sender.send(resp).await.map_err(map_native_error)
@@ -1020,7 +1020,7 @@ async fn on_cmd_create_dir(
         .map_err(map_native_error)?;
     let entry_id = parent.export(entry_id)?;
     core::mem::drop(fs);
-    log::debug!("created directory {parent_id:x}:{fname} => {entry_id:x}");
+    log::trace!("created directory {parent_id:x}:{fname} => {entry_id:x}");
 
     let resp = api_fs::stat_resp_encode(
         msg,

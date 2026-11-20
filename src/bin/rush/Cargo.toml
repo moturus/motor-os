@@ -13,6 +13,10 @@ license = "MIT OR Apache-2.0"
 name = "rush"
 path = "src/main.rs"
 
+[[test]]
+name = "motor_caps"
+harness = false
+
 [dependencies]
 # The terminal layer: keys, the terminal's size, raw mode and the escape
 # sequences the editor paints with. Motor OS is a supported target of the
@@ -28,10 +32,7 @@ libc = "0.2"
 # tests: `full-test.sh` runs the pty tests over both.
 dev-tty = ["crossterm/use-dev-tty"]
 
-# On Motor OS, `std::process::id()` panics (Motor pids are u64), so pids come
-# from moto-sys instead — see `sys::pid()`. moto-rt is where the `E_*` error
-# constants live (`ErrorCode` is a bare `u16`, not an enum); moto-sys re-exports
-# the type but not the constants, so `kill` names the crate directly.
+# Native capabilities, filesystem permissions, and unbuffered standard input.
 [target.'cfg(not(unix))'.dependencies]
 moto-sys = "0.3.2"
 moto-rt = "0.17.6"

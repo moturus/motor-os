@@ -12,7 +12,7 @@ and `cargo -Vv` report the commits they were built from; do not infer them from
 a branch name or copy a historical revision from documentation.
 
 The fork uses Rust's `dev` channel. Its compiler description is the
-toolchain's name, `x86_64-unknown-motor-1.99.1-2`, and its Cargo reports
+toolchain's name, `x86_64-unknown-motor-1.99.1-3`, and its Cargo reports
 `1.99.1-dev` plus the exact Cargo commit. Rust's downloaded Stage 0 compiler is only a bootstrap input selected
 by that Rust revision's `src/stage0`; repository commands never select Stage 0
 or an independent nightly/stable Cargo.
@@ -20,7 +20,7 @@ or an independent nightly/stable Cargo.
 ## Linux-host toolchain
 
 The Linux-host toolchain is installed from its archive into a directory that
-rustup knows as `x86_64-unknown-motor-1.99.1-2` (see
+rustup knows as `x86_64-unknown-motor-1.99.1-3` (see
 [toolchain.md](toolchain.md)). It contains:
 
 - Linux-host rustc and rustdoc;
@@ -53,7 +53,7 @@ rustfmt, or Clippy from an ambient channel.
 
 The installed rust-analyzer runs on Linux and analyzes both Linux-host and
 ordinary Motor OS userspace projects. It is distinct from the native server
-packaged in the development image. From the repository, obtain the exact name and
+packaged in the toolchain archive. From the repository, obtain the exact name and
 server path with:
 
 ```sh
@@ -117,25 +117,25 @@ or loader code.
 The offline host gate covers Motor OS Cargo, Linux Cargo, and inline Motor OS
 Project JSON, with wrong-target sentinels, std navigation, and a 60-second
 deadline per case. The Motor OS Cargo case also checks local proc-macro
-expansion. Run `src/tests/test-rust-analyzer.sh` and its `--release` variant
-after host LSP changes; both run through the corresponding full-test profile.
+expansion. Run the Cargo harness in `src/sys/tests/rust-analyzer` after host
+LSP changes; it runs through the corresponding full-test profile.
 The harness sets `CARGO_NET_OFFLINE=true` for Cargo children and retains
 bounded protocol and stderr evidence.
 
 ## Native Motor OS rust-analyzer
 
-The developer image packages `/devtools/rust/bin/rust-analyzer` and matching
-sources below `/devtools/rust/lib/rustlib/src/rust/library`. The standard
-image contains neither. The native server uses `/devtools/bin/lorry`, not
+The toolchain archive installs `/user/lib/rust/bin/rust-analyzer` and matching
+sources below `/user/lib/rust/lib/rustlib/src/rust/library` on the standard
+image. The native server uses `/user/bin/dev/lorry`, not
 Cargo; it does not replace the Linux-host component above.
 
 Launch the binary directly over stdio, with an absolute project working
 directory and this environment:
 
 ```text
-CARGO=/devtools/bin/lorry
-PATH=/devtools/bin:/system/bin
-RUSTFMT=/devtools/rust/bin/rustfmt
+CARGO=/user/bin/dev/lorry
+PATH=/user/bin:/user/bin/dev
+RUSTFMT=/user/lib/rust/bin/rustfmt
 ```
 
 An editor that owns a session terminal must additionally pass
@@ -219,11 +219,11 @@ though rustc may run an admitted static helper during a Lorry check.
 
 ### Native acceptance
 
-Native acceptance is integrated under the developer-image branch of
-`src/tests/full-test.sh`, reached by `src/tests/full-test-dev.sh --release`.
-The latter defaults to 8192 MiB for the repository-suite VM and retains
-4096 MiB for its separate developer-source phase; `MOTO_MEMORY_MIB` overrides
-both. `test-rust-analyzer-native.sh` exercises project loading, build-script
+Native acceptance runs through `src/tests/full-native-test.sh`, reached by
+`src/tests/full-test.sh` on a standard image with the toolchain installed.
+The full gate defaults to 8 GiB for debug tests and 4 GiB for release tests.
+Override guest memory with `--memory` or `MOTO_MEMORY_MIB`.
+Lorry's analyzer harness exercises project loading, build-script
 results, semantic requests, saved diagnostics and clearing, multiple roots,
 and shutdown. String hover exercises MIR evaluation and is sensitive to the
 [allocator's](frusa.md) performance; it is included in the native gate.
@@ -248,15 +248,16 @@ and sampled descendants are not an exhaustive execution audit. Phase timings
 remain measurements. A limit failure requires diagnosis rather than retries,
 worker caps, or automatic threshold increases.
 
-### Helix on the developer image
+### Native Helix
 
-Boot the release developer image with `vm_images/release/run-dev.sh`; this
-launcher provides 8 GiB of guest RAM by default. In Motor OS, `hx` uses the
-packaged native server configuration automatically. Try the dependency-free
-example, which requires no downloads:
+Install the toolchain archive on the standard image and boot with
+`MOTO_MEMORY_MIB=8192 vm_images/release/run-chv.sh`. In Motor OS, `hx` uses the
+installed native server configuration automatically. Create a project:
 
 ```sh
-cd /devtools/src/helix-rust-demo
+cd /none/dev
+lorry new hello
+cd hello
 hx src/main.rs
 ```
 
@@ -272,26 +273,26 @@ a second `x.py` invocation of the toolchain build builds rustc for
 `x86_64-unknown-motor` from the same Rust and LLVM trees, together with
 rustfmt and Clippy.
 
-The development image packages these native Rust files:
+The toolchain archive installs these native Rust files:
 
 ```text
-/devtools/rust/bin/rustc
-/devtools/rust/bin/rustfmt
-/devtools/rust/bin/clippy-driver
-/devtools/rust/lib/rustlib/x86_64-unknown-motor/lib/*.rlib
-/devtools/bin/rustc          PATH launcher
-/devtools/bin/rustfmt        PATH launcher
-/devtools/bin/clippy-driver  PATH launcher
-/devtools/bin/cc             native linker driver supplied by the C toolchain
+/user/lib/rust/bin/rustc
+/user/lib/rust/bin/rustfmt
+/user/lib/rust/bin/clippy-driver
+/user/lib/rust/lib/rustlib/x86_64-unknown-motor/lib/*.rlib
+/user/bin/dev/rustc          PATH launcher
+/user/bin/dev/rustfmt        PATH launcher
+/user/bin/dev/clippy-driver  PATH launcher
+/user/bin/dev/cc             native linker driver supplied by the C toolchain
 ```
 
 Use the launcher for formatting from the native shell; it supplies rustfmt's
 writable temporary directory:
 
 ```sh
-/devtools/bin/rustfmt --version
-/devtools/bin/rustfmt src/main.rs
-/devtools/bin/rustfmt --check src/main.rs
+/user/bin/dev/rustfmt --version
+/user/bin/dev/rustfmt src/main.rs
+/user/bin/dev/rustfmt --check src/main.rs
 ```
 
 rustfmt discovers `rustfmt.toml` from the source path and its ancestors. A
@@ -307,8 +308,8 @@ Run `lorry clippy` in an admitted package to get human diagnostics, or add
 Inside the development VM:
 
 ```sh
-/devtools/bin/rustc --version
-/devtools/bin/rustc /devtools/src/hello-world/hello.rs -o /user/tmp/hello
+/user/bin/dev/rustc --version
+/user/bin/dev/rustc /none/dev/hello-world/hello.rs -o /user/tmp/hello
 /user/tmp/hello
 ```
 
@@ -317,7 +318,7 @@ Pure Rust links remain independent of mlibc. The target passes
 entry point. A Rust program that intentionally links C opts into the C runtime:
 
 ```sh
-/devtools/bin/rustc \
+/user/bin/dev/rustc \
   -C link-self-contained=no \
   -C default-linker-libraries=yes \
   foo.rs -o foo
@@ -350,7 +351,7 @@ panic = "abort"
 For a direct native rustc invocation, pass `-C panic=abort` to opt out:
 
 ```sh
-/devtools/bin/rustc -C panic=abort app.rs -o app
+/user/bin/dev/rustc -C panic=abort app.rs -o app
 ```
 
 Motor OS system binaries declare abort profiles explicitly; the kernel, boot

@@ -2,11 +2,11 @@
 
 Motor OS is cross-compiled on Linux. The supported build entry point has been
 tested on Ubuntu 24.04 and 26.04. It needs the Motor OS toolchain that
-`rust-toolchain.toml` names, `x86_64-unknown-motor-1.99.1-2`, as two archives
+`rust-toolchain.toml` names, `x86_64-unknown-motor-1.99.1-3`, as two archives
 from [motor-os-toolchain](https://github.com/moturus/motor-os-toolchain): its
 release, or a build of that repository.
 
-First build the toolchain, which does not need a Motor OS checkout. On
+First build the toolchain, which clones its own Motor OS checkout. On
 Ubuntu 24.04 or 26.04, create the development root and clone the toolchain
 repository inside it:
 
@@ -28,22 +28,24 @@ Motor OS toolchain. It writes these files into its parent directory,
 `motor-dev`, where the commands above leave you:
 
 ```text
-motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux.tar.zst
-motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux.tar.zst.sha256
-motor-toolchain-x86_64-unknown-motor-1.99.1-2.tar.zst
-motor-toolchain-x86_64-unknown-motor-1.99.1-2.tar.zst.sha256
+motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux.tar.zst
+motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux.tar.zst.sha256
+motor-toolchain-x86_64-unknown-motor-1.99.1-3.tar.zst
+motor-toolchain-x86_64-unknown-motor-1.99.1-3.tar.zst.sha256
 ```
 
 Each toolchain build starts from scratch, replaces archives of the same name,
-and removes its `build/` directory after success. Allow about 30 GB of disk
-space during the build; the toolchain README estimates about 50 minutes on
-24 cores. See its [build instructions](https://github.com/moturus/motor-os-toolchain#building)
+and removes its `build/` directory after success. `--motor-os PATH` uses an
+existing Motor OS checkout for the development programs instead of cloning it.
+See its [build instructions](https://github.com/moturus/motor-os-toolchain#building)
 for details. The resulting toolchain name must match `rust-toolchain.toml`
 in the Motor OS checkout.
 
 Alternatively, download both archives and their checksum files from a matching
 toolchain release into `motor-dev`, then enter that directory. GNU tar needs
 `zstd` on the host to extract the `.tar.zst` archive.
+Keep a `motor-os-toolchain` checkout beside Motor OS for archive repackaging
+and its offline tests; `MOTOR_TOOLCHAIN_SOURCE` can name another location.
 
 Install rustup before the host toolchain. If it is not installed yet:
 
@@ -58,21 +60,22 @@ If rustup was installed by `--provision`, load it into your current shell with
 verify both archives, install the host toolchain, and build Motor OS:
 
 ```sh
-sha256sum -c motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux.tar.zst.sha256
-sha256sum -c motor-toolchain-x86_64-unknown-motor-1.99.1-2.tar.zst.sha256
+sha256sum -c motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux.tar.zst.sha256
+sha256sum -c motor-toolchain-x86_64-unknown-motor-1.99.1-3.tar.zst.sha256
 git clone https://github.com/moturus/motor-os.git
-tar -xaf motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux.tar.zst
-motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux/install.sh
-rm -rf motor-toolchain-x86_64-unknown-motor-1.99.1-2-x86_64-linux
-cd motor-os
-src/build-motor-os.sh
+tar -xaf motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux.tar.zst &&
+  motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux/install.sh &&
+  rm -rf motor-toolchain-x86_64-unknown-motor-1.99.1-3-x86_64-linux &&
+  cd motor-os &&
+  src/build-motor-os.sh
 ```
 
 `install.sh` installs the Linux-host toolchain and links it into rustup; the
-native archive, `motor-toolchain-x86_64-unknown-motor-1.99.1-2.tar.zst`, stays
+native archive, `motor-toolchain-x86_64-unknown-motor-1.99.1-3.tar.zst`, stays
 in the development root ([toolchain.md](toolchain.md)). The script installs
 missing host packages and rustup, configures the VM host, builds the external
-sources, and creates the base, standard, developer, and wasm release images.
+sources, and creates the base and standard release images and the native
+toolchain archive.
 Package installation and VM networking setup use `sudo`, and both run at the
 very start, so the rest of the build can be left unattended; the external
 sources and dependencies come from the network. If the build is interrupted or
@@ -129,55 +132,38 @@ assembly content keys to isolate old objects. Follow the
 [toolchain update procedure](toolchain.md#7-changing-the-toolchain), including
 its validation gates, for either a new version or a replacement `-dev` build.
 
-With a built assembly, build just Javy, Wasmtime, and their images with:
+With a built assembly, rebuild Javy, Wasmtime, and the toolchain archive with:
 
 ```sh
 src/build-motor-os.sh --javy-only --wasmtime-only
-make dev.img wasm.img BUILD=release -j"$(nproc)"
+make toolchain-archive BUILD=release -j"$(nproc)"
 ```
 
-Both images install `/devtools/bin/javy`, `/devtools/bin/wasmi`, the full
-`/devtools/bin/wasmtime` and runtime-only `/devtools/bin/wasmtime-rt`, with Javy's
+The archive installs `/user/bin/dev/javy`, `/user/bin/dev/wasmi`, the full
+`/user/bin/dev/wasmtime` and runtime-only `/user/bin/dev/wasmtime-rt`, with Javy's
 default plugin at
-`/devtools/javy/plugins/default.wasm` and build provenance under
-`/devtools/javy` and `/devtools/wasmtime`. See
-[WebAssembly on Motor OS](wasm.md) for the installed files and the developer
-image's example under `/devtools/src/wasm`.
+`/user/lib/javy/plugins/default.wasm` and build provenance under
+`/user/lib/javy` and `/user/lib/wasmtime`. See
+[WebAssembly on Motor OS](wasm.md) for the installed files.
 
-The developer image also stages Motor OS library sources in
-`/devtools/src/motor-os/sys/lib` for offline native `lorry test` runs: moto-sdk
-with moto-rt and moto-sys. Their crates.io dependencies are an overlay of the
-assembly too, locked to `src/sys/Cargo.lock`. moto-sdk uses tokio only on
-Unix, and Motor OS never builds it, but Cargo.lock covers every target. So the
-staged workspace
-patches tokio to an empty placeholder package, `tokio-placeholder`, and no
-tokio sources reach the image. When the lock changes the dependencies, refresh
-that overlay with:
-
-```sh
-src/build-motor-os.sh --sys-lib-deps-only
-```
-
-`make dev.img` then boots the new image once under QEMU to admit that
-workspace and compile its dependencies: about 10 seconds for a release image
-and 4 minutes for a debug one. So it needs the `moto-tap` network below and no
-other running VM.
-
-The wasm image has a 1 GiB data partition and installs the same four wasm
-tools, including the full Wasmtime compiler, but not the native development
-toolchain.
+Published images contain no tests or staged source workspace. The full test
+gate installs the archive into a disposable standard image, then uploads the
+current working tree to `/none/dev/motor-os`, including uncommitted and new
+files. Host preparation fetches locked dependency objects and Git sources;
+guest admission, builds and tests are offline. No placeholder packages replace
+the workspace's locked dependencies.
 
 On Motor OS, compile into a writable directory and execute with explicit masks:
 
 ```sh
-MOTOR_OS_CAPS=0x200 /devtools/bin/javy build hello.js -o /none/tmp/hello.wasm
-MOTOR_OS_CAPS=0 /devtools/bin/wasmi /none/tmp/hello.wasm
-MOTOR_OS_CAPS=0 /devtools/bin/wasmtime run /none/tmp/hello.wasm
+MOTOR_OS_CAPS=0x200 /user/bin/dev/javy build hello.js -o /none/tmp/hello.wasm
+MOTOR_OS_CAPS=0 /user/bin/dev/wasmi /none/tmp/hello.wasm
+MOTOR_OS_CAPS=0 /user/bin/dev/wasmtime run /none/tmp/hello.wasm
 ```
 
 Javy and Wasmtime follow published `moturus` branches and record resolved
 revisions, the toolchain, native library content, and input digests in
-`/devtools/javy/sources.txt` and `/devtools/wasmtime/sources.txt`. Their test
+`/user/lib/javy/sources.txt` and `/user/lib/wasmtime/sources.txt`. Their test
 inputs are staged outside the images, in the assembly's `tests/javy` and
 `tests/wasmtime`, and uploaded by the tests; the Wasmtime fixtures and two
 custom Javy plugins are built with a pinned upstream Rust that has the
@@ -186,13 +172,10 @@ pinned wasi-sdk. Build-time downloads are
 digest-checked; the installed-tool tests require no Internet access:
 
 ```sh
-src/tests/test-wasm.sh --prepare
-src/tests/test-wasm.sh
+src/tests/full-test.sh --release
 ```
 
-By default these Rust checks run both release images at 256 MiB
-(`--vm IMAGE:MIB` selects VMs instead), with the repeat-for-identical-bytes
-checks on the first VM only: Javy static and
+The native Rust harnesses cover Javy static and
 dynamic compilation, TypeScript, default and custom plugins, Wasmi execution,
 memory limits and a deliberately refused page fault, errors, fuel and
 permission refusals, and Wasmtime native compilation, raw execution/serving,
@@ -200,29 +183,19 @@ native loading in both CLIs, explicit Pulley, lifecycle, limits, artifact
 refusals, TypeScript, WASI p2 sockets/filesystem, and p2/p3 HTTP hello/echo.
 HTTP checks include fragmented headers, bounded concurrency, p3 defaults and
 instance turnover, foreground Ctrl-C and shutdown during an active response.
-`src/tests/full-test-dev.sh --release`
-runs them on the wasm image at 256 MiB and the developer image at 256 MiB, and
-the Linux identity checks once; debug suites skip them.
+`cross-test.sh` retains a 256 MiB standard-image run and the comparison with
+Linux output. It uploads inputs only to disposable image copies.
 Engine regressions remain in the owning forks; Wasmtime's suite also runs its
 existing engine checks natively in the VM. Upstream Brotli is used; the
 Linux identity checks require equal output bytes, including compressed source,
 with the same inputs and plugin.
 
-For a focused change, `--suite wasmtime` or `--suite javy` selects the
-smoke binary to build and run; `--suite both` is the default. Image and
-memory selection work the same way with either suite.
-
-The sys-init service-mask checks use separate test images:
-
-```sh
-src/tests/test-wasm.sh --prepare --services --suite wasmtime
-src/tests/test-wasm.sh --services --suite wasmtime
-```
-
-These variants add p2/p3 servers configured with `svc:256:`. The client
+For a focused change, run `lorry test --test installed` in
+`src/sys/tests/javy-smoke` or `src/sys/tests/wasmtime-smoke` on Motor with
+the prepared inputs. The cross runner also adds p2/p3 servers configured
+with `svc:256:` to a disposable image copy. The client
 checks their None role and sys-init parent, serves requests, and shuts them
-down. The same image, memory and VMM selectors apply; the release developer
-gate runs this phase on `wasm:256` and `dev:256` too.
+down. These service checks also run at 256 MiB.
 
 For the external sources, the build stages, and their outputs, see
 [Building Motor OS with its external sources](build-motor-os.md); for how the
@@ -247,7 +220,7 @@ While the VM is running, connect with
 `src/vm_scripts/ssh-into-motor-os-vm.sh`, or directly:
 
 ```sh
-ssh -p 2222 -o IdentitiesOnly=yes -i src/tests/test.key motor@192.168.4.2
+ssh -p 2222 -o IdentitiesOnly=yes -i src/vm_scripts/test.key motor@192.168.4.2
 ```
 
 The build also creates the `moto-tap` host interface and installs the IPv4
@@ -256,18 +229,29 @@ settings do not survive a host reboot; restore them afterwards with
 `vm_images/release/create-tap.sh` (it uses `sudo`), or by re-running
 `src/build-motor-os.sh`.
 
-Run the full debug or release integration suite from the repository root:
+Run the full integration tests from the repository root:
 
 ```sh
 src/tests/full-test.sh
 src/tests/full-test.sh --release
 ```
 
-The suite runs under QEMU, which the build installs. It also boots the image
-once under Cloud Hypervisor and once under Firecracker when
-`cloud-hypervisor-static` and `firecracker` are on `PATH`. Without them those
-two boot checks are skipped, and the suite says so after its final `PASS` line.
-Selecting one of them with `--vmm chv` or `--vmm fc` requires its binary.
+Both runs build and boot the release image. `--release` selects the release
+profile for native tests. [testing.md](testing.md) describes every option of
+the test runners, including the manual-only `--all-debug`.
+
+`full-test.sh` defaults to Cloud Hypervisor and runs boot-option checks on every
+available VMM. `--vmm qemu` skips System-console checks; `--vmm fc` skips
+toolchain installation, native guest tests, and cross checks that need
+development tools. Each skip is named. Cloud Hypervisor runs require QEMU for
+the DHCP check on a read-only root. `--full` adds the optional native Helix build.
+
+`src/tests/full-native-test.sh` runs Cargo and Lorry harnesses on Linux, with
+WireGuard using Cargo only, or Lorry harnesses on Motor.
+`src/tests/cross-test.sh --image IMAGE` runs the
+host/guest checks with a standard image that already has the toolchain installed.
+The full gate prepares that image automatically. `stress-soak.sh` remains a
+separate repository script; it is not included in the gate or published images.
 
 The SSH tests drive Motor OS with the host's OpenSSH client, and
 `ssh-copy-id -t` needs version 9.4 or newer. No test runs the host's `sshd`.

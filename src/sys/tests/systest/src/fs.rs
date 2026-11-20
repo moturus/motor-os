@@ -358,6 +358,13 @@ pub fn move_noreplace_child(args: &[String]) {
 fn copy_test() {
     use moto_sdk::io::fs::{AccessPermissions, EntryKind, FsClient, Role, RolePermissions};
 
+    let interactive = crate::has_interactive();
+    let role = if interactive {
+        Role::Interactive
+    } else {
+        Role::None
+    };
+
     // A panic aborts systest without cleanup. Keep this fixture outside the
     // shared test directory, where a sealed leftover would break other
     // tests, and heal whatever an earlier run left before starting over.
@@ -440,8 +447,14 @@ fn copy_test() {
             .unwrap()
             .permissions()
             .unwrap();
-        assert_eq!(AccessPermissions::Rw, permissions.interactive);
-        assert_eq!(AccessPermissions::R, permissions.none);
+        assert_eq!(AccessPermissions::Rwx, permissions.system);
+        if interactive {
+            assert_eq!(AccessPermissions::Rw, permissions.interactive);
+            assert_eq!(AccessPermissions::R, permissions.none);
+        } else {
+            assert_eq!(AccessPermissions::Rwx, permissions.interactive);
+            assert_eq!(AccessPermissions::Rw, permissions.none);
+        }
     });
 
     // Copying a non-existent source must fail with NotFound.
@@ -487,6 +500,12 @@ fn copy_test() {
     );
     let private = root.join("private");
     std::fs::write(&private, b"private contents").unwrap();
+    // Interactive can deny None access; None can restrict its own source to R.
+    let private_none = if interactive {
+        AccessPermissions::None
+    } else {
+        AccessPermissions::R
+    };
     moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let client = FsClient::connect().unwrap();
         let (id, _) = client.stat(private.to_str().unwrap()).await.unwrap();
@@ -495,8 +514,12 @@ fn copy_test() {
                 id,
                 RolePermissions::new(
                     AccessPermissions::Rwx,
-                    AccessPermissions::Rw,
-                    AccessPermissions::None,
+                    if interactive {
+                        AccessPermissions::Rw
+                    } else {
+                        AccessPermissions::Rwx
+                    },
+                    private_none,
                 ),
             )
             .await
@@ -522,7 +545,7 @@ fn copy_test() {
         let client = FsClient::connect().unwrap();
         let (id, _) = client.stat(protected_dst.to_str().unwrap()).await.unwrap();
         assert_eq!(
-            AccessPermissions::None,
+            private_none,
             client
                 .metadata(id)
                 .await
@@ -587,7 +610,15 @@ fn copy_test() {
                     parent,
                     EntryKind::File,
                     source.file_name().unwrap().to_str().unwrap(),
-                    RolePermissions::new(AccessPermissions::Rwx, staging, staging),
+                    RolePermissions::new(
+                        AccessPermissions::Rwx,
+                        if interactive {
+                            staging
+                        } else {
+                            AccessPermissions::Rwx
+                        },
+                        staging,
+                    ),
                 )
                 .await
                 .unwrap();
@@ -604,7 +635,7 @@ fn copy_test() {
                     .metadata(source_id)
                     .await
                     .unwrap()
-                    .access(Role::Interactive)
+                    .access(role)
                     .unwrap()
             );
         });
@@ -629,10 +660,21 @@ fn copy_test() {
                 metadata.access(Role::System).unwrap()
             );
             assert_eq!(
-                final_interactive,
+                if interactive {
+                    final_interactive
+                } else {
+                    AccessPermissions::Rwx
+                },
                 metadata.access(Role::Interactive).unwrap()
             );
-            assert_eq!(final_none, metadata.access(Role::None).unwrap());
+            assert_eq!(
+                if interactive {
+                    final_none
+                } else {
+                    final_interactive
+                },
+                metadata.access(Role::None).unwrap()
+            );
         });
     }
 
@@ -647,12 +689,18 @@ fn copy_test() {
 fn copy_ceiling_test() {
     use moto_sdk::io::fs::{AccessPermissions, EntryKind, FsClient, RolePermissions};
 
+    // The setup edits Interactive's byte and runs the denied copy as None.
+    if !crate::has_interactive() {
+        println!("    ---- FS: copy_ceiling_test runs under Interactive with a None child");
+        return;
+    }
+
     let root = crate::temp_path("systest-copy-ceiling");
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let source = root.join("executable");
     let destination = root.join("plain");
-    let script = b"#!/system/bin/rush\nexit 0\n";
+    let script = b"#!/user/bin/rush\nexit 0\n";
     std::fs::write(&source, script).unwrap();
     std::fs::write(&destination, b"before copy").unwrap();
     moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
@@ -689,7 +737,7 @@ fn copy_ceiling_test() {
     // A None copy would make the None byte `Rx`, which Interactive's `Rw`
     // cannot hold.
     let before = std::fs::metadata(&destination).unwrap();
-    let output = std::process::Command::new("/system/bin/sysbox")
+    let output = std::process::Command::new("/user/bin/sysbox")
         .args([
             "cp",
             source.to_str().unwrap(),
@@ -1565,7 +1613,7 @@ pub fn service_progress_test() {
         let mut completed = 0;
         while !stop_hot.load(Ordering::Acquire) {
             assert_eq!(
-                std::fs::metadata("/system/bin/.systest-missing-progress")
+                std::fs::metadata("/user/bin/.systest-missing-progress")
                     .unwrap_err()
                     .kind(),
                 std::io::ErrorKind::NotFound,
@@ -1587,7 +1635,7 @@ pub fn service_progress_test() {
         for _ in 0..ROUNDS {
             let client = moto_sdk::io::fs::FsClient::connect().unwrap();
             moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
-                client.stat("/system/bin").await.unwrap();
+                client.stat("/user/bin").await.unwrap();
             });
             newcomer_rounds.fetch_add(1, Ordering::Relaxed);
         }
@@ -1698,8 +1746,55 @@ pub fn metadata_page_pressure_test() {
     println!("    ---- FS: metadata_page_pressure_test PASS");
 }
 
+pub fn concurrent_create_test() {
+    use std::fs::{self, OpenOptions};
+    use std::sync::{Arc, Barrier};
+
+    const WRITERS: usize = 16;
+    let name = format!("create-race-{}", std::process::id());
+    for root in [crate::temp_path(&name), crate::disk_temp_path(&name)] {
+        for exclusive in [false, true] {
+            let path = root.with_extension(if exclusive { "exclusive" } else { "shared" });
+            assert!(!path.exists(), "stale create-race input: {path:?}");
+            let barrier = Arc::new(Barrier::new(WRITERS));
+            let threads = (0..WRITERS)
+                .map(|_| {
+                    let path = path.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .create(!exclusive)
+                            .create_new(exclusive)
+                            .open(path)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut created = 0;
+            for thread in threads {
+                match thread.join().unwrap() {
+                    Ok(file) => {
+                        assert!(file.metadata().unwrap().is_file());
+                        created += 1;
+                    }
+                    Err(error) if exclusive => {
+                        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+                    }
+                    Err(error) => panic!("non-exclusive create failed: {error}"),
+                }
+            }
+            assert_eq!(created, if exclusive { 1 } else { WRITERS });
+            fs::remove_file(path).unwrap();
+        }
+    }
+    println!("concurrent_create_test PASS");
+}
+
 pub fn run_tests() {
     println!("running FS tests ...");
+    concurrent_create_test();
     concurrent_client_progress_test();
     service_progress_test();
     metadata_page_pressure_test();

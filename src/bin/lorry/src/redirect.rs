@@ -276,6 +276,13 @@ impl TrustPolicy {
     }
 
     pub fn authorize(&mut self, source: &HttpsUrl, destination: &HttpsUrl) -> Result<()> {
+        #[cfg(target_os = "motor")]
+        if crate::motor_child::is_child() {
+            return crate::motor_child::authorize_redirect(
+                &source.request_url,
+                &destination.request_url,
+            );
+        }
         let stdin = io::stdin();
         let mut input = stdin.lock();
         let mut output = io::stderr().lock();

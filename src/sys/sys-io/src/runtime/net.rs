@@ -390,6 +390,12 @@ impl NetRuntime {
     async fn spawn_new_listener(&self) {
         let (started_tx, started_rx) = moto_sdk::async_runtime::oneshot();
 
+        // The listener counts from here, before its task first runs: clients
+        // that take every listener at once must each find, when accepted,
+        // that the replacements are on their way (see the floor below).
+        let armed = &self.stats.net_listeners_armed;
+        armed.set(armed.get() + 1);
+
         let this = self.clone();
         moto_sdk::async_runtime::LocalRuntime::spawn(async move {
             // net_listener() replenishes the accept pool itself once a client
@@ -413,6 +419,9 @@ impl NetRuntime {
                         ))
                         .await;
                         backoff_ms = (backoff_ms * 10).min(1000);
+                        // The next attempt counts again.
+                        let armed = &this.stats.net_listeners_armed;
+                        armed.set(armed.get() + 1);
                     }
                 }
             }
@@ -424,11 +433,10 @@ impl NetRuntime {
     }
 
     /// The explicit no. This client connected, so it must never see the
-    /// kernel's `NotFound` -- that is the one error its connect backoff
-    /// retries through 10 s budgets (the 2026-08-10 bind-at-exhaustion
-    /// crawl). Its first RPC is answered with `E_OUT_OF_MEMORY` and the
-    /// channel closes; the wait is bounded so a client that never sends
-    /// cannot pin the slot.
+    /// kernel's `NotReady` -- that is the one answer its connect waits on,
+    /// for 10 to 15 seconds (the 2026-08-10 bind-at-exhaustion crawl). Its
+    /// first RPC is answered with `E_OUT_OF_MEMORY` and the channel closes;
+    /// the wait is bounded so a client that never sends cannot pin the slot.
     async fn refuse_client(
         sender: moto_sdk::ipc::io_channel::Sender,
         mut receiver: moto_sdk::ipc::io_channel::Receiver,
@@ -469,27 +477,23 @@ impl NetRuntime {
                 let _ = started_tx.send(());
             }
 
-            match first_poll {
+            let res = match first_poll {
                 Some(res) => res,
-                None => {
-                    // Armed: registered and parked for a client. The gauge is
-                    // what the floor below reads -- while it is zero, every
-                    // connect would answer `NotFound`.
-                    let armed = &self.stats.net_listeners_armed;
-                    armed.set(armed.get() + 1);
-                    let res = listener.await;
-                    armed.set(armed.get() - 1);
-                    res
-                }
-            }
-            .map_err(|err| std::io::Error::from_raw_os_error(err as u16 as i32))?
+                None => listener.await,
+            };
+            // No longer waiting: its client is here, or it could not be
+            // armed. The gauge is what the floor below reads -- while it is
+            // zero, every connect would answer `NotReady`.
+            let armed = &self.stats.net_listeners_armed;
+            armed.set(armed.get() - 1);
+            res.map_err(|err| std::io::Error::from_raw_os_error(err as u16 as i32))?
         };
 
-        // The armed-listener floor: with no other listener armed (memory
-        // exhaustion stopped replenishment), serving this client would leave
-        // connects answering `NotFound`. Refuse it explicitly instead --
-        // dropping the refused connection frees its channel pages, which is
-        // exactly what this task's backoff retry needs to re-arm.
+        // The armed-listener floor: with no other listener armed or on its
+        // way (memory exhaustion stopped replenishment), serving this client
+        // would leave connects answering `NotReady`. Refuse it explicitly
+        // instead -- dropping the refused connection frees its channel pages,
+        // which is exactly what this task's backoff retry needs to re-arm.
         let at_floor = self.stats.net_listeners_armed.get() == 0;
         self.free_caches.reclaim_if_pressured();
         if at_floor {
@@ -981,7 +985,7 @@ impl NetRuntime {
             return;
         };
 
-        log::debug!("Got msg {net_cmd:?} for handle 0x{:x}", msg.handle);
+        log::trace!("Got msg {net_cmd:?} for handle 0x{:x}", msg.handle);
 
         if matches!(
             net_cmd,

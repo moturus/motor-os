@@ -12,7 +12,7 @@ const MAX_CONTROL_BYTES: usize = 16 * 1024;
 const MAX_DIAGNOSTIC_BYTES: usize = 64 * 1024;
 const MARKER: &str = "MOTOR-GIX-CURL-1";
 #[cfg(target_os = "motor")]
-const CURL: &str = "/system/bin/curl";
+const CURL: &str = "/user/bin/curl";
 #[cfg(not(target_os = "motor"))]
 const CURL: &str = "/usr/bin/curl";
 

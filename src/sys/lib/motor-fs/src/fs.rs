@@ -553,7 +553,7 @@ impl<BD: AsyncBlockDevice + 'static> MotorFs<BD> {
         self.require_access(role, new_parent_id, Need::Write)
             .await?;
 
-        log::debug!("move_entry {entry_id:?} to parent {new_parent_id:?} with name '{new_name}'");
+        log::trace!("move_entry {entry_id:?} to parent {new_parent_id:?} with name '{new_name}'");
         Txn::do_move_entry_txn(
             self,
             entry_id,
@@ -577,7 +577,6 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
         self.check_err()?;
         // Note: parent is required here, so "/" is always invalid.
         validate_filename(filename)?;
-        log::debug!("stat: {parent_id:x} '{filename}'");
 
         let id = self.internal_id(parent_id)?;
         {
@@ -640,7 +639,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
             return Err(ErrorKind::AlreadyExists.into());
         }
 
-        log::debug!("create_entry: parent_id: {parent_id:?} kind: {kind:?} fname: '{filename}'");
+        log::trace!("create_entry: parent_id: {parent_id:?} kind: {kind:?} fname: '{filename}'");
         Txn::do_create_entry_txn(self, parent_id, kind, filename, permissions)
             .await
             .map(|e| e.into())
@@ -684,7 +683,7 @@ impl<BD: AsyncBlockDevice + 'static> FileSystem for MotorFs<BD> {
                 .await?;
         }
 
-        log::debug!("delete_entry {entry_id:?}");
+        log::trace!("delete_entry {entry_id:?}");
         Txn::do_delete_entry_txn(self, entry_id).await
     }
 

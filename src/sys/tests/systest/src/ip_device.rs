@@ -2,6 +2,15 @@ use moto_sdk::sys_io::api_ip_device::{Cidr, MAX_ADDRESSES, MAX_ROUTES, Registrat
 
 pub fn run_all_tests() {
     test_registration_codec();
+    if !crate::has_interactive() {
+        moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+            let result =
+                moto_sdk::io::ip_device::IpDevice::register(&crate::ip_device_live::config(7))
+                    .await;
+            assert_eq!(result.err(), Some(moto_rt::Error::NotAllowed));
+        });
+        return;
+    }
     test_discovery();
     test_discovery_protocol();
     crate::ip_device_admission::test_admission_and_terminal_channel();

@@ -90,11 +90,11 @@ pub fn safe_identity(path: &Path) -> io::Result<()> {
     }
     #[cfg(target_os = "motor")]
     {
-        use moto_sdk::io::fs::{AccessPermissions, EntryKind, FsClient, Role};
+        use moto_sdk::io::fs::{AccessPermissions, EntryKind, Role};
 
         let path = absolute_utf8(path)?;
         motor_io(async {
-            let client = FsClient::connect()?;
+            let client = crate::motor_fs::connect()?;
             let (entry, kind) = client.stat(&path).await?;
             if kind != EntryKind::File {
                 return Err(moto_sdk::rt::Error::InvalidArgument);
@@ -122,11 +122,11 @@ pub fn file_mode(path: &Path, directory: bool) -> io::Result<u32> {
     #[cfg(target_os = "motor")]
     {
         use crate::permissions::{Access, NormalizedMode};
-        use moto_sdk::io::fs::{AccessPermissions, FsClient, Role};
+        use moto_sdk::io::fs::{AccessPermissions, Role};
 
         let path = absolute_utf8(path)?;
         let permissions = motor_io(async {
-            let client = FsClient::connect()?;
+            let client = crate::motor_fs::connect()?;
             let (entry, _) = client.stat(&path).await?;
             client.metadata(entry).await
         })?
@@ -161,7 +161,7 @@ pub fn set_mode(path: &Path, mode: u32, directory: bool) -> io::Result<()> {
     {
         let path = absolute_utf8(path)?;
         motor_io(async {
-            let client = moto_sdk::io::fs::FsClient::connect()?;
+            let client = crate::motor_fs::connect()?;
             let (entry, _) = client.stat(&path).await?;
             client
                 .set_all_permissions(entry, permissions(mode, directory))
@@ -214,14 +214,14 @@ fn create_motor_file(path: &Path, mode: u32) -> io::Result<()> {
 
 #[cfg(target_os = "motor")]
 fn ensure_motor_dir(path: &Path) -> io::Result<()> {
-    use moto_sdk::io::fs::{EntryKind, FsClient};
+    use moto_sdk::io::fs::EntryKind;
 
     if !path.exists() {
         create_motor_entry(path, EntryKind::Directory, permissions(0o700, true))?;
     }
     let path = absolute_utf8(path)?;
     motor_io(async {
-        let client = FsClient::connect()?;
+        let client = crate::motor_fs::connect()?;
         let (entry, kind) = client.stat(&path).await?;
         if kind != EntryKind::Directory {
             return Err(moto_sdk::rt::Error::InvalidArgument);
@@ -238,7 +238,7 @@ fn create_motor_entry(
     kind: moto_sdk::io::fs::EntryKind,
     permissions: moto_sdk::io::fs::RolePermissions,
 ) -> io::Result<()> {
-    use moto_sdk::io::fs::{EntryKind, FsClient};
+    use moto_sdk::io::fs::EntryKind;
 
     if path.exists() {
         return Err(io::ErrorKind::AlreadyExists.into());
@@ -257,7 +257,7 @@ fn create_motor_entry(
         .ok_or_else(|| io::Error::other("path is not UTF-8"))?;
     let parent = absolute_utf8(parent)?;
     motor_io(async {
-        let client = FsClient::connect()?;
+        let client = crate::motor_fs::connect()?;
         let (parent, parent_kind) = client.stat(&parent).await?;
         if parent_kind != EntryKind::Directory {
             return Err(moto_sdk::rt::Error::InvalidArgument);

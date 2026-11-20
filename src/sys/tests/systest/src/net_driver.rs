@@ -1069,6 +1069,45 @@ fn test_drop_driver_immediately_after_connect() {
     println!("net_driver::test_drop_driver_immediately_after_connect PASS");
 }
 
+/// Threads that each connect a channel at the same moment. sys-io keeps
+/// fewer listeners waiting than there are threads here, so most of these
+/// connects are refused at first: `connect()` has to wait for a listener.
+fn test_threads_that_start_together_all_connect() {
+    const THREADS: usize = 32;
+    let clients_before = crate::tcp::read_sys_io_metric("net.active_clients");
+    for _ in 0..4 {
+        let start = Arc::new(std::sync::Barrier::new(THREADS));
+        let threads: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
+                        start.wait();
+                        let (client, driver_task) = host_channel().await;
+                        // The first request: a client that sys-io refused
+                        // for want of a listener would learn it here.
+                        moto_sdk::io::net::udp::UdpSocket::bind_reserved(
+                            client.try_reserve().unwrap(),
+                            &"127.0.0.1:0".parse().unwrap(),
+                            None,
+                        )
+                        .await
+                        .unwrap();
+                        crate::net_harness::drain_host_channel(client, driver_task).await;
+                    });
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+    }
+    // Later tests count clients: let sys-io finish closing these first.
+    crate::tcp::wait_for_sys_io_metric("net.active_clients", |n| n <= clients_before);
+
+    println!("net_driver::test_threads_that_start_together_all_connect PASS");
+}
+
 /// Reservation-free RPCs staged before a closing driver starts cannot hold
 /// that driver open or be reused after its RX task has exited.
 fn test_queued_queries_fail_after_driver_exit() {
@@ -2352,6 +2391,7 @@ pub fn run_vsock_tests() {
 pub fn run_all_tests() {
     test_connect_drive_shutdown();
     test_drop_driver_immediately_after_connect();
+    test_threads_that_start_together_all_connect();
     test_queued_queries_fail_after_driver_exit();
     test_reservation_lifecycle();
     test_reserved_socket_io();

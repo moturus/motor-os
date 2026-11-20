@@ -640,7 +640,7 @@ fn path_executable(path: &Path, _metadata: &Metadata) -> Result<bool> {
             "failed to inspect Motor source permissions `{path}`: {error}"
         ))
     })?;
-    Ok(attr.perm & moto_rt::fs::PERM_EXEC != 0)
+    crate::motor_fs::none_executable(attr.entry_id)
 }
 
 #[cfg(not(any(unix, target_os = "motor")))]
@@ -664,7 +664,7 @@ fn file_executable(file: &File, _metadata: &Metadata) -> Result<bool> {
             "failed to inspect open Motor source permissions: {error}"
         ))
     })?;
-    Ok(attr.perm & moto_rt::fs::PERM_EXEC != 0)
+    crate::motor_fs::none_executable(attr.entry_id)
 }
 
 #[cfg(not(any(unix, target_os = "motor")))]
@@ -770,7 +770,6 @@ fn validate_entries(entries: &[Entry], limits: Limits) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hash::decode_hex;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -841,29 +840,51 @@ mod tests {
 
     #[test]
     fn matches_golden_vectors() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/source-tree-v1-vectors.json");
-        let document = Value::load(&path, "source-tree golden vectors").unwrap();
-        let vectors = document.get("vectors").and_then(Value::as_array).unwrap();
-        for vector in vectors {
-            let name = vector.get("name").and_then(Value::as_str).unwrap();
-            let entries = vector
-                .get("entries")
-                .and_then(Value::as_array)
-                .unwrap()
-                .iter()
-                .map(vector_entry)
-                .collect::<Vec<_>>();
-            let expected = vector
-                .get("source-tree-sha256")
-                .and_then(Value::as_str)
-                .unwrap();
-            assert_eq!(
-                hex(&digest_entries(&entries, DEFAULT_LIMITS).unwrap()),
-                expected,
-                "{name}"
-            );
+        assert_eq!(
+            hex(&digest_entries(&[], DEFAULT_LIMITS).unwrap()),
+            "4754e3b164c100dfd3a409a5e79d39597678f136438619f04273b1bd570c89f3"
+        );
+        let mut entries = Vec::new();
+        for path in ["bin", "empty"] {
+            entries.push(Entry {
+                path: path.into(),
+                kind: EntryKind::Directory,
+                executable: false,
+                length: 0,
+                sha256: ZERO_SHA256,
+            });
         }
+        for (path, content, executable, expected) in [
+            (
+                "bin/tool",
+                "#!/bin/sh\nexit 0\n",
+                true,
+                "306c6ca7407560340797866e077e053627ad409277d1b9da58106fce4cf717cb",
+            ),
+            (
+                "café.txt",
+                "café\n",
+                false,
+                "7b49b9e063bd91a4f9252b413261f5557b9c570aa61516989499f64a62dbcdd6",
+            ),
+        ] {
+            let mut hash = Sha256::new();
+            hash.update(content.as_bytes());
+            let sha256 = hash.finish();
+            assert_eq!(hex(&sha256), expected);
+            entries.push(Entry {
+                path: path.into(),
+                kind: EntryKind::File,
+                executable,
+                length: content.len() as u64,
+                sha256,
+            });
+        }
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(
+            hex(&digest_entries(&entries, DEFAULT_LIMITS).unwrap()),
+            "a0bba2df187c38aa673c7feb41af19de82915ef9ef514589bc142fbb9a5720ed"
+        );
     }
 
     #[test]
@@ -873,12 +894,8 @@ mod tests {
         fs::create_dir(root.0.join("empty")).unwrap();
         fs::write(root.0.join("bin/tool"), b"#!/bin/sh\nexit 0\n").unwrap();
         fs::write(root.0.join("caf\u{e9}.txt"), "caf\u{e9}\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(root.0.join("bin/tool"), fs::Permissions::from_mode(0o755))
-                .unwrap();
-        }
+        let tool = root.0.join("bin/tool");
+        crate::fs_check::set_file_mode(&File::open(&tool).unwrap(), &tool, true).unwrap();
 
         let tree = Tree::scan(&root.0, DEFAULT_LIMITS, Exclusions::None).unwrap();
         assert_eq!(tree.file_count, 2);
@@ -1004,47 +1021,5 @@ mod tests {
         };
         let error = digest_entries(&[directory], DEFAULT_LIMITS).unwrap_err();
         assert!(error.to_string().contains("file metadata"));
-    }
-
-    fn vector_entry(value: &Value) -> Entry {
-        let kind = match value.get("kind").and_then(Value::as_str).unwrap() {
-            "directory" => EntryKind::Directory,
-            "file" => EntryKind::File,
-            other => panic!("unknown vector entry kind {other}"),
-        };
-        if let Some(content) = value.get("content-hex").and_then(Value::as_str) {
-            let expected =
-                decode_hex::<32>(value.get("sha256").and_then(Value::as_str).unwrap()).unwrap();
-            let mut bytes = Vec::new();
-            for pair in content.as_bytes().as_chunks::<2>().0 {
-                bytes.push((nibble(pair[0]) << 4) | nibble(pair[1]));
-            }
-            let mut hasher = Sha256::new();
-            hasher.update(&bytes);
-            assert_eq!(hasher.finish(), expected);
-            assert_eq!(
-                value.get("length").and_then(Value::as_u64),
-                Some(bytes.len() as u64)
-            );
-        }
-        Entry {
-            path: value
-                .get("path")
-                .and_then(Value::as_str)
-                .unwrap()
-                .to_owned(),
-            kind,
-            executable: value.get("executable").and_then(Value::as_bool).unwrap(),
-            length: value.get("length").and_then(Value::as_u64).unwrap(),
-            sha256: decode_hex::<32>(value.get("sha256").and_then(Value::as_str).unwrap()).unwrap(),
-        }
-    }
-
-    fn nibble(byte: u8) -> u8 {
-        match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            _ => panic!("invalid test hex"),
-        }
     }
 }

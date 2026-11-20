@@ -1,12 +1,252 @@
 # Future work -- recorded, deliberately not scheduled
 
-Source review: 2026-10-28, Motor OS `8bb9345c`. Non-memory issues were
-checked against source only, without builds, tests, or runtime validation.
-Memory capacity, allocation failure, reclamation, and accounting entries
-were skipped and left unchanged. Runtime and I/O latency items, including
-per-operation allocation overhead, were reviewed. Historical timings below
-are not new measurements. An unexplained historical failure stays open
-unless the source establishes that its cause was fixed.
+## lorry builds on 12 vCPUs run slower than on 4 vCPUs
+
+## A failed output relay loses the output without an error (2026-11-17)
+
+A process whose standard output or error is a file relays the output of a
+child that inherits it: rt.vdso copies the child's pipe into the file
+(`transfer_file_output` in `src/sys/lib/rt.vdso/src/stdio.rs`). When that
+write fails, rt.vdso logs `child file-stdio relay failed: <code>` and ends
+the relay. The child is not told. A child that writes little has had every
+write succeed, exits with status 0, and its output is gone.
+
+Seen over SSH, though nothing in it depends on SSH:
+
+    MOTOR_OS_CAPS=0x204 cat > /none/tmp/a.txt
+
+leaves `a.txt` empty and reports status 0. The Interactive shell creates the
+file, so None may only read it (`rwxrw-r--`). `/user/bin/cat` is a Rush
+script that runs `sysbox cat`; that Rush runs as None, relays for sysbox, and
+its write is refused (`NotAllowed`, 9). The only trace is the warning on the
+session's standard error. `MOTOR_OS_CAPS=0x204 rush -c 'sysbox echo x' > file`
+loses its output the same way.
+
+A program that writes the file itself is told: `MOTOR_OS_CAPS=0x204 sysbox
+cat > file` ends with "failed printing to stdout: NotAllowed", and `sysbox
+echo` with "write error: Permission denied" and status 1. With the
+redirection inside the None shell the file is None's own and the write
+succeeds: `MOTOR_OS_CAPS=0x204 rush -c 'cat > file'`.
+
+Not tried: a write that fails for another reason, a full filesystem among
+them, which takes the same path in the code; and a child that keeps writing
+after the relay has ended. No fix is chosen: the relay could end the pipe
+with an error for the child's next write, and the relaying process could
+fail when its relay did. Until then a test that uploads a file this way gets
+an empty file and a passing status.
+
+## Debug images: what still slows guest file work (2026-11-16)
+
+An earlier entry here said the upload of the Lorry vendor tree in
+`full-test.sh --all-debug` stalled. It did not: the rate was a steady
+0.4 MiB/s, and the file count fell only because the archive reached large
+files. The two causes are fixed: DEBUG lines that sys-io logged per packet
+and per file, each written back into `kernel.log` through sys-io
+(`docs/kernel-logs.md`, "Debug builds: per-packet and per-operation lines"),
+and the 80-byte buffer of the stdio relay in rt.vdso. Rush's `read` also took
+a filesystem request per byte of a file. What remains, on a debug image with
+4 vCPUs and 4 GiB:
+
+- **Unoptimized code.** The toolchain installer takes about 150 s on its
+  own (19 s on a release image, measured before the Rush changes); copying
+  its trees is 68 s of that. There is no single cause left to fix.
+- **`install.sh` sets the modes of `/user/lib/rust` twice**, once for each
+  overlay that adds to it (rust-analyzer and rustc): 22 s of the 150. The
+  script is `lib/toolchain-native-install.sh` in the toolchain repository.
+- **The installation check's privacy watcher never pauses between scans.**
+  It lengthens a reinstall from 181 s to 230 s, and motor-fs logs one
+  `access denied` DEBUG line for each open it is refused, 24,000 in one
+  check. A pause would make the watcher sample less often on release images.
+- **rt.vdso logs two DEBUG lines per file open** to the process's stderr. An
+  install sends 7.6 MiB of them over SSH, which now costs about 5 s.
+- **A kernel record still costs a filesystem append in file mode.** A new
+  DEBUG line on a per-packet or per-file path brings the slowdown back, and
+  no test would notice.
+- **russhd sends one SSH packet per 256 bytes of command output**
+  (`pump_output` in `src/bin/russhd/src/local_session.rs`). Not measured as a
+  limit.
+
+## Lorry's debug tests do not build in the gate's 4 GiB guest (2026-11-16)
+
+`full-test.sh` without `--release` runs the native tests in the debug
+profile. Inside the guest, `lorry test` for `src/bin/lorry` compiles the
+`lorry` binary and its test build together; with 4 GiB the kernel's OOM
+killing takes a helper process and then `rustc`, and Lorry reports "rustc
+failed with status -1". It happens on the release image with the kernel,
+sys-io and rt.vdso of `af10bc45` as well as with the changes of 2026-11-16,
+and on a fresh boot running that crate alone. With `--memory 8192` the build
+succeeds and `full-test.sh --memory 8192` passes (1 h 44 min).
+
+On the kernel of `85505dbd` the `analyzer` test then failed with "server
+stdout closed": its resource sampler lists processes with the published
+moto-sys, and that commit made the kernel's `ProcessInfoV1` 8 bytes longer
+than the published one. With the record back at 56 bytes (the capability
+mask moved to `ProcessInfoV2`) the test passes as Interactive and as None.
+
+## `full-test.sh --all-debug` does not pass (2026-11-16)
+
+Two checks fail on a debug image. Neither has to do with speed, and both
+fail without the changes of 2026-11-16. The native tests inside the guest,
+which run after them, have not been reached on a debug image.
+
+- **The gix cross check does not build.** `cross_gix` builds the
+  `native-port` test of `src/bin/gix` for the Motor target in the gate's
+  profile. In debug the link fails: zlib-rs's `zalloc_c` and `zfree_c` refer
+  to `malloc` and `free`, which a Rust-only Motor program does not have. A
+  release build drops both functions as unused, and the image's own gix is
+  always a release build, so only this helper is affected. Building the
+  helper in release in every mode, or selecting zlib-rs's Rust allocator,
+  would fix it.
+- **The System OOM fixture fails once the toolchain is installed.**
+  `systest system-oom-tests`, run from the System console by
+  `cross_system_console`, fails at `oom.rs:583` ("the small cleanups must not
+  reach recovery before the large victim"): it expects one round of OOM
+  killing and counts two. The first round ends with 768 to 788 free pages,
+  at the 768-page floor; free memory then drops by about 480 pages, and a
+  second round starts and ends without a kill. On the plain debug image the
+  test passes, 3 runs of 3. On the debug image with the toolchain installed
+  it fails 4 of 4 with the kernel, sys-io and rt.vdso of `af10bc45`, and 3
+  of 4 with the changes of 2026-11-16. Not yet known: what uses more memory
+  on the installed image, and what allocates the 480 pages.
+
+## No test runs sys-io's self-tests (2026-11-16)
+
+sys-io's unit tests live inside sys-io (`src/sys/sys-io/src/self_test.rs`).
+They are compiled into debug builds only and run only on request, over the
+socket-stats service (`runtime/net/stats.rs`); sys-io does not run them at
+boot. systest used to request them whenever systest itself was a debug build.
+Since `full-test.sh` boots the release image by default, a debug systest no
+longer means a debug sys-io, so systest stopped requesting them. Nothing runs
+them now, not even `full-test.sh --all-debug`.
+
+The fix is to run them in sys-io at boot in debug builds and fail loudly, so
+that `--all-debug` covers them, without adding boot-time work to release
+builds. The request path in sys-io and `IoStatsService::run_self_tests` in
+moto-sdk are then unused and can go.
+
+## Two rnetbench unit tests are ignored on Motor (2026-11-14)
+
+rnetbench's unit tests first ran on Motor when the native crate tests moved
+into `full-native-test.sh`. Before that, Motor ran only the benchmark binary
+against network peers, which it still does. Two tests in
+`src/bin/rnetbench/src/main.rs` failed on that first run and are ignored on
+Motor only; both stay enabled on Linux, and the other six pass.
+
+- **A peer close is reported as `ConnectionReset`.**
+  `a_truncated_flow_is_an_error_rather_than_a_short_read` accepts a loopback
+  connection and drops the peer without sending data. `read_exact_pattern`
+  then returns `ConnectionReset`; the test expects `UnexpectedEof`, which a
+  read that returns zero produces. Not yet known: why this close is reported
+  as a reset, whether that is how Motor's TCP is meant to close, and whether
+  the test should arrange a graceful close. Keep the assertion that a
+  truncated flow fails, and do not relax the error it expects.
+- **A blocked write outlives its shutdown deadline.**
+  `timed_write_interrupts_blocking_io` holds a loopback peer open that does
+  not read, and `IoDeadline` shuts down a clone of the socket after 100 ms.
+  The write took 2.001 s: past the test's one-second limit, and as long as
+  the peer's two-second fallback lifetime. The read and round-trip deadline
+  tests pass. The cause is not established: trace the shutdown's wake-up,
+  the blocked writer and its final flush to find the wait that lasts until
+  the peer goes away. Do not lengthen the limit or the peer's lifetime.
+
+## frusa, motor-fs and netstack unit tests do not run on Motor (2026-11-14)
+
+`full-native-test.sh` runs the unit tests of `src/sys/lib/frusa`,
+`src/sys/lib/motor-fs` and `src/sys/sys-io/netstack` on Linux only, and
+prints a SKIP line for each on Motor. Their test builds depend on
+`rand = "0.8"`, and `getrandom 0.2.17` does not compile for Motor ("target
+is not supported"). The crates themselves do not use this RNG. Because the
+test build does not compile, ignoring single tests is not enough, so the
+runner leaves out each crate's unit tests as a whole.
+
+What still runs: on Linux, frusa's stress and concurrency counts, motor-fs
+with `image-admin`, and both netstack variants; on Motor, the allocator,
+filesystem and networking checks of systest and of `cross-test.sh`.
+
+The fix is a test RNG that builds on Motor, or a deterministic one used
+only by these tests, with no change to the allocator, filesystem or
+networking code. Then run the three crates' unit tests on Motor.
+
+## The reported boot time includes the VMM opening the disk image (2026-11-14)
+
+systest requires the boot time that the kernel log reports to be at most
+3,000 ms in release builds. On a native-test image that had grown to
+9.1 GiB the reported time was 3,655 ms. Cloud Hypervisor's log put the
+opening of the qcow2 file between 0.009 and 3.694 s, before the guest ran:
+the reported clock starts when the vCPUs are created, so it includes the
+VMM's own setup. A fresh standard image with the same kernel and initrd,
+4 vCPUs and 4 GiB reached the kernel at 60 ms and packet forwarding at
+77 ms.
+
+The check now runs where the image is still small: `cross-test.sh` calls
+`systest kernel-log-boot` right after the memory-placement check on the
+freshly installed image, and the check reads the latest boot record when
+the log also holds an older boot. The limit is unchanged.
+
+Still open: why opening a large qcow2 file takes seconds, and reporting the
+boot time from kloader's entry so that the VMM's work is not counted
+(item 5 of [boot-time.md](boot-time.md)).
+
+## Only modes keep None from writing `/system` and `/user` (2026-11-15)
+
+The images and the toolchain installation give None no write access at or
+below `/system` and `/user`, and the imager rejects any rule or entry that
+would. Nothing else enforces it: a wrong mode set later by Interactive or
+System would let None write there.
+
+sys-io could enforce it as well, whatever the modes say:
+
+- refuse every mutating request from a None client whose target, or whose
+  destination parent, lies in `/system` or `/user`, including the
+  `/system/tmp` and `/user/tmp` mounts;
+- refuse a mode change that would grant None `w` there;
+- refuse a rename into those trees that would carry None `w` along;
+- prove each rule with a native systest case.
+
+This is worth doing only if sys-io can tell which tree an entry is in
+without walking its parents on every write. If it cannot, the modes stay
+the only protection. If it can, one question is open: should "no mode may
+grant None `w` there" bind requests from Interactive and System too, or
+only None's own?
+
+## `sed -i` lets None read a private file while it runs (2026-11-13)
+
+Motor's sed fork stages an in-place edit in a new file beside the original,
+`.sed<hex>` (`NamedTempFile::new_in` in the fork's `src/sed/motor.rs`). A file
+that Interactive creates at run time is readable by None. In a directory None
+may enter, such as `/user/cfg`, a None process can therefore read the whole
+file during the edit, although the original is closed to it and the edited
+file keeps its permissions afterwards. A None process polling `/user/cfg` read
+the SSH host key this way while the toolchain installer ran
+`sed -i ... /user/cfg/sshd.toml`. The installer no longer uses `sed -i`; a
+user who edits `sshd.toml` with it is still exposed.
+
+The fix belongs in the sed fork. Staging in memory, which the fork already
+does when it cannot create a file in the directory, is the one place no other
+role can read. Creating the staging file and then closing its permissions
+leaves a moment in which None can open it. The documentation site's line on
+`sed -i` in `commands.html` says only that the file keeps its permissions.
+
+## A program that starts `rust-analyzer` by name loses its keyboard (2026-11-13)
+
+`/user/bin/dev/rust-analyzer` is a Rush script that runs
+`/user/lib/rust/bin/rust-analyzer`. When a terminal program starts the server
+through it, the program stops receiving keys: the Rush process between the two
+takes the session's terminal input. Exporting `MOTURUS_STDIO_NO_TERMINAL=true`
+inside the script does not help; the parent has to set it, or start the binary
+directly.
+
+Helix started with `hx` is not affected. That launcher sets
+`XDG_CONFIG_HOME=/user/cfg`, and `/user/cfg/helix/languages.toml` starts the
+binary directly with the variable set. `/user/lib/helix/hx` run directly does
+not read that file, finds `rust-analyzer` on `PATH`, and stops reacting to keys
+as soon as it opens a `.rs` file. The Helix check in `src/tests/test-tui.sh`
+previously bypassed the launcher too; it now uses `/user/bin/dev/hx` to exercise
+the shipped configuration. This test correction does not fix the generic
+rust-analyzer launcher. Any other editor that looks the server up by name is
+affected in the same way. Before toolchain 1.99.1-3 there was no `rust-analyzer`
+on `PATH`. No fix is chosen: the launcher could go, or a Rush script could get
+a way to run a helper without taking the terminal.
 
 ## rt.vdso keeps a closed poll registry's registrations (2026-11-02)
 
@@ -312,12 +552,40 @@ current reclaim stalls allocs/frees.
 
 ## Pipe closure is not reported as BrokenPipe (2026-10-09)
 
-The native writer no longer keeps succeeding after its reader is dropped:
-rt.vdso's `create_stdio_pipes` gives the child a direct pipe, closing the
-parent descriptor drops its endpoint, and `StdioPipe::write_timeout_impl`
-propagates peer-close errors. The source of
-`systest::stdio::test_child_stdout_reader_drop` covers termination after
-reader drop, but its child accepts any write error.
+The raw native writer observes reader loss: rt.vdso's `create_stdio_pipes`
+gives the child a direct pipe, closing the parent descriptor drops its
+endpoint, and `StdioPipe::write_timeout_impl` propagates peer-close errors.
+`systest::stdio::test_child_stdout_reader_drop`, added in `a3be0fed`, calls
+`moto_rt::fs::write` directly and accepts any write error. It does not establish
+that Rust's stdout writer reports the disconnect. The source-only review in
+`9b45fc7b` overstated this when it replaced the original `f53a85c9` observation
+of a stdout `write_all` loop that kept succeeding.
+
+A diagnosis on 2026-11-14 confirmed the distinction as Interactive
+and None. After dropping Gix's directly captured stdout reader, raw
+`moto_rt::fs::write` returned `BadHandle` (17), but Rust stdout `write_all`
+returned success. Motor's `sys/stdio/motor.rs::is_ebadf` classifies raw error
+17 as a closed local standard descriptor; shared `std::io::stdio::handle_ebadf`
+then discards the error. Gix propagates write and flush errors but receives
+success. The diagnosis log was not kept, and the temporary instrumentation
+was removed. This explains the current failure without establishing the
+precise cause of the original October workload.
+
+Since that date the Gix test `closed_stdout_reports_broken_pipe`
+(`src/bin/gix/tests/cli.rs`) is ignored on Motor for this reason. It stays
+enabled on Linux, under Cargo and under Lorry; before, it ran only against
+the host Gix. Motor's `std::io::pipe()` is unsupported, and with a captured
+child pipe and a 64 KiB commit title Gix still exits successfully after the
+reader is dropped. Reporting the lost reader as `NotConnected` in the
+runtime alone would stop the silent success, but would not finish the
+classification described below.
+
+Commit `9cf5eac8` changed the parent-side `ChildStdio::write` closed-event
+case from `BadHandle` to `NotConnected`. It did not change the child's own
+`SelfStdio` writer or normalize errors from the pipe's wait/wake calls.
+Commit `3b576408` explicitly preserves successful discarded writes when the
+process closes its own standard descriptor; that separate behavior is now
+covered by `systest::stdio_errors` and must survive a pipe-closure fix.
 
 The 2026-11-05 OOM follow-up developer gate also exposed this classification
 in sysbox's argument-error tests: `cut -b=1` exited before the fixture's stdin
@@ -342,8 +610,10 @@ Add a distinct pipe-closure error and propagate it through the ABI and
 stdlib. Translate peer loss only for a valid pipe writer; do not globally
 reinterpret invalid descriptors or disconnected sockets as broken pipes.
 This needs reviewed moto-rt and external stdlib changes. Then strengthen the
-native reader-drop assertion and enable the upstream EPIPE fixture with a
-parent that closes its reader. No external source was changed in this review.
+native reader-drop assertion so that it checks Rust's stdout, re-enable the
+Gix test with the diagnostic Motor should print, and enable the upstream
+EPIPE fixture with a parent that closes its reader. No external source was
+changed in this review.
 
 ## Motor OS filesystem behavior that WASI guests see (2026-10-09)
 

@@ -6,6 +6,11 @@
 use std::process::Command;
 
 const RUSH: &str = env!("CARGO_BIN_EXE_rush");
+const SH: &str = if cfg!(target_os = "motor") {
+    "/user/bin/sh"
+} else {
+    "/bin/sh"
+};
 
 struct Run {
     stdout: String,
@@ -35,6 +40,12 @@ fn write_executable(path: &std::path::Path, contents: &str) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
+    #[cfg(target_os = "motor")]
+    moto_rt::fs::set_perm(
+        path.to_str().unwrap(),
+        moto_rt::fs::PERM_READ | moto_rt::fs::PERM_EXEC,
+    )
+    .unwrap();
 }
 
 // ---- variables & $? --------------------------------------------------------
@@ -55,7 +66,12 @@ fn status_variable() {
 #[test]
 fn inline_assignment_scopes_to_the_command() {
     // A prefix assignment reaches the child's environment...
-    assert!(run_c("FOO=bar env").stdout.lines().any(|l| l == "FOO=bar"));
+    assert!(
+        run_c("FOO=bar printenv")
+            .stdout
+            .lines()
+            .any(|l| l == "FOO=bar")
+    );
     // ...but does not persist as a shell variable afterward.
     assert_eq!(run_c("FOO=bar true; echo \"[$FOO]\"").stdout, "[]\n");
 }
@@ -63,9 +79,9 @@ fn inline_assignment_scopes_to_the_command() {
 #[test]
 fn exec_assignments_do_not_escape_emulated_children() {
     for command in [
-        "(RUSH_EXEC_SCOPE=child exec /bin/sh -c 'echo $RUSH_EXEC_SCOPE')",
-        "RUSH_EXEC_SCOPE=child exec /bin/sh -c 'echo $RUSH_EXEC_SCOPE' & wait %1",
-        "x=$(RUSH_EXEC_SCOPE=child exec /bin/sh -c 'echo $RUSH_EXEC_SCOPE'); echo $x",
+        format!("(RUSH_EXEC_SCOPE=child exec {SH} -c 'echo $RUSH_EXEC_SCOPE')"),
+        format!("RUSH_EXEC_SCOPE=child exec {SH} -c 'echo $RUSH_EXEC_SCOPE' & wait %1"),
+        format!("x=$(RUSH_EXEC_SCOPE=child exec {SH} -c 'echo $RUSH_EXEC_SCOPE'); echo $x"),
     ] {
         let run = run_c(&format!(
             "export RUSH_EXEC_SCOPE=parent; {command}; echo $RUSH_EXEC_SCOPE"
@@ -78,8 +94,9 @@ fn exec_assignments_do_not_escape_emulated_children() {
 #[test]
 fn staging_failure_aborts_pipelines_and_substitutions() {
     let missing = tmp("missing_staging").join("absent");
+    let pipeline = format!("printf secret | {SH} -c 'echo downstream-ran'");
     for script in [
-        "printf secret | /bin/sh -c 'echo downstream-ran'",
+        pipeline.as_str(),
         "x=$(printf secret)",
         "set -e; x=$(printf secret); echo continued",
     ] {
@@ -104,7 +121,7 @@ fn command_resolved_via_unexported_shell_path() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let cmd = dir.join("mycmd");
-    write_executable(&cmd, "#!/bin/sh\necho CUSTOM\n");
+    write_executable(&cmd, &format!("#!{SH}\necho CUSTOM\n"));
     // env_clear() removes the inherited PATH, so PATH exists only as an
     // (unexported) shell variable set inside the script — exactly the Motor case.
     let out = Command::new(RUSH)
@@ -119,7 +136,7 @@ fn command_resolved_via_unexported_shell_path() {
 
 #[test]
 fn rush_and_sh_scripts_run_in_the_current_process() {
-    for (tag, interpreter) in [("rush_script", RUSH), ("sh_script", "/bin/sh")] {
+    for (tag, interpreter) in [("rush_script", RUSH), ("sh_script", SH)] {
         let script = tmp(tag);
         write_executable(
             &script,
@@ -472,34 +489,39 @@ fn command_substitution_runs_in_the_enclosing_io() {
     for (script, stdout) in [
         // A group's here-document feeds a substitution inside it.
         (
-            "{ x=$(cat); } <<EOF\nbody\nEOF\nprintf '[%s]' \"$x\"",
+            "{ x=$(cat); } <<EOF\nbody\nEOF\nprintf '[%s]' \"$x\"".to_owned(),
             "[body]",
         ),
         // `for` and `case` words expand under the compound command's redirects.
         (
-            "for f in $(ls /no_such_rush_dir); do :; done 2>/dev/null; printf ok",
+            format!(
+                "for f in $(ls /no_such_rush_dir); do :; done 2>{}; printf ok",
+                err.display()
+            ),
             "ok",
         ),
         (
-            "case $(ls /no_such_rush_dir) in x) ;; esac 2>/dev/null; printf ok",
+            format!(
+                "case $(ls /no_such_rush_dir) in x) ;; esac 2>{}; printf ok",
+                err.display()
+            ),
             "ok",
         ),
     ] {
-        let out = Command::new(RUSH).args(["-c", script]).output().unwrap();
+        let out = Command::new(RUSH).args(["-c", &script]).output().unwrap();
         assert_eq!(out.stdout, stdout.as_bytes(), "{script}");
         assert_eq!(out.stderr, b"", "{script}");
     }
 
     // A redirection inside the substitution still takes precedence.
-    let out = Command::new(RUSH)
-        .args([
-            "-c",
-            "{ x=$(ls /no_such_rush_dir 2>&1); } 2>/dev/null; printf '%s' \"$x\"",
-        ])
-        .output()
-        .unwrap();
+    let script = format!(
+        "{{ x=$(ls /no_such_rush_dir 2>&1); }} 2>{}; printf '%s' \"$x\"",
+        err.display()
+    );
+    let out = Command::new(RUSH).args(["-c", &script]).output().unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).contains("no_such_rush_dir"));
     assert_eq!(out.stderr, b"");
+    std::fs::remove_file(err).unwrap();
 }
 
 #[test]
@@ -513,7 +535,7 @@ fn assignment_values_expand_after_redirections() {
         run_c(&format!("x=$(cat) < {p}; printf '[%s]' \"$x\"")).stdout,
         "[from-file]"
     );
-    let r = run_c(&format!("FOO=$(cat) env < {p}"));
+    let r = run_c(&format!("FOO=$(cat) printenv < {p}"));
     assert!(
         r.stdout.lines().any(|l| l == "FOO=from-file"),
         "{}",
@@ -539,11 +561,14 @@ fn pipeline_stage_words_expand_in_the_stage() {
         run_c("echo x | echo \"[$(cat)]\" | tr a-z A-Z").stdout,
         "[X]\n"
     );
+    let empty = tmp("pipeline_empty");
+    std::fs::write(&empty, "").unwrap();
     assert_eq!(
-        run_c("echo x | echo \"[$(cat)]\" < /dev/null").stdout,
+        run_c(&format!("echo x | echo \"[$(cat)]\" < {}", empty.display())).stdout,
         "[x]\n"
     );
-    let r = run_c("echo x | FOO=$(cat) env");
+    std::fs::remove_file(empty).unwrap();
+    let r = run_c("echo x | FOO=$(cat) printenv");
     assert!(r.stdout.lines().any(|l| l == "FOO=x"), "{}", r.stdout);
 }
 

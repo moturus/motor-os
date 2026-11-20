@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
 //! Credential parsing, limits and trust checks, driven through the files russhd
-//! really reads. The guest's role checks are in src/tests/test-sshd-keys.sh.
+//! really reads. Motor OS's role checks are in tests/motor_trust.rs.
 
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};

@@ -232,8 +232,25 @@ impl AsyncFsClient {
         }
     }
 
+    /// Connects to sys-io's filesystem service, waiting for a free listener
+    /// as `ConnectBackoff` says. The calling thread has no async runtime to
+    /// wait on, so it sleeps.
+    fn connect() -> Result<Rc<FsClient>> {
+        let mut backoff = moto_sdk::io::ConnectBackoff::default();
+        loop {
+            match FsClient::connect() {
+                Err(moto_rt::Error::NotReady) => {}
+                result => return result,
+            }
+            match backoff.next_wake() {
+                Some(wake) => super::rt_thread::sleep(wake.as_u64()),
+                None => return Err(moto_rt::Error::NotReady),
+            }
+        }
+    }
+
     fn create() -> Result<&'static Self> {
-        let fs_client = moto_sdk::io::fs::FsClient::connect()?;
+        let fs_client = Self::connect()?;
         let (tasks_tx, tasks_rx) = moto_sdk::async_runtime::channel(8);
 
         let this = alloc::boxed::Box::leak(alloc::boxed::Box::new(AsyncFsClient {
@@ -329,37 +346,34 @@ impl AsyncFsClient {
 
         let path = CanonicalPath::parse(path)?;
 
-        let maybe_entry_id = match self.stat_internal(path.clone()) {
-            Ok(val) => Some(val),
-            Err(moto_rt::Error::NotFound) => None,
+        let (entry_id, entry_kind, created) = match self.stat_internal(path.clone()) {
+            Ok((entry_id, entry_kind)) => (entry_id, entry_kind, false),
+            Err(moto_rt::Error::NotFound)
+                if (opts & (moto_rt::fs::O_CREATE_NEW | moto_rt::fs::O_CREATE)) != 0 =>
+            {
+                match self.create_internal(&path, EntryKind::File) {
+                    Ok(entry_id) => (entry_id, EntryKind::File, true),
+                    Err(moto_rt::Error::AlreadyInUse)
+                        if (opts & moto_rt::fs::O_CREATE_NEW) == 0 =>
+                    {
+                        // A concurrent non-exclusive create may win after stat.
+                        let (entry_id, entry_kind) = self.stat_internal(path.clone())?;
+                        (entry_id, entry_kind, false)
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
             Err(err) => return Err(err),
         };
-
-        let (entry_id, created) = match maybe_entry_id {
-            Some((entry_id, entry_kind)) => {
-                if (opts & moto_rt::fs::O_CREATE_NEW) != 0 {
-                    return Err(moto_rt::Error::AlreadyInUse);
-                }
-
-                if entry_kind != EntryKind::File {
-                    return Err(moto_rt::Error::InvalidArgument);
-                }
-
-                if (opts & moto_rt::fs::O_TRUNCATE) != 0 {
-                    self.resize(entry_id, 0)?;
-                }
-                (entry_id, false)
-            }
-            None => {
-                if (opts & (moto_rt::fs::O_CREATE_NEW | moto_rt::fs::O_CREATE)) == 0 {
-                    return Err(moto_rt::Error::NotFound);
-                }
-                (
-                    self.create_internal(&path, moto_sdk::io::fs::EntryKind::File)?,
-                    true,
-                )
-            }
-        };
+        if !created && (opts & moto_rt::fs::O_CREATE_NEW) != 0 {
+            return Err(moto_rt::Error::AlreadyInUse);
+        }
+        if entry_kind != EntryKind::File {
+            return Err(moto_rt::Error::InvalidArgument);
+        }
+        if !created && (opts & moto_rt::fs::O_TRUNCATE) != 0 {
+            self.resize(entry_id, 0)?;
+        }
 
         let pos = if (opts & moto_rt::fs::O_APPEND) != 0 {
             self.metadata(entry_id)?.size

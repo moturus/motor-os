@@ -216,6 +216,30 @@ impl Client {
         Self::connect_to(SERVICE_URL)
     }
 
+    /// Connect to the resolver, and while it has no listener free wait for
+    /// one as [`ConnectBackoff`](moto_sdk::io::ConnectBackoff) says, sleeping
+    /// the calling thread. [`Self::connect`] reports that at once.
+    pub fn connect_with_backoff() -> Result<Self, ClientError> {
+        let mut connection =
+            ClientConnection::new(ChannelSize::Small).map_err(ClientError::Transport)?;
+        let mut backoff = moto_sdk::io::ConnectBackoff::default();
+        loop {
+            match connection.connect(SERVICE_URL) {
+                Ok(()) => break,
+                Err(moto_rt::E_NOT_READY) => {}
+                Err(_) => return Err(ClientError::ServiceUnavailable),
+            }
+            match backoff.next_wake() {
+                Some(wake) => moto_rt::thread::sleep_until(wake),
+                None => return Err(ClientError::ServiceUnavailable),
+            }
+        }
+        Ok(Self {
+            connection,
+            next_request_id: 1,
+        })
+    }
+
     /// Connect to an explicitly named endpoint. This is primarily useful to
     /// verify service-discovery failure without stopping the system resolver.
     pub fn connect_to(service_url: &str) -> Result<Self, ClientError> {

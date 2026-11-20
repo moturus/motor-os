@@ -6,7 +6,7 @@ from [Rust Book](https://doc.rust-lang.org/book/title-page.html) inside a Motor 
 
 First, make sure that you can [build and run Motor OS](https://github.com/moturus/motor-os/blob/main/docs/build.md).
 
-To build the program inside a VM instead, on the developer image, see
+To build the program inside a VM with the toolchain installed, see
 [Hello Motor OS, natively](hello-motor-os-native.md).
 
 On the host, start from the Motor OS checkout. Create the example below it
@@ -234,14 +234,14 @@ executable and its data files:
 ```sh
 SSH_KEY=vm_images/release/test.key
 ssh -p 2222 -o IdentitiesOnly=yes -i "$SSH_KEY" \
-  motor@192.168.4.2 /system/bin/mkdir /user/tmp/hello
+  motor@192.168.4.2 /user/bin/mkdir /user/tmp/hello
 scp -P 2222 -o IdentitiesOnly=yes -i "$SSH_KEY" \
   build/examples/hello/target/x86_64-unknown-motor/release/hello \
   build/examples/hello/hello.html \
   build/examples/hello/404.html \
   motor@192.168.4.2:/user/tmp/hello/
 ssh -p 2222 -o IdentitiesOnly=yes -i "$SSH_KEY" \
-  motor@192.168.4.2 /system/bin/chmod rwxr-xr-x /user/tmp/hello/hello
+  motor@192.168.4.2 /user/bin/chmod rwxr-xr-x /user/tmp/hello/hello
 ```
 
 Motor OS `chmod` takes a nine-character mode such as `rwxr-xr-x`, not an

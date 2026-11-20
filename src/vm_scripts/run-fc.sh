@@ -101,12 +101,23 @@ if [ -n "$VSOCK_UDS" ]; then
 "
 fi
 
+BOOT_ARGS="console=ttyS0 reboot=k panic=1 pci=off ip=192.168.4.2:::255.255.255.0::eth0:off"
+[ "$VM_SYSTEM_TTY" != 1 ] || BOOT_ARGS="$BOOT_ARGS system-tty"
+NETWORK_CONFIG=''
+if [ "$VM_NO_NETWORK" != 1 ]; then
+  NETWORK_CONFIG='{
+      "iface_id": "eth0",
+      "guest_mac": "a4:a1:c2:00:00:01",
+      "host_dev_name": "moto-tap"
+    }'
+fi
+
 cat <<EOF > "$CONFIG"
 {
   "boot-source": {
     "kernel_image_path": "${ABS_WD}/kloader",
     "initrd_path": "${ABS_WD}/initrd",
-    "boot_args": "console=ttyS0 reboot=k panic=1 pci=off ip=192.168.4.2:::255.255.255.0::eth0:off"
+    "boot_args": "$BOOT_ARGS"
   },
   "drives": [
     {
@@ -126,11 +137,7 @@ $(DISK_INDEX=1
   done)
   ],
   "network-interfaces": [
-    {
-      "iface_id": "eth0",
-      "guest_mac": "a4:a1:c2:00:00:01",
-      "host_dev_name": "moto-tap"
-    }
+    $NETWORK_CONFIG
   ],
   "machine-config": {
     "vcpu_count": ${SMP},

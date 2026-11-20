@@ -422,11 +422,15 @@ not spin for the child's lifetime.
 
 ### Which transport a shell picks
 
-`rush` uses the direct route only where the descriptor genuinely belongs to one
-command: a fresh redirect to a regular file, on a single external or background
-command. Anything that can hand one descriptor to several commands stays on the
-pipe-and-pump path, because a shared offset is what the relay exists to
-protect.
+`rush` hands input files directly to external commands so that spawning a
+command does not consume input it never reads. On Motor OS the child receives
+a copy of the current file position: its reads do not advance the shell's
+position. This also applies to the temporary file holding a pipeline stage's
+input. Here-documents are fed through pipes.
+
+For output, Rush uses the direct route for a fresh redirect to a regular file
+on a single external or background command. Output descriptors shared by
+several commands stay on the pipe-and-pump path.
 
 | Form | stdout | stderr |
 | --- | --- | --- |
@@ -510,14 +514,14 @@ authorizes an operation must use an explicit authorization policy.
   matrix: mixed redirection masks through `std::process::Command`,
   environment mutation, duplication, the direct-spawn hint, and non-stdio
   descriptors. `systest stdio-terminal-tests` runs just these tests.
-- `src/tests/test-tui.sh` validates the real providers end to end: the
+- `src/tests/cross-test.sh` validates the real providers end to end: the
   probe (`systest stdio-terminal-report-child`) reports `111` on the serial
   console, in SSH pty sessions, and in rmux panes, and `000` in non-pty SSH
   sessions and their descendants. It also injects terminal Ctrl+C into
   Default and handler leaves, verifies fd 0 and fd 3 delivery, foreground
   route restoration, no parent callback, retained type-ahead, the Crossterm
   adapter, and a nested rmux → rush → Default-child chain.
-- `src/tests/test-terminal-size.sh` validates the size half of the same
+- Its terminal-size phase validates the size half of the same
   providers, from the application's end: rush and red laid out for the size
   each terminal last reported, and repainted when it changes with no key
   typed, on the serial console, in an SSH pty session, and in an rmux pane —
@@ -530,7 +534,7 @@ All three run from `src/tests/full-test.sh`.
 terminal-chain probes. Lower-level atomic classification, route generation,
 batch scanning, and fixed-status process interruption are covered in their
 own tests: moto-sdk's `ipc::stdio_pipe` tests run natively under
-`full-test-dev.sh`, and the rt.vdso, moto-rt, and kernel tests are reached
+`full-native-test.sh`, and the rt.vdso, moto-rt, and kernel tests are reached
 transitively by `full-test.sh`.
 
 Redirection has its own set, also run from `full-test.sh`:

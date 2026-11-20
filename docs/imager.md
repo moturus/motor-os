@@ -31,12 +31,21 @@ run `cargo run --release -- <arguments>`. That directory's Cargo configuration
 supplies the required build flags. Cargo's `--release` selects the host tool's
 build profile; the separate `debug|release` argument selects guest build inputs.
 
+The toolchain archive also installs this Linux binary at `/user/lib/imager/imager`,
+off the guest's PATH, so it can be copied out to a Linux host. It does not run
+on Motor OS.
+
 Host paths are relative to the current working directory unless absolute;
 quote arguments containing spaces. Guest paths name entries inside the image.
 Editing commands detect raw versus qcow2 input by its contents, not its suffix.
 `qemu-img` must be on `PATH` for operations involving qcow2. No VM, mount, or
 guest service needs to run. Stop the VM and prevent concurrent image writers
 before using these commands.
+
+Image creation and the `mkdir`, `put`, and `chmod` commands reject modes that
+grant None write access under `/system` or `/user`. Use `/none/dev` for writable
+source trees; see [filesystem permissions](fs-permissions.md) for the shared
+configuration and installation modes.
 
 Successful commands exit with status 0; errors exit nonzero and report a
 diagnostic. Running without arguments prints usage and exits nonzero.
@@ -77,18 +86,18 @@ serialize image construction:
 make base.img BUILD=release
 make main.img BUILD=release
 make raw.img BUILD=release
-make dev.img BUILD=release
 ```
 
-These produce `motor-os-base.img`, `motor-os.qcow2`, `motor-os.img` (the raw
-standard image), and `motor-os-dev.qcow2`, respectively. Later rebuilding an
+These produce `motor-os-base.img`, `motor-os.qcow2`, and `motor-os.img` (the raw
+standard image), respectively. Later rebuilding an
 image replaces any customizations made directly to that output file.
 
 ### Image configuration
 
 The YAML file is read from the supplied host path. Start from the image
 descriptions in [`src/imager`](../src/imager), such as `motor-os-base.yaml`,
-`motor-os.yaml`, and `motor-os-dev.yaml`.
+and `motor-os.yaml`. Both images contain no tests. Development tools are
+installed from the toolchain archive onto a standard image.
 
 | Field | Meaning |
 | --- | --- |
@@ -98,6 +107,7 @@ descriptions in [`src/imager`](../src/imager), such as `motor-os-base.yaml`,
 | `static_dirs` | Required list of host trees to overlay at guest `/`. Relative source paths are resolved against `REPO ROOT`. Later overlays replace earlier files at the same destination. |
 | `filesystem` | Required; currently `motor-fs`. |
 | `data_partition_size_mb` | Required data-partition size in MiB (1,048,576 bytes), excluding the preceding boot partitions. |
+| `raw_data_partition_size_mb` | Optional size override used with `--raw-output`. The standard image uses 32 GiB for qcow2 and 256 MiB for raw output. |
 | `img_name` | Required output path, resolved against `vm_images/PROFILE/`; normally a filename. |
 | `image_format` | Required; `raw` or `qcow2`, independent of the image name's suffix. |
 | `required_executables` | Optional list of host files that must exist and have an execute bit. Relative paths use `REPO ROOT`. Defaults to an empty list. |
@@ -107,9 +117,8 @@ descriptions in [`src/imager`](../src/imager), such as `motor-os-base.yaml`,
 | `ca_bundle` | Optional host PEM file installed as `/system/cfg/ssl/ca-certificates.crt`. Relative paths use `REPO ROOT`. The build fails unless it exists and contains only certificates; text outside PEM blocks is allowed. |
 
 Source snapshots are added after static overlays and exclude `.git`, `.lorry`,
-`__pycache__`, and `target` directories. Static overlays omit `devtools`
-directories unless the configuration declares `/devtools` or a directory
-below it. File modes come from the
+`__pycache__`, and `target` directories. Every final image must contain exactly
+the `system`, `user`, and `none` roots. File modes come from the
 [permission policy](fs-permissions.md#imager-enforcement), not host ownership
 or host read/write permissions.
 
@@ -129,7 +138,7 @@ see [toolchain.md](toolchain.md#4-the-assembly) for the build workflow.
 ## Change guest permissions
 
 ```sh
-imager chmod rw-r----- image.img /system/cfg/sshd.toml
+imager chmod rwxrw---- image.img /user/cfg/sshd.toml
 imager chmod r-xr-xr-x image.qcow2 /user/bin/program
 ```
 
@@ -260,9 +269,11 @@ Allow space beside the image for a copy and, with qcow2, its raw intermediate.
 The image must be a regular file, not a symlink. Destination files other than
 a login name's key file must already exist, and their contents and each input
 artifact are limited to 1 MiB. Artifact input files must be nonempty regular
-files. Secret destinations (`sshd.toml` and `ssl-key.pem`) must have permissions
-no broader than `rw-r-----`; use `chmod` to correct a permissive image before
-installing secrets. All command arguments must be UTF-8.
+files. The Interactive-owned `sshd.toml` must have permissions no broader than
+`rwxrw----`, and None must not be able to replace its ancestors up to `/user`.
+The System-owned `ssl-key.pem` remains limited to `rw-r-----`. Use `chmod` to
+correct a permissive image before installing secrets. All command arguments
+must be UTF-8.
 
 Login credentials live in `/user/cfg/russhd/users.toml` and
 `/user/cfg/ssh/authorized_keys.NAME` (see
@@ -272,7 +283,7 @@ same. It refuses them, before changing anything, unless each is a regular file
 and None can neither write it nor replace any directory up to `/user`, and None
 cannot read `users.toml`. A file that an update only consults keeps its mode.
 
-SSH edits require version 2 `/system/cfg/sshd.toml` with the standard
+SSH edits require version 2 `/user/cfg/sshd.toml` with the standard
 `users_file` and `authorized_keys_dir` values and no user credentials, and a
 `users.toml` in the shipped layout, with bare `[users.NAME]` tables. Credential
 paths read from inside an image are never followed. Unsupported layouts, such

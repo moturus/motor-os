@@ -1,6 +1,6 @@
 //! Exercises the Motor OS backend of `crossterm` on the real thing.
 //!
-//! Everything here is scripted from `src/tests/full-test.sh`: a subcommand per
+//! Native Cargo tests and `src/tests/cross-test.sh` drive a subcommand per
 //! question, one line of output per answer, so an assertion can be a substring
 //! match. What it is checking is the part of the port that no host test can
 //! reach — a console that is a stdio pipe rather than a pty, mode 2048 with an

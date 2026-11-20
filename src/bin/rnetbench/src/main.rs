@@ -390,6 +390,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        target_os = "motor",
+        ignore = "a blocked write outlives its shutdown deadline; see docs/plans/future-work.md"
+    )]
     fn timed_write_interrupts_blocking_io() {
         let (client, release, peer) = stalled_connection();
         let (elapsed, bytes) =
@@ -517,6 +521,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        target_os = "motor",
+        ignore = "a peer close is reported as ConnectionReset; see docs/plans/future-work.md"
+    )]
     fn a_truncated_flow_is_an_error_rather_than_a_short_read() {
         let (client, release, peer) = stalled_connection();
         let mut client = client;

@@ -161,6 +161,12 @@ b"#,
     r#"echo one > "$T/f"; echo two >> "$T/f"; cat "$T/f""#,
     r#"echo in > "$T/f"; cat < "$T/f""#,
     r#"echo x > "$T/f"; read line < "$T/f"; echo "[$line]""#,
+    // `read` takes one line of a file and leaves the rest for the next reader.
+    r#"printf 'a\nb\nc\n' > "$T/f"; while read x; do echo "[$x]"; done < "$T/f""#,
+    r#"printf 'a\nb\nc\n' > "$T/f"; { read x; echo "[$x]"; cat; } < "$T/f""#,
+    r#"printf 'a\\\nb\nc\n' > "$T/f"; { read x; echo "[$x]"; cat; } < "$T/f""#,
+    r#"printf '%0700d\nrest\n' 7 > "$T/f"; { read x; echo "${#x}"; cat; } < "$T/f""#,
+    r#"printf 'no newline' > "$T/f"; { read x; echo "$? [$x]"; read y; echo "$? [$y]"; } < "$T/f""#,
     r#"ls /nonexistent-xyz 2>/dev/null; echo $?"#,
     r#"echo msg 2>&1 1>/dev/null"#,
     r#"{ echo out; echo err >&2; } > "$T/f" 2>&1; cat "$T/f""#,
@@ -186,6 +192,26 @@ EOT2"#,
     r#"cat <<EOT
 backtick: `echo sub`
 EOT"#,
+    // The commands under one here-document share its position. The loops are
+    // bounded, so a position that fails to advance cannot hang the corpus.
+    r#"{ read a; read b; echo "$a $b"; } <<EOT
+x
+y
+EOT"#,
+    r#"for i in 1 2 3; do read x || break; echo "got $x"; done <<EOT
+a
+b
+EOT"#,
+    r#"{ read a; cat; } <<EOT
+x
+y
+z
+EOT"#,
+    r#"for i in 1 2 3 4; do read x || break; cat /dev/null; echo "got $x"; done <<EOT
+a
+b
+c
+EOT"#,
 
     // ---- §2.9.2 pipelines ----
     r#"echo hi | cat"#,
@@ -210,6 +236,19 @@ EOT"#,
     r#"(echo sub)"#,
     r#"x=outer; (x=inner); echo $x"#,
     r#"x=outer; { x=inner; }; echo $x"#,
+    // An asynchronous list reads from nothing, not from the input around it,
+    // unless it redirects its own standard input.
+    r#"printf 'a\nb\nc\n' > "$T/f"; while read x; do cat & wait; echo "got $x"; done < "$T/f""#,
+    r#"printf 'a\nb\n' | { cat & wait; read x; echo "[$x]"; }"#,
+    r#"echo in > "$T/f"; { read x & wait; cat; } < "$T/f""#,
+    r#"echo in > "$T/f"; { { cat; } & wait; cat | cat & wait; echo done; } < "$T/f""#,
+    r#"echo in > "$T/f"; { cat <&0 & wait; read x; echo "[$x]"; } < "$T/f""#,
+    r#"echo in > "$T/f"; cat < "$T/f" & wait"#,
+    r#"cat <<EOT & wait
+doc
+EOT"#,
+    // Output it sends to that empty input goes nowhere.
+    r#"printf seed | { uname >&0 2>/dev/null & wait; }"#,
 
     // ---- §2.9.4 compound commands ----
     r#"if true; then echo yes; fi"#,
@@ -349,6 +388,13 @@ const DIVERGENCES: &[(&str, &str)] = &[
     // OS enforces: a child there takes only inherit/null/pipe as its stdio, so
     // an arbitrary fd cannot be handed to `cat >&3` at all).
     (r#"exec 3>"$T/f"; echo fd3 >&3; exec 3>&-; cat "$T/f""#, "fds > 2 are not wired (no fd passing on Motor OS)"),
+    // A here-document reaches an external command through a pipe, so what that
+    // command reads cannot be counted: `read` sees `x` again where dash is at
+    // the end.
+    (r#"{ cat; read b; echo "[$b]"; } <<EOT
+x
+y
+EOT"#, "what an external command reads from a here-document is not taken from the shell"),
 ];
 
 struct Run {

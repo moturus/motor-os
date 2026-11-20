@@ -6,7 +6,7 @@ use crate::prompt;
 
 pub(crate) mod workspace;
 
-#[derive(Clone, Copy)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
 pub enum Mode {
     Change,
     Forced,
@@ -58,11 +58,6 @@ pub(crate) fn approve_json(
                     "checksum": capability.checksum, "build_script": capability.build_script,
                     "proc_macro": capability.proc_macro,
                     "caller_env": capability.caller_env,
-                    "native_tools": capability.native_tools.iter().map(|role| match role {
-                        crate::config::NativeToolRole::CCompiler => "c-compiler",
-                        crate::config::NativeToolRole::CxxCompiler => "cxx-compiler",
-                        crate::config::NativeToolRole::Archiver => "archiver",
-                    }).collect::<Vec<_>>(),
                 })
             })
             .collect::<Vec<_>>()
@@ -91,9 +86,27 @@ pub(crate) fn approve_json(
             Error::failure(format!("candidate review is not UTF-8: {error}"))
         })?,
     });
-    writeln!(output, "{message}").map_err(|error| {
-        Error::failure(format!("failed to write vendor change message: {error}"))
-    })?;
+    approve_report(
+        format!("{message}\n").as_bytes(),
+        mode,
+        terminal,
+        input,
+        output,
+    )
+}
+
+pub(crate) fn approve_report(
+    report: &[u8],
+    mode: Mode,
+    terminal: bool,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<()> {
+    #[cfg(target_os = "motor")]
+    if crate::motor_child::is_child() {
+        return crate::motor_child::approve(report, mode);
+    }
+    output.write_all(report)?;
     confirm(mode, terminal, input, output)
 }
 
@@ -143,11 +156,10 @@ mod tests {
     use crate::admission_state::SourceEvidence;
 
     #[test]
-    fn json_reports_changed_execution_and_native_tool_grants() {
+    fn json_reports_changed_execution_and_environment_grants() {
         use crate::admission_state::{
             Capability, Context, ContextPackage, LockedRegistry, UnitKind,
         };
-        use crate::config::NativeToolRole;
         let checksum = "1".repeat(64);
         let mut previous = Review {
             resolver_version: 2,
@@ -189,7 +201,6 @@ mod tests {
                 checksum: checksum.clone(),
                 build_script: true,
                 proc_macro: false,
-                native_tools: vec![NativeToolRole::CCompiler],
                 caller_env: Vec::new(),
             }])
             .unwrap();
@@ -234,9 +245,6 @@ mod tests {
                         key,
                         crate::policy::PackageAdmission {
                             caller_env: ["EMPTY".into(), "PUBLIC".into()].into(),
-                            native_tools: [NativeToolRole::CCompiler, NativeToolRole::Archiver]
-                                .into(),
-                            configured_native_tools: false,
                         },
                     )]),
                     proposed: Default::default(),
@@ -260,15 +268,7 @@ mod tests {
         assert_eq!(message["added"], serde_json::json!([]));
         assert_eq!(message["removed"], serde_json::json!([]));
         assert_eq!(message["capabilities_removed"][0]["proc_macro"], false);
-        assert_eq!(
-            message["capabilities_removed"][0]["native_tools"],
-            serde_json::json!(["c-compiler"])
-        );
         assert_eq!(message["capabilities_added"][0]["proc_macro"], true);
-        assert_eq!(
-            message["capabilities_added"][0]["native_tools"],
-            serde_json::json!(["archiver", "c-compiler"])
-        );
         assert_eq!(message["capabilities_added"][0]["checksum"], checksum);
         assert_eq!(
             message["capabilities_removed"][0]["caller_env"],

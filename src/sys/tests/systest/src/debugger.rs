@@ -39,6 +39,12 @@ fn wait_for(debug: SysHandle, tid: u64, ready: impl Fn(&ThreadDataV1) -> bool) -
 /// Both fully paused threads and a pause racing a kill must release memory
 /// without a debugger resume, even while process and debugger handles survive.
 pub fn test_kill_paused() {
+    if moto_sys::caps::ProcessRole::from_caps(moto_sys::ProcessStaticPage::get().capabilities)
+        == moto_sys::caps::ProcessRole::None
+    {
+        println!("SKIP debugger::test_kill_paused: requires Interactive or System");
+        return;
+    }
     for mode in ["spin", "wait", "syscall"] {
         for settled in [true, false] {
             for round in 0..4 {

@@ -1,4 +1,5 @@
 //! A dedicated, process-owned IP interface. Dropping it closes its channel.
+use super::connect_backoff::retry_not_ready;
 use crate::ipc::io_channel::{self, IoPage, Msg, Receiver, Sender};
 use crate::sys_io::{api_ip_device as api, api_net::NetCmd};
 use core::task::{Context, Poll};
@@ -23,9 +24,13 @@ pub struct PacketReceiver<'a> {
 impl IpDevice {
     /// Cancellation closes both channel halves, including while waiting for
     /// the registration reply. No partial registration outlives that channel.
+    /// While sys-io has no listener free this waits for one as
+    /// [`ConnectBackoff`](super::ConnectBackoff) says.
     pub async fn register(config: &api::Registration) -> Result<Self> {
         config.validate()?;
-        let (sender, mut receiver) = io_channel::connect("sys-io").map_err(connection_error)?;
+        let (sender, mut receiver) = retry_not_ready(|| io_channel::connect("sys-io"))
+            .await
+            .map_err(connection_error)?;
         let page = sender
             .alloc_page(u64::MAX)
             .await

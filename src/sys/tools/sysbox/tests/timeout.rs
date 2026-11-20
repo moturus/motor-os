@@ -1,5 +1,5 @@
 //! Subprocess regressions for `sysbox timeout`; run natively with `lorry test`.
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
@@ -19,6 +19,17 @@ fn fixture(args: &[String]) -> ! {
             std::io::stdout().write_all(&input).unwrap();
             eprintln!("fixture stderr");
             std::process::exit(0);
+        }
+        "release" => {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !Path::new(&args[1]).exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "watchdog never signalled"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            std::process::exit(23);
         }
         _ => panic!("unknown fixture"),
     }
@@ -93,7 +104,7 @@ fn durations() {
     }
 }
 
-fn termination() {
+fn termination(root: &Path) {
     for options in [
         vec!["-p", ".01"],
         vec!["--preserve-status", "--signal=SIGTERM", ".01"],
@@ -120,8 +131,32 @@ fn termination() {
         assert!(diagnostic.contains("sending signal 0"), "{diagnostic}");
         assert!(diagnostic.contains("sending signal KILL"), "{diagnostic}");
     }
-    expect(run(&["-s0", "-k0", ".001"], &["sleep", "30"]), 124, b"");
-    expect(run(&["-ps0", ".001"], &["sleep", "30"]), 23, b"");
+    // The child must outlive the check-only signal. Waiting for the diagnostic
+    // avoids racing process startup against a short sleep in the child.
+    for (options, code) in [
+        (vec!["-vs0", "-k0", ".001"], 124),
+        (vec!["-pvs0", ".001"], 23),
+    ] {
+        let release = root.join(format!("release-{code}"));
+        let mut child = command(&options, &["release", release.to_str().unwrap()])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = std::io::BufReader::new(child.stderr.take().unwrap());
+        let mut signalled = false;
+        for line in stderr.lines() {
+            if line
+                .unwrap()
+                .contains("timeout: sending signal 0 to command '")
+            {
+                signalled = true;
+                std::fs::write(&release, b"release").unwrap();
+            }
+        }
+        expect(child.wait_with_output().unwrap(), code, b"");
+        assert!(signalled, "watchdog never signalled");
+    }
     expect(run(&["-k0", ".01"], &["sleep", "30000"]), 124, b"");
 }
 
@@ -204,7 +239,7 @@ fn main() {
     eprintln!("timeout test artifacts: {}", root.display());
     exits_and_io();
     durations();
-    termination();
+    termination(&root);
     errors(&root);
     informational();
     std::fs::remove_dir_all(root).unwrap();

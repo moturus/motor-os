@@ -5,14 +5,27 @@ use crate::cli::Verbosity;
 use crate::diagnostic::{Error, Result};
 
 pub fn execute(verbosity: Verbosity) -> Result<i32> {
-    let root = crate::config::Config::load_global()?.cache_directory()?;
-    let removed = clean(&root)?;
-    if verbosity != Verbosity::Quiet {
-        if removed {
-            eprintln!("Removed global Lorry cache from `{}`", root.display());
-        } else {
-            eprintln!("Removed 0 global Lorry cache entries");
+    let config = crate::config::Config::load_global()?;
+    #[cfg(not(target_os = "motor"))]
+    let roots = vec![config.cache_directory()?];
+    #[cfg(target_os = "motor")]
+    let roots = {
+        let mut roots = vec![config.cache_directory()?];
+        if crate::role::Role::current() == crate::role::Role::Interactive {
+            roots.push(crate::role::Role::None.cache_directory());
         }
+        roots
+    };
+    let mut any_removed = false;
+    for root in roots {
+        let removed = clean(&root)?;
+        any_removed |= removed;
+        if removed && verbosity != Verbosity::Quiet {
+            eprintln!("Removed global Lorry cache from `{}`", root.display());
+        }
+    }
+    if !any_removed && verbosity != Verbosity::Quiet {
+        eprintln!("Removed 0 global Lorry cache entries");
     }
     Ok(0)
 }

@@ -150,7 +150,7 @@ fn bare_exit_uses_last_status() {
 
 #[test]
 fn inline_env_assignment_reaches_child() {
-    let r = run_c("FOO=phase0bar env");
+    let r = run_c("FOO=phase0bar printenv");
     assert_eq!(r.code, 0);
     assert!(
         r.stdout.lines().any(|l| l == "FOO=phase0bar"),

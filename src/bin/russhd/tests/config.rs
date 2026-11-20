@@ -68,12 +68,8 @@ fn default_config() {
 
 #[test]
 fn shipped_configs_parse() {
-    for text in [
-        include_str!("../../../../img_files/motor-os-base/system/cfg/sshd.toml"),
-        include_str!("../../../../img_files/motor-os-dev/system/cfg/sshd.toml"),
-    ] {
-        assert!(!read("shipped", text).unwrap().gateway_ports());
-    }
+    let text = include_str!("../../../../img_files/motor-os-base/user/cfg/sshd.toml");
+    assert!(!read("shipped", text).unwrap().gateway_ports());
 }
 
 #[test]
@@ -89,6 +85,8 @@ fn only_the_version_2_schema_is_accepted() {
         ),
         ("legacy-key", format!("authorized_key = 'k'\n{CONFIG}")),
         ("unknown-field", format!("extra = 1\n{CONFIG}")),
+        // PATH comes from /user/cfg/profile, read by the session's login shell.
+        ("retired-path", format!("path = '/user/bin'\n{CONFIG}")),
         (
             "no-users-file",
             CONFIG.replace("users_file = '/user/cfg/russhd/users.toml'\n", ""),

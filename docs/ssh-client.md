@@ -284,13 +284,13 @@ If no usable credential is left, recover through the VM console, or stop the VM
 and use `imager set` (see [imager](imager.md)), which also creates names and
 replaces whole key lists in a stopped image.
 
-`/system/cfg/sshd.toml` holds the service settings and names the two credential
+`/user/cfg/sshd.toml` holds the service settings and names the two credential
 locations, as normalized absolute paths:
 
 ```toml
 version = 2
 listen_on = '0.0.0.0:2222'
-path = '/system/bin:/user/bin'
+path = '/user/bin'
 host_key = '...OpenSSH private key...'
 users_file = '/user/cfg/russhd/users.toml'
 authorized_keys_dir = '/user/cfg/ssh'

@@ -26,7 +26,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::IsTerminal;
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const MOTOR_TARGET: &str = "x86_64-unknown-motor";
 
@@ -55,6 +55,7 @@ fn report_build_completion(cli: &Cli, reported: &mut bool) -> Result<()> {
 }
 
 fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32> {
+    let started = Instant::now();
     let current = env::current_dir()
         .map_err(|error| Error::failure(format!("failed to read current directory: {error}")))?;
     let (workspace, mut selected) = crate::manifest::SourceWorkspace::load_compilation(
@@ -262,6 +263,14 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
     };
     let jobs = compile_jobs(cli.jobs(), config.build_jobs);
     let color = use_color(cli.color);
+    let finished = || {
+        Progress::new(cli.verbosity != Verbosity::Quiet).finished(
+            color,
+            manifest.profile_name.as_deref().unwrap_or("dev"),
+            &manifest.profile,
+            started.elapsed(),
+        )
+    };
     crate::trace::event("resolved effective build configuration");
 
     let cargo = env::current_exe()
@@ -345,15 +354,8 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
             color,
             cli.verbosity == Verbosity::Verbose,
         )?;
-        report_finished(
-            manifest
-                .profile_name
-                .as_deref()
-                .unwrap_or(if release { "release" } else { "dev" }),
-            cli.verbosity,
-            validation,
-            &artifacts,
-        )?;
+        report_artifact(cli.verbosity, validation, &artifacts)?;
+        finished()?;
         report_build_completion(cli, reported)?;
         return match &cli.command {
             Command::Build(_) | Command::Check(_) => Ok(0),
@@ -368,7 +370,7 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
                     &target_options,
                     &RuntimeOptions {
                         current_dir: &current,
-                        environment: &program_environment(&cargo, &manifest, &artifacts)?,
+                        environment: &program_environment(&config, &cargo, &manifest, &artifacts)?,
                         kind: process::ChildKind::Program,
                         verbosity: cli.verbosity,
                     },
@@ -380,7 +382,7 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
         };
     }
 
-    Progress::new(notes != Verbosity::Quiet).report("Verifying dependency state")?;
+    Progress::new(notes == Verbosity::Verbose).report("Verifying dependency state")?;
     // One registry source serves both admission verification and prepare, so
     // registry objects verified during admission are not hashed again when the
     // build prepares its dependency graph. Admission still loads and verifies
@@ -481,11 +483,19 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
     match &cli.command {
         Command::Build(_) => {
             build_inner(build, resolution, None, format)?;
+            finished()?;
             Ok(0)
         }
-        Command::Check(options) => check(build, resolution, options),
+        Command::Check(options) => {
+            let code = check(build, resolution, options)?;
+            if code == 0 {
+                finished()?;
+            }
+            Ok(code)
+        }
         Command::Run(options) => {
             let artifacts = build_reported(build, resolution, format)?;
+            finished()?;
             let artifact = selected_run_artifact(&artifacts, run_binary.unwrap(), run_example)?;
             report_build_completion(cli, reported)?;
             drop(artifact_lock);
@@ -497,7 +507,7 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
                 &target_options,
                 &RuntimeOptions {
                     current_dir: &current,
-                    environment: &program_environment(&cargo, &manifest, &artifacts)?,
+                    environment: &program_environment(&config, &cargo, &manifest, &artifacts)?,
                     kind: process::ChildKind::Program,
                     verbosity: cli.verbosity,
                 },
@@ -513,6 +523,7 @@ fn execute_inner(cli: &Cli, notes: Verbosity, reported: &mut bool) -> Result<i32
             let BuildOutcome::Tests(members) = outcome else {
                 unreachable!("test build returned no test artifacts")
             };
+            finished()?;
             report_build_completion(cli, reported)?;
             if options.no_run {
                 if options.build.message_format == MessageFormat::Human {
@@ -1025,7 +1036,7 @@ enum BuildOutcome {
     NoTargets,
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 fn build(build: Build<'_>, resolution: Resolution) -> Result<BuildArtifacts> {
     build_reported(build, resolution, MessageFormat::Human)
 }
@@ -1103,7 +1114,7 @@ fn build_inner(
     let staging = AtomicDirectory::new_compact(&profile_parent)?;
     crate::trace::event("created dependency preparation directory");
 
-    Progress::new(build.verbosity != Verbosity::Quiet).report("Preparing dependency graph")?;
+    Progress::new(build.verbosity == Verbosity::Verbose).report("Preparing dependency graph")?;
     let prepared = dependency::workspace::prepare_compilation(
         resolution,
         build.config,
@@ -1169,9 +1180,6 @@ fn build_inner(
                 build.verbosity == Verbosity::Verbose,
             )?;
             if check.is_some() {
-                if build.verbosity != Verbosity::Quiet {
-                    eprintln!("Finished `{}` profile", active_profile_name(&build));
-                }
                 return Ok(BuildOutcome::Check(0));
             }
             finish_build(&build, &artifacts)?;
@@ -1403,6 +1411,7 @@ fn build_inner(
         }
     }
     let executor_options = executor::Options {
+        environment: &build.config.environment,
         cargo: &cargo,
         child_lease_fd: build.child_lease_fd,
         workspace_root: &build.manifest.workspace_root,
@@ -1429,7 +1438,6 @@ fn build_inner(
         out_dir_limits: source_limits,
         cache: &cache,
         admission: &prepared.admission,
-        native_tools: &build.config.native_tools,
         jobs: build.jobs,
         keep_going: build.keep_going,
         reporter: &message_reporter,
@@ -1482,9 +1490,6 @@ fn build_inner(
             )?;
         }
         drop(prepared);
-        if build.verbosity != Verbosity::Quiet {
-            eprintln!("Finished `{}` profile", active_profile_name(&build));
-        }
         return Ok(BuildOutcome::Check(0));
     }
     if build.test {
@@ -1530,12 +1535,13 @@ fn build_inner(
                     output: &script.output,
                     out_dir: &script.out_dir,
                 });
-                let mut environment = crate::compile::runtime_environment(
+                let mut environment = build.config.environment.clone();
+                environment.extend(crate::compile::runtime_environment(
                     &cargo,
                     member,
                     &library_paths[&harness.key.compile_kind],
                     output.as_ref(),
-                )?;
+                )?);
                 if harness.key.kind == UnitKind::IntegrationHarness
                     && let Some(programs) = integration_binaries
                         .as_ref()
@@ -1620,9 +1626,6 @@ fn build_inner(
                 bundle: bundled,
             });
         }
-        if build.verbosity != Verbosity::Quiet {
-            eprintln!("Finished `{}` profile", active_profile_name(&build));
-        }
         return Ok(BuildOutcome::Tests(tests));
     }
     invalidate_fresh_profile(&destination, &fresh_owner)?;
@@ -1640,9 +1643,6 @@ fn build_inner(
     }
     let outputs = executor::execute(&plan, &manifests, &executor_options)?;
     if plan.units.is_empty() {
-        if build.verbosity != Verbosity::Quiet {
-            eprintln!("Finished `{}` profile", active_profile_name(&build));
-        }
         return Ok(BuildOutcome::NoTargets);
     }
     crate::trace::event(format_args!(
@@ -1791,26 +1791,7 @@ fn check_profile_artifacts(
 }
 
 fn finish_build(build: &Build<'_>, artifacts: &BuildArtifacts) -> Result<()> {
-    report_finished(
-        active_profile_name(build),
-        build.verbosity,
-        build.validation,
-        artifacts,
-    )
-}
-
-fn active_profile_name<'a>(build: &'a Build<'_>) -> &'a str {
-    build
-        .manifest
-        .profile_name
-        .as_deref()
-        .unwrap_or(if build.release {
-            "release"
-        } else if build.test {
-            "test"
-        } else {
-            "dev"
-        })
+    report_artifact(build.verbosity, build.validation, artifacts)
 }
 
 fn runtime_library_paths(
@@ -1863,7 +1844,7 @@ fn runtime_library_paths(
         child_lease_fd: build.child_lease_fd,
         program: &build.toolchain.rustc,
         arguments: &arguments,
-        environment: &BTreeMap::new(),
+        environment: &build.config.environment,
         current_dir: &build.manifest.workspace_root,
         verbose: build.verbosity == Verbosity::Verbose,
         color: false,
@@ -1887,15 +1868,11 @@ fn runtime_library_paths(
         .collect())
 }
 
-fn report_finished(
-    profile: &str,
+fn report_artifact(
     verbosity: Verbosity,
     validation: ValidationMode,
     artifacts: &BuildArtifacts,
 ) -> Result<()> {
-    if verbosity != Verbosity::Quiet {
-        eprintln!("Finished `{profile}` profile");
-    }
     if verbosity == Verbosity::Verbose && validation.is_strict() {
         eprintln!(
             "Artifact {} sha256={}",
@@ -1998,6 +1975,10 @@ fn trusted_freshness_base(inputs: &TrustedFreshness<'_>) -> Result<[u8; 32]> {
         digest.metadata("member-manifest", &member.path)?;
     }
     compiler_environment_digest(&mut digest);
+    digest.debug(
+        "build-script-tools",
+        &crate::build_script::tool_environment(&inputs.host.triple, &inputs.target.triple),
+    );
     for path in [
         inputs.host_options.linker.as_deref(),
         inputs.target_options.linker.as_deref(),
@@ -2009,11 +1990,6 @@ fn trusted_freshness_base(inputs: &TrustedFreshness<'_>) -> Result<[u8; 32]> {
         match crate::toolchain::program_path(path) {
             Some(resolved) => digest.metadata("linker", &resolved)?,
             None => digest.os("linker-name", path.as_os_str()),
-        }
-    }
-    for tool in inputs.config.native_tools.values() {
-        if let Some(path) = tool.program.as_deref() {
-            digest.metadata("native-tool", path)?;
         }
     }
     Ok(digest.finish())
@@ -2081,6 +2057,10 @@ fn freshness_base(
         digest.debug("dependency-file-count", &package.evidence.file_count);
     }
     compiler_environment_digest(&mut digest);
+    digest.debug(
+        "build-script-tools",
+        &crate::build_script::tool_environment(&build.host.triple, &build.target.triple),
+    );
     for path in [
         build.host_options.linker.as_deref(),
         build.target_options.linker.as_deref(),
@@ -2092,15 +2072,6 @@ fn freshness_base(
             digest.file("linker", path)?;
         } else {
             digest.os("linker-path", path.as_os_str());
-        }
-    }
-    for tool in build.config.native_tools.values() {
-        if let Some(path) = tool.program.as_deref() {
-            if build.validation.is_strict() && path.is_file() {
-                digest.file("native-tool", path)?;
-            } else {
-                digest.os("native-tool-path", path.as_os_str());
-            }
         }
     }
     Ok(digest.finish())
@@ -3180,11 +3151,12 @@ pub(crate) fn repository_tree_limits(policy: &PolicyLimits) -> Result<TreeLimits
 }
 
 fn program_environment(
+    config: &Config,
     cargo: &Path,
     manifest: &Manifest,
     artifacts: &BuildArtifacts,
 ) -> Result<BTreeMap<String, OsString>> {
-    let mut environment = BTreeMap::new();
+    let mut environment = config.environment.clone();
     let id = crate::metadata::package::path_package_id(
         &manifest.root,
         &manifest.name,
@@ -3319,7 +3291,6 @@ mod tests {
     }
     use crate::config::{CargoCompat, PolicyAction, PolicyRule};
     use crate::repository::RepositorySet;
-    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -4762,8 +4733,6 @@ mod tests {
                 license: Some("MIT".to_owned()),
                 allow_build_script: true,
                 allow_proc_macro: false,
-                native_tools: BTreeSet::new(),
-                configured_native_tools: false,
                 caller_env: Default::default(),
                 provenance: fixture.0.join("lorry.toml"),
             },
@@ -4930,8 +4899,6 @@ mod tests {
                 license: Some("MIT".to_owned()),
                 allow_build_script: true,
                 allow_proc_macro: false,
-                native_tools: BTreeSet::new(),
-                configured_native_tools: false,
                 caller_env: Default::default(),
                 provenance: fixture.0.join("lorry.toml"),
             },

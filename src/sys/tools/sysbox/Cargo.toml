@@ -9,6 +9,19 @@ edition = "2021"
 name = "timeout"
 harness = false
 
+[[test]]
+name = "kill"
+harness = false
+
+[[test]]
+name = "utilities"
+harness = false
+
+[[test]]
+name = "commands"
+path = "tests/commands/main.rs"
+harness = false
+
 [dependencies]
 # The terminal `less` pages on: keys, the size, raw mode and the alternate
 # screen. NOTE: crossterm is patched to the Motor OS fork in the workspace

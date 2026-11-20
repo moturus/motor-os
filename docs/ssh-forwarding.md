@@ -371,7 +371,7 @@ tests run transitively from `src/tests/full-test.sh`.
   parsing against `ssh -G`, `-L`/`-D`/`-R` lifetimes, and a hostile server's
   unrequested `-R` channel. Pressure refusal and shedding use an injected
   signal, because `memory_pressure()` exists only on Motor OS.
-- Guest tests in `src/tests/test-ssh-config.sh` run
+- Guest checks in `src/tests/cross-test.sh` run
   the Motor client through a jump, OpenSSH through Motor OS as the jump, 100
   forwards at once, name resolution by `russhd`, `gateway_ports` with `-R 0`,
   and one guest check each for `-L`, `-D`, and `-R`.

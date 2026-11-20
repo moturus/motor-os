@@ -4,13 +4,14 @@ use std::{
     process::ExitCode,
 };
 
-use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
+use clap::{Arg, ArgAction, ArgGroup, ArgMatches, Command, value_parser};
 
 mod log;
 
 use motor_gix::{
     Result, add, branch_checkout, branches, cancellation, clone, commit, diff, fetch, init, merge,
-    network, push, recover, refs, remotes, repository, restore, status, switch, unstage,
+    network, pull, push, rebase, recover, refs, remotes, repository, restore, status, switch,
+    unstage,
 };
 
 fn main() -> ExitCode {
@@ -119,7 +120,7 @@ fn run() -> Result {
             Command::new("commit").about("Commit the staged index").arg(
                 Arg::new("message")
                     .short('m')
-                    .required(true)
+                    .help("Commit message; otherwise open vim on Linux or red on Motor OS")
                     .value_name("MSG"),
             ),
         )
@@ -151,6 +152,39 @@ fn run() -> Result {
                     Arg::new("remote")
                         .default_value("origin")
                         .value_name("REMOTE"),
+                ),
+        )
+        .subcommand(
+            Command::new("pull")
+                .about("Fetch a remote, then merge its branch or rebase onto it")
+                .arg(
+                    Arg::new("ff-only")
+                        .long("ff-only")
+                        .action(ArgAction::SetTrue)
+                        .help("Only fast-forward; fail if the branches have diverged"),
+                )
+                .arg(
+                    Arg::new("rebase")
+                        .long("rebase")
+                        .action(ArgAction::SetTrue)
+                        .conflicts_with("no-rebase")
+                        .help("Replay your commits on the remote branch if the branches have diverged"),
+                )
+                .arg(
+                    Arg::new("no-rebase")
+                        .long("no-rebase")
+                        .action(ArgAction::SetTrue)
+                        .help("Merge if the branches have diverged"),
+                )
+                .arg(
+                    Arg::new("remote")
+                        .value_name("REMOTE")
+                        .help("The remote to fetch [default: the upstream remote]"),
+                )
+                .arg(
+                    Arg::new("branch")
+                        .value_name("BRANCH")
+                        .help("The remote's branch or tag to merge [default: the upstream branch]"),
                 ),
         )
         .subcommand(
@@ -234,6 +268,33 @@ fn run() -> Result {
                     Arg::new("revision")
                         .value_name("REV")
                         .required_unless_present("abort"),
+                ),
+        )
+        .subcommand(
+            Command::new("rebase")
+                .about("Go on with a rebase that 'pull --rebase' had to stop")
+                .arg(
+                    Arg::new("continue")
+                        .long("continue")
+                        .action(ArgAction::SetTrue)
+                        .help("Commit the conflicts you resolved and replay the remaining commits"),
+                )
+                .arg(
+                    Arg::new("skip")
+                        .long("skip")
+                        .action(ArgAction::SetTrue)
+                        .help("Leave out the commit that stopped the rebase and replay the rest"),
+                )
+                .arg(
+                    Arg::new("abort")
+                        .long("abort")
+                        .action(ArgAction::SetTrue)
+                        .help("Return to the branch as it was before the rebase"),
+                )
+                .group(
+                    ArgGroup::new("action")
+                        .args(["continue", "skip", "abort"])
+                        .required(true),
                 ),
         )
         .subcommand(Command::new("status").about("Show worktree status"))
@@ -332,13 +393,13 @@ fn run() -> Result {
                 ),
             }
         }
-        Some("commit") => commit::run(
+        Some("commit") => commit::run_or_edit(
             &opened,
             matches
                 .subcommand_matches("commit")
                 .expect("matched commit")
                 .get_one::<String>("message")
-                .expect("required message"),
+                .map(String::as_str),
             &cancellation,
         ),
         Some("diff") => {
@@ -367,6 +428,24 @@ fn run() -> Result {
                     .get_one::<String>("remote")
                     .expect("default remote"),
                 &policy,
+                &cancellation,
+            )
+        }
+        Some("pull") => {
+            let command = matches.subcommand_matches("pull").expect("matched pull");
+            let policy = network::Policy::new(&overrides, &cancellation)?;
+            let request = pull::Request {
+                remote: command.get_one::<String>("remote").map(String::as_str),
+                branch: command.get_one::<String>("branch").map(String::as_str),
+                ff_only: command.get_flag("ff-only"),
+                rebase: command.get_flag("rebase"),
+                no_rebase: command.get_flag("no-rebase"),
+            };
+            pull::run(
+                &mut opened,
+                request,
+                &policy,
+                io::stdout().lock(),
                 &cancellation,
             )
         }
@@ -414,6 +493,17 @@ fn run() -> Result {
                         .expect("required revision"),
                     &cancellation,
                 )
+            }
+        }
+        Some("rebase") => {
+            let command = matches
+                .subcommand_matches("rebase")
+                .expect("matched rebase");
+            if command.get_flag("abort") {
+                rebase::abort(&opened, &cancellation)
+            } else {
+                let skip = command.get_flag("skip");
+                rebase::resume(&opened, skip, io::stdout().lock(), &cancellation)
             }
         }
         Some("recover") => {

@@ -45,7 +45,7 @@ fn log_available_bytes(mounts: &[MountInfo]) -> Option<u64> {
 
 fn available_bytes() -> Option<u64> {
     let mounts = moto_sdk::async_runtime::LocalRuntime::new()
-        .block_on(async { FsClient::connect()?.mounts().await })
+        .block_on(async { FsClient::connect_with_backoff().await?.mounts().await })
         .ok()?;
     log_available_bytes(&mounts)
 }
@@ -86,7 +86,7 @@ fn create_log_file(name: &str) -> std::io::Result<()> {
     reclaim_previous_logs();
     moto_sdk::async_runtime::LocalRuntime::new()
         .block_on(async {
-            let client = FsClient::connect()?;
+            let client = FsClient::connect_with_backoff().await?;
             let (parent_id, kind) = client.stat(LOG_DIR_PATH).await?;
             if kind != EntryKind::Directory {
                 return Err(moto_rt::Error::InvalidArgument);

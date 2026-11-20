@@ -130,7 +130,10 @@ impl Peer {
             .args(args)
             .env(
                 moto_sys::caps::MOTOR_OS_CAPS_ENV_KEY,
-                format!("0x{CHILD_CAPS:x}"),
+                format!(
+                    "0x{:x}",
+                    CHILD_CAPS & moto_sys::ProcessStaticPage::get().capabilities
+                ),
             )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -189,7 +192,7 @@ pub fn run_tests() {
     );
     assert_eq!(
         SysObj::get_capabilities(client.handle()).unwrap(),
-        CHILD_CAPS
+        CHILD_CAPS & moto_sys::ProcessStaticPage::get().capabilities
     );
 
     // Connecting and a subsequent failed lookup must both retain ownership.

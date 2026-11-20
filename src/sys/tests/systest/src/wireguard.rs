@@ -43,7 +43,7 @@ pub fn reject_readable_secrets(paths: &[String]) {
         permissions.none = AccessPermissions::R;
         fs.set_all_permissions(entry, permissions).await.unwrap();
     });
-    let mut child = Command::new("/system/bin/wg")
+    let mut child = Command::new("/user/bin/wg")
         .arg(&paths[0])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

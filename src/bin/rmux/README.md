@@ -188,7 +188,10 @@ why rmux is on rush's `spawn-detached` list.
 | unit tests, in-file | the emulator, the layout tree, the key tables, the config, the frame diff and what it costs |
 | `tests/host.rs` | rmux on Linux, driven over a pty the way a user drives it |
 | `tests/conformance.rs` | the corpus, against real tmux (skipped if tmux is absent) |
-| `src/tests/test-terminal-size.sh` | rmux on a real Motor OS console under qemu, through sys-tty |
+| `tests/motor.rs` | native Motor terminal masks, Ctrl+C routing, screen restoration, pane size and resize |
 
-`cargo test` runs the first three; `src/tests/full-test.sh` runs them and then
-drives rmux on the VM over SSH and on the serial console.
+`cargo test` and `lorry test` select the cases supported by the current OS.
+The in-file unit suite is the `unit` test target (`--test unit`), which gives
+Motor process tests access to the Cargo-built `rmux-probe` binary.
+`src/tests/full-test.sh` reaches them through `full-native-test.sh` on Linux
+and in both Motor roles. Terminal transport checks belong to `cross-test.sh`.

@@ -1,9 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufRead, Write};
 
-use crate::admission_state::{
-    Capability, Context, ContextPackage, Review, UnitKind, native_tool_name,
-};
+use crate::admission_state::{Capability, Context, ContextPackage, Review, UnitKind};
 use crate::diagnostic::{Error, Result};
 use crate::resolver::{PackageKey, Resolution};
 
@@ -19,12 +17,7 @@ pub(crate) fn approve(
     if previous == Some(next) && matches!(mode, super::Mode::Change) {
         return Ok(());
     }
-    output.write_all(report).map_err(|error| {
-        Error::failure(format!(
-            "failed to write workspace dependency review: {error}"
-        ))
-    })?;
-    super::confirm(mode, terminal, input, output)
+    super::approve_report(report, mode, terminal, input, output)
 }
 
 pub(crate) fn render(
@@ -297,19 +290,13 @@ fn contexts(values: &[Context]) -> String {
 }
 
 fn grant(capability: &Capability) -> String {
-    let tools = capability
-        .native_tools
-        .iter()
-        .map(|role| native_tool_name(*role))
-        .collect::<Vec<_>>();
     format!(
-        "{} {} ({}); build script: {}; procedural macro: {}; native tools: {}; caller environment: {}",
+        "{} {} ({}); build script: {}; procedural macro: {}; caller environment: {}",
         capability.package,
         capability.version,
         capability.checksum,
         capability.build_script,
         capability.proc_macro,
-        list(&tools),
         list(&capability.caller_env)
     )
 }
@@ -422,7 +409,6 @@ fn write_users(
 mod tests {
     use super::*;
     use crate::admission_state::{LockedRegistry, SourceEvidence};
-    use crate::config::NativeToolRole;
 
     #[test]
     fn review_escapes_control_characters_from_package_metadata() {
@@ -479,7 +465,6 @@ mod tests {
                 checksum: checksum.clone(),
                 build_script: true,
                 proc_macro: false,
-                native_tools: vec![NativeToolRole::CCompiler],
                 caller_env: vec![],
             }])
             .unwrap();
@@ -505,7 +490,7 @@ mod tests {
         )
         .unwrap();
         let grant = format!(
-            "helper 1.0.0 ({checksum}); build script: true; procedural macro: false; native tools: c-compiler; caller environment"
+            "helper 1.0.0 ({checksum}); build script: true; procedural macro: false; caller environment"
         );
         let expected = format!(
             "Workspace dependency admission review:

@@ -1,9 +1,8 @@
 # Filesystem permissions in Motor OS images
 
-Motor OS images are built with a declarative Motor OS filesystem permission policy. The
-development image contains the complete policy surface; the base, standard,
-and System-tty images contain subsets of the same destination paths and apply
-the same mode to every shared entry.
+Motor OS images are built with a declarative Motor OS filesystem permission policy.
+The base and standard images apply the same mode to every shared entry. The
+toolchain installer applies matching permissions to its development tools.
 
 This document describes permissions on newly built images. It does not define
 a migration for existing images and does not impose an OS-wide W^X rule on
@@ -107,29 +106,28 @@ Interactive-owned locations.
 
 The initial image policy follows these principles:
 
-- System owns installed OS content. Installed executable ELFs are
-  read/execute-only. Files directly under `/system/bin` are also
-  read/execute-only when they are scripts.
+- System owns boot services and immutable OS configuration. Image-built
+  executable ELFs are read/execute-only. User commands live in `/user/bin`;
+  images no longer contain `/system/bin` compatibility shells.
 - Interactive may read and run installed programs, but cannot replace content
   in `/system`.
-- `/user` and `/devtools` are Interactive-owned. Interactive may install
-  programs, edit configuration, and create work there; in `/devtools` it may
-  replace the installed toolchain with a newer one.
+- `/user` is Interactive-owned. Interactive may install programs, edit
+  configuration, and replace the toolchain under `/user/lib`.
 - Scripts are writable by Interactive in its trees. Compiled programs there
   remain non-writable, but Interactive may replace them.
-- None may read and execute public installed content, but may write only its
-  own `/none/cfg` and `/none/tmp`. Lower-role services submit logs over IPC;
-  None cannot traverse `/user/cfg`, `/user/tmp`, `/system/tmp`, or
-  `/system/logs`.
+- None may read and execute public installed content, and write anywhere
+  under its own `/none`. It can traverse `/user/cfg` and
+  read explicitly shared configuration. Private files and subdirectories,
+  `/user/tmp`, `/system/tmp`, and `/system/logs` remain closed to None.
 - Host owner/group/other read and write bits do not map to Motor OS roles. Host
   execute bits select which files require script or ELF classification; the
   image policy supplies all three complete Motor OS permission triplets.
 
-## Development-image policy
+## Image and toolchain policy
 
 The following table is exhaustive. A destination uses the longest matching
-tree rule, with an exact-entry rule taking precedence. Images smaller than the
-development image simply omit some of these destinations.
+tree rule, with an exact-entry rule taking precedence. Images omit destinations
+that they do not use; development tools are installed separately.
 
 "Regular" means a file without a host execute bit, including an ELF object or
 even an executable-type ELF stored as non-executable on the host. "Script"
@@ -139,19 +137,15 @@ ELF whose type is `ET_EXEC` or `ET_DYN`.
 | Destination tree | Directories | Regular files | Scripts | ELF binaries | Purpose |
 |---|---|---|---|---|---|
 | `/` and otherwise unmatched paths | `rwxr-xr-x` | `rw-r--r--` | `rwxr-xr-x` | `r-xr-xr-x` | System-owned installed content with public read/execute access |
-| `/system/bin` | `rwxr-xr-x` | `rw-r--r--` | `r-xr-xr-x` | `r-xr-xr-x` | Non-writable system commands executable by every role |
 | `/system/logs` | `rwxr-x---` | `rw-r-----` | `r-xr-----` | `r-xr-----` | System strobe writes and rotates logs; Interactive may read them and None has no access |
 | `/system/tmp` | `rwx------` | `rw-------` | `rwx------` | `r-x------` | System scratch |
 | `/user` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Interactive-owned programs and work, readable by None by default |
 | `/user/bin` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Editable user scripts and W^X compiled programs |
-| `/user/cfg` | `rwxrwx---` | `rw-rw----` | `rwxrwx---` | `r-xr-x---` | Interactive configuration and credentials hidden from None |
+| `/user/cfg` descendants | `rwxrwx---` | `rw-rw----` | `rwxrwx---` | `r-xr-x---` | Private configuration by default; shared entries override this |
+| `/user/cfg/helix` | `rwxrwxr-x` | `rwxrw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Editor configuration shared with None |
 | `/user/tmp` | `rwxrwx---` | `rw-rw----` | `rwxrwx---` | `r-xr-x---` | Interactive scratch, closed to None |
-| `/none` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | The None role's home; None cannot add entries here |
-| `/none/cfg` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | None-role configuration, which None may write |
-| `/none/tmp` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | None-role scratch |
-| `/devtools` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | The Interactive-owned development tree: tools and launchers, the toolchain, tests, sources, and project-local Lorry state |
-| `/devtools/lorry/user` | `rwxrwx---` | `rw-rw----` | `rwxrwx---` | `r-xr-x---` | Interactive Lorry repository and cache, hidden from None |
-| `/devtools/lorry/none` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | None-role Lorry repository and cache |
+| `/none` | `rwxrwxrwx` | `rw-rw-rw-` | `rwxrwxrwx` | `r-xr-xr-x` | The None role's home: `cfg` for configuration, `tmp` for scratch, `dev` for source trees and the None-role Lorry repository and cache |
+| `/user/dev/lorry` | `rwxrwxr-x` | `rw-rw-r--` | `rwxrwxr-x` | `r-xr-xr-x` | Interactive Lorry repository and cache, readable by None |
 
 An exact-entry rule gives the `/system/tmp` directory `rwxr-x---`, permitting
 Interactive traversal without making its scratch files readable. sys-io creates
@@ -161,10 +155,10 @@ Interactive traversal without making its scratch files readable. sys-io creates
 Before any other runtime permission changes, the directory modes have these effects:
 
 - Interactive cannot create a new root-level tree or replace `/system`.
-- Interactive can create and replace entries throughout `/user` and
-  `/devtools`, except where a longer tree rule restricts access. A native
-  toolchain archive's `install.sh` relies on this to replace `/devtools/llvm`
-  and `/devtools/rust` ([toolchain.md](toolchain.md)).
+- Interactive can create and replace entries throughout `/user`, except where
+  a longer tree rule restricts access. A native
+  toolchain archive's `install.sh` relies on this to replace `/user/lib/llvm`
+  and `/user/lib/rust` ([toolchain.md](toolchain.md)).
 - Each role can create and replace entries in its own temporary directory
   and in those of lower roles. None can use only `/none/tmp`. Interactive can
   traverse `/system/tmp` and read the DHCP snapshot, but cannot modify either.
@@ -183,16 +177,16 @@ Several installed trees deliberately use the default rule:
 - Most of `/system/cfg`, including the implicit `/system/cfg/ssl` directory,
   is System-writable and publicly readable. None-role services have not yet
   been audited for configuration reads.
-- Under `/devtools`, `llvm`, `rust`, `tests`, and `www` hold installed
-  content that Interactive may replace. Clang reads its target configuration
-  from `/devtools/llvm/cfg`. `/devtools/lorry/user` and `/devtools/lorry/none`
-  hold the Interactive and None repositories and caches of the installed
-  Lorry tool; Lorry refuses to run as System. Other guest build and test
-  writes belong under `/devtools/src` or the role's temporary directory.
-- Development source trees staged in `/devtools/src` are consumed in place;
-  project build output belongs under `/devtools/src` and scratch output in
-  the role's temporary directory. Git dependencies are fetched by the build
-  tool rather than staged as separate source trees.
+- Development commands live in `/user/bin/dev`, and their supporting data in
+  `/user/lib`; Clang reads `/user/lib/llvm/cfg`. Tests are never shipped.
+  `/user/dev/lorry` and
+  `/none/dev/lorry` hold the Interactive and None repositories and caches of
+  the installed Lorry tool; Lorry refuses to run as System. Other guest build and test
+  writes belong under `/none/dev` or the role's temporary directory.
+- Development source trees uploaded to `/none/dev` are consumed in place;
+  project build output belongs under `/none/dev` and scratch output in
+  the role's temporary directory. The full gate prepares verified Git sources
+  on the host and uploads them for offline native builds.
 
 ### Exact entries
 
@@ -200,7 +194,7 @@ Four credential files override their matching tree mode:
 
 | Entry | Mode | Reason |
 |---|---|---|
-| `/system/cfg/sshd.toml` | `rw-r-----` | Contains the development host private key; russhd runs as Interactive |
+| `/user/cfg/sshd.toml` | `rwxrw----` | Interactive may edit the SSH settings and host key; None cannot read the key |
 | `/system/cfg/ssl/ssl-key.pem` | `rw-r-----` | The Interactive development web-server command needs the key; None does not |
 | `/user/cfg/russhd/users.toml` | `rwxrw----` | SSH login names and password verifiers, which russhd refuses if None can read them |
 | `/user/cfg/ssh/authorized_keys.motor` | `rwxrw----` | SSH public keys of the shipped login name |
@@ -210,6 +204,13 @@ credentials match. All four are supplied by `img_files/motor-os-base`, which is
 included in every image. `/system/cfg/ssl` and `/user/cfg/russhd` are implicit
 directories created while walking static content, so exact rules and directory
 rules apply equally to implicit and explicitly listed paths.
+
+`/user/cfg` itself is `rwxrwxr-x`, permitting None to traverse it. `profile`
+and `rush.toml` are `rwxrw-r--`; optional `lorry.toml` and `rmux.toml` use
+file-specific tree profiles with the same mode. Private sibling entries keep
+the default configuration profile. `profile` sets `PATH`. Login shells read it
+when they start: the console's shell and each SSH session's. A change reaches
+the next session without a reboot.
 
 ## Policy configuration
 
@@ -242,8 +243,8 @@ trees:
     elf: "r-xr-xr-x"
 
 entries:
-  - path: "/system/cfg/sshd.toml"
-    mode: "rw-r-----"
+  - path: "/user/cfg/sshd.toml"
+    mode: "rwxrw----"
 ```
 
 Policy paths are normalized absolute image paths. Tree matching uses complete
@@ -263,6 +264,8 @@ The imager rejects:
   role;
 - any script or ELF directly under `/system/bin` whose resolved mode is not
   exactly `r-xr-xr-x`;
+- any entry under `/system` or `/user` that grants None write access, including
+  explicit `imager mkdir`, `put`, and `chmod` modes;
 - an exact entry that is absent from an image using the policy, or whose mode
   is invalid for the actual directory or file class; and
 - a host-executable source that is neither a shebang script nor an executable
@@ -311,31 +314,29 @@ Imager tests cover policy parsing and validation, rule precedence, source
 classification, content overlays, the root mode, and file finalization by
 building and reopening a small Motor OS filesystem image.
 
-Guest acceptance tests intentionally limit exhaustive mode checks to direct
-entries matching `/*/bin/*`:
+Guest acceptance tests check command modes in `/user/bin` and `/user/bin/dev`:
 
-- every `/system/bin/*` entry is exactly `r-xr-xr-x`;
-- every `/user/bin/*` and `/devtools/bin/*` entry is either an ELF at
+- every command in `/user/bin` and `/user/bin/dev` is either an ELF at
   `r-xr-xr-x` or a script at `rwxrwxr-x`; and
 - any regular data file or unexpected mode in those directories fails the
   suite.
 
-With the initial image permissions, the development-image suite proves that
-Interactive can edit `/devtools/bin/www` in place and rename it, and installs
-a native toolchain into `/devtools`. Functional checks prove that Interactive
-cannot create a root-level directory and can write the appropriate scratch and
-source trees. Tests do not walk and assert the modes of
-every other image file.
+With the runtime installation permissions, the full suite proves that
+Interactive can edit `/user/bin/dev/www` in place and rename it, and installs
+a native toolchain into `/user/bin/dev` and `/user/lib`. Functional checks prove
+that Interactive cannot create a root-level directory and can write the
+appropriate scratch and source trees. Tests do not walk and assert the modes of
+every other image file. The cross runner also checks shared configuration,
+private credentials, and replacement through a temporary name. Runtime-installed
+executables use `rwxrwxr-x`, data uses `rwxrw-r--`, and directories use
+`rwxrwxr-x`; None can read or execute them but cannot write them.
 
-The VM harnesses share their guest directories (`src/tests/test-roots.sh`).
-Test binaries are the development image's shipped `/devtools/tests`, or, on
-the standard image, uploads to `/none/tmp/motor-tests/tests`, which None-role
-test children can run. Interactive scratch is `/user/tmp/motor-tests` on both
-images, and fixtures that a None-role child must open go in
-`/none/tmp/motor-tests/tmp`. The harness creates these directories itself and
-fails if one already exists, because a directory that None created would be
-writable by None. Standard tests continue to assert that `/devtools` is
-absent.
+`src/tests/cross-test.sh` owns its guest scratch directories and uploads
+cross-compiled programs to `/none/tmp`. Native Cargo tests create their own
+temporary data and test role-dependent access inside each case. The full gate
+extracts the working tree and Git sources as None under `/none/dev/motor-os`,
+preserving executable source flags; Interactive extracts dependency objects
+under `/user/dev/lorry`. Published images contain neither tests nor `/devtools`.
 
 ## Runtime behavior and remaining limits
 
@@ -458,7 +459,7 @@ after they are accepted.
    unmatched.
 6. **Git dependency source trees are not staged separately.** Development
    projects fetch their reviewed Git dependencies through the build tool.
-   Cargo writes project targets below `/devtools/src` and uses the role's
+   Cargo writes project targets below `/none/dev` and uses the role's
    temporary directory for scratch.
 7. **Standard test binaries live under `/none/tmp`, not a newly created
    `/devtools`.** Making `/` Interactive-writable solely to preserve the old

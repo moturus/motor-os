@@ -205,6 +205,8 @@ enum Destination {
     Public,
     /// Limited to `rw-r-----`.
     Secret,
+    /// Interactive-owned SSH configuration, limited to `rwxrw----`.
+    ServiceConfig,
     /// May not grant None any access.
     UserRegistry,
     /// May be read by None, and does not have to exist yet.
@@ -256,7 +258,9 @@ impl Stage {
 
     /// Every SSH credential needs a service configuration it can stand behind.
     async fn service(&mut self, fs: &Fs) -> io::Result<&mut Replacement> {
-        let config = self.entry(fs, SSH_CONFIG, Destination::Secret).await?;
+        let config = self
+            .entry(fs, SSH_CONFIG, Destination::ServiceConfig)
+            .await?;
         bare_toml::check_service(utf8(&config.bytes)?)?;
         Ok(config)
     }
@@ -358,7 +362,7 @@ impl Replacement {
             destination,
             Destination::UserRegistry | Destination::KeyList
         );
-        let parent = if credential {
+        let parent = if credential || destination == Destination::ServiceConfig {
             Some(check_ancestors(fs, path_buf).await?)
         } else {
             None
@@ -389,12 +393,25 @@ impl Replacement {
         let (bytes, installed) = read_entry(fs, id).await?;
         match destination {
             Destination::Public => {}
-            Destination::Secret => {
-                if !AccessPermissions::Rw.can_narrow_to(installed.system)
-                    || !AccessPermissions::R.can_narrow_to(installed.interactive)
+            Destination::Secret | Destination::ServiceConfig => {
+                let ceiling = if destination == Destination::ServiceConfig {
+                    CREDENTIAL_PERMISSIONS
+                } else {
+                    RolePermissions::new(
+                        AccessPermissions::Rw,
+                        AccessPermissions::R,
+                        AccessPermissions::None,
+                    )
+                };
+                if !ceiling.system.can_narrow_to(installed.system)
+                    || !ceiling.interactive.can_narrow_to(installed.interactive)
                     || installed.none != AccessPermissions::None
                 {
-                    return Err(invalid("secret destination permissions exceed rw-r-----"));
+                    return Err(invalid(if destination == Destination::ServiceConfig {
+                        "SSH configuration permissions exceed rwxrw----"
+                    } else {
+                        "secret destination permissions exceed rw-r-----"
+                    }));
                 }
             }
             Destination::UserRegistry | Destination::KeyList => {

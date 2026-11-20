@@ -4,6 +4,16 @@
 # many arguments to consume; unrecognized options belong to the VMM.
 vm_option() {
   case "$1" in
+    --system-tty)
+      VM_SYSTEM_TTY=1
+      VM_OPTION_SHIFT=1
+      return 0
+      ;;
+    --no-network)
+      VM_NO_NETWORK=1
+      VM_OPTION_SHIFT=1
+      return 0
+      ;;
     --root-read-only)
       VM_ROOT_READ_ONLY=on
       VM_OPTION_SHIFT=1
@@ -66,11 +76,13 @@ vm_option() {
 }
 
 vm_usage() {
-  echo "usage: $0 [--cpus N] [--memory SIZE] [--root-read-only] [--extra-disk FILE | --extra-disk-ro FILE]... [-- VMM-ARGUMENTS...]"
+  echo "usage: $0 [--cpus N] [--memory SIZE] [--system-tty] [--no-network] [--root-read-only] [--extra-disk FILE | --extra-disk-ro FILE]... [-- VMM-ARGUMENTS...]"
   echo "SIZE is a positive integer with M (MiB) or G (GiB) suffix."
   echo "Options override MOTO_SMP and MOTO_MEMORY_MIB; put them before VMM arguments."
   echo "Disk filenames are relative to this launcher; .img/.raw are raw, .qcow2 is qcow2."
   echo "Device indices follow PCI scan order, logged at startup. Firecracker requires raw disks."
+  echo "--system-tty selects a System console for this boot (Cloud Hypervisor and Firecracker only)."
+  echo "--no-network omits the network device. QEMU disk boot refuses --system-tty."
 }
 
 vm_extra_disk_format() {
@@ -89,6 +101,8 @@ vm_parse_options() {
   VM_ARGS_SHIFT=0
   VM_DISKS=""
   VM_ROOT_READ_ONLY=off
+  VM_SYSTEM_TTY=0
+  VM_NO_NETWORK=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       -h | --help) vm_usage; exit 0 ;;

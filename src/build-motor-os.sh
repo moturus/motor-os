@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 #
-# build-motor-os.sh — build the external sources and the base, standard,
-# development, and wasm VM images with the Motor toolchain that
-# rust-toolchain.toml names.
+# build-motor-os.sh — build the external sources, base and standard images,
+# and native toolchain archive with the toolchain in rust-toolchain.toml.
 #
 # The toolchain is built separately (github.com/moturus/motor-os-toolchain)
 # and comes as two archives named by its version, x86_64-unknown-motor-<Rust
@@ -16,8 +15,7 @@
 # Helix, uutils sed, Lua, tar and zstd, Javy with Wasmi, and Wasmtime) are
 # fetched into external-sources/. The assembly, build/assembly/, holds what
 # the images take from outside the tree: the overlays of the native toolchain,
-# of the external sources, and of the dependencies of the staged library
-# sources, plus the external sources' build trees.
+# of the external sources, plus the external sources' build trees.
 
 set -euo pipefail
 
@@ -30,28 +28,26 @@ usage() {
 	cat << 'EOF'
 Usage: src/build-motor-os.sh
        src/build-motor-os.sh [--javy-only] [--wasmtime-only]
-       src/build-motor-os.sh --sys-lib-deps-only
+       src/build-motor-os.sh --toolchain-overlays TOOLCHAIN_PREFIX OUTPUT
 
-Build the external sources and all four images with the Motor toolchain that
+Build the external sources and both images with the Motor toolchain that
 rust-toolchain.toml names, which must be installed in rustup, and whose
 native archive must be $MOTORH/motor-toolchain-<version>.tar.zst:
-  - ripgrep as /system/bin/rg;
-  - tar and zstd in /system/bin;
-  - Helix as /devtools/helix/hx in the development image;
-  - uutils sed as /devtools/bin/sed in the development image;
-  - Lua as /devtools/bin/lua in the development image;
-  - Javy and Wasmi in the development and small wasm images;
-  - full and runtime-only Wasmtime as /devtools/bin/wasmtime and wasmtime-rt
-    in both of those images;
-  - the crates.io dependencies of the Motor OS library sources the development
-    image stages for native tests, as Lorry repository objects;
-  - all standard and dev-image Motor OS binaries;
-  - base, standard, dev, and wasm images under vm_images/release.
+  - ripgrep as /user/bin/rg;
+  - tar and zstd in /user/bin;
+  - Helix, uutils sed, Lua, QuickJS, Javy and Wasmi in the toolchain archive;
+  - full and runtime-only Wasmtime as /user/bin/dev/wasmtime and wasmtime-rt
+    in the toolchain archive;
+  - all standard-image Motor OS binaries;
+  - base and standard images under vm_images/release;
+  - the current toolchain archive under build/toolchain/release.
 
 --javy-only and --wasmtime-only build only Javy/Wasmi and both Wasmtime CLIs;
 they skip host provisioning and image construction.
---sys-lib-deps-only likewise fetches only the dependencies of the development
-image's library sources.
+--toolchain-overlays builds the development programs with a freshly built
+Linux-host toolchain and copies their overlays into OUTPUT. This is the
+toolchain release builder's entry point; it needs neither an installed Motor
+toolchain nor a native archive, and does not provision the host or build images.
 
 Environment:
   MOTORH  The directory with the native toolchain archive. Defaults to the
@@ -65,23 +61,34 @@ through Cargo and make, so it is safe to rerun. After installing a different or
 rebuilt toolchain, run make clean first. The script fetches the external
 sources into external-sources/ and builds in build/ and vm_images/. It uses
 sudo only at the start, for missing Ubuntu packages and host VM setup, and
-starts a VM only to prepare the development image.
+does not start a VM.
 EOF
 }
 
 parse_options() {
 	JAVY_ONLY=false
 	WASMTIME_ONLY=false
-	SYS_LIB_DEPS_ONLY=false
+	BOOTSTRAP_TOOLCHAIN=
+	TOOLCHAIN_OVERLAY_OUTPUT=
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
 			-h|--help) usage; return 2 ;;
 			--javy-only) JAVY_ONLY=true; shift ;;
 			--wasmtime-only) WASMTIME_ONLY=true; shift ;;
-			--sys-lib-deps-only) SYS_LIB_DEPS_ONLY=true; shift ;;
+			--toolchain-overlays)
+				[ "$#" -ge 3 ] || die '--toolchain-overlays requires TOOLCHAIN_PREFIX and OUTPUT'
+				BOOTSTRAP_TOOLCHAIN="$(realpath -e "$2")" || die "toolchain directory is missing: $2"
+				TOOLCHAIN_OVERLAY_OUTPUT="$(realpath -m "$3")" || die "invalid overlay directory: $3"
+				[ -x "$BOOTSTRAP_TOOLCHAIN/bin/rustc" ] && [ -x "$BOOTSTRAP_TOOLCHAIN/bin/cargo" ] ||
+					die "not a Linux-host toolchain: $BOOTSTRAP_TOOLCHAIN"
+				shift 3 ;;
 			*) usage >&2; die "unknown argument: $1" ;;
 		esac
 	done
+	if [ -n "$BOOTSTRAP_TOOLCHAIN" ]; then
+		[ "$JAVY_ONLY" = false ] && [ "$WASMTIME_ONLY" = false ] ||
+			die '--toolchain-overlays cannot be combined with other build modes'
+	fi
 }
 
 # --- paths ------------------------------------------------------------------------
@@ -207,7 +214,7 @@ update_external_source() {
 # motor-clang compiles for the cross sysroot, and clang's Motor driver links
 # crt1.o and mlibc's link group, as the native cc does on Motor OS.
 build_lua() {
-	log "building Lua $LUA_VER and staging it as /devtools/bin/lua"
+	log "building Lua $LUA_VER and staging it as /user/bin/dev/lua"
 	mkdir -p "$EXTERNAL_SOURCES"
 	( cd "$EXTERNAL_SOURCES"
 		if [ ! -d "lua-$LUA_VER" ]; then
@@ -226,8 +233,8 @@ build_lua() {
 		done
 		"$LLVM_TOOLS/llvm-ar" rcs "$LUA_BUILD/liblua.a" "$LUA_BUILD"/*.o
 		"$cc" -O2 -DLUA_USE_POSIX lua.c "$LUA_BUILD/liblua.a" -o "$LUA_BUILD/lua" )
-	mkdir -p "$LUA_IMG/devtools/bin"
-	"$LLVM_TOOLS/llvm-strip" -o "$LUA_IMG/devtools/bin/lua" "$LUA_BUILD/lua"
+	mkdir -p "$LUA_IMG/user/bin/dev"
+	"$LLVM_TOOLS/llvm-strip" -o "$LUA_IMG/user/bin/dev/lua" "$LUA_BUILD/lua"
 }
 
 # --- external source: QuickJS-NG, an upstream tag plus a Motor patch -----------
@@ -252,7 +259,7 @@ fetch_quickjs() {
 
 # libqjs.a holds only QuickJS's C objects; the normal C toolchain supplies mlibc.
 build_quickjs() {
-	log "building QuickJS-NG $QUICKJS_VER and staging qjs, qjsc, and libqjs.a in /devtools"
+	log "building QuickJS-NG $QUICKJS_VER and staging commands in /user/bin/dev and libraries in /user/lib/quickjs"
 	fetch_quickjs
 	local source="$QUICKJS_BUILD/src" cc="$SYSROOT/bin/motor-clang" name objects=()
 	rm -rf "$QUICKJS_BUILD"
@@ -270,34 +277,34 @@ build_quickjs() {
 	"$cc" -O2 -I"$source" "$source/qjs.c" "$source/gen/repl.c" "$source/gen/standalone.c" \
 		"$QUICKJS_BUILD/libqjs.a" -o "$QUICKJS_BUILD/qjs"
 	"$cc" -O2 -I"$source" "$source/qjsc.c" "$QUICKJS_BUILD/libqjs.a" -o "$QUICKJS_BUILD/qjsc"
-	mkdir -p "$QUICKJS_IMG/devtools/bin" "$QUICKJS_IMG/devtools/quickjs/include" \
-		"$QUICKJS_IMG/devtools/quickjs/lib"
+	mkdir -p "$QUICKJS_IMG/user/bin/dev" "$QUICKJS_IMG/user/lib/quickjs/include" \
+		"$QUICKJS_IMG/user/lib/quickjs/lib"
 	for name in qjs qjsc; do
-		"$LLVM_TOOLS/llvm-strip" -o "$QUICKJS_IMG/devtools/bin/$name" "$QUICKJS_BUILD/$name"
-		"$SCRIPT_DIR/build-scripts/validate-native-elf.sh" "$QUICKJS_IMG/devtools/bin/$name"
+		"$LLVM_TOOLS/llvm-strip" -o "$QUICKJS_IMG/user/bin/dev/$name" "$QUICKJS_BUILD/$name"
+		"$SCRIPT_DIR/build-scripts/validate-native-elf.sh" "$QUICKJS_IMG/user/bin/dev/$name"
 	done
-	cp "$QUICKJS_BUILD/libqjs.a" "$QUICKJS_IMG/devtools/quickjs/lib/"
-	cp "$source/quickjs.h" "$source/quickjs-libc.h" "$QUICKJS_IMG/devtools/quickjs/include/"
-	cp "$source/LICENSE" "$QUICKJS_IMG/devtools/quickjs/"
+	cp "$QUICKJS_BUILD/libqjs.a" "$QUICKJS_IMG/user/lib/quickjs/lib/"
+	cp "$source/quickjs.h" "$source/quickjs-libc.h" "$QUICKJS_IMG/user/lib/quickjs/include/"
+	cp "$source/LICENSE" "$QUICKJS_IMG/user/lib/quickjs/"
 }
 
 # --- external source: ripgrep ---------------------------------------------------
 build_ripgrep() {
-	log "building ripgrep and staging it as /system/bin/rg"
+	log "building ripgrep and staging it as /user/bin/rg"
 	( cd "$RIPGREP" && \
 		CARGO_TARGET_DIR="$RIPGREP_TARGET_DIR" \
 			cargo build --target "$TARGET" --release --locked )
 
 	local binary="$RIPGREP_TARGET_DIR/$TARGET/release/rg"
 	[ -x "$binary" ] || die "ripgrep binary was not produced: $binary"
-	mkdir -p "$RG_IMG/system/bin"
-	"$LLVM_TOOLS/llvm-strip" -o "$RG_IMG/system/bin/rg" "$binary"
-	chmod 755 "$RG_IMG/system/bin/rg"
+	mkdir -p "$RG_IMG/user/bin"
+	"$LLVM_TOOLS/llvm-strip" -o "$RG_IMG/user/bin/rg" "$binary"
+	chmod 755 "$RG_IMG/user/bin/rg"
 }
 
 # --- external source: sed (uutils) ---------------------------------------------
 build_sed() {
-	log "building sed and staging it as /devtools/bin/sed"
+	log "building sed and staging it as /user/bin/dev/sed"
 	# One codegen unit, as sed's Cargo.toml suggests: smaller, and no slower.
 	( cd "$SED" && \
 		CARGO_TARGET_DIR="$SED_TARGET_DIR" \
@@ -306,14 +313,14 @@ build_sed() {
 
 	local binary="$SED_TARGET_DIR/$TARGET/release/sed"
 	[ -x "$binary" ] || die "sed binary was not produced: $binary"
-	mkdir -p "$SED_IMG/devtools/bin"
-	"$LLVM_TOOLS/llvm-strip" -o "$SED_IMG/devtools/bin/sed" "$binary"
-	chmod 755 "$SED_IMG/devtools/bin/sed"
+	mkdir -p "$SED_IMG/user/bin/dev"
+	"$LLVM_TOOLS/llvm-strip" -o "$SED_IMG/user/bin/dev/sed" "$binary"
+	chmod 755 "$SED_IMG/user/bin/dev/sed"
 }
 
 validate_helix_elf() {
 	local binary="$1" stack
-	"$LLVM_TOOLS/llvm-readelf" -h "$binary" | grep -Eq 'Type:.*DYN' ||
+	"$LLVM_TOOLS/llvm-readelf" -h "$binary" | awk '/Type:.*DYN/ { found = 1 } END { exit !found }' ||
 		die "Helix is not a static PIE (ELF DYN): $binary"
 	if "$LLVM_TOOLS/llvm-readelf" -d "$binary" | grep -q '(NEEDED)'; then
 		die "Helix has a dynamic library dependency: $binary"
@@ -339,14 +346,14 @@ stage_helix() {
 	local binary="$HELIX_TARGET_DIR/$TARGET/release/hx" component
 	[ -x "$binary" ] || die "Helix binary was not produced: $binary"
 	validate_helix_elf "$binary"
-	mkdir -p "$HELIX_IMG/devtools/helix/runtime"
-	"$LLVM_TOOLS/llvm-strip" -o "$HELIX_IMG/devtools/helix/hx" "$binary"
-	chmod 755 "$HELIX_IMG/devtools/helix/hx"
-	validate_helix_elf "$HELIX_IMG/devtools/helix/hx"
+	mkdir -p "$HELIX_IMG/user/lib/helix/runtime"
+	"$LLVM_TOOLS/llvm-strip" -o "$HELIX_IMG/user/lib/helix/hx" "$binary"
+	chmod 755 "$HELIX_IMG/user/lib/helix/hx"
+	validate_helix_elf "$HELIX_IMG/user/lib/helix/hx"
 	for component in queries themes tutor; do
 		[ -e "$HELIX/runtime/$component" ] ||
 			die "Helix runtime component is missing: $component"
-		cp -a "$HELIX/runtime/$component" "$HELIX_IMG/devtools/helix/runtime/"
+		cp -a "$HELIX/runtime/$component" "$HELIX_IMG/user/lib/helix/runtime/"
 	done
 }
 
@@ -384,72 +391,52 @@ ensure_wasi_sdk() {
 	mv "$WASI_SDK.part" "$WASI_SDK"
 }
 
-build_external_sources() {
-	build_external_source lua "$LUA_IMG" devtools/bin/lua build_lua
-	build_external_source quickjs "$QUICKJS_IMG" devtools/bin/qjs build_quickjs
-	build_external_source ripgrep "$RG_IMG" system/bin/rg build_ripgrep
-	build_external_source helix "$HELIX_IMG" devtools/helix/hx build_helix
-	build_external_source sed "$SED_IMG" devtools/bin/sed build_sed
-	build_external_source tar "$TAR_IMG" system/bin/tar build_tar
+build_development_sources() {
+	build_external_source lua "$LUA_IMG" user/bin/dev/lua build_lua
+	build_external_source quickjs "$QUICKJS_IMG" user/bin/dev/qjs build_quickjs
+	build_external_source helix "$HELIX_IMG" user/lib/helix/hx build_helix
+	build_external_source sed "$SED_IMG" user/bin/dev/sed build_sed
 	ensure_wasm_guest_toolchain
 	ensure_wasi_sdk
-	build_external_source javy "$JAVY_IMG" devtools/bin/javy build_javy
-	build_external_source wasmtime "$WASMTIME_IMG" devtools/bin/wasmtime-rt build_wasmtime
-	fetch_sys_lib_deps
+	build_external_source javy "$JAVY_IMG" user/bin/dev/javy build_javy
+	build_external_source wasmtime "$WASMTIME_IMG" user/bin/dev/wasmtime-rt build_wasmtime
+}
+
+build_external_sources() {
+	build_development_sources
+	build_external_source ripgrep "$RG_IMG" user/bin/rg build_ripgrep
+	build_external_source tar "$TAR_IMG" user/bin/tar build_tar
+}
+
+build_toolchain_overlays() {
+	select_external_sources toolchain
+	prepare_external_sources
+	check_external_lockfiles ||
+		die "external source preflight failed; see $MOTOR/build/external-lockfiles.log"
+	build_development_sources
+	make -C "$MOTOR" -j"$(nproc)" BUILD=release toolchain-payloads
+	. "$SCRIPT_DIR/build-scripts/toolchain-overlays.sh"
+	toolchain_collect_overlays "$MOTOR" "$MOTOR/build/bin/release" \
+		"$ASSEMBLY_IMAGE_ROOT" "$MOTOR/build/bin/release/imager" "$TOOLCHAIN_OVERLAY_OUTPUT"
 }
 
 # --- external source: tar and zstd ---------------------------------------------
 build_tar() {
-	log "building tar and zstd and staging them in /system/bin"
+	log "building tar and zstd and staging them in /user/bin"
 	( cd "$MOTOR_OS_TAR" && \
 		CARGO_TARGET_DIR="$TAR_TARGET_DIR" \
 			cargo build --target "$TARGET" --release --locked )
 	local tool
-	mkdir -p "$TAR_IMG/system/bin"
+	mkdir -p "$TAR_IMG/user/bin"
 	for tool in tar zstd; do
-		"$LLVM_TOOLS/llvm-strip" -o "$TAR_IMG/system/bin/$tool" \
+		"$LLVM_TOOLS/llvm-strip" -o "$TAR_IMG/user/bin/$tool" \
 			"$TAR_TARGET_DIR/$TARGET/release/$tool"
-		chmod 755 "$TAR_IMG/system/bin/$tool"
+		chmod 755 "$TAR_IMG/user/bin/$tool"
 	done
 }
 
-# --- dependencies of the staged Motor OS library sources ------------------------
-# The development image stages src/sys/lib crates for native tests, and
-# `make dev.img` admits and compiles them there offline
-# (src/build-scripts/prepare-dev-image.sh). Their crates.io dependencies
-# come from this overlay: objects of the image's
-# Interactive Lorry repository, fetched by a Lorry built for this host. Fetch
-# takes every package of the workspace's Cargo.lock, whatever features the
-# staged manifests select, so that lock alone decides the overlay; and
-# src/sys/Cargo.lock decides the lock.
-fetch_sys_lib_deps() {
-	local work="$ASSEMBLY_BUILD_ROOT/sys-lib-deps" overlay="$ASSEMBLY_IMAGE_ROOT/sys-lib-deps"
-	local repository="$overlay/devtools/lorry/user/vendor"
-	log "fetching the dependencies of the staged Motor OS library sources"
-	rm -rf "$work" "$overlay"
-	"$MOTOR/src/build-scripts/sys-lib-workspace.sh" "$work/workspace"
-	CARGO_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/host-lorry" \
-		cargo build --manifest-path "$MOTOR/src/bin/lorry/Cargo.toml" --release --locked
-	mkdir -p "$work/home/.config/lorry" "${repository%/*}"
-	cat > "$work/home/.config/lorry/lorry.toml" << EOF
-config-version = 1
-
-[repositories]
-user = "$repository"
-EOF
-	# A private HOME keeps the user's own Lorry configuration out.
-	( cd "$work/workspace" &&
-		RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" \
-		HOME="$work/home" "$ASSEMBLY_BUILD_ROOT/host-lorry/release/lorry" fetch --locked )
-	# The image ships its own repository header; only objects and index records
-	# belong to the overlay.
-	rm -rf "$repository/repository.toml" "$repository/.staging"
-	[ -n "$(find "$repository/objects" -type f)" ] ||
-		die "Lorry fetched no dependency objects into $repository"
-}
-
 build_helix() {
-	log "fetching, building, and staging Helix as /devtools/helix/hx"
+	log "fetching, building, and staging Helix as /user/lib/helix/hx"
 	(
 		cd "$HELIX"
 		cargo fetch --locked
@@ -461,7 +448,7 @@ build_helix() {
 			AR_x86_64_unknown_motor="$LLVM_TOOLS/llvm-ar" \
 			ARFLAGS_x86_64_unknown_motor= \
 			CARGO_TARGET_DIR="$HELIX_TARGET_DIR" \
-			HELIX_DEFAULT_RUNTIME=/devtools/helix/runtime \
+			HELIX_DEFAULT_RUNTIME=/user/lib/helix/runtime \
 			HELIX_DISABLE_AUTO_GRAMMAR_BUILD=1 \
 			cargo build --target "$TARGET" --release --locked \
 				--offline -p helix-term --bin hx
@@ -472,7 +459,7 @@ build_helix() {
 # --- rebuild the OS and images ----------------------------------------------
 build_images() {
 	log "rebuilding Motor OS and all images (make images BUILD=release)"
-	( cd "$MOTOR" && make images BUILD=release -j"$(nproc)" )
+	( cd "$MOTOR" && make images toolchain-archive BUILD=release -j"$(nproc)" )
 }
 
 # --- the native toolchain ------------------------------------------------------
@@ -505,13 +492,13 @@ main() {
 		return "$parse_status"
 	}
 	local complete=true caller_has_rustup=true
-	if [ "$JAVY_ONLY" = true ] || [ "$WASMTIME_ONLY" = true ] || [ "$SYS_LIB_DEPS_ONLY" = true ]; then
+	if [ "$JAVY_ONLY" = true ] || [ "$WASMTIME_ONLY" = true ] || [ -n "$BOOTSTRAP_TOOLCHAIN" ]; then
 		complete=false
 	else
 		log "complete Motor OS build starting"
 		log "Motor OS checkout: $MOTOR"
 
-		local test_ssh_key="$MOTOR/src/tests/test.key"
+		local test_ssh_key="$MOTOR/src/vm_scripts/test.key"
 		[ -f "$test_ssh_key" ] && [ ! -L "$test_ssh_key" ] ||
 			die "Motor test SSH key is absent or linked: $test_ssh_key"
 		chmod 400 "$test_ssh_key"
@@ -525,14 +512,26 @@ main() {
 		command -v rustup >/dev/null 2>&1 || caller_has_rustup=false
 		MOTOR_BUILD_ORCHESTRATOR=1 "$base"
 		[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-		command -v rustup >/dev/null || die "rustup is unavailable after host provisioning"
 	fi
+	command -v rustup >/dev/null ||
+		die 'The build needs rustup. Load it with . "$HOME/.cargo/env" or install rustup as described in docs/toolchain.md.'
 	# Helix and Javy pin toolchains of their own; the exported name overrides them.
-	export RUSTUP_TOOLCHAIN="$TOOLCHAIN"
+	export RUSTUP_TOOLCHAIN="${BOOTSTRAP_TOOLCHAIN:-$TOOLCHAIN}"
+	if [ -z "$BOOTSTRAP_TOOLCHAIN" ] && ! rustup which rustc >/dev/null; then
+		local host_package="motor-toolchain-$TOOLCHAIN-x86_64-linux"
+		die "rustup cannot find the Linux-host compiler '$TOOLCHAIN' required by $MOTOR/rust-toolchain.toml.
+If provisioning just installed rustup, load it in your shell with . \"\$HOME/.cargo/env\".
+From the directory containing the Linux-host archive (usually $MOTORH), run
+  tar -xaf $host_package.tar.zst && ./$host_package/install.sh"
+	fi
 	local toolchain_sysroot
 	toolchain_sysroot="$(rustc --print sysroot)"
 	SYSROOT="$toolchain_sysroot/lib/rustlib/$TARGET/sysroot"
 	LLVM_TOOLS="$toolchain_sysroot/lib/rustlib/x86_64-unknown-linux-gnu/bin"
+	if [ -n "$BOOTSTRAP_TOOLCHAIN" ]; then
+		build_toolchain_overlays
+		return
+	fi
 
 	if [ "$complete" = false ]; then
 		local wasm=false
@@ -549,11 +548,10 @@ main() {
 		[ "$wasm" = false ] || ensure_wasm_guest_toolchain
 		if [ "$JAVY_ONLY" = true ]; then
 			ensure_wasi_sdk
-			build_external_source javy "$JAVY_IMG" devtools/bin/javy build_javy
+			build_external_source javy "$JAVY_IMG" user/bin/dev/javy build_javy
 		fi
 		[ "$WASMTIME_ONLY" = false ] ||
-			build_external_source wasmtime "$WASMTIME_IMG" devtools/bin/wasmtime-rt build_wasmtime
-		[ "$SYS_LIB_DEPS_ONLY" = false ] || fetch_sys_lib_deps
+			build_external_source wasmtime "$WASMTIME_IMG" user/bin/dev/wasmtime-rt build_wasmtime
 		return
 	fi
 	log "toolchain: $TOOLCHAIN"
@@ -568,31 +566,31 @@ main() {
 	build_images
 
 	local required_outputs=(
-		"$ASSEMBLY_IMAGE_ROOT/llvm/devtools/llvm/bin/llvm"
-		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustc"
-		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/rustfmt"
-		"$ASSEMBLY_IMAGE_ROOT/rustc/devtools/rust/bin/clippy-driver"
-		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/devtools/rust/bin/rust-analyzer"
-		"$RG_IMG/system/bin/rg"
-		"$TAR_IMG/system/bin/tar"
-		"$TAR_IMG/system/bin/zstd"
-		"$HELIX_IMG/devtools/helix/hx"
-		"$SED_IMG/devtools/bin/sed"
-		"$QUICKJS_IMG/devtools/bin/qjs"
-		"$QUICKJS_IMG/devtools/bin/qjsc"
+		"$ASSEMBLY_IMAGE_ROOT/llvm/user/lib/llvm/bin/llvm"
+		"$ASSEMBLY_IMAGE_ROOT/rustc/user/lib/rust/bin/rustc"
+		"$ASSEMBLY_IMAGE_ROOT/rustc/user/lib/rust/bin/rustfmt"
+		"$ASSEMBLY_IMAGE_ROOT/rustc/user/lib/rust/bin/clippy-driver"
+		"$ASSEMBLY_IMAGE_ROOT/rust-analyzer/user/lib/rust/bin/rust-analyzer"
+		"$RG_IMG/user/bin/rg"
+		"$TAR_IMG/user/bin/tar"
+		"$TAR_IMG/user/bin/zstd"
+		"$HELIX_IMG/user/lib/helix/hx"
+		"$SED_IMG/user/bin/dev/sed"
+		"$QUICKJS_IMG/user/bin/dev/qjs"
+		"$QUICKJS_IMG/user/bin/dev/qjsc"
 		"$MOTOR/vm_images/release/motor-os.qcow2"
-		"$MOTOR/vm_images/release/motor-os-dev.qcow2"
-		"$MOTOR/vm_images/release/motor-os-wasm.qcow2"
-		"$JAVY_IMG/devtools/bin/javy"
-		"$JAVY_IMG/devtools/bin/wasmi"
-		"$WASMTIME_IMG/devtools/bin/wasmtime"
-		"$WASMTIME_IMG/devtools/bin/wasmtime-rt"
+		"$MOTOR/vm_images/release/motor-os-base.img"
+		"$MOTOR/build/toolchain/release/motor-toolchain-$TOOLCHAIN.tar.zst"
+		"$JAVY_IMG/user/bin/dev/javy"
+		"$JAVY_IMG/user/bin/dev/wasmi"
+		"$WASMTIME_IMG/user/bin/dev/wasmtime"
+		"$WASMTIME_IMG/user/bin/dev/wasmtime-rt"
 	)
 	local output
 	for output in "${required_outputs[@]}"; do
 		[ -f "$output" ] || die "final build output is missing: $output"
 	done
-	log "base, standard, dev, and wasm release images built successfully"
+	log "base and standard release images and native toolchain archive built successfully"
 	[ "$caller_has_rustup" = true ] ||
 		warn "this shell's PATH lacks rustup: open a new shell or run '. \"\$HOME/.cargo/env\"' before make or the tests"
 	return 0

@@ -1,13 +1,14 @@
 permission_policy: "motor-os-permissions.yaml"
 input_files:
   - "/system/services/russhd"
-  - "/system/bin/wg"
-  - "/system/bin/wg-tool"
+  - "/user/bin/wg"
+  - "/user/bin/wg-tool"
   - "/system/services/strobe"
   - "/system/services/sys-init"
   - "/system/services/sys-tty"
-  - "/system/bin/rush"
-  - "/system/bin/sysbox"
+  - "/user/bin/rush"
+  - "/user/bin/sysbox"
+  - "/user/bin/curl"
   - "/user/bin/red"
   - "/user/bin/rmux"
   - "/system/services/dns-resolver"
@@ -17,7 +18,6 @@ input_files:
   - "/user/bin/ssh"
 directories:
   - "/system"
-  - "/system/bin"
   - "/system/cfg"
   - "/system/cfg/libc"
   - "/system/logs"
@@ -31,6 +31,7 @@ directories:
   - "/user/tmp"
   - "/none"
   - "/none/cfg"
+  - "/none/dev"
   - "/none/tmp"
 static_dirs:
   - "img_files/motor-os-base"
@@ -40,11 +41,12 @@ assembly_dirs:
   - "rg"
   - "tar"
 assembly_required_executables:
-  - "rg/system/bin/rg"
-  - "tar/system/bin/tar"
-  - "tar/system/bin/zstd"
+  - "rg/user/bin/rg"
+  - "tar/user/bin/tar"
+  - "tar/user/bin/zstd"
 ca_bundle: "/etc/ssl/certs/ca-certificates.crt"
 filesystem: "motor-fs"
 img_name: "motor-os.qcow2"
 image_format: "qcow2"
-data_partition_size_mb: 256
+data_partition_size_mb: 32768
+raw_data_partition_size_mb: 256

@@ -105,7 +105,7 @@ fn valid_name(name: &str) -> Result<&str> {
 
 #[cfg(target_os = "motor")]
 fn default_executable() -> Result<PathBuf> {
-    executable(Path::new("/system/bin/curl"), "Motor curl")
+    executable(Path::new("/user/bin/curl"), "Motor curl")
 }
 
 #[cfg(not(target_os = "motor"))]

@@ -1,0 +1,4 @@
+# Read by login shells: the console's and each SSH session's. Every command
+# started from them inherits what this file exports. It must print nothing:
+# `ssh host command` output can carry a protocol.
+export PATH=/user/bin

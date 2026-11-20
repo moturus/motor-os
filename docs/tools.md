@@ -9,8 +9,6 @@ and several useful scripts:
 - `motor-os-base.img` contains the minimal bootable system and user shell tools;
 - `motor-os.qcow2` is the standard production image, adding networking, DNS, and
   regular user programs;
-- `motor-os-dev.qcow2` adds native toolchains, sources, diagnostics, tests, and
-  the bundled sample website;
 - `create-tap.sh` creates the local `moto-tap` interface the VMs use for
   networking and the NAT rules that let them reach the Internet; the build runs
   the same steps, so it is needed only after a host reboot;
@@ -25,6 +23,41 @@ and several useful scripts:
   are used only through Motor FS mounts in `/system/cfg/sys-fs.toml`
   ([fs-permissions.md](fs-permissions.md)); a read-only root disk needs a
   read-only root configured in the image.
+
+`--system-tty` on `run-chv.sh` and `run-fc.sh` selects a System serial
+console for that boot, overriding the console role in `sys-init.cfg`.
+The launcher appends the bare `system-tty` kernel option and preserves
+existing boot arguments. Other service roles and the console's remaining
+capabilities stay the same. Without the option, the configured console role
+applies. `run-qemu.sh` and `run-qemu-echr.sh` refuse it because disk boot has
+no kernel command line.
+
+All three launchers accept `--no-network` to omit the network device;
+`run-qemu-echr.sh` forwards it too. The serial console remains available,
+and guest loopback follows the image's networking configuration. Put these
+launcher options before `--` or any VMM-specific arguments. For example:
+
+```sh
+./run-chv.sh --system-tty --no-network
+MOTO_IMAGE=motor-os.img ./run-fc.sh --system-tty
+./run-qemu-echr.sh --no-network
+```
+
+The kernel retains the original command-line bytes and exposes them through
+`SysRay::OP_QUERY_CMDLINE` only to System processes. `SysRay::query_cmdline`
+copies into a caller buffer and returns `(written, total)`, excluding the
+terminating NUL. sys-init queries the kernel directly and accepts `system-tty`
+only as a complete ASCII-whitespace-separated token. Empty or absent command
+lines select no options; `system-tty=1` and `no-system-tty` do not select a
+System console. Command lines must terminate within 4096 bytes of mapped boot
+RAM, including the NUL; an invalid address or missing terminator fails boot.
+
+`src/tests/cross-test.sh` checks the
+standard image's console capabilities and boots without a network device.
+boot options on every available VMM. Guest tests check the query's
+bytes and access control. Kernel command-line reader self-tests run inside
+debug Motor OS boots; sys-init's parser has host unit tests, and
+the host checks in `full-test.sh` verify argument construction and QEMU's refusal.
 
 For host-side image creation, data filesystems, guest files, permission
 changes, resizing, and SSH/TLS credential replacement, see the [imager command reference](imager.md).
@@ -41,7 +74,7 @@ as running this from the checkout with network access:
 cargo install --locked --version 0.3.0 vhost-device-vsock
 ```
 
-The lookup (`src/tests/vm-vsock-backend.sh`) takes an explicit
+The lookup in `src/tests/cross-test.sh` takes an explicit
 `VHOST_DEVICE_VSOCK` path first, then `PATH`, where `cargo install` puts the
 backend beside `cargo` itself. It checks the version and never skips
 coverage. An explicit path is only checked, never replaced; a failed install
@@ -50,11 +83,11 @@ or a mismatched explicit backend fails the test and prints the command.
 QEMU uses opt-in shared guest RAM (`MOTO_SHARED_MEM=1`), preserving
 the runner's hugepage policy and any `MOTO_HUGEPAGES` override.
 
-`src/tests/test-vsock.sh [--release] [--vmm qemu|chv|fc]` runs outgoing stream
-tests on the selected VMM (QEMU by default), then the existing IP-disabled
+`src/tests/cross-test.sh` runs outgoing stream
+tests on the selected VMM (Cloud Hypervisor by default), then the IP-disabled
 discovery cases on the same VMM. The full standard suite calls this phase.
-The selected Firecracker phase requests `raw.img`; developer-image tests
-support QEMU and Cloud Hypervisor only. All phases share the VM lock and run
+The selected Firecracker phase requests `raw.img` and skips development tools.
+All phases share the VM lock and run
 sequentially; each owns and reaps its VMM and any backend/peer processes.
 
 ## Tools available inside the Motor OS VM
@@ -66,8 +99,8 @@ This is how `top` looks like:
 Motor OS boots into a unix-like shell [rush](https://github.com/moturus/rush).
 The shell is somewhat barebones now (contributions are welcome!).
 
-- `ls /system/bin` and `ls /user/bin` show the standard commands; the
-  development image also places `/devtools/bin` on `PATH`;
+- `ls /user/bin` shows the standard commands; installing the toolchain archive
+  adds development tools in `/user/bin/dev` and extends `PATH`;
 - `free`, `kill`, `ping`, `printenv`, `ps`, `ss`, and `top` are worth mentioning;
 - `mkdir [-p | --parents] [--] DIRECTORY...` creates directories. With `-p`,
   it creates missing parents and accepts directories that already exist;
@@ -105,7 +138,7 @@ The shell is somewhat barebones now (contributions are welcome!).
   the trailing newline; `-e` enables byte escapes and `-E` disables them.
   Escapes include octal/hex bytes and `\c` to stop output. `POSIXLY_CORRECT`
   enables escapes and restricts option parsing. Rush retains its built-in echo;
-  use `sysbox echo` or `/system/bin/echo` to select this implementation;
+  use `sysbox echo` or `/user/bin/echo` to select this implementation;
 - `xargs [-0r] [-d BYTE] [-n COUNT] [-I MARKER] [-t] [--] [COMMAND [ARG]...]` reads UTF-8 arguments and runs the
   command directly. Default input recognizes quotes and backslashes; `-0`
   reads literal NUL-separated arguments. `-d` uses a single-byte or escaped
@@ -136,9 +169,8 @@ The shell is somewhat barebones now (contributions are welcome!).
   trouble) follow GNU `diff`, and so do the hunks: it finds the same edit
   script GNU `diff` does. Side-by-side and ed output, `-B`, `-I` and `-x`
   are not supported;
-- On the development image, `/devtools/tests/systest`,
-  `/devtools/tests/mio-test`, and `/devtools/tests/tokio-tests` are useful to
-  make sure everything is working as expected;
+- Native Cargo harnesses for systest, mio, and Tokio run through
+  `src/tests/full-native-test.sh` in an uploaded source checkout;
 - `/system/logs` contains current and rotated service logs. Interactive
   sessions can list and read them, System-role strobe alone creates and rotates
   them, and None-role processes cannot traverse the directory. The unfiltered
@@ -148,7 +180,7 @@ The shell is somewhat barebones now (contributions are welcome!).
   diagnostics go to the process's stderr first, including debug records when
   debug logging is configured; for these diagnostics, the kernel log is a
   capability-gated fallback when that write fails;
-- `/devtools/bin/mdbg print-stacks $PID`, where `$PID` can be deduced by running `ps`, will
+- `/user/bin/dev/mdbg print-stacks $PID`, where `$PID` can be deduced by running `ps`, will
   (attempt) to extract stack traces for all threads in the process; the stack traces
   are addresses, so `addr2line` will need to be used with the binary
   (e.g. `$MOTORH/motor-os/build/obj/debug/sys-io/x86_64-unknown-motor/debug/sys-io`);
@@ -157,9 +189,9 @@ The shell is somewhat barebones now (contributions are welcome!).
 
 ![ps -H](ps.png)
 
-## Git on the developer image
+## Git on Motor OS
 
-The developer image includes `/devtools/bin/gix` for Git repositories:
+The toolchain archive installs `/user/bin/dev/gix` for Git repositories:
 HTTPS/SSH clone and fetch, local inspection and authoring, branch switching,
 merging, and single-ref HTTPS/SSH push. See [gix on Motor OS](gix.md) for
 commands, configuration, recovery and limits.

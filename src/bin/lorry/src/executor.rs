@@ -15,12 +15,11 @@ use crate::compile::{
 use crate::diagnostic::{Error, Result};
 use crate::hash::sha256_file;
 use crate::manifest::Manifest;
-use crate::native_tool;
 use crate::policy::Admission;
 use crate::process::RustcCommand;
+use crate::progress::{Progress, package_label};
 use crate::resolver::{CompileKind, PackageKey, PackageSourceKey};
 use crate::run_record;
-use crate::sandbox::Executable;
 use crate::source_tree::Limits as TreeLimits;
 use crate::toolchain::{TargetInfo, Toolchain};
 use crate::tracked_env::{self, Tracked};
@@ -47,6 +46,7 @@ pub trait EventReporter: Sync {
 }
 
 pub struct Options<'a> {
+    pub environment: &'a BTreeMap<String, std::ffi::OsString>,
     pub child_lease_fd: Option<i32>,
     pub cargo: &'a Path,
     pub workspace_root: &'a Path,
@@ -73,8 +73,6 @@ pub struct Options<'a> {
     pub out_dir_limits: TreeLimits,
     pub cache: &'a BuildCaches,
     pub admission: &'a Admission,
-    pub native_tools:
-        &'a BTreeMap<(String, crate::config::NativeToolRole), crate::config::NativeTool>,
     /// Maximum number of units executed concurrently.
     pub jobs: usize,
     pub keep_going: bool,
@@ -468,7 +466,7 @@ pub fn execute(
     let workers = options.jobs.clamp(1, total.max(1));
     let state = std::sync::Mutex::new(state);
     let wakeup = std::sync::Condvar::new();
-    let print = std::sync::Mutex::new(());
+    let print = std::sync::Mutex::new(BTreeSet::<(PackageKey, bool)>::new());
     let (stores, store_queue) = std::sync::mpsc::channel::<CacheStore<'_>>();
     let store_queue = std::sync::Mutex::new(store_queue);
     let store_failures = std::sync::Mutex::new(Vec::new());
@@ -660,7 +658,7 @@ fn execute_unit<'a>(
     planned: &'a crate::unit::PlannedUnit,
     linked: &[UnitKey],
     outputs: &Outputs,
-    print: &std::sync::Mutex<()>,
+    print: &std::sync::Mutex<BTreeSet<(PackageKey, bool)>>,
     stores: &std::sync::mpsc::Sender<CacheStore<'a>>,
     on_metadata: &dyn Fn(Executed),
 ) -> Result<Executed> {
@@ -727,6 +725,7 @@ fn execute_unit<'a>(
                     &planned.unit,
                     &planned.settings,
                     &EnvironmentOptions {
+                        configured: options.environment,
                         cargo: options.cargo,
                         rustc: &options.toolchain.rustc,
                         host: &options.host.triple,
@@ -767,26 +766,6 @@ fn execute_unit<'a>(
                             key.package.name, key.package.version
                         ))
                     })?;
-                let mut granted = admission.native_tools.clone();
-                if admission.configured_native_tools {
-                    granted.extend(
-                        crate::config::NativeToolRole::ALL
-                            .into_iter()
-                            .filter(|role| {
-                                options
-                                    .native_tools
-                                    .get(&(target.triple.clone(), *role))
-                                    .is_some_and(|tool| tool.program.is_some())
-                            }),
-                    );
-                }
-                let native = native_tool::project(
-                    options.native_tools,
-                    &granted,
-                    &target.triple,
-                    planned.source_remap.as_ref(),
-                )?;
-                environment.extend(native.environment);
                 let caller = admission
                     .caller_env
                     .iter()
@@ -794,7 +773,12 @@ fn execute_unit<'a>(
                     .collect();
                 build_script::add_caller_environment(
                     &mut environment,
-                    &admission.caller_env,
+                    &admission
+                        .caller_env
+                        .iter()
+                        .filter(|name| !options.environment.contains_key(*name))
+                        .cloned()
+                        .collect(),
                     &caller,
                 )?;
                 let mut read_only = sandbox_inputs(
@@ -802,14 +786,10 @@ fn execute_unit<'a>(
                     options,
                     directories.iter().map(|directory| directory.path.clone()),
                 );
-                read_only.extend(native.read_only);
+                #[cfg(target_os = "linux")]
+                read_only.extend(native_tool_inputs(&environment, &manifest.root));
                 read_only.sort();
                 read_only.dedup();
-                let mut executables = vec![Executable {
-                    path: options.toolchain.rustc.clone(),
-                    argument_prefix: Vec::new(),
-                }];
-                executables.extend(native.executables);
                 let workspace_lock = options.workspace_root.join("Cargo.lock");
                 let run_options = RunOptions {
                     child_lease_fd: options.child_lease_fd,
@@ -825,7 +805,6 @@ fn execute_unit<'a>(
                     out_dir: &out_dir,
                     temp_dir: &temp_dir,
                     read_only: &read_only,
-                    executables: &executables,
                     timeout: options.build_script_timeout,
                     max_output_bytes: options.build_script_output_bytes,
                     out_dir_limits: options.out_dir_limits,
@@ -836,7 +815,6 @@ fn execute_unit<'a>(
                     &options.toolchain.verbose_version,
                     &executable_sha256,
                     &environment,
-                    &executables,
                 )?;
                 let package_sources = || match key.package.source {
                     PackageSourceKey::Path(_) => {
@@ -861,7 +839,6 @@ fn execute_unit<'a>(
                         }
                         None => run_build_script(
                             key,
-                            manifest,
                             options,
                             &run_options,
                             root,
@@ -950,6 +927,9 @@ fn execute_unit<'a>(
                     &linked,
                 )?
                 .ok_or_else(|| Error::failure("rustc invocation unexpectedly missing"))?;
+                let mut environment = options.environment.clone();
+                environment.extend(planned_invocation.environment);
+                planned_invocation.environment = environment;
                 let driver = options.toolchain.clippy.as_ref().filter(|_| {
                     options
                         .workspace_members
@@ -1012,6 +992,7 @@ fn execute_unit<'a>(
                     planned,
                     manifest,
                     invocation: &planned_invocation,
+                    configured_environment: options.environment,
                     host_profile: options.host_profile,
                     target_profile: options.target_profile,
                     dependencies: &dependencies,
@@ -1117,7 +1098,7 @@ fn execute_unit<'a>(
                 } else {
                     (invocation, Some(staging))
                 };
-                if restorable && !options.quiet && caches.report_shared_rebuild(planned) {
+                if restorable && options.verbose && caches.report_shared_rebuild(planned) {
                     let _guard = print
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1126,46 +1107,7 @@ fn execute_unit<'a>(
                 if restorable && options.verbose {
                     eprintln!("Cache miss {} v{}", key.package.name, key.package.version);
                 }
-                if !options.quiet {
-                    let _guard = print
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    let unit = match key.kind {
-                        UnitKind::Library => "library".to_owned(),
-                        UnitKind::Binary => format!(
-                            "binary `{}`",
-                            key.target.as_deref().ok_or_else(|| Error::failure(
-                                "selected binary has no target name"
-                            ))?
-                        ),
-                        UnitKind::LibraryHarness
-                        | UnitKind::BinaryHarness
-                        | UnitKind::IntegrationHarness => format!(
-                            "test `{}`",
-                            key.target.as_deref().ok_or_else(|| Error::failure(
-                                "selected harness has no target name"
-                            ))?
-                        ),
-                        UnitKind::ProcMacro => "proc macro".to_owned(),
-                        UnitKind::Example | UnitKind::Bench => format!(
-                            "{} `{}`",
-                            if key.kind == UnitKind::Example {
-                                "example"
-                            } else {
-                                "bench"
-                            },
-                            key.target.as_deref().unwrap()
-                        ),
-                        UnitKind::BuildScriptCompile => "build script".to_owned(),
-                        UnitKind::BuildScriptRun => unreachable!(),
-                    };
-                    eprintln!(
-                        "Compiling {} v{} ({}) [{unit}]",
-                        key.package.name,
-                        key.package.version,
-                        manifest.root.display()
-                    );
-                }
+                report_package(key, options, print)?;
                 let command = RustcCommand {
                     child_lease_fd: options.child_lease_fd,
                     program: driver.map_or(&options.toolchain.rustc, |driver| &driver.path),
@@ -1753,6 +1695,94 @@ fn install_unhashed(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Expose the tools the caller selected, including their installed headers,
+/// runtime libraries and helper programs. Landlock still denies writes here.
+#[cfg(target_os = "linux")]
+fn native_tool_inputs(
+    environment: &BTreeMap<String, std::ffi::OsString>,
+    package_root: &Path,
+) -> Vec<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let search = environment
+        .get("PATH")
+        .into_iter()
+        .flat_map(std::env::split_paths)
+        .map(|path| package_root.join(path))
+        .collect::<Vec<_>>();
+    let mut directories = search.clone();
+    let mut programs = ["cc", "c++", "ar", "ranlib"].map(PathBuf::from).to_vec();
+    for (name, value) in environment {
+        if !["CC", "CXX", "AR", "RANLIB"].iter().any(|base| {
+            name == base
+                || name.starts_with(&format!("{base}_"))
+                || name == &format!("HOST_{base}")
+                || name == &format!("TARGET_{base}")
+        }) {
+            continue;
+        }
+        let path = package_root.join(value);
+        if path.is_file() {
+            // cc-rs checks the whole value first, including paths with spaces.
+            programs.push(path);
+        } else {
+            programs.extend(
+                value
+                    .to_str()
+                    .into_iter()
+                    .flat_map(str::split_whitespace)
+                    .filter(|value| !value.starts_with('-'))
+                    .map(PathBuf::from),
+            );
+        }
+    }
+    for program in programs {
+        let program = if program.components().count() > 1 {
+            package_root.join(program)
+        } else {
+            let Some(path) = search
+                .iter()
+                .map(|path| path.join(&program))
+                .find(|path| path.is_file())
+            else {
+                continue;
+            };
+            path
+        };
+        if fs::metadata(&program)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        {
+            directories.extend(program.parent().map(Path::to_path_buf));
+            if let Ok(real) = fs::canonicalize(program) {
+                directories.extend(real.parent().map(Path::to_path_buf));
+            }
+        }
+    }
+    let mut paths = Vec::new();
+    for directory in directories {
+        let Ok(directory) = fs::canonicalize(directory) else {
+            continue;
+        };
+        if !directory.is_dir() {
+            continue;
+        }
+        if directory
+            .file_name()
+            .is_some_and(|name| name == "bin" || name == "sbin")
+            && let Some(prefix) = directory.parent()
+        {
+            for name in ["include", "lib", "lib64", "libexec"] {
+                let path = prefix.join(name);
+                if path.is_dir() {
+                    paths.push(path);
+                }
+            }
+        }
+        paths.push(directory);
+    }
+    paths
+}
+
 fn sandbox_inputs(
     manifests: &BTreeMap<PackageKey, Manifest>,
     options: &Options<'_>,
@@ -1772,12 +1802,14 @@ fn sandbox_inputs(
         .rustc
         .parent()
         .and_then(Path::parent)
-        .map(|root| root.join("lib"))
+        .map(Path::to_path_buf)
         .filter(|path| path.is_dir())
     {
         paths.push(toolchain_root);
     }
     for path in [
+        "/bin",
+        "/usr/bin",
         "/lib",
         "/lib64",
         "/usr/include",
@@ -1794,28 +1826,48 @@ fn sandbox_inputs(
     paths
 }
 
+fn report_package(
+    key: &UnitKey,
+    options: &Options<'_>,
+    print: &std::sync::Mutex<BTreeSet<(PackageKey, bool)>>,
+) -> Result<()> {
+    if !options.quiet {
+        let mut printed = print
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let checking = key.kind != UnitKind::BuildScriptRun
+            && matches!(key.mode, UnitMode::Check | UnitMode::CheckTest);
+        if printed.insert((key.package.clone(), checking)) {
+            Progress::new(true).status(
+                options.color,
+                if checking { "Checking" } else { "Compiling" },
+                package_label(&key.package),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Runs a build script that has no fresh record and records the run.
 #[allow(clippy::too_many_arguments)]
 fn run_build_script(
     key: &UnitKey,
-    manifest: &Manifest,
     options: &Options<'_>,
     run_options: &RunOptions<'_>,
     directory: &Path,
     run_key: &[u8; 32],
     package_sources: Option<[u8; 32]>,
-    print: &std::sync::Mutex<()>,
+    print: &std::sync::Mutex<BTreeSet<(PackageKey, bool)>>,
 ) -> Result<build_script::Output> {
     run_record::remove(directory)?;
-    if !options.quiet {
+    report_package(key, options, print)?;
+    if options.verbose {
         let _guard = print
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         eprintln!(
-            "Running build script {} v{} ({})",
-            key.package.name,
-            key.package.version,
-            manifest.root.display()
+            "Running build script {} v{}",
+            key.package.name, key.package.version
         );
     }
     let started = run_record::now();
@@ -1827,7 +1879,7 @@ fn run_build_script(
             let advice = if build_script::validate_caller_environment_name(name).is_ok() {
                 format!("add caller-env = [\"{name}\"] to the named path build-script rule")
             } else {
-                "use the documented compiler/native-tool configuration; this variable is controlled"
+                "use supported compiler options or caller inputs; this variable is controlled"
                     .into()
             };
             eprintln!(
@@ -1884,7 +1936,7 @@ fn render_build_script_warnings(key: &UnitKey, output: &build_script::Output) {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use crate::config::{CargoCompat, Config, NativeTool, NativeToolRole};
+    use crate::config::{CargoCompat, Config};
     use crate::policy::PackageAdmission;
     use crate::resolver::{PackageSourceKey, Resolution, ResolvedPackage, ResolvedSource};
     use crate::source_tree::DEFAULT_LIMITS;
@@ -1927,7 +1979,7 @@ mod tests {
                      assert!(env::var_os(\"HOME\").is_none());\n\
                      assert!(fs::write(root.join(\"src/lib.rs\"), \"bad\").is_err());\n\
                      assert!(TcpStream::connect(\"127.0.0.1:9\").is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied));\n\
-                     assert!(Command::new(\"/bin/true\").status().is_err());\n\
+                     assert!(Command::new(\"/bin/true\").status().unwrap().success());\n\
                      let rustc = env::var_os(\"RUSTC\").unwrap();\n\
                      assert!(Command::new(rustc).arg(\"--version\").output().unwrap().status.success());\n\
                      let out = env::var_os(\"OUT_DIR\").unwrap();\n\
@@ -2054,8 +2106,6 @@ mod tests {
             packages: BTreeMap::from([(
                 key,
                 PackageAdmission {
-                    native_tools: BTreeSet::new(),
-                    configured_native_tools: false,
                     caller_env: Default::default(),
                 },
             )]),
@@ -2102,6 +2152,7 @@ mod tests {
                 &plan,
                 &manifests,
                 &Options {
+                    environment: &BTreeMap::new(),
                     cargo: &cargo,
                     child_lease_fd: None,
                     workspace_root: &fixture.0,
@@ -2128,7 +2179,6 @@ mod tests {
                     out_dir_limits: DEFAULT_LIMITS,
                     cache: &cache,
                     admission: &admission,
-                    native_tools: &BTreeMap::new(),
                     jobs: 1,
                     keep_going: false,
                     reporter: &reporter,
@@ -2165,7 +2215,7 @@ mod tests {
     }
 
     #[test]
-    fn runs_a_sandboxed_build_script_without_undeclared_native_tools() {
+    fn runs_a_build_script_with_filesystem_and_network_limits() {
         let fixture = Fixture::new();
         let manifest = Manifest::load_path_dependency(&fixture.0.join("package")).unwrap();
         let key = PackageKey {
@@ -2192,8 +2242,6 @@ mod tests {
             packages: BTreeMap::from([(
                 key,
                 PackageAdmission {
-                    native_tools: BTreeSet::new(),
-                    configured_native_tools: false,
                     caller_env: Default::default(),
                 },
             )]),
@@ -2201,15 +2249,6 @@ mod tests {
         };
         let graph = dependency_units(&resolution, &manifests).unwrap();
         let (toolchain, target) = actual_toolchain();
-        let native_tools = BTreeMap::from([(
-            (target.triple.clone(), NativeToolRole::CCompiler),
-            NativeTool {
-                cpp_stdlib: None,
-                program: Some(PathBuf::from("/bin/true")),
-                prefix_args: Vec::new(),
-                flags: Vec::new(),
-            },
-        )]);
         let plan = plan_dependency_units(
             &graph,
             &manifests,
@@ -2247,6 +2286,7 @@ mod tests {
             &plan,
             &manifests,
             &Options {
+                environment: &BTreeMap::new(),
                 cargo: &cargo,
                 child_lease_fd: None,
                 workspace_root: &fixture.0,
@@ -2273,7 +2313,6 @@ mod tests {
                 out_dir_limits: DEFAULT_LIMITS,
                 cache: &cache,
                 admission: &admission,
-                native_tools: &native_tools,
                 jobs: 2,
                 keep_going: false,
                 reporter: &SilentReporter,

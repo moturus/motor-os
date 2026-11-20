@@ -34,7 +34,9 @@ pub const CMD_STAT_PATH: u16 = 20;
 /// Build a child process from an executable on the caller's behalf; see
 /// `spawn_msg_encode`.
 pub const CMD_SPAWN: u16 = 21;
-/// Global mount topology and sampled usage, visible to every role.
+/// Global mount topology and sampled usage, visible to every role. Private
+/// API, subject to change; see `MountInfo`.
+#[doc(hidden)]
 pub const CMD_GET_MOUNTS: u16 = 22;
 
 /// True for the command ids the FS server dispatches; keep in sync with the
@@ -67,6 +69,8 @@ pub fn is_read_command(cmd: u16) -> bool {
 /// `release_donated_pages`, so the layout cannot drift between them.
 pub const SINGLE_PAGE_SLOT: usize = 11;
 
+/// Private API, subject to change; see `MountInfo`.
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum MountKind {
@@ -75,14 +79,22 @@ pub enum MountKind {
 }
 
 /// Boot-time virtio-block ordinal and optional one-based MBR primary slot.
+/// Private API, subject to change; see `MountInfo`.
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MountBlockSource {
     pub device: u32,
     pub partition: Option<u8>,
 }
 
+/// Private API, subject to change: the mount list, with its command, records
+/// and messages, is for Motor OS system components (`src/sys`) only. It is
+/// hidden from the generated documentation, and its format and fields may
+/// change in any release.
+///
 /// The configured path can become stale if an ancestor is renamed. Unknown
 /// numbers are represented explicitly, including all usage on corrupt mounts.
+#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MountInfo {
     pub id: u32,
@@ -96,6 +108,7 @@ pub struct MountInfo {
     pub cap: Option<u64>,
 }
 
+#[doc(hidden)]
 pub const MOUNTS_END: u32 = u32::MAX;
 const MOUNT_HEADER: usize = 40;
 const _: () = assert!(MOUNT_HEADER + MAX_PATH_LEN <= PAGE_SIZE);
@@ -192,6 +205,8 @@ impl MountInfo {
     }
 }
 
+// The mount list's messages: private API, like `MountInfo`.
+#[doc(hidden)]
 pub fn get_mounts_req_encode(cursor: u32) -> Msg {
     let mut msg = Msg::new();
     msg.command = CMD_GET_MOUNTS;
@@ -199,12 +214,14 @@ pub fn get_mounts_req_encode(cursor: u32) -> Msg {
     msg
 }
 
+#[doc(hidden)]
 pub fn get_mounts_req_decode(msg: Msg) -> Result<u32> {
     msg.payload.args_64()[0]
         .try_into()
         .map_err(|_| moto_rt::Error::InvalidArgument)
 }
 
+#[doc(hidden)]
 pub fn get_mounts_resp_encode(id: u64, mount: &MountInfo, next: u32, page: IoPage) -> Result<Msg> {
     let len = mount.encode(page.bytes_mut())?;
     let mut msg = Msg::new();
@@ -217,6 +234,7 @@ pub fn get_mounts_resp_encode(id: u64, mount: &MountInfo, next: u32, page: IoPag
     Ok(msg)
 }
 
+#[doc(hidden)]
 pub fn get_mounts_resp_decode(msg: Msg, sender: &Sender) -> Result<(MountInfo, u32)> {
     msg.status()?;
     // Recover the page before validation so malformed records also release it.

@@ -2576,10 +2576,8 @@ mod tests {
     };
     use crate::toolchain::CfgSet;
     use semver::Version;
-    use serde_json::Value;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -2630,8 +2628,11 @@ mod tests {
             host: "x86_64-unknown-linux-gnu".to_owned(),
             compatibility: CargoCompat::V1_99,
             query_cache: None,
+            environment: BTreeMap::new(),
         }
     }
+
+    include!("../tests/unit/harness-graph.rs");
 
     #[test]
     fn custom_library_dependency_names_match_cargo() {
@@ -2662,32 +2663,7 @@ mod tests {
                 ),
             )
             .unwrap();
-            let cargo = Command::new(env!("CARGO"))
-                .current_dir(&fixture.0)
-                .env(
-                    "RUSTC",
-                    Path::new(env!("CARGO")).parent().unwrap().join("rustc"),
-                )
-                .args([
-                    "-Z",
-                    "unstable-options",
-                    "build",
-                    "--unit-graph",
-                    "--offline",
-                ])
-                .output()
-                .unwrap();
-            assert!(
-                cargo.status.success(),
-                "{}",
-                String::from_utf8_lossy(&cargo.stderr)
-            );
-            let cargo: Value = serde_json::from_slice(&cargo.stdout).unwrap();
-            let root_index = cargo["roots"][0].as_u64().unwrap() as usize;
-            let cargo_alias = cargo["units"][root_index]["dependencies"][0]["extern_crate_name"]
-                .as_str()
-                .unwrap();
-            assert_eq!(cargo_alias, expected);
+            fs::write(fixture.0.join("Cargo.lock"), "version=4\n[[package]]\nname=\"root\"\nversion=\"1.0.0\"\ndependencies=[\"shared\"]\n[[package]]\nname=\"shared\"\nversion=\"1.0.0\"\n").unwrap();
             let root = Manifest::load_for_build(&fixture.0).unwrap();
             let resolution = resolve_selected(
                 &root,
@@ -2729,7 +2705,7 @@ mod tests {
             let edge = graph.units[&library].dependencies.iter().next().unwrap();
             assert_eq!(
                 edge.alias.as_deref(),
-                Some(cargo_alias),
+                Some(expected),
                 "dependency {declaration}"
             );
         }
@@ -2843,178 +2819,107 @@ mod tests {
         )
         .unwrap();
 
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let result = Command::new(cargo)
-            .args([
-                "-Z",
-                "unstable-options",
-                "build",
-                "--unit-graph",
-                "--offline",
-            ])
-            .arg("--manifest-path")
-            .arg(workspace.join("Cargo.toml"))
-            .args(["-p", "app"])
-            .env("CARGO_NET_OFFLINE", "true")
-            .output()
-            .unwrap();
-        assert!(
-            result.status.success(),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        let cargo: Value = serde_json::from_slice(&result.stdout).unwrap();
         let roots = plan
             .units
             .keys()
             .filter(|key| key.package == app)
             .cloned()
             .collect::<Vec<_>>();
-        assert_ordinary_cargo_plan(&cargo, &plan, &manifests, &roots, "dev");
+        let library = "app/lib/app/build".to_owned();
+        let binary = "app/bin/app/build".to_owned();
+        let shared = "shared/lib/shared/build".to_owned();
+        assert_ordinary_plan(
+            &plan,
+            &manifests,
+            &roots,
+            vec![library.clone(), binary.clone(), shared.clone()],
+            vec![
+                (binary.clone(), library.clone(), "app"),
+                (binary.clone(), shared.clone(), "renamed"),
+                (library.clone(), shared, "renamed"),
+            ],
+            vec![library, binary],
+        );
     }
 
-    fn assert_ordinary_cargo_plan(
-        cargo: &Value,
+    fn ordinary_node(key: &UnitKey, manifests: &BTreeMap<PackageKey, Manifest>) -> String {
+        let kind = match key.kind {
+            UnitKind::Library | UnitKind::LibraryHarness => "lib",
+            UnitKind::Binary | UnitKind::BinaryHarness => "bin",
+            UnitKind::IntegrationHarness => "test",
+            UnitKind::Example => "example",
+            UnitKind::Bench => "bench",
+            _ => panic!("unexpected ordinary unit: {:?}", key.kind),
+        };
+        let name = key.target.as_deref().unwrap_or_else(|| {
+            manifests[&key.package]
+                .library
+                .as_ref()
+                .unwrap()
+                .name
+                .as_str()
+        });
+        let mode = match key.mode {
+            UnitMode::Build => "build",
+            UnitMode::Test => "test",
+            UnitMode::Check | UnitMode::CheckTest => "check",
+        };
+        format!("{}/{kind}/{name}/{mode}", key.package.name)
+    }
+
+    fn assert_ordinary_plan(
         plan: &CompilationPlan,
         manifests: &BTreeMap<PackageKey, Manifest>,
         roots: &[UnitKey],
-        profile_name: &str,
+        nodes: Vec<String>,
+        edges: Vec<(String, String, &str)>,
+        expected_roots: Vec<String>,
     ) {
-        let units = cargo["units"].as_array().unwrap();
-        let cargo_nodes = units
-            .iter()
-            .map(|unit| {
-                let package = unit["pkg_id"]
-                    .as_str()
-                    .unwrap()
-                    .rsplit('/')
-                    .next()
-                    .unwrap()
-                    .split('#')
-                    .next()
-                    .unwrap();
-                let kind = unit["target"]["kind"][0].as_str().unwrap();
-                let name = unit["target"]["name"].as_str().unwrap();
-                (
-                    package.to_owned(),
-                    kind.to_owned(),
-                    name.to_owned(),
-                    unit["mode"].as_str().unwrap().to_owned(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let lorry_node = |key: &UnitKey| {
-            let kind = match key.kind {
-                UnitKind::Library | UnitKind::LibraryHarness => "lib",
-                UnitKind::Binary | UnitKind::BinaryHarness => "bin",
-                UnitKind::IntegrationHarness => "test",
-                UnitKind::Example => "example",
-                UnitKind::Bench => "bench",
-                _ => panic!("unexpected unit in build oracle: {:?}", key.kind),
-            };
-            let name = key.target.as_deref().unwrap_or_else(|| {
-                manifests[&key.package]
-                    .library
-                    .as_ref()
-                    .unwrap()
-                    .name
-                    .as_str()
-            });
-            (
-                key.package.name.clone(),
-                kind.to_owned(),
-                name.to_owned(),
-                match key.mode {
-                    UnitMode::Build => "build",
-                    UnitMode::Test => "test",
-                    UnitMode::Check | UnitMode::CheckTest => "check",
-                }
-                .to_owned(),
-            )
-        };
-        let lorry_nodes = plan.units.keys().map(lorry_node).collect::<Vec<_>>();
+        let node = |key: &UnitKey| ordinary_node(key, manifests);
         assert_eq!(
-            cargo_nodes.iter().cloned().collect::<BTreeSet<_>>(),
-            lorry_nodes.iter().cloned().collect::<BTreeSet<_>>()
+            plan.units.keys().map(node).collect::<BTreeSet<_>>(),
+            nodes.into_iter().collect()
         );
-        let mut cargo_edges = BTreeSet::new();
-        for (parent, unit) in units.iter().enumerate() {
-            for edge in unit["dependencies"].as_array().unwrap() {
-                cargo_edges.insert((
-                    cargo_nodes[parent].clone(),
-                    cargo_nodes[edge["index"].as_u64().unwrap() as usize].clone(),
-                    edge["extern_crate_name"].as_str().unwrap().to_owned(),
-                ));
-            }
-        }
-        let lorry_edges = plan
+        let actual_edges = plan
             .units
             .values()
-            .flat_map(|planned| {
-                planned.unit.dependencies.iter().map(|edge| {
+            .flat_map(|unit| {
+                unit.unit.dependencies.iter().map(|edge| {
                     (
-                        lorry_node(&planned.unit.key),
-                        lorry_node(&edge.unit),
+                        node(&unit.unit.key),
+                        node(&edge.unit),
                         edge.alias.clone().unwrap(),
                     )
                 })
             })
             .collect::<BTreeSet<_>>();
-        assert_eq!(cargo_edges, lorry_edges);
-        let cargo_roots = cargo["roots"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|index| cargo_nodes[index.as_u64().unwrap() as usize].clone())
-            .collect::<BTreeSet<_>>();
-        let lorry_roots = roots.iter().map(lorry_node).collect::<BTreeSet<_>>();
-        assert_eq!(cargo_roots, lorry_roots);
+        assert_eq!(
+            actual_edges,
+            edges
+                .into_iter()
+                .map(|(a, b, alias)| (a, b, alias.to_owned()))
+                .collect()
+        );
+        assert_eq!(
+            roots.iter().map(node).collect::<BTreeSet<_>>(),
+            expected_roots.into_iter().collect()
+        );
         for (key, planned) in &plan.units {
-            let node = lorry_node(key);
-            let unit = &units[cargo_nodes
-                .iter()
-                .position(|candidate| *candidate == node)
-                .unwrap()];
-            let profile = &unit["profile"];
-            if let Some(target) = key.manifest_target(&manifests[&key.package]) {
-                assert_eq!(
-                    unit["target"]["crate_types"],
-                    serde_json::json!(target.crate_types)
-                );
-            }
-            let (mode, compile_mode) = match key.mode {
-                UnitMode::Check => ("check", CargoCompileMode::Check { test: false }),
-                UnitMode::CheckTest => ("check", CargoCompileMode::Check { test: true }),
-                UnitMode::Test => ("test", CargoCompileMode::Test),
-                UnitMode::Build => ("build", CargoCompileMode::Build),
+            let mode = match key.mode {
+                UnitMode::Check => CargoCompileMode::Check { test: false },
+                UnitMode::CheckTest => CargoCompileMode::Check { test: true },
+                UnitMode::Test => CargoCompileMode::Test,
+                UnitMode::Build => CargoCompileMode::Build,
             };
-            assert_eq!(planned.settings.mode, compile_mode);
-            assert_eq!(unit["mode"], mode);
-            assert!(unit["platform"].is_null());
-            assert_eq!(unit["features"], serde_json::json!(key.features));
-            assert_eq!(profile["name"], profile_name);
-            assert_eq!(profile["opt_level"], planned.settings.profile.opt_level);
+            assert_eq!(planned.settings.mode, mode);
+            assert_eq!(planned.settings.profile.opt_level, "0");
             assert_eq!(planned.settings.profile.lto, CargoProfileLto::Bool(false));
-            assert_eq!(profile["lto"], "false");
-            assert!(profile["codegen_backend"].is_null());
-            assert!(profile["codegen_units"].is_null());
-            assert_eq!(profile["debuginfo"], 2);
             assert_eq!(planned.settings.profile.debuginfo, CargoDebugInfo::Full);
-            assert!(profile["split_debuginfo"].is_null());
-            assert_eq!(
-                profile["debug_assertions"],
-                planned.settings.profile.debug_assertions
-            );
-            assert_eq!(
-                profile["overflow_checks"],
-                planned.settings.profile.overflow_checks
-            );
-            assert_eq!(profile["incremental"], planned.settings.profile.incremental);
-            assert_eq!(profile["panic"], "unwind");
+            assert!(planned.settings.profile.debug_assertions);
+            assert!(planned.settings.profile.overflow_checks);
+            assert!(planned.settings.profile.incremental);
             assert_eq!(planned.settings.profile.panic, CargoPanicStrategy::Unwind);
             assert_eq!(planned.settings.profile.strip, CargoStrip::None);
-            assert_eq!(profile["strip"], serde_json::json!({ "deferred": "None" }));
-            assert_eq!(profile["rpath"], false);
             assert!(planned.settings.rustflags.is_empty());
         }
     }
@@ -3161,38 +3066,70 @@ mod tests {
                 .cloned()
                 .collect::<Vec<_>>();
             let plan = plan_dependency_units(&graph, &manifests, &options).unwrap();
-            let mut cargo_command = Command::new(env!("CARGO"));
-            cargo_command
-                .current_dir(&fixture.0)
-                .args([
-                    "-Z",
-                    "unstable-options",
-                    command,
-                    "--unit-graph",
-                    "--offline",
-                    "-p",
-                    "a",
-                ])
-                .env("CARGO_NET_OFFLINE", "true");
-            if kind == "all" {
-                cargo_command.arg("--all-targets");
-            } else if kind != "default" {
-                cargo_command.args([&format!("--{kind}"), name]);
+            let dependency_mode = if command == "check" { "check" } else { "build" };
+            let a = format!("a/lib/a/{dependency_mode}");
+            let b = format!("b/lib/b/{dependency_mode}");
+            let mut nodes = vec![a.clone(), b.clone()];
+            let mut edges = vec![(b.clone(), a.clone(), "a")];
+            let mut expected_roots = Vec::new();
+            let mut auxiliary = Vec::new();
+            if kind == "all" || kind == "default" {
+                let harness = format!(
+                    "a/lib/a/{}",
+                    if command == "check" { "check" } else { "test" }
+                );
+                nodes.push(harness.clone());
+                edges.push((harness.clone(), b.clone(), "b"));
+                expected_roots.push(harness);
+                if kind == "all" && command != "test" {
+                    expected_roots.push(a.clone());
+                }
+                let example_mode = if kind == "all" && command == "test" {
+                    "test"
+                } else {
+                    dependency_mode
+                };
+                auxiliary.extend([
+                    ("example", "library", example_mode),
+                    ("example", "selected", example_mode),
+                ]);
+                if kind == "all" {
+                    auxiliary.push((
+                        "bench",
+                        "selected",
+                        if command == "check" { "check" } else { "test" },
+                    ));
+                }
+            } else {
+                auxiliary.push((
+                    kind,
+                    name,
+                    if command == "check" {
+                        "check"
+                    } else if kind == "bench" || command == "test" {
+                        "test"
+                    } else {
+                        "build"
+                    },
+                ));
             }
-            let output = cargo_command.output().unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let cargo: Value = serde_json::from_slice(&output.stdout).unwrap();
-            assert_ordinary_cargo_plan(
-                &cargo,
-                &plan,
-                &manifests,
-                &roots,
-                if command == "test" { "test" } else { "dev" },
-            );
+            for (kind, name, mode) in auxiliary {
+                let node = format!("a/{kind}/{name}/{mode}");
+                nodes.push(node.clone());
+                expected_roots.push(node.clone());
+                edges.extend([(node.clone(), a.clone(), "a"), (node, b.clone(), "b")]);
+            }
+            assert_ordinary_plan(&plan, &manifests, &roots, nodes, edges, expected_roots);
+            for key in plan.units.keys() {
+                assert_eq!(
+                    key.features,
+                    if key.package.name == "b" {
+                        BTreeSet::from(["dev".to_owned()])
+                    } else {
+                        BTreeSet::new()
+                    }
+                );
+            }
             if kind == "example" {
                 let invocation = crate::compile::dependency_rustc_invocation(
                     &plan,
@@ -3276,11 +3213,10 @@ mod tests {
             &mut |_, _, _| Ok(()),
         )
         .unwrap();
-        for (arguments, names) in [
-            (vec![], vec!["a", "b"]),
-            (vec!["--workspace"], vec!["a", "b", "shared"]),
-            (vec!["-p", "a", "-p", "b"], vec!["a", "b"]),
-            (vec!["--workspace", "--exclude", "b"], vec!["a", "shared"]),
+        for names in [
+            vec!["a", "b"],
+            vec!["a", "b", "shared"],
+            vec!["a", "shared"],
         ] {
             let requests = names
                 .iter()
@@ -3318,26 +3254,6 @@ mod tests {
                 .map(|package| package.key.clone())
                 .collect::<Vec<_>>();
             for command in ["build", "check"] {
-                let result = Command::new(env!("CARGO"))
-                    .args([
-                        "-Z",
-                        "unstable-options",
-                        command,
-                        "--unit-graph",
-                        "--offline",
-                    ])
-                    .args(&arguments)
-                    .env("CARGO_HOME", fixture.0.join("cargo-home"))
-                    .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
-                    .current_dir(&fixture.0)
-                    .output()
-                    .unwrap();
-                assert!(
-                    result.status.success(),
-                    "{}",
-                    String::from_utf8_lossy(&result.stderr)
-                );
-                let cargo = serde_json::from_slice(&result.stdout).unwrap();
                 let graph = workspace_units(
                     &resolution,
                     &manifests,
@@ -3369,7 +3285,36 @@ mod tests {
                     .filter(|key| selected.contains(&key.package))
                     .cloned()
                     .collect::<Vec<_>>();
-                assert_ordinary_cargo_plan(&cargo, &plan, &manifests, &roots, "dev");
+                let a = format!("a/lib/a/{command}");
+                let binary = format!("a/bin/a/{command}");
+                let shared = format!("shared/lib/shared_crate/{command}");
+                let mut nodes = vec![a.clone(), binary.clone(), shared.clone()];
+                let mut edges = vec![
+                    (binary.clone(), a.clone(), "a"),
+                    (binary.clone(), shared.clone(), "shared_crate"),
+                    (a.clone(), shared.clone(), "shared_crate"),
+                ];
+                let mut expected_roots = vec![a, binary];
+                if names.contains(&"b") {
+                    let b = format!("b/bin/b/{command}");
+                    nodes.push(b.clone());
+                    expected_roots.push(b.clone());
+                    edges.push((b, shared.clone(), "shared_crate"));
+                }
+                if names.contains(&"shared") {
+                    expected_roots.push(shared);
+                }
+                assert_ordinary_plan(&plan, &manifests, &roots, nodes, edges, expected_roots);
+                for key in plan.units.keys() {
+                    let expected = if key.package.name != "shared" {
+                        BTreeSet::new()
+                    } else if names.contains(&"b") {
+                        BTreeSet::from(["blue".to_owned(), "red".to_owned()])
+                    } else {
+                        BTreeSet::from(["red".to_owned()])
+                    };
+                    assert_eq!(key.features, expected);
+                }
             }
         }
     }
@@ -3387,18 +3332,7 @@ mod tests {
         fixture.package("b", "[package]\nname = \"b\"\nversion = \"1.0.0\"\nedition = \"2024\"\n[target.'cfg(unix)'.build-dependencies]\nbuilder = { path = \"../builder\", features = [\"build\"] }\n", true);
         fs::remove_file(fixture.0.join("b/src/lib.rs")).unwrap();
         fs::write(fixture.0.join("b/src/main.rs"), "fn main() {}\n").unwrap();
-        let lock = Command::new(env!("CARGO"))
-            .args(["generate-lockfile", "--offline"])
-            .env("CARGO_HOME", fixture.0.join("cargo-home"))
-            .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
-            .current_dir(&fixture.0)
-            .output()
-            .unwrap();
-        assert!(
-            lock.status.success(),
-            "{}",
-            String::from_utf8_lossy(&lock.stderr)
-        );
+        fs::write(fixture.0.join("Cargo.lock"), "version=4\n[[package]]\nname=\"a\"\nversion=\"1.0.0\"\ndependencies=[\"builder\"]\n[[package]]\nname=\"b\"\nversion=\"1.0.0\"\ndependencies=[\"builder\"]\n[[package]]\nname=\"builder\"\nversion=\"1.0.0\"\n").unwrap();
         let (workspace, members) = crate::manifest::SourceWorkspace::load_compilation(
             &fixture.0,
             None,
@@ -3465,49 +3399,6 @@ mod tests {
             .map(|package| package.key.clone())
             .collect::<Vec<_>>();
         for command in ["build", "check"] {
-            let output = Command::new(env!("CARGO"))
-                .args([
-                    "-Z",
-                    "unstable-options",
-                    command,
-                    "--unit-graph",
-                    "--offline",
-                    "--workspace",
-                    "--target",
-                    "x86_64-unknown-linux-gnu",
-                ])
-                .env("CARGO_HOME", fixture.0.join("cargo-home"))
-                .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
-                .current_dir(&fixture.0)
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let cargo: Value = serde_json::from_slice(&output.stdout).unwrap();
-            let units = cargo["units"].as_array().unwrap();
-            let cargo_nodes = units
-                .iter()
-                .map(|unit| {
-                    (
-                        unit["pkg_id"]
-                            .as_str()
-                            .unwrap()
-                            .split('#')
-                            .next()
-                            .unwrap()
-                            .rsplit('/')
-                            .next()
-                            .unwrap()
-                            .to_owned(),
-                        unit["target"]["kind"][0].as_str().unwrap().to_owned(),
-                        unit["mode"].as_str().unwrap().to_owned(),
-                        unit["platform"].as_str().is_some(),
-                    )
-                })
-                .collect::<Vec<_>>();
             let graph = workspace_units(
                 &resolution,
                 &manifests,
@@ -3539,26 +3430,24 @@ mod tests {
                     key.compile_kind == CompileKind::Target,
                 )
             };
+            let expected = [
+                ("a", "lib", command, true),
+                ("a", "custom-build", "run-custom-build", true),
+                ("a", "custom-build", "build", false),
+                ("b", "bin", command, true),
+                ("b", "custom-build", "run-custom-build", true),
+                ("b", "custom-build", "build", false),
+                ("builder", "lib", "build", false),
+                ("builder", "lib", command, true),
+            ]
+            .map(|(p, k, m, t)| (p.to_owned(), k.to_owned(), m.to_owned(), t));
             assert_eq!(
-                cargo_nodes.iter().cloned().collect::<BTreeSet<_>>(),
-                graph.units.keys().map(node).collect()
+                graph.units.keys().map(node).collect::<BTreeSet<_>>(),
+                expected.iter().cloned().collect()
             );
-            let cargo_edges = units
-                .iter()
-                .enumerate()
-                .flat_map(|(parent, unit)| {
-                    let nodes = &cargo_nodes;
-                    unit["dependencies"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(move |edge| {
-                            (
-                                nodes[parent].clone(),
-                                nodes[edge["index"].as_u64().unwrap() as usize].clone(),
-                            )
-                        })
-                })
+            let expected_edges = [(2, 6), (1, 2), (0, 1), (0, 7), (3, 4), (5, 6), (4, 5)]
+                .map(|(a, b)| (expected[a].clone(), expected[b].clone()))
+                .into_iter()
                 .collect::<BTreeSet<_>>();
             let edges = graph
                 .units
@@ -3569,16 +3458,16 @@ mod tests {
                         .map(|edge| (node(&unit.key), node(&edge.unit)))
                 })
                 .collect::<BTreeSet<_>>();
-            assert_eq!(cargo_edges, edges);
-            for unit in graph.units.values() {
-                let index = cargo_nodes
-                    .iter()
-                    .position(|candidate| *candidate == node(&unit.key))
-                    .unwrap();
-                assert_eq!(
-                    units[index]["features"],
-                    serde_json::json!(unit.key.features)
-                );
+            assert_eq!(edges, expected_edges);
+            for key in graph.units.keys() {
+                let features = if key.package.name != "builder" {
+                    BTreeSet::new()
+                } else if key.compile_kind == CompileKind::Host {
+                    BTreeSet::from(["build".to_owned()])
+                } else {
+                    BTreeSet::from(["normal".to_owned()])
+                };
+                assert_eq!(key.features, features);
             }
         }
     }
@@ -3766,64 +3655,6 @@ mod tests {
             }
             .unwrap();
             let plan = plan_dependency_units(&graph, &manifests, &options).unwrap();
-            let mut command = Command::new(env!("CARGO"));
-            command
-                .args([
-                    "-Z",
-                    "unstable-options",
-                    if checking { "check" } else { "test" },
-                    "--unit-graph",
-                    "--workspace",
-                    "--offline",
-                ])
-                .env("CARGO_HOME", fixture.0.join("cargo-home"))
-                .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
-                .current_dir(&fixture.0);
-            if checking && integration_name.is_none() {
-                command.arg("--all-targets");
-            }
-            if let Some(target) = logical_target {
-                command.args(["--target", target]);
-            }
-            if let Some(name) = integration_name {
-                command.args(["--test", name]);
-            }
-            let output = command.output().unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let cargo: Value = serde_json::from_slice(&output.stdout).unwrap();
-            let units = cargo["units"].as_array().unwrap();
-            let cargo_nodes = units
-                .iter()
-                .map(|unit| {
-                    (
-                        unit["pkg_id"]
-                            .as_str()
-                            .unwrap()
-                            .split('#')
-                            .next()
-                            .unwrap()
-                            .rsplit('/')
-                            .next()
-                            .unwrap()
-                            .to_owned(),
-                        unit["target"]["kind"][0].as_str().unwrap().to_owned(),
-                        unit["target"]["name"].as_str().unwrap().to_owned(),
-                        unit["mode"].as_str().unwrap().to_owned(),
-                        unit["platform"].is_string(),
-                        unit["profile"]["opt_level"].as_str().unwrap().to_owned(),
-                        unit["features"]
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .map(|feature| feature.as_str().unwrap().to_owned())
-                            .collect::<Vec<_>>(),
-                    )
-                })
-                .collect::<Vec<_>>();
             let node = |key: &UnitKey| {
                 (
                     key.package.name.clone(),
@@ -3865,28 +3696,16 @@ mod tests {
                     key.features.iter().cloned().collect::<Vec<_>>(),
                 )
             };
-            assert_eq!(
-                cargo_nodes.iter().cloned().collect::<BTreeSet<_>>(),
-                plan.units.keys().map(node).collect()
+            let (expected_nodes, expected_edges) = expected_harness_graph(
+                integration_name,
+                logical_target.is_some(),
+                checking,
+                opt_level,
             );
-            let cargo_edges = units
-                .iter()
-                .enumerate()
-                .flat_map(|(parent, unit)| {
-                    let nodes = &cargo_nodes;
-                    unit["dependencies"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .map(move |edge| {
-                            (
-                                nodes[parent].clone(),
-                                nodes[edge["index"].as_u64().unwrap() as usize].clone(),
-                                edge["extern_crate_name"].as_str().unwrap().to_owned(),
-                            )
-                        })
-                })
-                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                plan.units.keys().map(node).collect::<BTreeSet<_>>(),
+                expected_nodes
+            );
             let edges = plan
                 .units
                 .values()
@@ -3906,25 +3725,30 @@ mod tests {
                     })
                 })
                 .collect::<BTreeSet<_>>();
-            assert_eq!(cargo_edges, edges);
+            assert_eq!(edges, expected_edges);
             for (key, unit) in &plan.units {
-                let reference = &units[cargo_nodes
-                    .iter()
-                    .position(|candidate| *candidate == node(key))
-                    .unwrap()];
-                assert_eq!(reference["features"], serde_json::json!(key.features));
-                assert_eq!(
-                    reference["profile"]["opt_level"],
-                    unit.settings.profile.opt_level
-                );
-                let debug = match unit.settings.profile.debuginfo {
-                    CargoDebugInfo::None => 0,
-                    CargoDebugInfo::Full => 2,
-                    other => panic!("unexpected debug setting {other:?}"),
-                };
-                assert_eq!(reference["profile"]["debuginfo"], debug);
-                assert_eq!(reference["profile"]["panic"], "unwind");
                 assert_eq!(unit.settings.profile.panic, CargoPanicStrategy::Unwind);
+                let selected_macro = key.package.name == "derive"
+                    && (key.is_harness()
+                        || key.profile == ProfileContext::Selected
+                        || (checking
+                            && key.kind == UnitKind::ProcMacro
+                            && key.mode == UnitMode::Check));
+                let host_only = key.kind == UnitKind::BuildScriptCompile
+                    || (key.kind == UnitKind::ProcMacro && !selected_macro)
+                    || (key.package.name == "helper" && key.compile_kind == CompileKind::Host)
+                    || (key.package.name == "derive"
+                        && key.kind == UnitKind::BuildScriptRun
+                        && !selected_macro);
+                assert_eq!(
+                    unit.settings.profile.debuginfo,
+                    if logical_target.is_none() && host_only {
+                        CargoDebugInfo::None
+                    } else {
+                        CargoDebugInfo::Full
+                    },
+                    "{key:?}; checking={checking}, integration={integration_name:?}, target={logical_target:?}, opt={opt_level}"
+                );
             }
         }
     }

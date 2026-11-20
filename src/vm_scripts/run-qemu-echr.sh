@@ -16,9 +16,14 @@ MEMORY_MIB="${MOTO_MEMORY_MIB:-1024}"
 . "$WD/vm-options.sh"
 vm_parse_options "$@"
 shift "$VM_ARGS_SHIFT"
+if [ "$VM_SYSTEM_TTY" = 1 ]; then
+  echo "run-qemu-echr: --system-tty is unsupported: disk boot has no kernel command line" >&2
+  exit 2
+fi
 export MOTO_SMP="$SMP" MOTO_MEMORY_MIB="$MEMORY_MIB"
 
 DISK_OPTIONS=()
+[ "$VM_NO_NETWORK" != 1 ] || DISK_OPTIONS+=(--no-network)
 [ "$VM_ROOT_READ_ONLY" != on ] || DISK_OPTIONS+=(--root-read-only)
 for DISK in $VM_DISKS; do
   OPTION=--extra-disk

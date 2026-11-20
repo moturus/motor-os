@@ -1,7 +1,7 @@
 # gix: Git on Motor OS
 
-The developer image comes with `gix`, a small Git client, at
-`/devtools/bin/gix`. It works with normal Git repositories: a worktree with a
+The toolchain archive installs `gix`, a small Git client, at
+`/user/bin/dev/gix`. It works with normal Git repositories: a worktree with a
 `.git` directory, full history and SHA-1 object names. Gix reads and writes
 the same files as Git does, so you can copy a repository between Motor OS and
 a machine that has Git and keep working on either side. Just let gix finish
@@ -58,13 +58,14 @@ directory. Put `--` in front of a name that starts with a dash. `gix COMMAND
 | `init [DIR]` | Create a new repository. |
 | `clone URL [DIR]` | Clone over HTTPS or SSH. DIR defaults to the repository name. |
 | `fetch [REMOTE]` | Download new commits and tags from a remote, `origin` by default. Your current branch and your files do not change. |
+| `pull [OPTIONS] [REMOTE [BRANCH]]` | Fetch, then merge the remote branch into the current branch or rebase onto it. |
 | `status` | Show what has changed, and whether a merge or another operation is unfinished. |
 | `log` | Show the history of the current branch. |
 | `diff [--staged] [PATH…]` | Show your unstaged changes, or with `--staged` what the next commit will contain. Binary files and mode changes are summarized. |
 | `add PATH…`, `add -A` | Stage the named files, or with `-A` every new, changed and deleted file. `-A` skips new files that match an ignore rule; naming such a file yourself is an error. |
 | `unstage PATH…` | Take files out of the next commit without touching the files themselves. |
 | `restore PATH…` | Throw away your unstaged changes to the named files. |
-| `commit -m MSG` | Commit what is staged to the current branch. |
+| `commit [-m MSG]` | Commit what is staged to the current branch. Without `-m`, edit the message in `vim` on Linux or `red` on Motor OS. |
 | `branch [-a] [-v]` | List branches. |
 | `branch list`, `branch create NAME [REV]` | Print the branch names only, or create a branch without switching to it. |
 | `tag list`, `tag create NAME [REV]` | List tags, or create a lightweight tag. |
@@ -72,16 +73,20 @@ directory. Put `--` in front of a name that starts with a dash. `gix COMMAND
 | `switch BRANCH`, `checkout BRANCH` | Move to another local branch. |
 | `checkout [--track] -b NEW [START]` | Create a branch and move to it. |
 | `merge REV`, `merge --abort` | Merge a commit into the current branch, or give up on a merge. |
+| `rebase --continue`, `rebase --skip`, `rebase --abort` | Go on with a rebase that `pull --rebase` had to stop, or give it up. |
 | `recover` | Finish or undo an operation that was interrupted. |
 | `push [OPTIONS] REMOTE SOURCE:DESTINATION` | Publish one branch or tag over HTTPS or SSH. |
 
 A few things work differently from Git:
 
-- There is no `pull`. Run `fetch`, then `merge origin/BRANCH`.
+- A rebase starts only with `pull --rebase`. `rebase --continue` keeps the
+  message of the commit and does not open an editor.
 - To stage a deleted file, delete it in the shell and then run `add` on its
   name.
 - `commit` refuses to make an empty commit, except to conclude a merge, and
   refuses while a merge still has unresolved conflicts.
+  Without `-m`, it opens `.git/COMMIT_EDITMSG`; save and quit to commit, or
+  leave the message empty to abort. Lines starting with `#` are ignored.
 - `unstage` on a branch that has no commits yet simply removes the files from
   the index.
 - `restore` will not touch a file that is in conflict.
@@ -142,8 +147,10 @@ Gix never runs other programs on a repository's behalf. Hooks, credential
 helpers, external filters, diff and merge drivers and signing programs are
 all ignored. If a repository cannot be handled without one of them, for
 example a file that needs an external filter, the command stops with an error
-instead of guessing. The only programs gix starts are `/system/bin/curl` for
-HTTPS and `/user/bin/ssh` for SSH, and their paths cannot be configured.
+instead of guessing. Gix starts `/user/bin/curl` for HTTPS, `/user/bin/ssh`
+for SSH, and `/user/bin/red` for commit messages (`/usr/bin/curl`,
+`/usr/bin/ssh`, and `/usr/bin/vim` on Linux). Their paths cannot be configured;
+`GIT_EDITOR`, `VISUAL`, `EDITOR`, and `core.editor` do not change the editor.
 
 ## Remotes
 
@@ -183,6 +190,132 @@ Before you use one, set up your key in `/user/cfg/ssh/id_ed25519` and the
 server's key in `/user/cfg/ssh/known_hosts` with the SSH tools. Gix never
 asks questions: if the key is missing or the host is unknown, the command
 fails.
+
+### Pulling
+
+`gix pull` fetches and then merges or rebases, like `git pull`. Without
+arguments it
+uses the upstream of the current branch: the remote branch that the current
+branch follows. A clone sets the upstream of its first branch, and `checkout
+-b NEW origin/BRANCH` sets it for a new branch. You can also name what to
+pull:
+
+```sh
+gix pull                # the upstream of the current branch
+gix pull origin main    # the branch main of the remote origin
+```
+
+REMOTE is the name of a configured remote. BRANCH is a branch or a tag on
+that remote. The fetch is the same as `gix fetch REMOTE`, so it updates all
+your `origin/…` branches. If the upstream is a local branch, as after
+`checkout --track -b NEW BRANCH`, nothing is fetched.
+
+Pull needs a clean repository. It prints `Already up to date.`, or
+`Updating OLD..NEW` and `Fast-forward`, when nothing has to be merged or
+rebased.
+
+If your branch and the remote branch both have new commits, they have
+diverged. As in Git, pull then stops unless you have said what to do:
+
+- `gix pull --rebase` rebases. Set `pull.rebase = true` to rebase on every
+  pull, or `branch.NAME.rebase = true` for one branch.
+- `gix pull --no-rebase` merges. Set `pull.rebase = false` to merge on every
+  pull.
+- `gix pull --ff-only` stops. Set `pull.ff = only` to stop on every pull.
+
+A merge follows the rules under [Merging](#merging), and pull prints `Merge
+made.` The merge commit gets the message Git gives it, such as `Merge branch
+'main' of https://example.test/project`.
+
+A rebase replays your commits on top of the remote branch, oldest first.
+Each new commit keeps its author and message, and you become its committer.
+So a rebase needs your name and email, as a commit does. Pull prints
+`Successfully rebased and updated refs/heads/BRANCH.` Three kinds of commits
+are not replayed, as in Git:
+
+- A commit that makes the same change as a commit that only the remote
+  branch has. Pull prints `warning: skipped previously applied commit ID
+  (SUBJECT)`. The changes are compared as Git compares them: by the lines
+  they remove and add and the three lines around them, without whitespace
+  and without line numbers. Such a commit stays out even if the remote
+  branch has undone the change since.
+- A commit that changes nothing once it is replayed, because the remote
+  branch has its changes in some other form. Pull prints `dropping ID
+  (SUBJECT) -- patch contents already upstream`.
+- A merge commit of your own. The commits that it merged are replayed, so
+  your history becomes one line.
+
+The remote branch may have been rewritten, for example by a forced push
+that replaced its last commit. Your branch then still has the commit that
+the remote branch dropped. As in Git, the rebase leaves that commit out. Gix
+knows that it was a commit of the remote branch from the reflog of
+`origin/BRANCH`, so this works only for commits that your repository has
+seen `origin/BRANCH` at. After such a rewrite the changes of your commits
+are not compared with those of the remote branch, in gix as in Git: every
+commit is replayed.
+
+If one of your commits conflicts with the remote branch, the rebase stops
+at that commit. [Rebasing](#rebasing) says how to go on.
+
+Gix can only do this plain rebase. Pull stops on diverged branches when
+`pull.rebase` or `branch.NAME.rebase` is `merges` or `interactive`. Gix also
+cannot record a fast-forward as a merge commit, so pull stops when `pull.ff =
+false` asks for one and no rebase was asked for.
+
+When pull stops after the fetch, your `origin/…` branches are already
+updated. Fix the problem and pull again, or run `merge origin/BRANCH`.
+
+### Rebasing
+
+A rebase starts with `gix pull --rebase`. When one of your commits does not
+apply on the remote branch, the rebase stops and pull says which commit it
+was:
+
+```text
+gix: could not apply 3256f45 (Fix the parser)
+```
+
+At that point:
+
+- The files that conflict have conflict markers, as after a merge. `gix
+  status` shows `operation rebase ready` and marks the files `UU`.
+- You are on the last of your commits that did apply. `gix branch` shows
+  `(no branch, rebasing BRANCH)`.
+- Your branch has not moved. It still has your commits as they were.
+
+Then do one of these:
+
+- Edit the files, run `gix add` on them, and run `gix rebase --continue`.
+  Gix commits your resolution with the author and message of the commit
+  that stopped the rebase, and replays the commits after it. If your
+  resolution keeps nothing of that commit, the commit is dropped.
+- Run `gix rebase --skip` to leave that commit out and replay the rest.
+- Run `gix rebase --abort` to return to your branch as it was.
+
+The rebase may stop again at a later commit. After the last commit, gix
+moves your branch to the new commits and prints `Successfully rebased and
+updated refs/heads/BRANCH.`
+
+`rebase --skip` and `rebase --abort` discard the conflict, everything
+staged, and the changes to the files that the rebase touched. They keep your
+unstaged changes to other files, and they keep untracked and ignored files.
+`rebase --continue` refuses while a tracked file has changes that are not
+staged.
+
+Gix can show a conflict only where both sides changed the text of the same
+file, as in a merge. For any other conflict, for example in a binary file or
+in a file that one side deleted, the rebase pauses before the commit instead.
+The files are then clean, and `gix status` shows `operation rebase paused`.
+Run `gix rebase --skip` to leave the commit out, or `gix rebase --abort`.
+Gix cannot apply such a commit; use Git for that rebase.
+
+While a rebase is stopped, `status`, `diff`, `log` and `branch` work, and
+`add` works while there is a conflict to resolve. Everything else that
+changes the repository refuses until the rebase has ended: `commit`,
+`restore`, `unstage`, `switch`, `checkout`, `merge`, `pull` and `fetch`.
+
+Git cannot continue a rebase that gix stopped, and gix cannot continue a
+rebase that Git stopped. End the rebase with the program that started it.
 
 ### Pushing
 
@@ -247,10 +380,11 @@ while a merge is in progress.
 
 ## When something goes wrong
 
-If a switch, a merge or an abort is interrupted, by an error or by Ctrl+C,
-the repository is left half-way. `gix status` tells you so but does not fix
-it, and gix refuses to change the repository any further. Fix whatever caused
-the problem (a full disk, for instance), then run `gix recover`.
+If a switch, a merge, an abort or a step of a rebase is interrupted, by an
+error or by Ctrl+C, the repository is left half-way. `gix status` tells you
+so but does not fix it, and gix refuses to change the repository any
+further. Fix whatever caused the problem (a full disk, for instance), then
+run `gix recover`.
 
 `recover` normally puts the repository back the way it was before the
 interrupted command. If the command had already moved the branch, `recover`
@@ -261,6 +395,15 @@ same things as `merge --abort`. If `recover` itself fails, it keeps its
 record of the interrupted command, so you can run it again. A merge that is
 waiting for you to resolve conflicts is not a job for `recover`; commit it or
 abort it.
+
+A rebase is different, because it cannot go back to where a step began.
+`recover` finishes the step in the simplest way: it puts the files to the
+last commit that the rebase has replayed and leaves the rebase paused.
+`gix status` then shows `operation rebase paused`, and `gix rebase
+--continue` goes on. A conflict that the interrupted step was showing is
+shown again. If you would rather give up, `gix rebase --abort` works on an
+interrupted rebase too, without `recover`. A rebase that is stopped at a
+conflict is not a job for `recover`; use the three `rebase` commands.
 
 A few more things to know:
 
@@ -284,8 +427,10 @@ A few more things to know:
 
 - Bare repositories and linked worktrees are not supported. Gix will not
   commit to, merge in or push from a shallow, partial or sparse repository.
-- There is no rebase, stash, cherry-pick or amend, no annotated tags, no
-  signing and no LFS.
+- There is no rebase other than `pull --rebase`, and that one is plain: it
+  is not interactive, it does not keep merge commits, and it does not stash
+  local changes. There is no stash, cherry-pick or amend, no annotated tags,
+  no signing and no LFS.
 - File names have to be valid UTF-8 and valid Motor OS file names. Names and
   characters that Windows reserves are rejected as well.
 - Motor OS has no symbolic links. A symbolic link in a repository is checked
@@ -323,10 +468,11 @@ can use 512 MiB of buffers in all, and the files of one commit can add up to
 
 ## Source and tests
 
-The program is in [src/bin/gix](../src/bin/gix). Its tests are in
-[test-gix.sh](../src/tests/test-gix.sh), which runs them on Linux and inside
-a Motor OS VM, and they are part of the release developer suite,
-`src/tests/full-test-dev.sh --release`.
+The program and its Cargo tests are in [src/bin/gix](../src/bin/gix).
+`src/tests/full-native-test.sh` runs the supported native harnesses on Linux
+and Motor. `src/tests/cross-test.sh` checks guest HTTPS/SSH transports with
+local host servers and compares Git index and pack formats. Both are included
+in `src/tests/full-test.sh`; generated repositories stay in temporary directories.
 
 ### Testing changes to the Gitoxide fork
 

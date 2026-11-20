@@ -65,6 +65,16 @@ regressions in the product suite.
 
 ## Differences from Cargo
 
+- **Configured environment invalidation.** Every effective Cargo `[env]`
+  value currently enters every compiler-unit and build-script-run cache key.
+  Changing a runtime-only value such as `RUST_LOG` therefore rebuilds
+  dependencies and stores additional cache entries, while Cargo keeps them
+  fresh. Retain this conservative behavior for the initial `[env]` support.
+  A finer-grained design should recheck the variables rustc reports reading,
+  resolve configured values before caller values, and still hash implicit
+  compiler inputs. Preserve verbatim values across workspace boundaries and
+  audit build-script tracking and completed-profile freshness together.
+
 - **Resolver contexts.** Lorry resolves host and target feature contexts
   separately, so one package can add more than one group of dependencies.
   The extra groups normally select packages that are already chosen. If one
@@ -87,8 +97,6 @@ regressions in the product suite.
   successful run, such as the compiler errors of a feature probe. Cargo shows
   it only when the script fails, or with `-vv`. See
   `render_build_script_output` in `src/executor.rs`.
-- **GCC as a native tool.** A build script cannot use GCC: its driver starts
-  `cc1`, which the build-script sandbox blocks. Clang works.
 - **Config `rustflags` are always appended (from dev).** Cargo appends only
   arrays. A string value replaces the lower layer, and mixing a string with
   an array is an error. See `src/config.rs`.
@@ -266,19 +274,14 @@ edits are stronger initial candidates than the roughly 2 ms fallback cost.
 
 ## Tests
 
-- `tests/test-native.sh` vendors from crates.io and GitHub on every run of
-  `test-all.sh`. Supply pinned local source fixtures for regular offline
-  validation and make online acquisition a separate integration step. Keep
-  the Cargo and cross/native Lorry byte-identity checks in the offline gate.
-- `artifact-lock-contract.sh` and `helpers/cancel-probe.rs` wait 0.1-0.2 s
-  before checking that nothing happened, so they pass trivially when Lorry is
-  slow. Replace elapsed-time assumptions with synchronization proving that
-  the competing operation reached the relevant state.
-- `stage2-differential.sh` keeps the old "stage 2" name.
-- 25 test scripts embed Python (48 `python3` calls), mostly to read JSON and
-  to build synthetic crates. Port them to shell or Rust.
-  `mixed-case-name-contract.sh` builds a synthetic crate with `tar` and
-  `sha256sum`.
+The image-layout migration replaces the shell/Python tests with Cargo
+harnesses and generated temporary workspaces. Host preparation supplies locked
+sources before offline native runs; acquisition tests use loopback servers.
+Cargo and cross/native Lorry byte comparisons belong to `src/tests/cross-test.sh`.
+
+- The process-control tests retain fixed waits before some negative checks.
+  Replace elapsed-time assumptions with synchronization proving that the
+  competing operation reached the relevant state; see `tests/control/`.
 
 ## Recommended order after the product review
 

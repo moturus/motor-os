@@ -7,6 +7,32 @@ MEMORY_MIB="${MOTO_MEMORY_MIB:-1024}"
 vm_parse_options "$@"
 shift "$VM_ARGS_SHIFT"
 
+# Merge the boot option into a caller-supplied command line, retaining quoting
+# and every other VMM argument. Without the option, pass arguments untouched.
+if [ "$VM_SYSTEM_TTY" = 1 ]; then
+  VMM_ARGS=()
+  CMDLINE_SET=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --cmdline)
+        [ "$#" -ge 2 ] || { echo "run-chv: --cmdline requires a value" >&2; exit 2; }
+        VMM_ARGS+=(--cmdline "${2:+$2 }system-tty")
+        CMDLINE_SET=1
+        shift 2
+        ;;
+      --cmdline=*)
+        CMDLINE="${1#--cmdline=}"
+        VMM_ARGS+=(--cmdline "${CMDLINE:+$CMDLINE }system-tty")
+        CMDLINE_SET=1
+        shift
+        ;;
+      *) VMM_ARGS+=("$1"); shift ;;
+    esac
+  done
+  [ "$CMDLINE_SET" = 1 ] || VMM_ARGS+=(--cmdline system-tty)
+  set -- "${VMM_ARGS[@]}"
+fi
+
 # Use the same host-wide lock as QEMU: both launchers use moto-tap and the
 # standard guest address, so concurrent runs could observe each other's VM.
 VM_LOCK="${MOTO_QEMU_LOCK:-/tmp/motor-os-qemu.$(id -u).lock}"
@@ -62,13 +88,17 @@ for DISK in $VM_DISKS; do
 done
 ROOT_DISK_MODE=""
 [ "$VM_ROOT_READ_ONLY" != on ] || ROOT_DISK_MODE=,readonly=on
+NETWORK=()
+if [ "$VM_NO_NETWORK" != 1 ]; then
+  NETWORK=(--net "tap=moto-tap,mac=a4:a1:c2:00:00:01,ip=192.168.4.2,mask=255.255.255.0")
+fi
 exec cloud-hypervisor-static --cpus "boot=$SMP" --memory "$MEMORY" \
     --api-socket "$RUNTIME_DIR/chv" \
     --console off --serial tty \
     --log-file "$RUNTIME_DIR/cloud-hypervisor.log" -v \
     --kernel "$WD/kloader" \
     --initramfs "$WD/initrd" \
-    --net "tap=moto-tap,mac=a4:a1:c2:00:00:01,ip=192.168.4.2,mask=255.255.255.0" \
+    "${NETWORK[@]}" \
     --disk "path=$WD/$IMAGE,image_type=$IMAGE_FORMAT$ROOT_DISK_MODE" "${EXTRA_DISKS[@]}" "$@"
 
 #           "tap=moto-tap-2,mac=a4:a1:c2:00:00:02,ip=192.168.6.2,mask=255.255.255.0" \

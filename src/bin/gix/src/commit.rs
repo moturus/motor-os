@@ -16,13 +16,31 @@ use crate::{
     tree_index,
 };
 
+mod message;
+
 pub(crate) struct Identities {
     author: gix::actor::Signature,
     committer: gix::actor::Signature,
 }
 
+impl Identities {
+    /// Who makes a commit now, with the time at which the identities were read.
+    pub(crate) fn committer(&self) -> &gix::actor::Signature {
+        &self.committer
+    }
+}
+
 /// Commit the held index, completing a validated ready merge when present.
 pub fn run(opened: &OpenedRepository, message: &str, cancellation: &Cancellation) -> crate::Result {
+    run_or_edit(opened, Some(message), cancellation)
+}
+
+/// Commit the held index, opening the platform editor when no message was supplied.
+pub fn run_or_edit(
+    opened: &OpenedRepository,
+    message: Option<&str>,
+    cancellation: &Cancellation,
+) -> crate::Result {
     cancellation.check()?;
     let repo = &opened.repo;
     let identities = identities(repo)?;
@@ -30,14 +48,22 @@ pub fn run(opened: &OpenedRepository, message: &str, cancellation: &Cancellation
 
     let (guard, ready) = Guard::acquire_for_ready_mutation(repo)?;
     if let Some(ready) = ready {
+        if matches!(ready.kind, crate::operation::Kind::Rebase(_)) {
+            // Only the rebase knows the author and the message of the commit to make.
+            return Err(invalid(
+                "a rebase is stopped at a conflict; after 'gix add', run 'gix rebase --continue'",
+            )
+            .into());
+        }
         guard.require_ready_merge(repo, &ready, cancellation)?;
         let tree = tree_index::write(repo, guard.index(), cancellation)?;
+        let message = message::prepare(repo, message, true, cancellation)?;
         return finish_ready(
             opened,
             &guard,
             &ready,
             tree,
-            message,
+            &message,
             &identities,
             cancellation,
         );
@@ -63,13 +89,14 @@ pub fn run(opened: &OpenedRepository, message: &str, cancellation: &Cancellation
     if tree == previous_tree {
         return Err(invalid("nothing to commit; the index is unchanged").into());
     }
+    let message = message::prepare(repo, message, false, cancellation)?;
     cancellation.check()?;
     let mut author_time = gix::date::parse::TimeBuf::default();
     let mut committer_time = gix::date::parse::TimeBuf::default();
     let author = identities.author.to_ref(&mut author_time);
     let committer = identities.committer.to_ref(&mut committer_time);
     let commit_id = repo
-        .new_commit_as(committer, author, message, tree, parent)?
+        .new_commit_as(committer, author, message.as_ref(), tree, parent)?
         .id;
 
     let expected = match parent {

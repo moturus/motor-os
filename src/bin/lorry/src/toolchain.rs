@@ -12,6 +12,7 @@ use std::time::UNIX_EPOCH;
 
 #[derive(Clone, Debug)]
 pub struct Toolchain {
+    pub environment: BTreeMap<String, std::ffi::OsString>,
     pub rustc: PathBuf,
     pub clippy: Option<ClippyDriver>,
     pub verbose_version: String,
@@ -37,6 +38,13 @@ pub struct TargetInfo {
 
 impl Toolchain {
     pub fn discover(selector: Option<&str>, config: &Config, clippy: bool) -> Result<Self> {
+        // Vendoring queries the compiler before asking about repository settings.
+        let environment =
+            if config.policy.trust_cargo_cache || config.unapproved_cargo_configs().is_empty() {
+                config.environment.clone()
+            } else {
+                BTreeMap::new()
+            };
         let mut rustc = if cfg!(target_os = "motor") {
             if selector.is_some() {
                 return Err(Error::failure(
@@ -47,7 +55,7 @@ impl Toolchain {
                 .map(PathBuf::from)
                 .map(|rustc| program_path(&rustc).unwrap_or(rustc))
                 .or_else(|| config.rustc.clone())
-                .unwrap_or_else(|| PathBuf::from("/devtools/bin/rustc"))
+                .unwrap_or_else(|| PathBuf::from("/user/bin/dev/rustc"))
         } else if let Some(selector) = selector {
             let rustup = find_program("rustup").ok_or_else(|| {
                 Error::failure(format!(
@@ -88,12 +96,13 @@ impl Toolchain {
         let query_cache = config
             .cache_directory()
             .ok()
-            .map(|cache| cache.join("rustc-queries"));
+            .map(|cache| query_cache_directory(&cache));
         let output = cached_query(
             query_cache.as_deref(),
             &rustc,
             &["--version", "--verbose"],
             "rustc version query",
+            &environment,
         )?;
         let verbose_version = String::from_utf8(output)
             .map_err(|_| Error::failure("rustc version output is not Unicode"))?;
@@ -110,10 +119,11 @@ impl Toolchain {
             )
         })?;
         let clippy = clippy
-            .then(|| discover_clippy_driver(&rustc, &verbose_version))
+            .then(|| discover_clippy_driver(&rustc, &verbose_version, &environment))
             .transpose()?;
 
         Ok(Self {
+            environment,
             rustc,
             clippy,
             verbose_version,
@@ -134,6 +144,7 @@ impl Toolchain {
             &self.rustc,
             &arguments,
             "rustc target cfg query",
+            &self.environment,
         )
         .map_err(|error| {
             if error.exit_code() == 130 {
@@ -154,6 +165,10 @@ impl Toolchain {
     }
 }
 
+fn query_cache_directory(cache: &Path) -> PathBuf {
+    cache.join("rustc-queries")
+}
+
 /// Runs a rustc query, or reuses its recorded output while the rustc file is
 /// unchanged. Like Cargo's `target/.rustc_info.json`, a record is keyed on the
 /// rustc path, size, and modification time. Cache failures only cost a query.
@@ -162,23 +177,40 @@ fn cached_query(
     rustc: &Path,
     arguments: &[&str],
     description: &str,
+    environment: &BTreeMap<String, std::ffi::OsString>,
 ) -> Result<Vec<u8>> {
     const MAX_RECORD_BYTES: u64 = 1024 * 1024;
     let record = cache.and_then(|cache| {
         let metadata = fs::metadata(rustc).ok()?;
         let modified = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
-        let mut key = FieldDigest::tagged(b"lorry-rustc-query-v1\0");
+        let mut key = FieldDigest::tagged(b"lorry-rustc-query-v2\0");
         key.field(rustc.as_os_str().as_encoded_bytes());
         key.field(&metadata.len().to_le_bytes());
         key.field(&modified.as_nanos().to_le_bytes());
+        key.field(&(arguments.len() as u64).to_le_bytes());
         for argument in arguments {
             key.field(argument.as_bytes());
         }
+        for (name, value) in environment {
+            key.field(name.as_bytes());
+            key.field(value.as_encoded_bytes());
+        }
         Some(cache.join(hex(&key.finish())))
     });
-    if let Some(path) = &record
-        && let Ok(file) = fs::File::open(path)
-    {
+    #[cfg(not(target_os = "motor"))]
+    let records = record.iter().cloned().collect::<Vec<_>>();
+    #[cfg(target_os = "motor")]
+    let records = record.as_ref().map_or_else(Vec::new, |record| {
+        [crate::role::Role::None, crate::role::Role::Interactive]
+            .map(|role| {
+                query_cache_directory(&role.cache_directory()).join(record.file_name().unwrap())
+            })
+            .to_vec()
+    });
+    for path in records {
+        let Ok(file) = fs::File::open(path) else {
+            continue;
+        };
         let mut bytes = Vec::new();
         if file
             .take(MAX_RECORD_BYTES + 1)
@@ -188,7 +220,7 @@ fn cached_query(
             return Ok(bytes);
         }
     }
-    let output = process::query_rustc(rustc, arguments, description)?.stdout;
+    let output = process::query_rustc(rustc, arguments, description, environment)?.stdout;
     if let Some(path) = &record {
         let _ = write_record(path, &output);
     }
@@ -204,7 +236,11 @@ fn write_record(path: &Path, bytes: &[u8]) -> Result<()> {
     record.commit()
 }
 
-fn discover_clippy_driver(rustc: &Path, rustc_version: &str) -> Result<ClippyDriver> {
+fn discover_clippy_driver(
+    rustc: &Path,
+    rustc_version: &str,
+    environment: &BTreeMap<String, std::ffi::OsString>,
+) -> Result<ClippyDriver> {
     let path = rustc.with_file_name(if cfg!(windows) {
         "clippy-driver.exe"
     } else {
@@ -217,6 +253,7 @@ fn discover_clippy_driver(rustc: &Path, rustc_version: &str) -> Result<ClippyDri
         &path,
         &["--rustc", "-vV"],
         "Clippy embedded compiler version query",
+        environment,
     )?;
     let version = String::from_utf8(output.stdout)
         .map_err(|_| Error::failure("Clippy embedded compiler version output is not Unicode"))?;
@@ -229,10 +266,10 @@ fn discover_clippy_driver(rustc: &Path, rustc_version: &str) -> Result<ClippyDri
         .with_help("select rustc and clippy-driver from the same toolchain"));
     }
     let mut sha256 = crate::hash::sha256_file(&path)?;
-    if cfg!(target_os = "motor") && path == Path::new("/devtools/bin/clippy-driver") {
+    if cfg!(target_os = "motor") && path == Path::new("/user/bin/dev/clippy-driver") {
         // The shipped sibling is a TMPDIR launcher; bind the compiler payload
         // too, so a driver rebuilt from the same rustc cannot reuse old lints.
-        let payload = crate::hash::sha256_file(Path::new("/devtools/rust/bin/clippy-driver"))?;
+        let payload = crate::hash::sha256_file(Path::new("/user/lib/rust/bin/clippy-driver"))?;
         let mut digest = crate::hash::Sha256::new();
         digest.update(&sha256);
         digest.update(&payload);
@@ -649,13 +686,14 @@ mod tests {
             assert!(status.success());
             fs::set_permissions(&driver, fs::Permissions::from_mode(mode)).unwrap();
         };
-        let missing = discover_clippy_driver(&rustc, version).unwrap_err();
+        let environment = BTreeMap::new();
+        let missing = discover_clippy_driver(&rustc, version, &environment).unwrap_err();
         assert!(missing.render().contains("beside the selected rustc"));
         install("#!/bin/sh\nprintf 'different compiler\\n'\n", 0o644);
-        assert!(discover_clippy_driver(&rustc, version).is_err());
+        assert!(discover_clippy_driver(&rustc, version, &environment).is_err());
         fs::set_permissions(&driver, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(
-            discover_clippy_driver(&rustc, version)
+            discover_clippy_driver(&rustc, version, &environment)
                 .unwrap_err()
                 .render()
                 .contains("does not embed the selected rustc")
@@ -664,15 +702,20 @@ mod tests {
             "#!/bin/sh\n[ \"$*\" = '--rustc -vV' ] || exit 2\ncat <<'VERSION'\n{version}VERSION\n"
         );
         install(&script, 0o755);
-        let first = discover_clippy_driver(&rustc, version).unwrap();
+        let first = discover_clippy_driver(&rustc, version, &environment).unwrap();
         assert_eq!(first.path, driver);
         assert_eq!(first.sha256, crate::hash::sha256_file(&driver).unwrap());
         install(&format!("{script}# changed lint implementation\n"), 0o755);
         assert_ne!(
             first.sha256,
-            discover_clippy_driver(&rustc, version).unwrap().sha256
+            discover_clippy_driver(&rustc, version, &environment)
+                .unwrap()
+                .sha256
         );
-        assert!(discover_clippy_driver(&rustc, &version.replace("selected", "other")).is_err());
+        assert!(
+            discover_clippy_driver(&rustc, &version.replace("selected", "other"), &environment)
+                .is_err()
+        );
     }
 
     #[cfg(unix)]
@@ -709,7 +752,14 @@ mod tests {
         };
         let runs = || fs::read_to_string(&log).unwrap_or_default().lines().count();
         let query = |arguments: &[&str]| {
-            cached_query(Some(&cache), &rustc, arguments, "test query").unwrap()
+            cached_query(
+                Some(&cache),
+                &rustc,
+                arguments,
+                "test query",
+                &BTreeMap::new(),
+            )
+            .unwrap()
         };
         install("first");
         assert_eq!(query(&["--print", "cfg"]), b"first");
@@ -717,14 +767,48 @@ mod tests {
         assert_eq!(runs(), 1);
         assert_eq!(query(&["--print", "cfg", "--target", "other"]), b"first");
         assert_eq!(runs(), 2);
+        // Environment names and values cannot alias trailing query arguments.
+        let environment = BTreeMap::from([("--target".to_owned(), "other".into())]);
+        cached_query(
+            Some(&cache),
+            &rustc,
+            &["--print", "cfg"],
+            "test query",
+            &environment,
+        )
+        .unwrap();
+        assert_eq!(runs(), 3);
         install("second, longer");
         assert_eq!(query(&["--print", "cfg"]), b"second, longer");
-        assert_eq!(runs(), 3);
+        assert_eq!(runs(), 4);
         assert_eq!(
-            cached_query(None, &rustc, &["--print", "cfg"], "test query").unwrap(),
+            cached_query(
+                None,
+                &rustc,
+                &["--print", "cfg"],
+                "test query",
+                &BTreeMap::new()
+            )
+            .unwrap(),
             b"second, longer"
         );
-        assert_eq!(runs(), 4);
+        assert_eq!(runs(), 5);
+        install("'\"$LORRY_QUERY_ENV\"'");
+        for value in ["first", "first", "changed"] {
+            let environment = BTreeMap::from([("LORRY_QUERY_ENV".to_owned(), value.into())]);
+            assert_eq!(
+                cached_query(
+                    Some(&cache),
+                    &rustc,
+                    &["--print", "cfg"],
+                    "test query",
+                    &environment
+                )
+                .unwrap(),
+                value.as_bytes()
+            );
+        }
+        assert_eq!(runs(), 7);
         fs::remove_dir_all(root).unwrap();
     }
 

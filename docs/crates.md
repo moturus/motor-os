@@ -71,14 +71,15 @@ The SDK combines eleven former crates. Paths below are relative to `moto_sdk`.
 - Versions follow Cargo's semver rules. One version covers the whole SDK.
 - Crates outside `src/sys` see an SDK change only after it is published.
   Publish, then raise their requirement where needed and re-resolve their
-  lockfiles. That includes javy-smoke, wasmtime-smoke and the Lorry editor
-  fixture, which are built with `--locked`.
+  lockfiles. That includes javy-smoke and wasmtime-smoke, which are built
+  with `--locked`.
 - Publish moto-rt or moto-sys first when the SDK needs a newer one, and raise
   the SDK's floor for it.
-- `src/tests/test-sdk-package.sh`, part of `full-test.sh`, builds the SDK the
+- The `host_sdk_package` phase of `src/tests/full-test.sh` builds the SDK the
   way crates.io would ship it, against crates.io only. Its lock pins each
   direct dependency at the lowest version the manifest allows. After a
-  dependency change, `test-sdk-package.sh --update-lock` writes a new lock.
+  dependency change, `bash -c 'source src/tests/full-test.sh;
+  host_sdk_package --update-lock'` writes a new lock.
 - Publish from `src/sys` after the gates pass, and from a pushed commit: the
   package records its commit, and crates.io links to it.
 - Crates the SDK replaced, such as moto-ipc 0.2.4, stay on crates.io. New code
@@ -117,3 +118,16 @@ Russhd now uses both published versions. Applications that need the new API
 use `moto-sdk = "0.2"` and update their registry lockfiles. Existing `0.1`
 consumers keep their current requirement until they migrate. These releases
 did not change runtime or kernel implementations.
+
+### Not yet published: moto-sys 0.4.1
+
+`moto-sys 0.4.1` adds `stats::ProcessInfoV2`, which is `ProcessInfoV1` plus
+the capability mask, and `SysRay::list_processes_v2()`, which calls version 2
+of the process list query. `ProcessInfoV1` keeps its 56-byte layout and
+version 1 of the query still returns it, so programs built against 0.3.2 and
+0.4.0 run unchanged. The addition is compatible, so the version stays in the
+0.4 range.
+
+Crates in `src/sys` use 0.4.1 by path. `moto-sdk` still names `moto-sys 0.4.0`
+as its floor, and crates outside `src/sys` stay on the published versions:
+none of them needs the new record.

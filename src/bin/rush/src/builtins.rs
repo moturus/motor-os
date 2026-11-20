@@ -36,6 +36,7 @@ use crate::jobs::{JobState, JobWait};
 use crate::options::Options;
 use crate::shell::Shell;
 use crate::signal;
+#[cfg(unix)]
 use crate::sys;
 
 /// The writers a builtin sends its normal and error output to. They are derived
@@ -126,6 +127,7 @@ pub enum Builtin {
     Jobs,
     Fg,
     Bg,
+    #[cfg(unix)]
     Kill,
     /// A rush extension (see [`crate::history`]).
     History,
@@ -186,6 +188,8 @@ const TABLE: &[BuiltinSpec] = &[
     BuiltinSpec { name: "jobs",     builtin: Builtin::Jobs,     special: false },
     BuiltinSpec { name: "fg",       builtin: Builtin::Fg,       special: false },
     BuiltinSpec { name: "bg",       builtin: Builtin::Bg,       special: false },
+    // Motor OS uses the external wrapper over `sysbox kill`.
+    #[cfg(unix)]
     BuiltinSpec { name: "kill",     builtin: Builtin::Kill,     special: false },
     // A rush extension, not POSIX: the interactive history list (see
     // `crate::history`). Named here so it composes — `history | tail`, and
@@ -240,6 +244,7 @@ pub fn dispatch(b: Builtin, args: &[String], io: &mut Io, shell: &mut Shell) -> 
         Builtin::Jobs => jobs_cmd(args, io, shell),
         Builtin::Fg => fg(args, io, shell),
         Builtin::Bg => bg(args, io, shell),
+        #[cfg(unix)]
         Builtin::Kill => kill(args, io, shell),
         Builtin::Times => times(io),
         Builtin::Trap => trap(args, io, shell),
@@ -1522,7 +1527,8 @@ fn bg(args: &[String], io: &mut Io, shell: &mut Shell) -> i32 {
 ///
 /// A `%job`, and any `$!` naming a job of this shell, is resolved through
 /// rush's own job table (see [`crate::jobs`]); a bare pid the shell did not
-/// start goes to the platform, which on Motor OS can only ever terminate it.
+/// start goes to the platform.
+#[cfg(unix)]
 fn kill(args: &[String], io: &mut Io, shell: &mut Shell) -> i32 {
     const SIGTERM: i32 = 15;
 
@@ -1595,6 +1601,7 @@ fn kill(args: &[String], io: &mut Io, shell: &mut Shell) -> i32 {
 
 /// A signal number from a `kill` sigspec: a name (`TERM`, `SIGTERM`) or a number.
 /// Unlike a trap condition, `0` is the "check only" signal rather than `EXIT`.
+#[cfg(unix)]
 fn signal_number(spec: &str) -> Option<i32> {
     if spec == "0" {
         return Some(0);
@@ -1606,12 +1613,11 @@ fn signal_number(spec: &str) -> Option<i32> {
     }
 }
 
+#[cfg(unix)]
 fn kill_error(err: sys::KillError) -> &'static str {
     match err {
         sys::KillError::NoSuchProcess => "no such process",
         sys::KillError::PermissionDenied => "operation not permitted",
-        // Reached on Motor OS for every signal but KILL/TERM: there is no signal
-        // delivery to degrade to, so say so rather than killing something.
         sys::KillError::Unsupported => "signal not supported on this platform",
     }
 }
@@ -2179,11 +2185,8 @@ fn is_executable(path: &str) -> bool {
 
 #[cfg(not(unix))]
 fn is_executable(path: &str) -> bool {
-    // Motor OS has no execute permission bit; treat any existing file as
-    // executable (matching how command resolution accepts it).
-    std::fs::metadata(path)
-        .map(|m| m.is_file())
-        .unwrap_or(false)
+    // stat reports permissions for the caller's role, including directory x.
+    moto_rt::fs::stat(path).is_ok_and(|attr| attr.perm & moto_rt::fs::PERM_EXEC != 0)
 }
 
 /// Whether `path` is something the shell could *run*: an executable regular

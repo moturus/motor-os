@@ -88,11 +88,14 @@ impl Fixture {
             .unwrap();
         write_private(&root.join("users.toml"), SHIPPED_USERS);
         write_private(&root.join("authorized_keys.motor"), SHIPPED_KEYS);
+        write_private(
+            &root.join("test.key"),
+            include_str!("../../../vm_scripts/test.key"),
+        );
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/sshd.toml");
         let config = std::fs::read_to_string(source)
             .unwrap()
             .replace("0.0.0.0:2222", "127.0.0.1:0")
-            .replace("/system/bin:/user/bin", "/bin:/usr/bin")
             .replace(
                 "/user/cfg/russhd/users.toml",
                 root.join("users.toml").to_str().unwrap(),
@@ -105,6 +108,8 @@ impl Fixture {
             .arg(&config_path)
             .current_dir(&root)
             .env("HOME", &root)
+            // Sessions inherit it: the host build starts no login shell.
+            .env("PATH", "/bin:/usr/bin")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -132,7 +137,7 @@ impl Fixture {
             child,
             log_thread: Some(log_thread),
             known_hosts: root.join("known_hosts"),
-            identity: Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/test.key"),
+            identity: root.join("test.key"),
             root,
             port,
         }

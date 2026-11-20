@@ -39,6 +39,8 @@ pub fn execute(path: &str, quiet: bool) -> Result<i32> {
             source_directory.display()
         ))
     })?;
+    #[cfg(target_os = "motor")]
+    crate::motor_fs::directory_mode(&source_directory)?;
     write(
         &staging.path().join("Cargo.toml"),
         &MANIFEST.replace("{name}", name),
@@ -80,12 +82,9 @@ fn normalized_destination(path: &Path, name: &str) -> PathBuf {
 }
 
 fn write(path: &Path, contents: &str) -> Result<()> {
-    fs::write(path, contents).map_err(|error| {
-        Error::failure(format!(
-            "failed to write package file `{}`: {error}",
-            path.display()
-        ))
-    })
+    let mut staged = crate::atomic::AtomicFile::new(path)?;
+    staged.write_all(contents.as_bytes())?;
+    staged.commit()
 }
 
 fn package_name(path: &Path) -> Result<&str> {

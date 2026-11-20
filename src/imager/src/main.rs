@@ -61,6 +61,8 @@ struct Config {
     ca_bundle: Option<String>,
     filesystem: String,
     data_partition_size_mb: u64,
+    #[serde(default)]
+    raw_data_partition_size_mb: Option<u64>,
     img_name: String,
     image_format: ImageFormat,
 }
@@ -80,8 +82,12 @@ struct ImageFile {
     permissions: moto_sdk::async_fs::RolePermissions,
 }
 
+/// Creates the filesystem in place, in the partition at `offset` of `disk`.
+/// Blocks that it does not write stay holes of the disk file: copying a
+/// separately built partition would write out all of its unused space.
 async fn create_motorfs_partition_async(
-    result_path: &Path,
+    disk: &Path,
+    offset: u64,
     directories: &[String],
     files: &[ImageFile],
     policy: &permissions::PermissionPolicy,
@@ -89,15 +95,14 @@ async fn create_motorfs_partition_async(
 ) -> io::Result<()> {
     use moto_sdk::async_fs::FileSystem;
 
-    let data_partition_size = data_partition_size_mb * 1024 * 1024;
-
-    let bd = moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice::create(
-        result_path.to_str().unwrap().into(),
-        data_partition_size / 4096,
+    let bd = moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice::open_region(
+        disk.to_str().unwrap().into(),
+        offset,
+        data_partition_size_mb * 1024 * 1024,
     )
     .await?;
     let mut fs = motor_fs::MotorFs::format(Box::new(bd)).await?;
-    println!("creating Motor FS in {:?}", result_path);
+    println!("creating Motor FS in {:?}", disk);
 
     fs.set_all_permissions_image_admin(
         moto_sdk::async_fs::Role::System,
@@ -180,7 +185,8 @@ async fn create_motorfs_partition_async(
 }
 
 fn create_motorfs_partition(
-    result_path: &Path,
+    disk: &Path,
+    offset: u64,
     directories: &[String],
     files: &[ImageFile],
     policy: &permissions::PermissionPolicy,
@@ -189,7 +195,8 @@ fn create_motorfs_partition(
     let rt = tokio::runtime::LocalRuntime::new().unwrap();
 
     rt.block_on(create_motorfs_partition_async(
-        result_path,
+        disk,
+        offset,
         directories,
         files,
         policy,
@@ -293,12 +300,10 @@ fn create_initrd(result: &Path, kloader: &Path, kernel: &Path, sys_io: &Path) {
 fn set_partition(
     mbr: &mut mbrman::MBR,
     idx: usize,
-    partition: &Path,
+    size: u64,
     start_sector: u32,
     fs: Option<&str>,
 ) -> u32 {
-    let data = File::open(partition).unwrap();
-    let size = data.metadata().unwrap().len();
     let sectors = size.div_ceil(u64::from(SECTOR_SIZE)).try_into().unwrap();
 
     mbr[idx] = mbrman::MBRPartitionEntry {
@@ -333,14 +338,16 @@ fn write_partition(mbr: &mbrman::MBR, idx: usize, partition: &Path, disk: &mut F
     }
 }
 
+/// Writes the boot sector and the two boot partitions, and leaves the last
+/// partition, of `part3_len` bytes, as a hole. Returns that partition's offset.
 fn create_mbr_disk(
     mbr: &Path,
     part1: &Path,
     part2: &Path,
-    part3: &Path,
+    part3_len: u64,
     part3_fs: Option<&str>,
     result: &Path,
-) {
+) -> u64 {
     let mut boot_sector = File::open(mbr).unwrap();
     let mut mbr = mbrman::MBR::read_from(&mut boot_sector, SECTOR_SIZE).unwrap();
 
@@ -350,10 +357,12 @@ fn create_mbr_disk(
         }
     }
 
+    let file_len = |path: &Path| fs::metadata(path).unwrap().len();
     let mut current_sector = 1_u32;
-    current_sector += set_partition(&mut mbr, 1, part1, current_sector, None);
-    current_sector += set_partition(&mut mbr, 2, part2, current_sector, None);
-    set_partition(&mut mbr, 3, part3, current_sector, part3_fs);
+    current_sector += set_partition(&mut mbr, 1, file_len(part1), current_sector, None);
+    current_sector += set_partition(&mut mbr, 2, file_len(part2), current_sector, None);
+    let part3_sectors = set_partition(&mut mbr, 3, part3_len, current_sector, part3_fs);
+    let part3_offset = u64::from(current_sector) * u64::from(SECTOR_SIZE);
 
     let mut disk = fs::OpenOptions::new()
         .create(true)
@@ -367,7 +376,9 @@ fn create_mbr_disk(
 
     write_partition(&mbr, 1, part1, &mut disk);
     write_partition(&mbr, 2, part2, &mut disk);
-    write_partition(&mbr, 3, part3, &mut disk);
+    disk.set_len(part3_offset + u64::from(part3_sectors) * u64::from(SECTOR_SIZE))
+        .unwrap();
+    part3_offset
 }
 
 fn convert_image(
@@ -438,22 +449,6 @@ fn add_dir(
 #[cfg(test)]
 fn add_static_dir(files: &mut BTreeMap<String, PathBuf>, dir_to_add: PathBuf, dest_path: &Path) {
     add_dir(files, dir_to_add, dest_path, &[]);
-}
-
-fn static_overlay_exclusions(directories: &[String]) -> &'static [&'static str] {
-    const NONE: &[&str] = &[];
-    const DEVTOOLS: &[&str] = &["devtools"];
-
-    let devtools = Path::new("/devtools");
-    if directories
-        .iter()
-        .map(Path::new)
-        .any(|path| path == devtools || path.starts_with(devtools))
-    {
-        NONE
-    } else {
-        DEVTOOLS
-    }
 }
 
 fn add_source_dir(files: &mut BTreeMap<String, PathBuf>, dir_to_add: PathBuf, dest_path: &Path) {
@@ -882,10 +877,9 @@ fn main() {
         files.insert((*prog).clone(), bin_dir.join(filename));
     }
 
-    let static_exclusions = static_overlay_exclusions(&config.directories);
     for dir in &config.static_dirs {
         let path = motorh.join(dir);
-        add_dir(&mut files, path, Path::new("/"), static_exclusions);
+        add_dir(&mut files, path, Path::new("/"), &[]);
     }
     for dir in &config.source_dirs {
         let path = motorh.join(&dir.source);
@@ -921,17 +915,8 @@ fn main() {
 
     std::fs::copy(bin_dir.join("kloader"), img_dir.join("kloader")).unwrap();
 
-    let fs_partition = tmp_img_dir.join("fs_part");
-    match config.filesystem.as_str() {
-        "motor-fs" => create_motorfs_partition(
-            &fs_partition,
-            &config.directories,
-            &files,
-            &policy,
-            config.data_partition_size_mb,
-        )
-        .unwrap_or_else(|error| panic!("failed to create Motor FS partition: {error}")),
-        _ => panic!("Unknown filesystem: {}", config.filesystem),
+    if config.filesystem != "motor-fs" {
+        panic!("Unknown filesystem: {}", config.filesystem);
     }
 
     let result = img_dir.join(&config.img_name);
@@ -939,14 +924,27 @@ fn main() {
         ImageFormat::Raw => result.clone(),
         ImageFormat::Qcow2 => tmp_img_dir.join("disk.raw"),
     };
-    create_mbr_disk(
+    let fs_offset = create_mbr_disk(
         &bin_dir.join("mbr.bin"),
         &bin_dir.join("boot.bin"),
         &initrd,
-        &fs_partition,
+        config.data_partition_size_mb * 1024 * 1024,
         Some(&config.filesystem),
         &raw,
     );
+    create_motorfs_partition(
+        &raw,
+        fs_offset,
+        &config.directories,
+        &files,
+        &policy,
+        config.data_partition_size_mb,
+    )
+    .unwrap_or_else(|error| {
+        // Do not leave a disk without its filesystem where an image belongs.
+        let _ = fs::remove_file(&raw);
+        panic!("failed to create Motor FS partition: {error}")
+    });
     if config.image_format == ImageFormat::Qcow2 {
         let qcow2 = tmp_img_dir.join("disk.qcow2");
         convert_raw_to_qcow2(&raw, &qcow2)
@@ -973,6 +971,9 @@ fn set_raw_output(config: &mut Config, output: &str) -> Result<(), String> {
     }
     config.img_name = output.to_owned();
     config.image_format = ImageFormat::Raw;
+    if let Some(size) = config.raw_data_partition_size_mb {
+        config.data_partition_size_mb = size;
+    }
     Ok(())
 }
 
@@ -982,13 +983,67 @@ mod tests {
     use moto_sdk::async_fs::FileSystem;
 
     #[test]
+    fn every_image_uses_user_commands_without_legacy_shells() {
+        for yaml in [
+            include_str!("../motor-os-base.yaml"),
+            include_str!("../motor-os.yaml"),
+        ] {
+            let config: Config = serde_yaml::from_str(yaml).unwrap();
+            assert!(config.directories.contains(&"/none/dev".to_owned()));
+            for command in ["rush", "sysbox"] {
+                assert!(config.input_files.contains(&format!("/user/bin/{command}")));
+            }
+            assert!(!config.directories.iter().any(|path| path == "/system/bin"));
+            assert!(!config
+                .input_files
+                .iter()
+                .any(|path| path.starts_with("/system/bin/")));
+            let mut files = BTreeMap::new();
+            for overlay in config.static_dirs {
+                add_static_dir(&mut files, Path::new("../..").join(overlay), Path::new("/"));
+            }
+            assert!(!files.keys().any(|path| path.starts_with("/system/bin/")));
+            for path in ["/user/cfg/profile", "/user/cfg/sshd.toml"] {
+                let contents = fs::read_to_string(&files[path]).unwrap();
+                assert!(!contents.contains("/system/bin"));
+            }
+            assert!(!files.contains_key("/system/cfg/profile"));
+            assert!(!files.contains_key("/system/cfg/sshd.toml"));
+            assert!(config.source_dirs.is_empty());
+            let paths = config
+                .directories
+                .iter()
+                .chain(config.input_files.iter())
+                .chain(files.keys());
+            let mut roots = std::collections::BTreeSet::new();
+            for path in paths {
+                roots.insert(path.split('/').nth(1).unwrap());
+                assert!(
+                    !path.contains("/tests/") && !path.contains("/test-tmp"),
+                    "{path}"
+                );
+                assert!(
+                    !path.contains("stress-soak") && !path.contains("systest"),
+                    "{path}"
+                );
+                assert!(!path.starts_with("/user/bin/dev/"), "{path}");
+            }
+            assert_eq!(
+                roots,
+                std::collections::BTreeSet::from(["none", "system", "user"])
+            );
+        }
+    }
+
+    #[test]
     fn production_image_requires_ripgrep() {
         let config: Config = serde_yaml::from_str(include_str!("../motor-os.yaml")).unwrap();
 
         assert_eq!(config.permission_policy, "motor-os-permissions.yaml");
         assert_eq!(config.img_name, "motor-os.qcow2");
         assert_eq!(config.image_format, ImageFormat::Qcow2);
-        assert_eq!(config.data_partition_size_mb, 256);
+        assert_eq!(config.data_partition_size_mb, 32768);
+        assert_eq!(config.raw_data_partition_size_mb, Some(256));
         assert_eq!(
             config.static_dirs,
             ["img_files/motor-os-base", "img_files/motor-os"]
@@ -996,11 +1051,7 @@ mod tests {
         assert_eq!(config.assembly_dirs, ["libc", "rg", "tar"]);
         assert_eq!(
             config.assembly_required_executables,
-            [
-                "rg/system/bin/rg",
-                "tar/system/bin/tar",
-                "tar/system/bin/zstd"
-            ]
+            ["rg/user/bin/rg", "tar/user/bin/tar", "tar/user/bin/zstd"]
         );
         assert!(!config.assembly_dirs.iter().any(|path| path == "helix"));
         assert!(!config
@@ -1016,10 +1067,10 @@ mod tests {
             .input_files
             .iter()
             .any(|path| path.contains("/tests/")));
-        assert!(!config
+        assert!(config
             .input_files
             .iter()
-            .any(|path| path == "/system/bin/curl"));
+            .any(|path| path == "/user/bin/curl"));
         assert!(config
             .input_files
             .iter()
@@ -1047,6 +1098,7 @@ mod tests {
 
         assert_eq!(config.img_name, "motor-os.img");
         assert_eq!(config.image_format, ImageFormat::Raw);
+        assert_eq!(config.data_partition_size_mb, 256);
         assert_eq!(config.input_files, input_files);
         assert_eq!(config.static_dirs, static_dirs);
         assert_eq!(config.assembly_dirs, assembly_dirs);
@@ -1056,195 +1108,8 @@ mod tests {
             assert!(set_raw_output(&mut invalid, output).is_err());
             assert_eq!(invalid.img_name, "motor-os.qcow2");
             assert_eq!(invalid.image_format, ImageFormat::Qcow2);
+            assert_eq!(invalid.data_partition_size_mb, 32768);
         }
-    }
-
-    #[test]
-    fn dev_image_requires_the_native_toolchain() {
-        let config: Config = serde_yaml::from_str(include_str!("../motor-os-dev.yaml")).unwrap();
-
-        assert_eq!(config.permission_policy, "motor-os-permissions.yaml");
-        assert_eq!(config.img_name, "motor-os-dev.qcow2");
-        assert_eq!(config.image_format, ImageFormat::Qcow2);
-        assert!(config
-            .input_files
-            .iter()
-            .any(|path| path == "/devtools/bin/lorry"));
-        assert!(config
-            .input_files
-            .iter()
-            .any(|path| path == "/system/bin/curl"));
-        assert!(config
-            .input_files
-            .iter()
-            .any(|path| path == "/user/bin/ssh"));
-        assert!(config
-            .directories
-            .iter()
-            .any(|path| path == "/user/cfg/ssh"));
-        assert_eq!(
-            config.static_dirs,
-            [
-                "img_files/motor-os-base",
-                "img_files/motor-os",
-                "img_files/motor-os-dev"
-            ]
-        );
-        assert_eq!(
-            config.assembly_dirs,
-            [
-                "libc",
-                "rg",
-                "tar",
-                "llvm",
-                "rustc",
-                "helix",
-                "lua",
-                "quickjs",
-                "sed",
-                "rust-analyzer",
-                "javy",
-                "wasmtime",
-                "sys-lib-deps"
-            ]
-        );
-        assert_eq!(config.assembly_required_executables.len(), 21);
-        assert!(config
-            .assembly_required_executables
-            .iter()
-            .any(|path| path == "wasmtime/devtools/bin/wasmtime"));
-        assert!(config
-            .assembly_required_executables
-            .iter()
-            .any(|path| path == "wasmtime/devtools/bin/wasmtime-rt"));
-        assert!(config
-            .assembly_required_executables
-            .iter()
-            .any(|path| path == "rust-analyzer/devtools/rust/bin/rust-analyzer"));
-        assert!(!config
-            .assembly_required_executables
-            .iter()
-            .any(|path| path.ends_with("/cargo")));
-        assert!(config
-            .assembly_required_executables
-            .iter()
-            .any(|path| path.ends_with("/rustc")));
-        for path in [
-            "rustc/devtools/bin/rustfmt",
-            "rustc/devtools/rust/bin/rustfmt",
-            "rustc/devtools/bin/clippy-driver",
-            "rustc/devtools/rust/bin/clippy-driver",
-        ] {
-            assert!(config
-                .assembly_required_executables
-                .iter()
-                .any(|candidate| candidate == path));
-        }
-        assert!(config
-            .assembly_required_executables
-            .iter()
-            .any(|path| path.ends_with("/rg")));
-        assert!(config
-            .assembly_required_executables
-            .iter()
-            .any(|path| path == "helix/devtools/helix/hx"));
-        assert!(config
-            .assembly_required_executables
-            .iter()
-            .any(|path| path == "sed/devtools/bin/sed"));
-        // Scratch and configuration belong to the roles, not to /devtools.
-        for path in ["/devtools/tmp", "/devtools/cfg"] {
-            assert!(!config.directories.iter().any(|candidate| candidate == path));
-        }
-        for path in ["/none/tmp", "/devtools/llvm/cfg"] {
-            assert!(config.directories.iter().any(|candidate| candidate == path));
-        }
-        // Each role has its own Lorry repository and cache.
-        for role in ["user", "none"] {
-            for path in ["cache", "vendor", "vendor/.staging"] {
-                let path = format!("/devtools/lorry/{role}/{path}");
-                assert!(config.directories.contains(&path));
-            }
-        }
-        for path in ["/devtools/lorry/cache", "/devtools/lorry/vendor"] {
-            assert!(!config.directories.iter().any(|candidate| candidate == path));
-        }
-        assert!(!config
-            .directories
-            .iter()
-            .any(|path| path == "/user/cfg/lorry" || path.starts_with("/user/cfg/lorry/")));
-        assert_eq!(config.source_dirs.len(), 5);
-        for (source, destination) in [
-            ("src/bin/red", "/devtools/src/motor-os/bin/red"),
-            ("src/bin/lorry", "/devtools/src/motor-os/bin/lorry"),
-        ] {
-            assert!(config
-                .source_dirs
-                .iter()
-                .any(|dir| dir.source == source && dir.destination == destination));
-        }
-        // Library sources for native tests mirror the tree below sys/lib, so
-        // their `../moto-rt` path dependencies resolve on the image.
-        let mut library_sources: Vec<_> = config
-            .source_dirs
-            .iter()
-            .filter(|dir| dir.destination.starts_with("/devtools/src/motor-os/sys/"))
-            .map(|dir| {
-                let name = dir.source.strip_prefix("src/sys/lib/").unwrap();
-                assert_eq!(
-                    dir.destination,
-                    format!("/devtools/src/motor-os/sys/lib/{name}")
-                );
-                name
-            })
-            .collect();
-        library_sources.sort_unstable();
-        assert_eq!(library_sources, ["moto-rt", "moto-sdk", "moto-sys"]);
-    }
-
-    #[test]
-    fn wasm_image_has_the_wasm_tools_and_no_native_toolchain() {
-        let config: Config = serde_yaml::from_str(include_str!("../motor-os-wasm.yaml")).unwrap();
-
-        assert_eq!(config.permission_policy, "motor-os-permissions.yaml");
-        assert_eq!(config.img_name, "motor-os-wasm.qcow2");
-        assert_eq!(config.image_format, ImageFormat::Qcow2);
-        assert_eq!(config.data_partition_size_mb, 1024);
-        assert_eq!(
-            config.static_dirs,
-            ["img_files/motor-os-base", "img_files/motor-os"]
-        );
-        assert_eq!(config.assembly_dirs, ["libc", "rg", "javy", "wasmtime"]);
-        assert_eq!(
-            config.assembly_required_executables,
-            [
-                "rg/system/bin/rg",
-                "javy/devtools/bin/javy",
-                "javy/devtools/bin/wasmi",
-                "wasmtime/devtools/bin/wasmtime",
-                "wasmtime/devtools/bin/wasmtime-rt"
-            ]
-        );
-        for path in [
-            "/devtools/javy",
-            "/devtools/javy/plugins",
-            "/devtools/wasmtime",
-            "/user/tmp",
-        ] {
-            assert!(config.directories.iter().any(|candidate| candidate == path));
-        }
-        assert!(config
-            .directories
-            .iter()
-            .all(|path| !path.starts_with("/devtools/cfg")));
-        assert!(config.directories.iter().all(|path| {
-            !path.starts_with("/devtools/llvm") && !path.starts_with("/devtools/rust")
-        }));
-        assert!(config
-            .input_files
-            .iter()
-            .all(|path| !path.starts_with("/devtools") && !path.contains("/tests/")));
-        assert!(config.source_dirs.is_empty());
     }
 
     #[test]
@@ -1263,7 +1128,7 @@ mod tests {
         assert!(config
             .input_files
             .iter()
-            .filter(|path| path.starts_with("/system/bin/"))
+            .filter(|path| path.starts_with("/user/bin/"))
             .all(|path| !path.contains("services")));
         assert!(!config
             .input_files
@@ -1275,13 +1140,9 @@ mod tests {
             .any(|path| path == "/user/cfg/ssh"));
     }
 
-    const IMAGE_CONFIGS: [&str; 6] = [
+    const IMAGE_CONFIGS: [&str; 2] = [
         include_str!("../motor-os-base.yaml"),
         include_str!("../motor-os.yaml"),
-        include_str!("../motor-os-dev.yaml"),
-        include_str!("../motor-os-wasm.yaml"),
-        include_str!("../motor-os-system-tty.yaml"),
-        include_str!("../motor-os-vsock-test.yaml"),
     ];
 
     const TEST_CERTIFICATE: &str =
@@ -1402,22 +1263,21 @@ mod tests {
 
     #[test]
     fn assembly_image_root_resolves_only_assembly_inputs() {
-        let mut config: Config =
-            serde_yaml::from_str(include_str!("../motor-os-dev.yaml")).unwrap();
+        let mut config: Config = serde_yaml::from_str(include_str!("../motor-os.yaml")).unwrap();
         use_assembly_image_root(&mut config, Some(Path::new("/assemblies/exact/images"))).unwrap();
 
         assert!(config
             .static_dirs
             .iter()
-            .any(|path| path == "/assemblies/exact/images/rustc"));
+            .any(|path| path == "/assemblies/exact/images/rg"));
         assert!(config
             .required_executables
             .iter()
-            .any(|path| path == "/assemblies/exact/images/llvm/devtools/bin/cc"));
+            .any(|path| path == "/assemblies/exact/images/rg/user/bin/rg"));
         assert!(config
             .static_dirs
             .iter()
-            .any(|path| path == "img_files/motor-os-dev"));
+            .any(|path| path == "img_files/motor-os"));
         assert!(use_assembly_image_root(&mut config, Some(Path::new("relative/images"))).is_err());
         assert!(use_assembly_image_root(&mut config, Some(Path::new("/images/../other"))).is_err());
     }
@@ -1448,10 +1308,10 @@ mod tests {
         if root.exists() {
             fs::remove_dir_all(&root).unwrap();
         }
-        fs::create_dir_all(root.join("first/system/cfg")).unwrap();
-        fs::create_dir_all(root.join("second/system/cfg")).unwrap();
-        fs::write(root.join("first/system/cfg/rush.cfg"), "first\n").unwrap();
-        fs::write(root.join("second/system/cfg/rush.cfg"), "second\n").unwrap();
+        fs::create_dir_all(root.join("first/user/cfg")).unwrap();
+        fs::create_dir_all(root.join("second/user/cfg")).unwrap();
+        fs::write(root.join("first/user/cfg/profile"), "first\n").unwrap();
+        fs::write(root.join("second/user/cfg/profile"), "second\n").unwrap();
 
         let mut files = BTreeMap::new();
         add_static_dir(&mut files, root.join("first"), Path::new("/"));
@@ -1459,8 +1319,8 @@ mod tests {
 
         assert_eq!(files.len(), 1);
         assert_eq!(
-            files.get("/system/cfg/rush.cfg").unwrap(),
-            &root.join("second/system/cfg/rush.cfg")
+            files.get("/user/cfg/profile").unwrap(),
+            &root.join("second/user/cfg/profile")
         );
 
         let policy_path = root.join("permissions.yaml");
@@ -1483,21 +1343,12 @@ entries: []
         .unwrap();
         let resolved = resolve_image_files(&files, &[], &policy).unwrap();
         assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].source, root.join("second/system/cfg/rush.cfg"));
+        assert_eq!(resolved[0].source, root.join("second/user/cfg/profile"));
         assert_eq!(
             permissions::mode_string(resolved[0].permissions),
             "rw-r--r--"
         );
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn static_overlays_cannot_introduce_undeclared_devtools() {
-        assert_eq!(static_overlay_exclusions(&[]), ["devtools"]);
-        assert_eq!(
-            static_overlay_exclusions(&["/devtools/bin".to_owned()]),
-            [] as [&str; 0]
-        );
     }
 
     #[test]
@@ -1530,7 +1381,7 @@ trees:
     file: "rw-rw-r--"
     script: "rwxrwxr-x"
     elf: "r-xr-xr-x"
-  - path: "/devtools/bin"
+  - path: "/user/bin/dev"
     directory: "rwxr-xr-x"
     file: "rw-r--r--"
     script: "rwxrwxr-x"
@@ -1546,14 +1397,14 @@ entries: []
         .unwrap();
 
         let system_script = root.join("system-script");
-        fs::write(&system_script, b"#!/system/bin/rush\n").unwrap();
+        fs::write(&system_script, b"#!/user/bin/rush\n").unwrap();
         let user_elf = root.join("user-elf");
         let mut elf = [0_u8; 64];
         elf[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
         elf[16..18].copy_from_slice(&3_u16.to_le_bytes());
         fs::write(&user_elf, elf).unwrap();
         let dev_script = root.join("dev-script");
-        fs::write(&dev_script, b"#!/system/bin/rush\n").unwrap();
+        fs::write(&dev_script, b"#!/user/bin/rush\n").unwrap();
         for path in [&system_script, &user_elf, &dev_script] {
             let mut mode = fs::metadata(path).unwrap().permissions();
             mode.set_mode(0o755);
@@ -1561,26 +1412,59 @@ entries: []
         }
 
         let raw_files = BTreeMap::from([
-            ("/system/bin/script".to_owned(), system_script),
+            ("/system/bin/sh".to_owned(), system_script),
             ("/user/bin/elf".to_owned(), user_elf),
-            ("/devtools/bin/script".to_owned(), dev_script),
+            ("/user/bin/dev/script".to_owned(), dev_script),
         ]);
         let directories = vec![
             "/system/bin".to_owned(),
             "/user/bin".to_owned(),
-            "/devtools/bin".to_owned(),
+            "/user/bin/dev".to_owned(),
         ];
         let files = resolve_image_files(&raw_files, &directories, &policy).unwrap();
-        let partition = root.join("partition");
-        create_motorfs_partition(&partition, &directories, &files, &policy, 1).unwrap();
+        // A disk laid out as in an image: the boot sector, two boot partitions
+        // that end inside a sector, then the filesystem, created in place.
+        let mut boot_sector = [0_u8; 512];
+        boot_sector[510..].copy_from_slice(&[0x55, 0xaa]);
+        fs::write(root.join("mbr"), boot_sector).unwrap();
+        fs::write(root.join("boot"), [1_u8; 700]).unwrap();
+        fs::write(root.join("initrd"), [2_u8; 1300]).unwrap();
+        const SIZE_MB: u64 = 64;
+        let disk = root.join("disk");
+        let offset = create_mbr_disk(
+            &root.join("mbr"),
+            &root.join("boot"),
+            &root.join("initrd"),
+            SIZE_MB << 20,
+            Some("motor-fs"),
+            &disk,
+        );
+        assert_eq!(offset, 512 * (1 + 2 + 3));
+        create_motorfs_partition(&disk, offset, &directories, &files, &policy, SIZE_MB).unwrap();
+
+        // The unused part of the partition is a hole: it was never written.
+        use std::os::unix::fs::MetadataExt;
+        let metadata = fs::metadata(&disk).unwrap();
+        assert_eq!(metadata.len(), offset + (SIZE_MB << 20));
+        assert!(
+            metadata.blocks() * 512 < (SIZE_MB << 20) / 4,
+            "the disk takes {} sectors",
+            metadata.blocks()
+        );
+        let contents = fs::read(&disk).unwrap();
+        assert_eq!(contents[512..512 + 700], [1_u8; 700]);
+        assert_eq!(contents[3 * 512..3 * 512 + 1300], [2_u8; 1300]);
 
         tokio::runtime::LocalRuntime::new()
             .unwrap()
             .block_on(async {
-                let device = moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice::open(
-                    camino::Utf8Path::from_path(&partition).unwrap(),
-                )
-                .await?;
+                let device =
+                    moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice::open_region(
+                        camino::Utf8Path::from_path(&disk).unwrap(),
+                        offset,
+                        SIZE_MB << 20,
+                    )
+                    .await?;
                 let fs = motor_fs::MotorFs::open(Box::new(device)).await?;
 
                 async fn entry(
@@ -1605,9 +1489,9 @@ entries: []
 
                 for (path, expected) in [
                     ("/", "rwxr-xr-x"),
-                    ("/system/bin/script", "r-xr-xr-x"),
+                    ("/system/bin/sh", "r-xr-xr-x"),
                     ("/user/bin/elf", "r-xr-xr-x"),
-                    ("/devtools/bin/script", "rwxrwxr-x"),
+                    ("/user/bin/dev/script", "rwxrwxr-x"),
                 ] {
                     let id = entry(&fs, Path::new(path)).await?;
                     let mode = fs
@@ -1643,14 +1527,14 @@ entries: []
         fs::write(root.join("nested/.lorry/vendor/object"), "generated\n").unwrap();
 
         let mut files = BTreeMap::new();
-        add_source_dir(&mut files, root.clone(), Path::new("/devtools/src/example"));
+        add_source_dir(&mut files, root.clone(), Path::new("/none/dev/example"));
 
         let destinations: Vec<_> = files.keys().map(String::as_str).collect();
         assert_eq!(
             destinations,
             [
-                "/devtools/src/example/Cargo.toml",
-                "/devtools/src/example/src/main.rs"
+                "/none/dev/example/Cargo.toml",
+                "/none/dev/example/src/main.rs"
             ]
         );
 
@@ -1663,10 +1547,7 @@ entries: []
             .collect();
         assert_eq!(
             staged,
-            [
-                "/devtools/src/example/src/main.rs",
-                "/user/cfg/example/main.rs"
-            ]
+            ["/none/dev/example/src/main.rs", "/user/cfg/example/main.rs"]
         );
         fs::remove_dir_all(root).unwrap();
     }

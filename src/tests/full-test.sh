@@ -1,1753 +1,2138 @@
 #!/bin/bash
+# Build checks, native Linux tests, and a disposable standard-image gate.
+set -euo pipefail
 
-WD="$(dirname "$0")"
-# The option loop below consumes "$@", which the timed run still needs.
-ORIGINAL_ARGS=("$@")
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT_DIR/src/tests/cross-test.sh"
 
-BUILD="debug"
-VMM=qemu
-# Guest size. The defaults match the VM launchers; --cpus and --memory pick a different guest.
-CPUS="${MOTO_SMP-4}"
-MEMORY_MIB="${MOTO_MEMORY_MIB-1024}"
-SEEN_RELEASE=0
-SEEN_VMM=0
-SEEN_CPUS=0
-SEEN_MEMORY=0
-usage() { echo "usage: $0 [--release] [--vmm qemu|chv|fc] [--cpus N] [--memory MIB]" >&2; exit 2; }
-positive_integer() { case "$1" in "" | *[!0-9]* | 0*) return 1 ;; esac; }
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --release)
-      [ "$SEEN_RELEASE" = 0 ] || { echo "full-test: duplicate --release" >&2; exit 2; }
-      BUILD=release
-      SEEN_RELEASE=1
-      shift
-      ;;
-    --cpus | --cpus=*)
-      [ "$SEEN_CPUS" = 0 ] || { echo "full-test: duplicate --cpus" >&2; exit 2; }
-      case "$1" in
-        --cpus=*) CPUS="${1#--cpus=}"; shift ;;
-        *) [ "$#" -ge 2 ] || { echo "full-test: --cpus requires a vCPU count" >&2; exit 2; }
-           CPUS="$2"; shift 2 ;;
-      esac
-      SEEN_CPUS=1
-      ;;
-    --memory | --memory=*)
-      [ "$SEEN_MEMORY" = 0 ] || { echo "full-test: duplicate --memory" >&2; exit 2; }
-      case "$1" in
-        --memory=*) MEMORY_MIB="${1#--memory=}"; shift ;;
-        *) [ "$#" -ge 2 ] || { echo "full-test: --memory requires a size in MiB" >&2; exit 2; }
-           MEMORY_MIB="$2"; shift 2 ;;
-      esac
-      SEEN_MEMORY=1
-      ;;
-    --vmm)
-      [ "$SEEN_VMM" = 0 ] || { echo "full-test: duplicate --vmm" >&2; exit 2; }
-      [ "$#" -ge 2 ] || { echo "full-test: --vmm requires qemu, chv, or fc" >&2; exit 2; }
-      VMM="$2"
-      SEEN_VMM=1
-      shift 2
-      ;;
-    --vmm=*)
-      [ "$SEEN_VMM" = 0 ] || { echo "full-test: duplicate --vmm" >&2; exit 2; }
-      VMM="${1#--vmm=}"
-      SEEN_VMM=1
-      shift
-      ;;
-    *) usage ;;
-  esac
-done
-positive_integer "$CPUS" || { echo "full-test: CPU count must be a positive integer" >&2; exit 2; }
-positive_integer "$MEMORY_MIB" || { echo "full-test: memory must be a positive integer (MiB)" >&2; exit 2; }
-export MOTO_SMP="$CPUS"
-export MOTO_MEMORY_MIB="$MEMORY_MIB"
-case "$VMM" in qemu|chv|fc) ;; *) echo "full-test: unsupported VMM '$VMM'" >&2; exit 2 ;; esac
-if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = 1 ] && [ "$VMM" = fc ]; then
-  echo "full-test: Firecracker does not support developer images" >&2
-  exit 2
-fi
-
-vmm_host_tool() {
-  case "$1" in
-    qemu) echo qemu-system-x86_64 ;;
-    chv) echo cloud-hypervisor-static ;;
-    fc) echo firecracker ;;
-  esac
-}
-
-vmm_label() {
-  case "$1" in
-    qemu) echo QEMU ;;
-    chv) echo "Cloud Hypervisor" ;;
-    fc) echo Firecracker ;;
-  esac
-}
-
-# The selected VMM is required. The standard suite also boots the other VMMs;
-# a host without one of them skips that boot check and says so at the very end.
-command -v "$(vmm_host_tool "$VMM")" >/dev/null 2>&1 || {
-  echo "full-test: required host tool is missing: $(vmm_host_tool "$VMM")" >&2
-  exit 1
-}
-SKIPPED_BOOT_VMMS=()
-if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != 1 ]; then
-  for boot_vmm in qemu chv fc; do
-    [ "$boot_vmm" = "$VMM" ] ||
-      command -v "$(vmm_host_tool "$boot_vmm")" >/dev/null 2>&1 ||
-      SKIPPED_BOOT_VMMS+=("$boot_vmm")
+full_options() {
+  # The gate builds and boots the release image. --release selects the release
+  # profile for native tests. --all-debug (manual runs only, never automation)
+  # builds and boots the debug image and runs every check in debug.
+  BUILD=release
+  TEST_BUILD=debug
+  VMM=chv
+  CPUS="${MOTO_SMP-4}"
+  FULL=0
+  local option value
+  local -A seen=()
+  while [ "$#" -gt 0 ]; do
+    option="${1%%=*}"
+    [ -z "${seen[$option]:-}" ] || { echo "duplicate option: $option" >&2; return 2; }
+    seen[$option]=1
+    case "$option" in
+      --release) [ "$1" = --release ] || return 2; TEST_BUILD=release; shift ;;
+      --all-debug) [ "$1" = --all-debug ] || return 2; BUILD=debug; shift ;;
+      --full) [ "$1" = --full ] || return 2; FULL=1; shift ;;
+      --vmm|--cpus|--memory)
+        if [[ "$1" == *=* ]]; then value="${1#*=}"; shift
+        else
+          [ "$#" -ge 2 ] || { echo "$option requires a value" >&2; return 2; }
+          value="$2"; shift 2
+        fi
+        case "$option" in --vmm) VMM="$value" ;; --cpus) CPUS="$value" ;; --memory) MEMORY_MIB="$value" ;; esac ;;
+      *) echo "usage: $0 [--release | --all-debug] [--full] [--vmm chv|qemu|fc] [--cpus N] [--memory MIB]" >&2; return 2 ;;
+    esac
   done
-fi
-
-if [ "${FULL_TEST_TIMEOUT_ACTIVE:-0}" != "1" ]; then
-  export FULL_TEST_TIMEOUT_ACTIVE=1
-  # Debug builds and developer-image checks need the larger overall budget.
-  # A single vCPU serializes everything the guest does, so it gets twice the
-  # time: 30 minutes for the release suite instead of 15.
-  TIMEOUT=1800
-  if [ "$BUILD" = "release" ] && [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
-    TIMEOUT=900
+  if [ "$BUILD:$TEST_BUILD" = debug:release ]; then
+    echo "--all-debug and --release are mutually exclusive" >&2; return 2
   fi
-  [ "$CPUS" -ge 2 ] || TIMEOUT=$((TIMEOUT * 2))
+  if [ -z "${seen[--memory]:-}" ]; then
+    case "$TEST_BUILD" in
+      debug) MEMORY_MIB="${MOTO_MEMORY_MIB-8192}" ;;
+      release) MEMORY_MIB="${MOTO_MEMORY_MIB-4096}" ;;
+    esac
+  fi
+  case "$VMM" in chv|qemu|fc) ;; *) echo "unsupported VMM: $VMM" >&2; return 2 ;; esac
+  for value in "$CPUS" "$MEMORY_MIB"; do
+    case "$value" in ''|*[!0-9]*|0*) echo 'CPU and memory values must be positive integers' >&2; return 2 ;; esac
+  done
+  export MOTO_SMP="$CPUS" MOTO_MEMORY_MIB="$MEMORY_MIB"
+  PROFILE_ARGS=()
+  [ "$BUILD" != release ] || PROFILE_ARGS=(--release)
+  NATIVE_ARGS=()
+  [ "$TEST_BUILD" != release ] || NATIVE_ARGS=(--release)
+  [ "$FULL" != 1 ] || NATIVE_ARGS+=(--full)
+}
 
-  minutes() {
-    awk -v seconds="$1" 'BEGIN { printf "%.1f", seconds / 60 }'
+full_check_toolchain() (
+  local channel="$1" package="motor-toolchain-$1"
+  local archive="${MOTORH:-$ROOT_DIR/..}/$package.tar.zst"
+  local rustlib=lib/rustlib/x86_64-unknown-motor crt=user/lib/llvm/lib/crt1.o
+  local sysroot rustc_version clang_version lld_version expected work images
+  local rustup_compiler compiler checked_sysroot=
+  fail() { echo "full-test: $*" >&2; exit 1; }
+
+  [ -f "$archive" ] || fail "missing native toolchain archive: $archive"
+  rustup_compiler="$(rustup which rustc)" || fail "cannot locate the installed $channel toolchain"
+  mismatch() {
+    fail "toolchain at $sysroot differs from $archive. Install the matching $package-x86_64-linux.tar.zst (see docs/toolchain.md)."
+  }
+  # The native archive carries the same Motor Rust libraries and C startup
+  # object as the host cross sysroot. Read the original release before repackaging.
+  work="$(mktemp -d)" || return 1
+  trap 'rm -r -- "$work"' EXIT
+  images="$work/$package/images"
+  tar -xf "$archive" -C "$work" "$package/images/rustc/user/lib/rust/$rustlib/lib" \
+    "$package/images/llvm/$crt" "$package/images/motor/user/bin/dev/lorry" ||
+    fail "cannot read the toolchain reference files from $archive"
+
+  # Lorry in the release records the full rustc, Clang and LLD producer
+  # strings, including the LLVM repository even for builds of the same commit.
+  expected="$(LC_ALL=C readelf -p .comment "$images/motor/user/bin/dev/lorry" |
+    sed -n 's/^ *\[[^]]*\]  //p')" || fail "cannot read compiler identities from $archive"
+  [ -n "$expected" ] || fail "release Lorry has no compiler identities in $archive"
+  check_stamp() {
+    if ! grep -Fxq -- "$1" <<< "$expected"; then
+      printf 'Installed: %s\nArchive compiler identities:\n%s\n' "$1" "$expected" >&2
+      mismatch
+    fi
   }
 
-  # Building the artifacts is not testing: the first run after
-  # src/build-motor-os.sh compiles the whole tree, which alone outlasts the
-  # budget above. Prepare first, outside the timeout, and time the two apart.
-  preparation_started="$SECONDS"
-  "$WD/full-test-prepare.sh" "$BUILD" "$VMM" || exit "$?"
-  preparation_seconds=$((SECONDS - preparation_started))
-
-  # Let bash put timeout's process group in the foreground. Without job control,
-  # timeout moves the suite into a background process group; a terminal
-  # operation can then stop timeout and the entire suite with SIGTTIN/SIGTTOU.
-  # Keeping timeout's separate group preserves its whole-process-tree timeout.
-  echo "full-test: starting $BUILD tests ($VMM)"
-  testing_started="$SECONDS"
-  set -m
-  timeout "${TIMEOUT}s" "$0" "${ORIGINAL_ARGS[@]}" < /dev/null
-  status=$?
-  main_status=$status
-  set +m
-  if [ "$status" -eq 0 ]; then
-    # Block-mount fixtures have their own deadline; the one-vCPU main suite
-    # already consumes its budget. Keep the existing main deadline unchanged.
-    block_mount_args=(--vmm "$VMM")
-    [ "$BUILD" != release ] || block_mount_args+=(--release)
-    "$WD/test-block-mounts.sh" "${block_mount_args[@]}" || status=$?
-  fi
-  testing_seconds=$((SECONDS - testing_started))
-  if [ "$main_status" -eq 124 ]; then
-    echo "full-test: timed out after $TIMEOUT seconds of testing" >&2
-  elif [ "$status" -ne 0 ]; then
-    echo "FULL TEST FAIL: status $status after $(minutes "$testing_seconds") minutes of testing" >&2
-  else
-    printf 'FULL TEST PASS: preparation steps: %s minutes, testing: %s minutes\n' \
-      "$(minutes "$preparation_seconds")" "$(minutes "$testing_seconds")"
-    for boot_vmm in "${SKIPPED_BOOT_VMMS[@]}"; do
-      echo "NOTE: the $(vmm_label "$boot_vmm") boot check was skipped:" \
-        "$(vmm_host_tool "$boot_vmm") was not found"
-    done
-  fi
-  exit "$status"
-fi
-
-# Abort on error and name the command that failed. Until the EXIT trap below
-# is installed, a failing host-only phase would otherwise end the suite with
-# no diagnostic at all; errtrace carries the trap into functions.
-set -eE
-report_failed_command() {
-  local command="${3%%$'\n'*}"
-  echo "full-test: FAILED: $2${4:+ in $4()}: ${command:0:160} (status $1)" >&2
-}
-trap 'report_failed_command "$?" "${BASH_SOURCE[0]}:$LINENO" "$BASH_COMMAND" "${FUNCNAME[0]:-}"' ERR
-
-# The repo root is two levels up from src/tests/.
-ROOT_DIR="$WD/../.."
-. "$WD/vm-console-filter.sh"
-. "$WD/vm-test-boot.sh"
-. "$WD/vm-test-boot-check.sh"
-. "$WD/vm-test-selection.sh"
-
-# Host russhd tests also use this key, before the VM tests below.
-test_vm_configure_ssh
-
-# Host-only regression for upgrading an existing IPv4-only moto-tap after the
-# IPv6 test network was introduced.
-"$WD/test-build-base-networking.sh"
-"$WD/test-external-sources.sh"
-"$WD/test-wasm-selection.sh"
-"$WD/test-sys-lib-workspace.sh"
-"$WD/test-full-test-size.sh"
-"$WD/test-vm-console-filter.sh"
-"$WD/test-vm-image-format.sh"
-"$WD/test-vm-vsock-backend.sh"
-"$WD/test-dev-memory-contract.sh"
-"$WD/test-rust-analyzer-size-contract.sh"
-"$WD/test-rustfmt-size-contract.sh"
-"$WD/test-make-driver.sh"
-bash "$WD/test-net-contract.sh"
-python3 "$WD/test-helix-lsp-ready.py"
-if [ "$BUILD" = "release" ]; then
-  bash "$WD/test-rmux-copy-status.sh" --self-test --release
-else
-  bash "$WD/test-rmux-copy-status.sh" --self-test
-fi
-if [ "$BUILD" = "release" ]; then
-  "$WD/test-rust-analyzer.sh" --release
-else
-  "$WD/test-rust-analyzer.sh"
-fi
-# Keep a local runtime version bump from breaking only the dev-image suite.
-python3 "$WD/test-dev-path-locks.py"
-
-TEST_VM_PHASE=standard
-if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = 1 ]; then
-  TEST_VM_PHASE=developer
-fi
-select_test_vm "$ROOT_DIR" "$BUILD" "$TEST_VM_PHASE" "$VMM"
-IMG_TARGET="${FULL_TEST_IMG_TARGET:-$TEST_VM_IMG_TARGET}"
-export MOTO_IMAGE="${FULL_TEST_IMAGE:-$TEST_VM_IMAGE}"
-case "$VMM:$MOTO_IMAGE" in
-  fc:*.img|fc:*.raw|qemu:*.qcow2|qemu:*.img|qemu:*.raw|chv:*.qcow2|chv:*.img|chv:*.raw) ;;
-  fc:*) echo "full-test: Firecracker requires a raw image, not '$MOTO_IMAGE'" >&2; exit 2 ;;
-  *) echo "full-test: unsupported image filename '$MOTO_IMAGE'" >&2; exit 2 ;;
-esac
-IMAGE_TARGETS=("$IMG_TARGET")
-if [ "$TEST_VM_PHASE" = standard ]; then
-  for required_target in main.img base.img; do
-    [ "$IMG_TARGET" = "$required_target" ] || IMAGE_TARGETS+=("$required_target")
+  # Make uses rustc on PATH, the native tests ask rustup, and Cargo honors RUSTC.
+  local compilers=(rustc "$rustup_compiler")
+  [ -z "${RUSTC:-}" ] || compilers+=("$RUSTC")
+  for compiler in "${compilers[@]}"; do
+    sysroot="$("$compiler" --print sysroot)" || fail "cannot locate the sysroot for $compiler"
+    rustc_version="$("$compiler" --version)" || mismatch
+    [[ "$rustc_version" == *" ($channel)" ]] || { echo "$rustc_version" >&2; mismatch; }
+    check_stamp "rustc version ${rustc_version#rustc }"
+    [[ "$sysroot" -ef "$checked_sysroot" ]] && continue
+    checked_sysroot="$sysroot"
+    clang_version="$("$sysroot/$rustlib/sysroot/bin/motor-clang" --version)" || mismatch
+    lld_version="$("$sysroot/lib/rustlib/x86_64-unknown-linux-gnu/bin/ld.lld" --version)" || mismatch
+    check_stamp "${clang_version%%$'\n'*}"
+    check_stamp "Linker: ${lld_version% (compatible with GNU linkers)}"
+    cmp "$images/llvm/$crt" "$sysroot/$rustlib/sysroot/$crt" || mismatch
+    diff -qr "$images/rustc/user/lib/rust/$rustlib/lib" "$sysroot/$rustlib/lib" || mismatch
   done
-fi
-echo "full-test: runner=$TEST_VM_RUNNER profile=$TEST_VM_PROFILE target=$IMG_TARGET image=$MOTO_IMAGE cpus=$MOTO_SMP memory=${MOTO_MEMORY_MIB}MiB"
+  echo "full-test: installed toolchain matches $channel"
+)
 
-# Build the image under test before running the tests.
-if [ "$BUILD" = "release" ]; then
-  bash "$WD/test-moto-ipc-sync.sh" --release
-  make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" systest sysbox-tests mio-test tokio-tests wg-self-test \
-    crossterm-smoke BUILD=release -j"$(nproc)"
-  (cd "$ROOT_DIR/src/imager" && cargo test --release)
-  bash "$WD/test-kloader-image.sh" --release
-else
-  bash "$WD/test-moto-ipc-sync.sh"
-  make -C "$ROOT_DIR" "${IMAGE_TARGETS[@]}" systest sysbox-tests mio-test tokio-tests wg-self-test \
-    crossterm-smoke -j"$(nproc)"
-  (cd "$ROOT_DIR/src/imager" && cargo test)
-  bash "$WD/test-kloader-image.sh"
-fi
+full_prepare() {
+  local targets=(images raw.img systest crossterm-smoke wg-self-test rnetbench)
+  local crate
+  make -C "$ROOT_DIR" -j"$(nproc)" BUILD="$BUILD" "${targets[@]}"
+  # Native development tools are distributed as release builds. Test harnesses
+  # still use the gate's selected debug or release profile on both machines.
+  if [ "$VMM" != fc ]; then
+    make -C "$ROOT_DIR" -j"$(nproc)" BUILD=release toolchain-archive
+  fi
+  "$ROOT_DIR/src/build-scripts/native-test-inputs.sh" "${NATIVE_ARGS[@]}"
+  for crate in src/imager src/sys/tools/wg/host-peer; do
+    cargo fetch --locked --manifest-path "$ROOT_DIR/$crate/Cargo.toml"
+  done
+  host_sdk_package --prepare "${PROFILE_ARGS[@]}"
+}
 
-if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
-  # The imager tests that only the developer-image suite runs are #[ignore]d.
-  if [ "$BUILD" = "release" ]; then
-    (cd "$ROOT_DIR/src/imager" && cargo test --release resize -- --ignored)
+host_path_locks() {
+  local crate metadata source= resolved
+  for crate in curl lorry; do
+    # --locked rejects a local package/version change before building anything.
+    cargo metadata --manifest-path "$ROOT_DIR/src/bin/$crate/Cargo.toml" \
+      --format-version 1 --locked --offline > /dev/null
+  done
+  for crate in gix lorry; do
+    metadata="$(cargo metadata --manifest-path "$ROOT_DIR/src/bin/$crate/Cargo.toml" --format-version 1 --locked --offline)"
+    resolved="$(jq -er '[.packages[].source // empty | select(startswith("git+https://github.com/moturus/gitoxide.git?"))] | unique | if length == 1 then .[0] else error("multiple gitoxide sources") end' <<< "$metadata")"
+    [[ "$resolved" =~ ^git\+https://github.com/moturus/gitoxide.git\?branch=gix-moturus-cli#[0-9a-f]{40}$ ]] ||
+      cross_fail "$crate does not pin the shared gitoxide branch"
+    [ -z "$source" ] || [ "$source" = "$resolved" ] || cross_fail 'gix and Lorry resolve different gitoxide commits'
+    source="$resolved"
+  done
+}
+
+host_resolution_oracles() (
+  local inputs
+  inputs="$(mktemp -d "$ROOT_DIR/build/resolution-oracles.XXXXXX")"
+  trap 'rm -r "$inputs"' EXIT
+  cd "$ROOT_DIR/src/bin/lorry"
+  LORRY_RESOLUTION_ORACLE_EXPORT="$inputs" cargo test --release --locked --offline \
+    --bin lorry frozen_
+  for directory in "$inputs"/*; do
+    (cd "$directory/root" && cargo generate-lockfile --offline)
+    cmp "$directory/expected.lock" "$directory/root/Cargo.lock"
+  done
+)
+
+full_install_toolchain() {
+  local package="motor-toolchain-$1" archive
+  archive="$ROOT_DIR/build/toolchain/release/$package.tar.zst"
+  [ -f "$archive" ] || cross_fail "missing toolchain archive: $archive"
+  copy_test_image "$CROSS_IMAGE" installed
+  FULL_IMAGE="$VM_DIR/$MOTO_IMAGE"
+  boot_test_image install
+  wait_vm_ssh
+  check_guest_image_layout
+  vm_ssh 'mkdir -p /none/dev/toolchain-install'
+  printf 'put "%s" "/none/dev/toolchain-install/%s.tar.zst"\n' "$archive" "$package" | vm_sftp
+  # Preserve archive permissions relative to the Interactive installer.
+  vm_ssh "tar -xf /none/dev/toolchain-install/$package.tar.zst -C /none/dev/toolchain-install"
+  full_check_installation "$package"
+  shutdown_test_image
+}
+
+full_upload_native_inputs() {
+  local inputs="$ROOT_DIR/build/native-test-inputs" directory path
+  echo 'full-test: uploading native working-tree snapshot'
+  vm_ssh 'MOTOR_OS_CAPS=0x204 mkdir -p /none/dev/motor-os'
+  vm_ssh 'MOTOR_OS_CAPS=0x204 tar -xf - -C /none/dev/motor-os' < "$inputs/working-tree.tar"
+  if [ "$FULL" = 1 ]; then
+    vm_ssh 'MOTOR_OS_CAPS=0x204 tar -xf - -C /none/dev/motor-os' < "$inputs/helix-source.tar"
+  fi
+  # Git exports include executable source files. Extract as None so their
+  # provenance hashes are identical to the verified sources on the host.
+  while IFS= read -r manifest; do
+    directory="${manifest%/Cargo.toml}"
+    path="$directory/.lorry/vendor/git"
+    if [ -d "$inputs/source/$path" ]; then
+      echo "full-test: uploading Git dependencies for $directory"
+      tar -C "$inputs/source" -cf - "$path" |
+        vm_ssh 'MOTOR_OS_CAPS=0x204 tar -xf - -C /none/dev/motor-os'
+    fi
+  done < "$inputs/workspaces"
+  echo 'full-test: uploading shared native dependencies'
+  vm_ssh 'mkdir -p /user/dev/lorry'
+  tar -C "$inputs" -cf - vendor | vm_ssh 'tar -xf - -C /user/dev/lorry'
+  printf 'put "%s" "/none/dev/vendor-executables"\n' "$inputs/vendor-executables" | vm_sftp
+  vm_ssh 'while IFS= read -r path; do chmod rwxr-xr-x "/user/dev/lorry/vendor/$path" || exit; done < /none/dev/vendor-executables'
+  vm_ssh 'rm /none/dev/vendor-executables'
+  guest_mode /user/dev/lorry drwxrwxr-x
+  vm_ssh 'MOTOR_OS_CAPS=0x204 cat /user/dev/lorry/vendor/repository.toml' >/dev/null
+  if vm_ssh "MOTOR_OS_CAPS=0x204 /user/bin/rush -c 'echo denied >>/user/dev/lorry/vendor/repository.toml'" >/dev/null 2>&1; then
+    cross_fail 'None can modify the Interactive dependency repository'
+  fi
+  if [ "$TEST_BUILD" = release ]; then
+    vm_ssh 'MOTOR_OS_CAPS=0x204 mkdir /none/dev/quickjs-test262'
+    vm_ssh 'MOTOR_OS_CAPS=0x204 tar -xf - -C /none/dev/quickjs-test262' < "$inputs/quickjs-source.tar"
+    vm_ssh 'MOTOR_OS_CAPS=0x204 tar -xf - -C /none/dev/quickjs-test262' < "$inputs/quickjs-test262.tar.zst"
+  fi
+}
+
+full_native_guest() {
+  copy_test_image "$FULL_IMAGE" native
+  boot_test_image native
+  wait_vm_ssh
+  check_guest_image_layout
+  full_upload_native_inputs
+  cross_upload_wasm_inputs
+  local caps
+  for caps in 0x3ec 0x3a4; do
+    echo "full-test: native Motor tests, capabilities=$caps"
+    vm_ssh "MOTOR_OS_CAPS=$caps NATIVE_TEST_CAPS=$caps /user/bin/rush /none/dev/motor-os/src/tests/full-native-test.sh ${NATIVE_ARGS[*]}"
+  done
+  shutdown_test_image
+}
+
+full_host_checks() {
+  (cd "$ROOT_DIR/src/imager" && cargo test --locked --offline "${PROFILE_ARGS[@]}")
+  (cd "$ROOT_DIR/src/imager" && cargo test --locked --offline "${PROFILE_ARGS[@]}" resize -- --ignored)
+  # The independent upstream WireGuard peer is a Linux-only cross-test tool.
+  (cd "$ROOT_DIR/src/sys/tools/wg/host-peer" && cargo test --locked --offline "${PROFILE_ARGS[@]}")
+  host_build_base_networking
+  host_make_driver
+  host_kloader_image "${PROFILE_ARGS[@]}"
+  host_external_sources
+  host_toolchain_archive
+  host_full_toolchain
+  host_toolchain_bootstrap
+  host_net_contract
+  host_vm_image_format
+  host_vm_console_filter
+  host_vm_vsock_backend
+  host_full_options
+  host_path_locks
+  host_resolution_oracles
+  host_sdk_package "${PROFILE_ARGS[@]}"
+  host_tool_sizes
+  host_unwind_elf
+}
+
+full_main() {
+  full_options "$@"
+  cd "$ROOT_DIR"
+  local channel
+  channel="$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' rust-toolchain.toml)"
+  [[ "$channel" =~ ^[A-Za-z0-9._-]+$ ]] || cross_fail 'expected one toolchain channel in rust-toolchain.toml'
+  full_check_toolchain "$channel" || return 1
+  full_prepare
+  full_host_checks
+  "$ROOT_DIR/src/tests/full-native-test.sh" "${NATIVE_ARGS[@]}"
+  cross_options "${PROFILE_ARGS[@]}" --vmm "$VMM" --cpus "$CPUS" --memory "$MEMORY_MIB"
+  cross_setup
+  if [ "$VMM" = fc ]; then
+    FULL_IMAGE="$CROSS_IMAGE"
+    echo 'SKIP Firecracker: toolchain archive installation'
   else
-    (cd "$ROOT_DIR/src/imager" && cargo test resize -- --ignored)
+    full_install_toolchain "$channel"
   fi
-  "$WD/test-rust-analyzer-size.sh"
-  "$WD/test-rustfmt-size.sh"
-  "$WD/test-gix.sh" --host
-fi
-
-# Run selected-VMM outgoing acceptance and discovery with and without a device
-# before the longer-lived acceptance VMs.
-if [ "$BUILD" = "release" ]; then
-  "$WD/test-vsock.sh" --release --vmm "$VMM"
-else
-  "$WD/test-vsock.sh" --vmm "$VMM"
-fi
-
-# The benchmark's deadline tests use deliberately stalled host TCP peers.
-if [ "$BUILD" = "release" ]; then
-  cargo test --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml" --release
-else
-  cargo test --manifest-path "$ROOT_DIR/src/bin/rnetbench/Cargo.toml"
-fi
-
-# The host-side tests of the terminal programs: the parts that need no Motor OS
-# at all run on Linux in seconds, so they run before the VM is even booted.
-# rush's are here because its line editor is testable only over a terminal, and
-# a pty is the one this host has -- including a resize, which on a pty is a
-# `SIGWINCH` and on a Motor console is the answer to an `ESC[6n`.
-for crate in red rmux rush russhd wg; do
-  profile_args=()
-  if [ "$BUILD" = "release" ]; then
-    profile_args+=(--release)
-  fi
-  (cd "$ROOT_DIR/src/bin/$crate" && cargo test --quiet "${profile_args[@]}")
-done
-cargo test "${profile_args[@]}" --manifest-path "$WD/wasm-smoke-suite/Cargo.toml"
-# Independent upstream WireGuard peer and its localhost transport tests.
-(cd "$ROOT_DIR/src/tests/wg-peer" && cargo test --quiet --locked "${profile_args[@]}")
-# The crossterm revision Rush ships: its own tests, and Rush's pty tests over
-# the Unix event source the pass above does not use.
-bash "$WD/test-crossterm-host.sh" "${profile_args[@]}"
-
-# Static HTTP serving, including default protocol restrictions and TLS.
-if [ "$BUILD" = "release" ]; then
-  "$ROOT_DIR/src/bin/httpd-axum/tests/run.sh" --release
-else
-  "$ROOT_DIR/src/bin/httpd-axum/tests/run.sh"
-fi
-
-# sys-init's dependency-free config parser is host-tested separately from its
-# Motor-only process-management binary.
-if [ "$BUILD" = "release" ]; then
-  cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/sys-init/Cargo.toml"
-  cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/lib/moto-sys/Cargo.toml"
-else
-  cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/sys-init/Cargo.toml"
-  cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/moto-sys/Cargo.toml"
-fi
-
-# The SDK's portable modules, host-tested with and without std; the rest of
-# the SDK is Motor-only and tested natively by full-test-dev.sh.
-if [ "$BUILD" = "release" ]; then
-  cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/lib/moto-sdk/Cargo.toml"
-  cargo test --quiet --release --no-default-features --manifest-path "$ROOT_DIR/src/sys/lib/moto-sdk/Cargo.toml"
-else
-  cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/moto-sdk/Cargo.toml"
-  cargo test --quiet --no-default-features --manifest-path "$ROOT_DIR/src/sys/lib/moto-sdk/Cargo.toml"
-fi
-# The SDK as crates.io would ship it, built against registry dependencies.
-bash "$WD/test-sdk-package.sh" "${profile_args[@]}"
-
-# The allocator crate (kernel heap and runtime) is host-tested. Release
-# covers the full stress and concurrency step counts.
-if [ "$BUILD" = "release" ]; then
-  cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/lib/frusa/Cargo.toml"
-else
-  cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/lib/frusa/Cargo.toml"
-fi
-
-# The netstack's own tests, under the exact feature closure sys-io builds it
-# with: its packet-facing regressions run nowhere else in this suite, and a
-# feature set that differs from sys-io's compiles different code.
-NETSTACK_FEATURES="async,assembler-max-segment-count-32,fragmentation-buffer-size-65536,iface-neighbor-cache-count-64,medium-ethernet,medium-ip,proto-ipv4,proto-ipv4-fragmentation,proto-ipv6,proto-ipv6-fragmentation,reassembly-buffer-count-4,reassembly-buffer-size-65536,socket-dhcpv4,socket-icmp,socket-tcp,socket-udp"
-if [ "$BUILD" = "release" ]; then
-  cargo test --release \
-    --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \
-    --no-default-features --features "$NETSTACK_FEATURES"
-else
-  cargo test \
-    --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \
-    --no-default-features --features "$NETSTACK_FEATURES"
-fi
-
-# SLAAC is optional in sys-io; exercise its route merging alongside the
-# interface tests without changing the production feature set above.
-cargo test --locked --offline "${profile_args[@]}" \
-  --manifest-path "$ROOT_DIR/src/sys/sys-io/netstack/Cargo.toml" \
-  --no-default-features --features "$NETSTACK_FEATURES,proto-ipv6-slaac" \
-  --lib iface::
-
-# The test-only image changes only sys-init.cfg, through a later static overlay,
-# and proves the opt-in System serial session without changing standard-image
-# role expectations.
-if [ "$BUILD" = "release" ]; then
-  "$WD/test-system-tty.sh" --release --vmm "$VMM"
-else
-  "$WD/test-system-tty.sh" --vmm "$VMM"
-fi
-
-# The terminal acceptance suite (docs/tui.md) boots its own VM: the sys-tty
-# console check needs the serial console's stdin, which this script never
-# connects. It runs before this script's VM starts, since both use the same
-# tap interface and address.
-if [ "$BUILD" = "release" ]; then
-  FULL_TEST_IMAGE_PREBUILT=1 "$WD/test-tui.sh" --release --vmm "$VMM"
-else
-  FULL_TEST_IMAGE_PREBUILT=1 "$WD/test-tui.sh" --vmm "$VMM"
-fi
-
-# In-band terminal size (docs/tui.md), from the application's end. Its
-# console check answers the serial line as a
-# mode-2048-capable terminal, so it needs that stdin too and boots its own VM
-# for it -- and, like the suite above, must have the tap to itself.
-if [ "$BUILD" = "release" ]; then
-  FULL_TEST_IMAGE_PREBUILT=1 "$WD/test-terminal-size.sh" --release --vmm "$VMM"
-else
-  FULL_TEST_IMAGE_PREBUILT=1 "$WD/test-terminal-size.sh" --vmm "$VMM"
-fi
-
-# Several SSH keys per login name, and remote key installation. It provisions a
-# disposable image and reboots it, so it boots its own VM, for the same reason.
-# Credentials are the same on every image, and a staged update of the developer
-# image would copy all 16 GiB of it, so this runs in the standard phase only.
-if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
-  if [ "$BUILD" = "release" ]; then
-    FULL_TEST_IMAGE_PREBUILT=1 "$WD/test-sshd-keys.sh" --release --vmm "$VMM"
+  CROSS_IMAGE="$FULL_IMAGE"
+  cross_run
+  if [ "$VMM" = fc ]; then
+    echo 'SKIP Firecracker: native Motor crate and installed-tool tests'
   else
-    FULL_TEST_IMAGE_PREBUILT=1 "$WD/test-sshd-keys.sh" --vmm "$VMM"
+    full_native_guest
   fi
-fi
-
-# motor-fs's own tests: the filesystem's B+tree, transaction log, resize and
-# readdir paths are covered here and nowhere else, against a host file-backed
-# block device, in about a second. Must run from the crate directory --
-# `src/sys/lib/motor-fs/.cargo/config.toml` supplies `--cfg tokio_unstable`,
-# and cargo reads config only from the cwd and its ancestors, so a
-# --manifest-path invocation from elsewhere drops the flag and fails to build.
-if [ "$BUILD" = "release" ]; then
-  (cd "$ROOT_DIR/src/sys/lib/motor-fs" && cargo test --quiet --release --features image-admin)
-else
-  (cd "$ROOT_DIR/src/sys/lib/motor-fs" && cargo test --quiet --features image-admin)
-fi
-
-# memfs shares these runtime-free tests with its native Lorry test harness.
-if [ "$BUILD" = "release" ]; then
-  cargo test --quiet --release --manifest-path "$ROOT_DIR/src/sys/Cargo.toml" -p memfs
-else
-  cargo test --quiet --manifest-path "$ROOT_DIR/src/sys/Cargo.toml" -p memfs
-fi
-
-. "$WD/test-roots.sh"
-RMUX_TMPDIR="$TEST_TMP/full-test-rmux"
-
-vm_ssh_stdout() {
-  vm_ssh "$@"
+  echo "full-test: PASS ($BUILD image, $TEST_BUILD tests, $VMM)"
 }
 
-vm_rmux() {
-  vm_ssh "TMPDIR=$RMUX_TMPDIR" /user/bin/rmux
-}
+host_build_base_networking() (
 
-. "$WD/test-udp-fragmentation.sh"
-. "$WD/test-wireguard.sh"
-. "$WD/test-ssh-client-host.sh"
-. "$WD/test-rush-script-caps.sh"
+set -euo pipefail
 
-# Some environments (e.g. a dev host behind qemu user-mode networking) cannot
-# send external ICMP echo at all; probe once so external pings can tolerate it.
-EXTERNAL_ICMP=1
-ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 || EXTERNAL_ICMP=0
+. "$ROOT_DIR/src/build-scripts/build-base.sh"
 
-# Ping an external host: name resolution must always succeed; a missing echo
-# reply is tolerated iff the test host itself has no external ICMP.
-ping_external() {
-  local host="$1"
-  local output
-
-  if output="$(vm_ssh /system/bin/ping -c 1 "$host" 2>&1)"; then
-    printf '%s\n' "$output"
-    return
-  fi
-  printf '%s\n' "$output"
-  if [ "$EXTERNAL_ICMP" = "0" ]; then
-    case "$output" in
-      *"Request timeout"*)
-        echo "NOTE: '$host' resolved; echo reply skipped (host has no external ICMP)"
-        return
-        ;;
-    esac
-  fi
-  fail "ping '$host' failed"
-}
-
-fail() {
-  echo "full-test: $*" >&2
+fail_test() {
+  echo "test-build-base-networking: $*" >&2
   exit 1
 }
 
-expect_ping_error() {
-  local host="$1"
-  local expected="$2"
-  local output
+ipv4=1
+ipv6=0
+sudo_calls=()
 
-  if output="$(vm_ssh /system/bin/ping -c 1 "$host" 2>&1)"; then
-    printf '%s\n' "$output"
-    fail "ping unexpectedly resolved '$host'"
-  fi
-  printf '%s\n' "$output"
-  case "$output" in
-    *"$expected"*) ;;
-    *) fail "ping '$host' did not report '$expected'" ;;
-  esac
-}
-
-wait_for_ping_error() {
-  local host="$1"
-  local expected="$2"
-  local output=""
-
-  for _ in $(seq 1 20); do
-    if output="$(vm_ssh /system/bin/ping -c 1 "$host" 2>&1)"; then
-      printf '%s\n' "$output"
-      fail "ping unexpectedly resolved '$host'"
-    fi
-    case "$output" in
-      *"$expected"*)
-        printf '%s\n' "$output"
-        return
-        ;;
-    esac
-    sleep 0.1
-  done
-
-  printf '%s\n' "$output"
-  fail "ping '$host' did not settle on '$expected'"
-}
-
-read_udp_socket_count() {
-  local expected="${1:-1}"
-  local output=""
-  local count=""
-  local last_count=""
-
-  for _ in $(seq 1 20); do
-    count=""
-    if output="$(vm_ssh /system/bin/stats get 2 2>&1)"; then
-      count="$(printf '%s\n' "$output" |
-        awk '$2 == "net.udp_sockets" { print $3 }')"
-      if [ "$count" = "$expected" ]; then
-        printf '%s\n' "$expected"
-        return
-      fi
-      [ -z "$count" ] || last_count="$count"
-    fi
-    sleep 0.1
-  done
-
-  if [ -n "$last_count" ]; then
-    printf '%s\n' "$last_count"
-    return
-  fi
-
-  printf '%s\n' "$output" >&2
-  fail "stats did not report net.udp_sockets"
-}
-
-DNS_RESOLVER_SSH_PID=""
-DNS_PORT_HOLDER_SSH_PID=""
-VMM_PID=""
-RMUX_TITLE_SSH_PID=""
-RMUX_TITLE_IN_FD=""
-RMUX_TITLE_OUT_FD=""
-
-# Preserve the suite's original failure while making teardown failure turn an
-# otherwise successful run into a failure.
-cleanup_full_test() {
-  local status="$1"
-  local cleanup_status=0
-  trap - EXIT
-  trap - ERR
-  set +e
-  if [ -n "$RMUX_TITLE_IN_FD" ]; then
-    exec {RMUX_TITLE_IN_FD}>&-
-  fi
-  if [ -n "$RMUX_TITLE_OUT_FD" ]; then
-    exec {RMUX_TITLE_OUT_FD}<&-
-  fi
-  if [ -n "$RMUX_TITLE_SSH_PID" ]; then
-    kill "$RMUX_TITLE_SSH_PID" 2>/dev/null
-    wait "$RMUX_TITLE_SSH_PID" 2>/dev/null
-  fi
-  cleanup_ssh_client_host
-  stop_udp_fragment_echo
-  if [ -n "$VMM_PID" ]; then
-    stop_test_vm_owned "$VMM" "$TEST_VM_LABEL" || cleanup_status=1
-  fi
-  if [ -n "$DNS_RESOLVER_SSH_PID" ]; then
-    kill "$DNS_RESOLVER_SSH_PID" 2>/dev/null
-    wait "$DNS_RESOLVER_SSH_PID"
-  fi
-  if [ -n "$DNS_PORT_HOLDER_SSH_PID" ]; then
-    kill "$DNS_PORT_HOLDER_SSH_PID" 2>/dev/null
-    wait "$DNS_PORT_HOLDER_SSH_PID"
-  fi
-  set -e
-  [ "$status" -ne 0 ] && return "$status"
-  return "$cleanup_status"
-}
-
-exit_full_test() {
-  local status=$?
-  local cleanup_status
-  if cleanup_full_test "$status"; then
-    cleanup_status=0
+cat() {
+  if [ "$#" -eq 1 ] && [ "$1" = /proc/sys/net/ipv4/ip_forward ]; then
+    printf '1\n'
   else
-    cleanup_status=$?
+    command cat "$@"
   fi
-  exit "$cleanup_status"
 }
-trap exit_full_test EXIT
 
-echo "Starting Motor OS test."
-echo "Console output is streamed below and saved to /tmp/full-test.log."
-if [ "$TEST_VM_PHASE" = standard ]; then
-  for boot_vmm in qemu chv fc; do
-    [ "$boot_vmm" != "$VMM" ] || continue
-    case " ${SKIPPED_BOOT_VMMS[*]} " in
-      *" $boot_vmm "*)
-        echo "full-test: skipping the $(vmm_label "$boot_vmm") boot check:" \
-          "$(vmm_host_tool "$boot_vmm") was not found"
-        continue
+ip() {
+  case "$*" in
+    '-o link show dev moto-tap')
+      printf '4: moto-tap: <BROADCAST,MULTICAST,UP> mtu 1500\n'
+      ;;
+    'link show moto-tap')
+      return 0
+      ;;
+    '-o -4 addr show dev moto-tap')
+      if [ "$ipv4" -eq 1 ]; then
+        printf '4: moto-tap inet 192.168.4.1/24 scope global moto-tap\n'
+      fi
+      ;;
+    '-o -6 addr show dev moto-tap')
+      if [ "$ipv6" -eq 1 ]; then
+        printf '4: moto-tap inet6 2001:db8::1/64 scope global\n'
+      fi
+      ;;
+    *)
+      fail_test "unexpected ip command: $*"
+      ;;
+  esac
+}
+
+sudo() {
+  sudo_calls+=("$*")
+  case "$*" in
+    'ip -6 addr add 2001:db8::1/64 dev moto-tap')
+      ipv6=1
+      ;;
+    'sysctl -w net.ipv4.ip_forward=1')
+      ;;
+    'nft list table ip nat')
+      ;;
+    'nft list chain ip nat postrouting')
+      printf 'ip saddr 192.168.4.0/24 masquerade\n'
+      ;;
+    *)
+      fail_test "unexpected sudo command: $*"
+      ;;
+  esac
+}
+
+log() { :; }
+skip() { :; }
+
+if host_networking_ready; then
+  fail_test "networking without the required IPv6 address was accepted"
+fi
+
+setup_host_networking
+[ "$ipv6" -eq 1 ] || fail_test "setup did not add the IPv6 address"
+host_networking_ready || fail_test "repaired networking was not accepted"
+
+ipv6_adds=0
+for call in "${sudo_calls[@]}"; do
+  if [ "$call" = 'ip -6 addr add 2001:db8::1/64 dev moto-tap' ]; then
+    ipv6_adds=$((ipv6_adds + 1))
+  fi
+done
+[ "$ipv6_adds" -eq 1 ] || fail_test "IPv6 address was added $ipv6_adds times"
+
+sudo_calls=()
+setup_host_networking
+[ "${#sudo_calls[@]}" -eq 0 ] || fail_test "ready networking was reconfigured"
+
+echo "test-build-base-networking PASS"
+
+)
+
+host_make_driver() (
+# A failed top-level make must end with a loud summary naming what failed.
+set -euo pipefail
+temporary="$(mktemp -d)"
+trap 'rm -rf "$temporary"' EXIT
+fail() { echo "test-make-driver: $*" >&2; exit 1; }
+
+failing="$temporary/failing-build"
+printf '%s\n' '#!/bin/bash' 'echo "the build says no" >&2' 'exit 3' > "$failing"
+chmod +x "$failing"
+export MOTOR_MAKE_LOG="$temporary/make.log"
+run_make() {
+  local status=0
+  make -C "$ROOT_DIR" "$@" > "$temporary/out" 2> "$temporary/err" || status=$?
+  echo "$status"
+}
+outputs=("BIN_DIR=$temporary/output" "OBJ_DIR=$temporary/objects")
+
+# The failing recipe is named, its output is quoted, and the verdict is last.
+status="$(run_make strobe "DO_BUILD=$failing" "${outputs[@]}")"
+[ "$status" -ne 0 ] || fail 'a failing recipe left make successful'
+grep -q 'strobe\] Error 3' "$temporary/err" || fail 'failed recipe not named'
+grep -q 'the build says no' "$temporary/err" || fail 'recipe output not quoted'
+grep -q "^Full log: $MOTOR_MAKE_LOG\$" "$temporary/err" || fail 'log path missing'
+grep -q 'the build says no' "$MOTOR_MAKE_LOG" || fail 'log lacks the recipe output'
+[ "$(tail -n 2 "$temporary/err" | head -n 1)" = \
+  "BUILD FAILED: make BUILD=debug strobe (exit status 2)" ] ||
+  fail "verdict is not the driver's last line: $(tail -n 2 "$temporary/err" | head -n 1)"
+tail -n 1 "$temporary/err" | grep -q '^make: \*\*\* \[.*strobe\] Error' ||
+  fail 'make did not report the top-level goal after the verdict'
+! grep -q $'\033' "$temporary/err" || fail 'color escapes without a terminal'
+
+status="$(FORCE_COLOR=1 run_make strobe "DO_BUILD=$failing" "${outputs[@]}")"
+[ "$status" -ne 0 ] || fail 'colored run left make successful'
+grep -q $'\033\\[1;31mBUILD FAILED\033\\[0m: make' "$temporary/err" || fail 'forced color missing'
+
+# A passing build prints no verdict, and a dry run neither captures nor logs.
+mkdir -p "$temporary/objects/strobe/x86_64-unknown-motor/debug"
+cp /bin/true "$temporary/objects/strobe/x86_64-unknown-motor/debug/strobe"
+status="$(run_make strobe DO_BUILD=true "${outputs[@]}")"
+[ "$status" -eq 0 ] || fail 'a passing recipe failed'
+! grep -q 'BUILD FAILED' "$temporary/err" "$temporary/out" || fail 'verdict printed on success'
+rm -f "$MOTOR_MAKE_LOG"
+status="$(run_make -n strobe mbr.bin "DO_BUILD=$failing" "${outputs[@]}")"
+[ "$status" -eq 0 ] || fail 'dry run failed'
+grep -qF -- "$failing" "$temporary/out" || fail 'dry run hides the first goal'
+grep -q 'x64.mbr' "$temporary/out" || fail 'dry run hides the second goal'
+[ ! -e "$MOTOR_MAKE_LOG" ] || fail 'dry run wrote a log'
+
+# A fresh gix cache must be populated before the offline build starts. Stub
+# Cargo so this also checks fetch failures without accessing the network.
+mkdir -p "$temporary/bin"
+export MOTOR_TEST_CARGO_LOG="$temporary/cargo.log"
+export MOTOR_TEST_FETCH_STATUS=0
+cat > "$temporary/bin/cargo" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >> "$MOTOR_TEST_CARGO_LOG"
+case "$1" in
+  fetch) exit "$MOTOR_TEST_FETCH_STATUS" ;;
+  build) exit 42 ;; # Stop before ELF validation and installation.
+  *) exit 99 ;;
+esac
+EOF
+chmod +x "$temporary/bin/cargo"
+status="$(PATH="$temporary/bin:$PATH" run_make gix \
+  "BIN_DIR=$temporary/output" "OBJ_DIR=$temporary/objects")"
+[ "$status" -ne 0 ] || fail 'stub build unexpectedly succeeded'
+printf '%s\n' 'fetch --locked' \
+  'build --target x86_64-unknown-motor --locked --offline' > "$temporary/expected-cargo.log"
+cmp -s "$temporary/expected-cargo.log" "$MOTOR_TEST_CARGO_LOG" ||
+  fail 'gix did not fetch locked sources before its offline build'
+grep -q 'gix\] Error 42' "$temporary/err" || fail 'gix did not reach the build'
+
+: > "$MOTOR_TEST_CARGO_LOG"
+export MOTOR_TEST_FETCH_STATUS=43
+status="$(PATH="$temporary/bin:$PATH" run_make gix \
+  "BIN_DIR=$temporary/output" "OBJ_DIR=$temporary/objects")"
+[ "$status" -ne 0 ] || fail 'failed gix fetch left make successful'
+printf '%s\n' 'fetch --locked' > "$temporary/expected-cargo.log"
+cmp -s "$temporary/expected-cargo.log" "$MOTOR_TEST_CARGO_LOG" ||
+  fail 'gix started building after a failed fetch'
+grep -q 'gix\] Error 43' "$temporary/err" || fail 'gix did not report the fetch failure'
+echo 'test-make-driver PASS'
+
+)
+
+host_kloader_image() (
+set -euo pipefail
+
+BUILD=debug
+if [ "${1:-}" = --release ]; then
+  BUILD=release
+elif [ "$#" -ne 0 ]; then
+  echo "usage: $0 [--release]" >&2
+  exit 2
+fi
+BIN_DIR="$ROOT_DIR/build/bin/$BUILD"
+TEST_DIR="$(mktemp -d)"
+trap 'rm -r "$TEST_DIR"' EXIT
+
+# The staged ELF must be stripped, including when Cargo retains debug info.
+sections="$(readelf -SW "$BIN_DIR/kloader")"
+if printf '%s\n' "$sections" | awk '
+  /[[:space:]]\.(debug_[^[:space:]]*|symtab|strtab)[[:space:]]/ { found = 1 }
+  END { exit !found }
+'; then
+  echo "test-kloader-image: staged ELF still contains debug information or symbols" >&2
+  exit 1
+fi
+
+# Stripping must preserve the embedded kernel byte for byte.
+objcopy -O binary --only-section=.kernel_image \
+  "$BIN_DIR/kloader" "$TEST_DIR/kernel"
+cmp "$BIN_DIR/kernel" "$TEST_DIR/kernel"
+
+echo "test-kloader-image ($BUILD) PASS"
+
+)
+
+host_external_sources() (
+
+# Offline checks of the external-source stage of src/build-motor-os.sh: the
+# branch-following and revision-pinned checkouts, Helix staging and ELF
+# validation, and the rule that every run builds each external source into an
+# empty overlay.
+
+set -euo pipefail
+. "$ROOT_DIR/src/build-motor-os.sh"
+fail() { echo "test-external-sources: $*" >&2; exit 1; }
+temporary="$(mktemp -d)"
+trap 'rm -rf "$temporary"' EXIT
+
+remote="$temporary/remote"
+seed="$temporary/seed"
+mkdir -p "$remote" "$seed"
+git -C "$remote" init -q --bare
+git -C "$seed" init -q
+git -C "$seed" config user.email test@example.com
+git -C "$seed" config user.name Test
+printf fixture > "$seed/source"
+git -C "$seed" add source
+git -C "$seed" commit -qm fixture
+git -C "$seed" branch -M helix-test
+git -C "$seed" remote add origin "$remote"
+git -C "$seed" push -q origin helix-test
+
+# An external source follows one branch of its fork: no commit is declared anywhere.
+EXTERNAL_SOURCES="$temporary/external-sources"
+HELIX="$EXTERNAL_SOURCES/helix"
+mkdir -p "$EXTERNAL_SOURCES"
+log() { :; }
+update_external_source helix "$HELIX" "$remote" helix-test >/dev/null 2>&1
+[ "$(git -C "$HELIX" rev-parse HEAD)" = "$(git -C "$seed" rev-parse HEAD)" ] ||
+	fail "the checkout did not select the branch head"
+printf update > "$seed/source"
+git -C "$seed" commit -qam update
+git -C "$seed" push -q origin helix-test
+update_external_source helix "$HELIX" "$remote" helix-test >/dev/null 2>&1
+[ "$(git -C "$HELIX" rev-parse HEAD)" = "$(git -C "$seed" rev-parse HEAD)" ] ||
+	fail "the checkout did not follow its branch"
+[ -z "$(git -C "$HELIX" status --porcelain)" ] || fail "the checkout is dirty"
+printf local > "$HELIX/source"
+if (update_external_source helix "$HELIX" "$remote" helix-test) >/dev/null 2>&1; then
+	fail "a dirty external source checkout was updated"
+fi
+git -C "$HELIX" checkout -q -- source
+# The checkouts sit inside the Motor OS checkout: a directory there that is
+# not a checkout of its own must not be taken for that one.
+outer="$temporary/outer"
+git init -q -b helix-test "$outer"
+printf '/external-sources/\n' > "$outer/.gitignore"
+git -C "$outer" add .gitignore
+git -C "$outer" -c user.email=test@example.com -c user.name=Test commit -qm outer
+mkdir -p "$outer/external-sources/helix"
+if (update_external_source helix "$outer/external-sources/helix" "$remote" helix-test) >/dev/null 2>&1 ||
+	[ -e "$outer/.git/FETCH_HEAD" ]; then
+	fail "a directory inside another checkout was taken for an external source checkout"
+fi
+
+# A pinned external source is built at its declared revision: an older one detaches the
+# checkout, a newer one fast-forwards the branch, a revision the branch does not
+# reach yet is fetched by its hash, and commits that are not on the remote
+# branch are never left behind.
+git -C "$remote" config uploadpack.allowReachableSHA1InWant true
+first="$(git -C "$seed" rev-parse HEAD~1)"
+second="$(git -C "$seed" rev-parse HEAD)"
+update_external_source helix "$HELIX" "$remote" helix-test "$first" >/dev/null 2>&1
+[ "$(git -C "$HELIX" rev-parse HEAD)" = "$first" ] ||
+	fail "the checkout did not select the declared revision"
+[ -z "$(git -C "$HELIX" branch --show-current)" ] ||
+	fail "an older declared revision did not detach the checkout"
+update_external_source helix "$HELIX" "$remote" helix-test "$second" >/dev/null 2>&1
+[ "$(git -C "$HELIX" rev-parse HEAD)" = "$second" ] ||
+	fail "the checkout did not move to the newer declared revision"
+git -C "$HELIX" checkout -q helix-test
+git -C "$HELIX" reset -q --hard "$first"
+update_external_source helix "$HELIX" "$remote" helix-test "$second" >/dev/null 2>&1
+[ "$(git -C "$HELIX" branch --show-current)" = helix-test ] &&
+	[ "$(git -C "$HELIX" rev-parse HEAD)" = "$second" ] ||
+	fail "a newer declared revision did not fast-forward the branch"
+printf third > "$seed/source"
+git -C "$seed" commit -qam third
+third="$(git -C "$seed" rev-parse HEAD)"
+if (update_external_source helix "$HELIX" "$remote" helix-test "$third") >/dev/null 2>&1; then
+	fail "an unpublished declared revision was accepted"
+fi
+git -C "$seed" checkout -q -b helix-other
+printf fourth > "$seed/source"
+git -C "$seed" commit -qam fourth
+fourth="$(git -C "$seed" rev-parse HEAD)"
+git -C "$seed" push -q origin helix-test helix-other
+update_external_source helix "$HELIX" "$remote" helix-test "$fourth" >/dev/null 2>&1
+[ "$(git -C "$HELIX" rev-parse HEAD)" = "$fourth" ] ||
+	fail "a declared revision on another branch was not fetched"
+update_external_source helix "$HELIX" "$remote" helix-test "$third" >/dev/null 2>&1
+[ "$(git -C "$HELIX" rev-parse HEAD)" = "$third" ] || fail "the checkout did not return to the branch head"
+git -C "$HELIX" checkout -q -B helix-test "$third"
+printf local > "$HELIX/source"
+git -C "$HELIX" -c user.email=test@example.com -c user.name=Test commit -qam local
+local_head="$(git -C "$HELIX" rev-parse HEAD)"
+if (update_external_source helix "$HELIX" "$remote" helix-test "$third") >/dev/null 2>&1; then
+	fail "a checkout with local commits was moved to the declared revision"
+fi
+[ "$(git -C "$HELIX" rev-parse HEAD)" = "$local_head" ] || fail "local commits were left behind"
+update_external_source helix "$HELIX" "$remote" helix-test "$local_head" >/dev/null 2>&1 ||
+	fail "a pinned local commit was refused"
+git -C "$HELIX" reset -q --hard "$third"
+case "$(declare -f prepare_external_sources)" in
+	*'IFS=: read -r repo branch revision <<< "$spec"'*'"$branch" "$revision"'*) ;;
+	*) fail "external sources are not prepared at their declared revisions" ;;
+esac
+[[ "$MOTOR_JAVY_REV" =~ ^[0-9a-f]{40}$ ]] && [[ "$MOTOR_WASMTIME_REV" =~ ^[0-9a-f]{40}$ ]] ||
+	fail "Javy and Wasmtime do not declare full fork revisions"
+
+ASSEMBLY_ROOT="$temporary/assembly"
+ASSEMBLY_BUILD_ROOT="$ASSEMBLY_ROOT/build"
+ASSEMBLY_IMAGE_ROOT="$ASSEMBLY_ROOT/images"
+LLVM_TOOLS="$temporary/llvm/bin"
+HELIX_IMG="$ASSEMBLY_IMAGE_ROOT/helix"
+HELIX_TARGET_DIR="$ASSEMBLY_BUILD_ROOT/helix"
+TARGET=x86_64-unknown-motor
+mkdir -p "$HELIX_TARGET_DIR/$TARGET/release" "$HELIX/runtime/queries/rust" \
+	"$HELIX/runtime/themes" "$LLVM_TOOLS"
+printf binary > "$HELIX_TARGET_DIR/$TARGET/release/hx"
+chmod 755 "$HELIX_TARGET_DIR/$TARGET/release/hx"
+printf query > "$HELIX/runtime/queries/rust/highlights.scm"
+printf theme > "$HELIX/runtime/themes/default.toml"
+printf tutor > "$HELIX/runtime/tutor"
+mkdir -p "$HELIX/runtime/grammars/sources/rust"
+printf source > "$HELIX/runtime/grammars/sources/rust/parser.c"
+cat > "$LLVM_TOOLS/llvm-strip" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = -o ]; then cp "$3" "$2"; else exit 1; fi
+EOF
+chmod +x "$LLVM_TOOLS/llvm-strip"
+saved_validator="$(declare -f validate_helix_elf)"
+validate_helix_elf() { :; }
+stage_helix
+[ -x "$HELIX_IMG/user/lib/helix/hx" ] || fail "staged hx is not executable"
+for component in queries themes tutor; do
+	[ -e "$HELIX_IMG/user/lib/helix/runtime/$component" ] ||
+		fail "runtime component was not staged: $component"
+done
+[ ! -e "$HELIX_IMG/user/lib/helix/runtime/grammars" ] ||
+	fail "grammar sources were staged"
+
+eval "$saved_validator"
+elf_tools="$temporary/elf-tools"
+mkdir -p "$elf_tools"
+ln -s "$(command -v readelf)" "$elf_tools/llvm-readelf"
+ln -s "$(command -v nm)" "$elf_tools/llvm-nm"
+ln -s "$(command -v strip)" "$elf_tools/llvm-strip"
+LLVM_TOOLS="$elf_tools"
+printf 'int main(void) { return 0; }\n' > "$temporary/static.c"
+cc -fPIE -ffreestanding -c "$temporary/static.c" -o "$temporary/static.o"
+cc -nostdlib -static-pie -Wl,-e,main "$temporary/static.o" -o "$temporary/static-pie"
+validate_helix_elf "$temporary/static-pie"
+cc -fPIE -pie "$temporary/static.c" -o "$temporary/dynamic-pie"
+if (validate_helix_elf "$temporary/dynamic-pie") 2>/dev/null; then
+	fail "ELF validation accepted a dynamic library dependency"
+fi
+printf '_Thread_local int value; int main(void) { return value; }\n' > \
+	"$temporary/tls.c"
+cc -fPIE -ffreestanding -c "$temporary/tls.c" -o "$temporary/tls.o"
+cc -nostdlib -static-pie -Wl,-e,main "$temporary/tls.o" -o "$temporary/tls-pie"
+if (validate_helix_elf "$temporary/tls-pie") 2>/dev/null; then
+	fail "ELF validation accepted a TLS segment"
+fi
+
+case "$(declare -f build_helix)" in
+	*'fetch --locked'*'CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER="$SYSROOT/bin/motor-clang"'*\
+*'build --target "$TARGET" --release --locked'*'--offline -p helix-term --bin hx'*) ;;
+	*) fail "Helix build is not an explicit fetch followed by an offline locked build" ;;
+esac
+# QuickJS-NG is the pinned upstream tag plus a checked patch on a fresh copy.
+[ -f "$QUICKJS_PATCH" ] || fail "QuickJS patch is missing: $QUICKJS_PATCH"
+case "$(declare -f fetch_quickjs)" in
+	*'"$QUICKJS_REV"'*'status --porcelain'*) ;;
+	*) fail "QuickJS checkout is not checked against its pinned commit and cleanliness" ;;
+esac
+case "$(declare -f build_quickjs)" in
+	*'fetch_quickjs'*'git apply --check "$QUICKJS_PATCH"'*'git apply "$QUICKJS_PATCH"'*) ;;
+	*) fail "QuickJS is not built from the checked tag with its checked patch" ;;
+esac
+# The native toolchain is unpacked from its archive before the external sources
+# are built, so a bad archive fails the build early; the images take both.
+case "$(declare -f main)" in
+	*'unpack_native_toolchain'*'build_external_sources'*'build_images'*) ;;
+	*) fail "the images are not built after the native toolchain and the external sources" ;;
+esac
+sources="$(
+	build_external_source() { echo "$1"; }
+	ensure_wasm_guest_toolchain() { :; }
+	ensure_wasi_sdk() { :; }
+	build_external_sources
+)"
+[ "$sources" = $'lua\nquickjs\nhelix\nsed\njavy\nwasmtime\nripgrep\ntar' ] ||
+	fail 'the image build does not include all external sources'
+case "$(declare -f select_external_sources)" in
+	*'"sed:$SED_BRANCH"'*) ;;
+	*) fail "sed does not follow its fork branch" ;;
+esac
+case "$(declare -f build_sed)" in
+	*'CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1'*'build --target "$TARGET" --release --locked'*\
+*'"$SED_IMG/user/bin/dev/sed"'*) ;;
+	*) fail "sed is not a single-codegen-unit locked release build staged as /user/bin/dev/sed" ;;
+esac
+case "$(declare -f select_external_sources)" in
+	*'"motor-os-tar:$MOTOR_OS_TAR_BRANCH"'*) ;;
+	*) fail "motor-os-tar does not follow its fork branch" ;;
+esac
+case "$(declare -f build_tar)" in
+	*'build --target "$TARGET" --release --locked'*'for tool in tar zstd'*\
+*'"$TAR_IMG/user/bin/$tool"'*) ;;
+	*) fail "tar and zstd are not locked release builds staged in /user/bin" ;;
+esac
+
+# Every run builds each external source into an empty overlay, and a build
+# that stages nothing fails.
+builds=0
+overlay="$ASSEMBLY_IMAGE_ROOT/external-test"
+build_test_source() {
+	builds=$((builds + 1))
+	mkdir -p "$overlay/bin"
+	printf '%s' "$builds" > "$overlay/bin/tool"
+	chmod 755 "$overlay/bin/tool"
+}
+build_external_source test "$overlay" bin/tool build_test_source
+: > "$overlay/stale"
+build_external_source test "$overlay" bin/tool build_test_source
+[ "$builds" -eq 2 ] || fail "an unchanged external source was not built again"
+[ ! -e "$overlay/stale" ] || fail "an external source was staged over its previous overlay"
+build_nothing() { :; }
+if (build_external_source test "$overlay" bin/tool build_nothing) 2>/dev/null; then
+	fail "an external source build that staged nothing was accepted"
+fi
+
+# Javy and Wasmtime build with the selected toolchain, which their provenance
+# records.
+case "$(declare -f build_development_sources)" in
+	*'build_external_source javy'*'build_external_source wasmtime'*) ;;
+	*) fail "Javy/Wasmi and Wasmtime are not both external sources" ;;
+esac
+javy_root="$temporary/javy"
+javy_log="$javy_root/toolchains.log"
+mkdir -p "$javy_root/external-sources/javy" "$javy_root/external-sources/wasmtime"
+for tool in javy wasmtime; do
+	cat > "$javy_root/external-sources/$tool/motor-build.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'build %s %s\n' "$RUSTUP_TOOLCHAIN" "$*" >> "$JAVY_TOOLCHAIN_LOG"
+EOF
+	chmod +x "$javy_root/external-sources/$tool/motor-build.sh"
+done
+for selection in first-probe second-probe; do
+	(
+		export RUSTUP_TOOLCHAIN="$selection" JAVY_TOOLCHAIN_LOG="$javy_log"
+		EXTERNAL_SOURCES="$javy_root/external-sources"
+		SYSROOT="$javy_root/sysroot"
+		ASSEMBLY_BUILD_ROOT="$javy_root/build"
+		JAVY_IMG="$javy_root/images/javy" JAVY_TESTS="$javy_root/tests/javy"
+		WASMTIME_IMG="$javy_root/images/wasmtime" WASMTIME_TESTS="$javy_root/tests/wasmtime"
+		JAVY_PLUGIN_SHA=plugin JAVY_TYPESCRIPT_SHA=typescript
+		javy_source_manifest() { echo manifest; }
+		wasmtime_source_manifest() { echo manifest; }
+		javy_download() { : > "$3"; }
+		cargo() {
+			printf 'cargo %s %s %s\n' "$RUSTUP_TOOLCHAIN" "${PWD##*/}" "$*" >> "$JAVY_TOOLCHAIN_LOG"
+			if [ "$1" = run ]; then
+				mkdir -p "${@: -1}"
+				printf 'generated workload\n' > "${@: -1}/typescript-workload.js"
+			fi
+		}
+		gzip() { :; }
+		tar() { :; }
+		install() { :; }
+		sha256sum() { cat > /dev/null; }
+		build_wasmtime_fixtures() { printf 'fixtures %s\n' "$RUSTUP_TOOLCHAIN" >> "$JAVY_TOOLCHAIN_LOG"; }
+		javy_linux_reference() { :; }
+		build_javy_test_plugins() { :; }
+		build_javy
+		build_wasmtime
+	) < /dev/null > /dev/null 2>&1 || fail "the Javy or Wasmtime build failed with selection $selection"
+done
+expected=""
+for selection in first-probe second-probe; do
+	expected+="cargo $selection ${PWD##*/} run --locked --offline --manifest-path $MOTOR/src/sys/tests/javy-smoke/Cargo.toml --bin prepare-inputs -- $javy_root/build/javy-inputs/source"$'\n'
+	expected+="cargo $selection javy fetch --locked"$'\n'"build $selection "$'\n'
+	expected+="cargo $selection wasmtime fetch --locked"$'\n'
+	expected+="cargo $selection wasmtime fetch --locked --manifest-path motor-tests/Cargo.toml"$'\n'
+	expected+="build $selection all"$'\n'"fixtures $selection"$'\n'
+done
+[ "$(cat "$javy_log")"$'\n' = "$expected" ] ||
+	fail "Javy and Wasmtime did not fetch and build with the selected toolchain"
+# The normal host CLI compiler uses the selected toolchain; guest programs use the
+# pinned upstream one with wasm32 targets, which the Motor toolchain lacks.
+case "$(declare -f build_wasmtime_fixtures)" in
+	*'--bin wasmtime --no-default-features'*'--features compile,cranelift,'*'RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN"'*\
+*'--target wasm32-wasip2 -p test-programs --features motor'*) ;;
+	*) fail "the Wasmtime fixtures are not built with the expected toolchains" ;;
+esac
+case "$(declare -f build_development_sources)" in
+	*'ensure_wasm_guest_toolchain'*'ensure_wasi_sdk'*'build_external_source javy'*\
+*'build_external_source wasmtime'*) ;;
+	*) fail "the guest toolchain and wasi-sdk are not provided before Javy and Wasmtime" ;;
+esac
+# javy-smoke's test plugins are guests too, and their QuickJS C code is built
+# with the pinned wasi-sdk, checked before it is unpacked.
+case "$(declare -f build_javy_test_plugins)" in
+	*'RUSTUP_TOOLCHAIN="$WASM_GUEST_TOOLCHAIN" WASI_SDK'*'--target wasm32-wasip1'*\
+*'--target wasm32-wasip2'*) ;;
+	*) fail "the Javy test plugins are not built with the guest toolchain and wasi-sdk" ;;
+esac
+case "$(declare -f ensure_wasi_sdk)" in
+	*'"$WASI_SDK_SHA"'*'sha256sum -c'*'tar -xzf'*) ;;
+	*) fail "wasi-sdk is not checked before it is unpacked" ;;
+esac
+javy_manifest() (
+	RUSTUP_TOOLCHAIN="$1"
+	local selected="$1" reported="${2:-$1}"
+	rustc() {
+		if [ "$RUSTUP_TOOLCHAIN" = "$selected" ]; then
+			printf 'rustc for %s\n' "$reported"
+		else
+			printf 'rustc for %s\n' "$RUSTUP_TOOLCHAIN"
+		fi
+	}
+	JAVY_SOURCES=()
+	JAVY_PLUGIN_SHA=plugin
+	JAVY_TYPESCRIPT_SHA=typescript
+	javy_source_manifest
+)
+first_manifest="$(javy_manifest first-probe)"
+second_manifest="$(javy_manifest second-probe)"
+case "$second_manifest" in
+	*'rustc=rustc for second-probe'*) ;;
+	*) fail "the Javy manifest does not name the selected toolchain" ;;
+esac
+[ "$(javy_manifest "$temporary/compiler build" second-probe)" = "$second_manifest" ] ||
+	fail "selecting the same compiler by path changes the shipped provenance"
+# The Linux reference digests come from the pinned Linux Javy and the fixtures
+# javy-smoke compiles, so the Javy provenance names each.
+case "$first_manifest" in
+	*'javy-smoke/src/inputs.rs'*"javy-linux=$JAVY_LINUX_SHA"*) ;;
+	*) fail "the Javy manifest does not name the Linux reference inputs" ;;
+esac
+case "$first_manifest" in
+	*'javy-smoke/src/inputs.rs'*'guest-toolchain=rustc for '"$WASM_GUEST_TOOLCHAIN"*\
+*"wasi-sdk=$WASI_SDK_SHA"*) ;;
+	*) fail "the Javy manifest does not name the test plugin inputs" ;;
+esac
+
+host_wasmtime_fetch
+echo "test-external-sources PASS"
+
+)
+
+host_toolchain_archive() (
+# Offline contracts for collecting and repackaging native development payloads.
+set -euo pipefail
+ROOT="$ROOT_DIR"
+source "$ROOT/src/build-scripts/toolchain-overlays.sh"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+fail() { echo "test-toolchain-archive: $*" >&2; exit 1; }
+defaults="$WORK/repo/img_files/motor-toolchain"
+mkdir -p "$defaults/user/bin/dev" "$defaults/user/lib/www" \
+    "$defaults/user/cfg/cargo" "$defaults/none/cfg" "$WORK/bin"
+for command in lorry gix mdbg imager; do
+    printf '%s\n' "$command" > "$WORK/bin/$command"
+done
+printf 'launcher\n' > "$defaults/user/bin/dev/www"
+printf 'documentation\n' > "$defaults/user/lib/www/index.html"
+printf 'Cargo defaults\n' > "$defaults/user/cfg/cargo/config.toml"
+printf 'user PATH\n' > "$defaults/user/cfg/profile"
+printf 'SSH PATH\n' > "$defaults/user/cfg/sshd.toml"
+printf 'None defaults\n' > "$defaults/none/cfg/lorry.toml"
+for overlay in "${MOTOR_TOOLCHAIN_OVERLAYS[@]}"; do
+    [ "$overlay" != motor ] || continue
+    mkdir -p "$WORK/assembly/$overlay/user/lib/$overlay"
+    printf '%s\n' "$overlay" > "$WORK/assembly/$overlay/user/lib/$overlay/payload"
+done
+toolchain_collect_overlays "$WORK/repo" "$WORK/bin" "$WORK/assembly" \
+    "$WORK/bin/imager" "$WORK/current"
+for path in user/bin/dev/lorry user/bin/dev/gix user/bin/dev/mdbg user/bin/dev/www \
+    user/lib/www/index.html user/lib/imager/imager user/cfg/cargo/config.toml \
+    none/cfg/lorry.toml; do
+    [ -f "$WORK/current/motor/$path" ] || fail "missing $path"
+done
+for path in user/bin/dev/ar user/cfg/profile user/cfg/sshd.toml; do
+    [ ! -e "$WORK/current/motor/$path" ] || fail "unexpected replacement of $path"
+done
+# Exercise the shared packager with real tar archives, including its standalone
+# entry point. The fixture tools are inert files: no compiler or network is used.
+toolchain_source="${MOTOR_TOOLCHAIN_SOURCE:-$ROOT/../motor-os-toolchain}"
+package_script="$toolchain_source/lib/toolchain-package.sh"
+images="$WORK/current"
+mkdir -p "$images/libc/system/cfg/libc" "$WORK/host/bin" "$WORK/host/lib"
+for path in llvm/user/lib/llvm/bin/llvm rustc/user/lib/rust/bin/rustc \
+    rustc/user/lib/rust/bin/rustfmt rustc/user/lib/rust/bin/clippy-driver \
+    rust-analyzer/user/lib/rust/bin/rust-analyzer helix/user/lib/helix/hx \
+    sed/user/bin/dev/sed lua/user/bin/dev/lua quickjs/user/bin/dev/qjs \
+    quickjs/user/bin/dev/qjsc javy/user/bin/dev/javy javy/user/bin/dev/wasmi \
+    wasmtime/user/bin/dev/wasmtime wasmtime/user/bin/dev/wasmtime-rt; do
+    mkdir -p "$images/${path%/*}"
+    printf '#!/user/bin/rush\nexit 0\n' > "$images/$path"
+    chmod 755 "$images/$path"
+done
+printf '#!/bin/sh\necho "host compiler"\n' > "$WORK/expected-rustc"
+install -m 755 "$WORK/expected-rustc" "$WORK/host/bin/rustc"
+# LLVM's Android linker names are unrelated to the retired Motor layout.
+printf '/system/bin/linker64\0' >> "$images/llvm/user/lib/llvm/bin/llvm"
+name=x86_64-unknown-motor-1.99.1-3
+package="motor-toolchain-$name"
+cp -a "$images" "$WORK/expected-images"
+bash "$package_script" "$(command -v tar)" "$WORK/output" "$name" "$images" "$WORK/host"
+(cd "$WORK/output" && sha256sum -c "$package.tar.zst.sha256" "$package-x86_64-linux.tar.zst.sha256")
+mkdir "$WORK/extracted"
+tar -xaf "$WORK/output/$package.tar.zst" -C "$WORK/extracted"
+tar -xaf "$WORK/output/$package-x86_64-linux.tar.zst" -C "$WORK/extracted"
+diff -r "$WORK/expected-images" "$WORK/extracted/$package/images"
+cmp "$WORK/expected-rustc" "$WORK/extracted/$package-x86_64-linux/toolchain/bin/rustc" ||
+    fail 'host payload changed'
+grep -qx '#!/user/bin/rush' "$WORK/extracted/$package/install.sh" || fail 'wrong installer shell'
+if grep -Eq '/devtools|/system/bin' "$WORK/extracted/$package/install.sh"; then
+    fail 'installer contains an obsolete path'
+fi
+[ ! -e "$images" ] && [ ! -e "$WORK/host" ] || fail 'packaging did not consume its input trees'
+
+# A freshly provisioned shell can still have its old PATH. Exercise the
+# packaged installer with real rustup and a disposable toolchain registry.
+(
+    export CARGO_HOME="$WORK/cargo home" RUSTUP_HOME="$WORK/rustup home"
+    installer="$WORK/extracted/$package-x86_64-linux/install.sh"
+    mkdir -p "$CARGO_HOME/bin" "$WORK/install-bin"
+    for tool in dirname mkdir cp; do
+        ln -s "$(command -v "$tool")" "$WORK/install-bin/$tool"
+    done
+    if PATH="$WORK/install-bin" "$installer" --prefix "$WORK/installed" > "$WORK/error" 2>&1; then
+        fail 'host installer succeeded without rustup'
+    fi
+    grep -Fq "$CARGO_HOME/bin/rustup" "$WORK/error" && grep -Fq 'https://rustup.rs' "$WORK/error" ||
+        fail 'missing rustup diagnostic did not explain where to find or install it'
+    [ ! -e "$WORK/installed" ] || fail 'installer copied the payload before finding rustup'
+    ln -s "$(command -v rustup)" "$CARGO_HOME/bin/rustup"
+    PATH="$WORK/install-bin" "$installer" --prefix "$WORK/installed"
+    [ "$(rustup run "$name" rustc)" = 'host compiler' ] || fail 'rustup did not run the installed host compiler'
+)
+
+# A failed validation leaves the previous archive intact.
+before="$(sha256sum "$WORK/output/$package.tar.zst")"
+cp -a "$WORK/extracted/$package/images" "$images"
+ln -s payload "$images/quickjs/user/lib/quickjs/link"
+if bash "$package_script" "$(command -v tar)" "$WORK/output" "$name" "$images" > "$WORK/error" 2>&1; then
+    fail 'packager accepted a symlink'
+fi
+grep -q 'unsupported archive member' "$WORK/error" || fail 'wrong symlink diagnostic'
+[ "$(sha256sum "$WORK/output/$package.tar.zst")" = "$before" ] || fail 'failed packaging changed the archive'
+rm "$images/quickjs/user/lib/quickjs/link"
+printf '/system/bin/sh\0' >> "$images/llvm/user/lib/llvm/bin/llvm"
+if bash "$package_script" "$(command -v tar)" "$WORK/output" "$name" "$images" > "$WORK/error" 2>&1; then
+    fail 'packager accepted an obsolete compiled shell path'
+fi
+grep -q 'obsolete compiled path' "$WORK/error" || fail 'wrong compiled-path diagnostic'
+cp -a "$WORK/extracted/$package/images/llvm/user/lib/llvm/bin/llvm" "$images/llvm/user/lib/llvm/bin/llvm"
+mkdir "$images/llvm/devtools"
+if bash "$package_script" "$(command -v tar)" "$WORK/output" "$name" "$images" > "$WORK/error" 2>&1; then
+    fail 'packager accepted the obsolete layout'
+fi
+grep -q 'obsolete image layout' "$WORK/error" || fail 'wrong legacy-layout diagnostic'
+
+# Always repackage, including unchanged payloads, without modifying the release.
+repo="$WORK/repo"
+mkdir -p "$repo/src/build-scripts" "$repo/build/bin" "$repo/build/assembly/build/motor-os-tar-linux/release"
+cp "$ROOT/src/build-scripts/"toolchain-{archive,overlays}.sh "$repo/src/build-scripts/"
+cp -a "$WORK/bin" "$repo/build/bin/release"
+cp -a "$WORK/extracted/$package/images" "$repo/build/assembly/"
+ln -s "$(command -v tar)" "$repo/build/assembly/build/motor-os-tar-linux/release/tar"
+printf '[toolchain]\nchannel = "%s"\n' "$name" > "$repo/rust-toolchain.toml"
+repackage() {
+    MOTORH="$WORK/output" MOTOR_TOOLCHAIN_SOURCE="$toolchain_source" \
+        bash "$repo/src/build-scripts/toolchain-archive.sh" release
+}
+original="$WORK/output/$package.tar.zst"
+[ "$(repackage)" = "$repo/build/toolchain/release/$package.tar.zst" ] ||
+    fail 'unchanged payloads did not produce a local archive'
+printf 'new host imager\n' >> "$repo/build/bin/release/imager"
+printf 'new Lorry\n' >> "$repo/build/bin/release/lorry"
+repacked="$(repackage)"
+[ "$repacked" = "$repo/build/toolchain/release/$package.tar.zst" ] || fail 'repackaged archive is outside build/'
+tar -xOf "$repacked" "$package/images/motor/user/bin/dev/lorry" > "$WORK/lorry"
+cmp "$repo/build/bin/release/lorry" "$WORK/lorry" || fail 'repackaged archive has stale guest bytes'
+tar -xOf "$repacked" "$package/images/motor/user/lib/imager/imager" > "$WORK/imager"
+cmp "$repo/build/bin/release/imager" "$WORK/imager" || fail 'repackaged archive has a stale host imager'
+[ "$(sha256sum "$original")" = "$before" ] || fail 'repackaging changed the original release'
+echo 'test-toolchain-archive PASS'
+
+)
+
+host_toolchain_bootstrap() (
+# Offline checks of the release builder's Motor OS checkout and compiler handoff.
+set -euo pipefail
+ROOT="$ROOT_DIR"
+source "${MOTOR_TOOLCHAIN_SOURCE:-$ROOT/../motor-os-toolchain}/build-toolchain.sh"
+temporary="$(mktemp -d)"
+trap 'rm -rf "$temporary"' EXIT
+fail() { echo "test-toolchain-bootstrap: $*" >&2; exit 1; }
+log() { :; }
+WORK="$temporary/build"
+seed="$temporary/local Motor OS"
+mkdir -p "$seed/src" "$WORK"
+git init -q -b main "$seed"
+cat > "$seed/src/build-motor-os.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >> "$HANDOFF"
+EOF
+git -C "$seed" add src
+git -C "$seed" -c user.name=Test -c user.email=test@example.com commit -qm fixture
+MOTOR_OS_REPOSITORY="$seed"
+MOTOR_OS_BRANCH=main
+parse_options
+fetch_motor_source
+[ "$MOTOR_SOURCE" = "$WORK/motor-os" ] || fail 'default checkout is outside the build tree'
+[ "$(git -C "$MOTOR_SOURCE" rev-parse HEAD)" = "$(git -C "$seed" rev-parse HEAD)" ] ||
+    fail 'default checkout did not clone the selected branch'
+
+# A local override uses the actual working tree, preserving uncommitted work.
+printf 'local changes\n' > "$seed/uncommitted"
+parse_options --motor-os "$seed" --dev
+toolchain_fetch_branch() { fail 'local override unexpectedly fetched sources'; }
+fetch_motor_source
+[ "$MOTOR_SOURCE" = "$seed" ] && [ "$DEV" = true ] || fail 'local override was lost'
+[ "$(cat "$seed/uncommitted")" = 'local changes' ] || fail 'local work was changed'
+export HANDOFF="$temporary/handoff"
+TOOLCHAIN_PREFIX="$temporary/new compiler"
+TOOLCHAIN_IMAGES="$temporary/images"
+run_motor_cargo() { printf '%s\n' "$@" >> "$HANDOFF"; }
+build_motor_tools
+printf '%s\n' fetch --locked --manifest-path "$seed/src/sys/tests/javy-smoke/Cargo.toml" \
+    --toolchain-overlays "$TOOLCHAIN_PREFIX" "$TOOLCHAIN_IMAGES" > "$temporary/expected"
+cmp "$temporary/expected" "$HANDOFF" || fail 'wrong dependency fetch or overlay handoff'
+
+if (parse_options --motor-os "$WORK/motor-os") > "$temporary/error" 2>&1; then
+    fail 'accepted a local checkout that the build would delete'
+fi
+grep -q 'outside the disposable build directory' "$temporary/error" || fail 'wrong checkout diagnostic'
+if (parse_options --motor-os) > "$temporary/error" 2>&1; then
+    fail 'accepted --motor-os without a path'
+fi
+
+# The main checkout selects the compiler by path before running its overlay
+# stage, even though rust-toolchain.toml names an older release. No VM or
+# native archive is required for this mode.
+(
+    source "$ROOT/src/build-motor-os.sh"
+    if (
+        export RUSTUP_HOME="$temporary/empty-rustup"
+        prepare_external_sources() { fail 'reached external sources without a host toolchain'; }
+        main --javy-only
+    ) > "$temporary/error" 2>&1; then
+        fail 'accepted an uninstalled host toolchain'
+    fi
+    package="motor-toolchain-$TOOLCHAIN-x86_64-linux"
+    grep -Fq "$package.tar.zst" "$temporary/error" && grep -Fq "$package/install.sh" "$temporary/error" ||
+        fail 'missing host toolchain diagnostic did not name the archive and its installer'
+    selected="$(rustc --print sysroot)"
+    build_toolchain_overlays() {
+        [ "$RUSTUP_TOOLCHAIN" = "$selected" ] || fail 'used the checkout toolchain selector'
+        [ "$(rustc --print sysroot)" = "$selected" ] || fail 'rustup did not use the compiler directory'
+        [ "$SYSROOT" = "$selected/lib/rustlib/x86_64-unknown-motor/sysroot" ] || fail 'wrong C sysroot'
+        [ "$TOOLCHAIN_OVERLAY_OUTPUT" = "$temporary/overlays" ] || fail 'wrong overlay destination'
+        select_external_sources toolchain
+        [ "${#EXTERNAL_REPOS[@]}" -eq 4 ] || fail 'wrong development source set'
+        case " ${EXTERNAL_REPOS[*]} " in
+            *ripgrep:*|*motor-os-tar:*) fail 'selected unrelated image sources';;
+        esac
+        printf done > "$temporary/built"
+    }
+    NATIVE_ARCHIVE="$temporary/no-native-archive"
+    main --toolchain-overlays "$selected" "$temporary/overlays"
+    [ -f "$temporary/built" ] || fail 'overlay stage was skipped'
+    if (main --javy-only --toolchain-overlays "$selected" "$temporary/overlays") > "$temporary/error" 2>&1; then
+        fail 'accepted incompatible build modes'
+    fi
+)
+echo 'test-toolchain-bootstrap PASS'
+
+)
+
+host_net_contract() (
+set -euo pipefail
+
+
+# Networking remains async-first; blocking policy belongs to the VDSO.
+if matches=$(grep -RnE --include='*.rs' \
+    'SysCpu::spawn|block_on_sync|SyncWaiter|thread::sleep|sched_yield' \
+    "$ROOT_DIR/src/sys/lib/moto-sdk/src/io/net" | \
+    grep -vE '^[^:]+:[0-9]+:[[:space:]]*//'); then
+  echo "moto-sdk networking contains blocking operations:" >&2
+  echo "$matches" >&2
+  exit 1
+fi
+
+feature_graph() {
+  cargo tree --manifest-path "$1" --target "$2" --locked --offline -p "$3" \
+    -e normal,build --prefix none --format '{p} features=[{f}]'
+}
+
+no_test_support() {
+  local graph matches
+  graph=$(feature_graph "$@")
+  if matches=$(printf '%s\n' "$graph" | \
+      grep -E 'features=\[([^]]*,)?test-support(,|\])'); then
+    echo "$3 enables test-support in production:" >&2
+    echo "$matches" >&2
+    exit 1
+  fi
+}
+
+# Each production package builds independently, just as in the Makefile.
+# Including systest here would unify its test features into the services.
+MOTOR=x86_64-unknown-motor
+for package in rt sys-io sys-init sys-tty strobe dns-resolver sysbox wg; do
+  no_test_support "$ROOT_DIR/src/sys/Cargo.toml" "$MOTOR" "$package"
+done
+# Programs outside src/sys take the same SDK.
+HOST="$(rustc -vV | sed -n 's/^host: //p')"
+no_test_support "$ROOT_DIR/src/bin/russhd/Cargo.toml" "$MOTOR" russhd
+no_test_support "$ROOT_DIR/src/bin/rmux/Cargo.toml" "$MOTOR" rmux
+no_test_support "$ROOT_DIR/src/imager/Cargo.toml" "$HOST" imager
+
+# rt.vdso builds with core and alloc only, so nothing may turn on the SDK's std.
+if feature_graph "$ROOT_DIR/src/sys/Cargo.toml" "$MOTOR" rt | \
+    grep -E '^moto-sdk .*features=\[([^]]*,)?std(,|\])' >&2; then
+  echo "rt.vdso enables moto-sdk's std" >&2
+  exit 1
+fi
+# The SDK's Unix slice takes no Motor OS crates.
+if feature_graph "$ROOT_DIR/src/imager/Cargo.toml" "$HOST" imager | \
+    grep -E '^moto-(rt|sys) ' >&2; then
+  echo "the imager's SDK pulls in Motor OS crates on $HOST" >&2
+  exit 1
+fi
+
+graph=$(feature_graph "$ROOT_DIR/src/sys/Cargo.toml" "$MOTOR" systest)
+printf '%s\n' "$graph" | \
+  grep -E '^moto-sdk .*features=\[([^]]*,)?test-support(,|\])' >/dev/null
+echo "network async and production feature contracts PASS"
+
+)
+
+host_wasmtime_fetch() (
+# Exercise the producer's fetch with an empty cache and a file-only registry.
+set -euo pipefail
+. "$ROOT_DIR/src/build-motor-os.sh"
+temporary="$(mktemp -d)"
+trap 'rm -rf "$temporary"' EXIT
+fail() { echo "test-wasmtime-fetch: $*" >&2; exit 1; }
+export RUSTUP_TOOLCHAIN="$TOOLCHAIN"
+export CARGO_HOME="$temporary/cargo-home"
+export CARGO_TARGET_DIR="$temporary/target"
+EXTERNAL_SOURCES="$temporary/external-sources"
+SYSROOT="$temporary/sysroot"
+ASSEMBLY_ROOT="$temporary/assembly"
+ASSEMBLY_BUILD_ROOT="$temporary/build"
+WASMTIME_IMG="$temporary/image"
+WASMTIME_TESTS="$temporary/tests"
+wasmtime_source_manifest() { echo fixture; }
+registry="$temporary/registry"
+runtime="$EXTERNAL_SOURCES/wasmtime"
+mkdir -p "$registry/fe/tc" "$temporary/downloads" "$CARGO_HOME" \
+	"$runtime/src" "$runtime/motor-tests/src" "$EXTERNAL_SOURCES/bridge/src"
+for version in 1.0.0 2.0.0; do
+	mkdir -p "$temporary/fetch-leaf-$version/src"
+	cat > "$temporary/fetch-leaf-$version/Cargo.toml" <<EOF
+[package]
+name = "fetch-leaf"
+version = "$version"
+edition = "2024"
+EOF
+	: > "$temporary/fetch-leaf-$version/src/lib.rs"
+	tar -czf "$temporary/downloads/fetch-leaf-$version.crate" -C "$temporary" "fetch-leaf-$version"
+	checksum="$(sha256sum "$temporary/downloads/fetch-leaf-$version.crate" | cut -d' ' -f1)"
+	printf '{"name":"fetch-leaf","vers":"%s","deps":[],"cksum":"%s","features":{},"yanked":false}\n' \
+		"$version" "$checksum" >> "$registry/fe/tc/fetch-leaf"
+done
+printf '{"dl":"file://%s/downloads/{crate}-{version}.crate"}\n' "$temporary" > "$registry/config.json"
+git -C "$registry" init -q
+git -C "$registry" add .
+git -C "$registry" -c user.name=Test -c user.email=test@example.com commit -qm fixture
+cat > "$CARGO_HOME/config.toml" <<EOF
+[source.crates-io]
+replace-with = "fixture"
+[source.fixture]
+registry = "file://$registry"
+EOF
+cat > "$runtime/Cargo.toml" <<'EOF'
+[package]
+name = "fetch-runtime"
+version = "1.0.0"
+edition = "2024"
+[workspace]
+[target.'cfg(target_os = "motor")'.dependencies]
+fetch-bridge = { path = "../bridge" }
+EOF
+cat > "$EXTERNAL_SOURCES/bridge/Cargo.toml" <<'EOF'
+[package]
+name = "fetch-bridge"
+version = "1.0.0"
+edition = "2024"
+[workspace]
+[target.'cfg(not(target_os = "motor"))'.dependencies]
+fetch-leaf = "=1.0.0"
+EOF
+: > "$runtime/src/lib.rs"
+: > "$EXTERNAL_SOURCES/bridge/src/lib.rs"
+# An independent lockfile can select a version absent from the main workspace.
+cat > "$runtime/motor-tests/Cargo.toml" <<'EOF'
+[package]
+name = "fetch-policy-tests"
+version = "1.0.0"
+edition = "2024"
+[workspace]
+[dependencies]
+fetch-leaf = "=2.0.0"
+EOF
+: > "$runtime/motor-tests/src/lib.rs"
+cat > "$EXTERNAL_SOURCES/wasmtime/motor-build.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$CARGO_NET_OFFLINE" = true ]
+manifest=Cargo.toml
+[ "$1" != tests ] || manifest=motor-tests/Cargo.toml
+cargo build --locked --manifest-path "$manifest" --target x86_64-unknown-motor --lib
+EOF
+chmod +x "$EXTERNAL_SOURCES/wasmtime/motor-build.sh"
+(
+	cd "$runtime"
+	cargo generate-lockfile
+	cp Cargo.lock "$temporary/original.lock"
+	cargo generate-lockfile --manifest-path motor-tests/Cargo.toml
+	cp motor-tests/Cargo.lock "$temporary/original-tests.lock"
+)
+# The registry leaf is still uncached. Separate target walks miss this host
+# dependency below the Motor-only bridge; the producer must fetch it first.
+# Run the real producer fetch and offline build; image staging is unrelated.
+install() { :; }
+sha256sum() { :; }
+build_wasmtime_fixtures() {
+	(cd "$runtime" && CARGO_NET_OFFLINE=true ./motor-build.sh tests)
+}
+build_wasmtime
+cmp "$runtime/Cargo.lock" "$temporary/original.lock" || fail "the producer changed the lockfile"
+cmp "$runtime/motor-tests/Cargo.lock" "$temporary/original-tests.lock" ||
+	fail "the producer changed the test lockfile"
+echo "test-wasmtime-fetch PASS"
+
+)
+
+host_vm_image_format() (
+unset MOTO_IMAGE MOTO_SMP MOTO_MEMORY_MIB
+
+set -euo pipefail
+
+SCRIPT_DIR="$ROOT_DIR/src/tests"
+VM_DIR="$ROOT_DIR/src/vm_scripts"
+TEST_ROOT="$(mktemp -d /tmp/motor-image-format-test-XXXXXX)"
+FAKE_BIN="$TEST_ROOT/bin"
+ARG_LOG="$TEST_ROOT/args"
+ERROR_LOG="$TEST_ROOT/error"
+
+cleanup() {
+  rm -rf "$TEST_ROOT"
+}
+trap cleanup EXIT
+
+fail() {
+  echo "test-vm-image-format: $*" >&2
+  exit 1
+}
+
+assert_arg() {
+  local expected="$1"
+  grep -Fxq -- "$expected" "$ARG_LOG" ||
+    fail "missing VMM argument '$expected'"
+}
+
+assert_no_arg() {
+  local unexpected="$1"
+  if grep -Fxq -- "$unexpected" "$ARG_LOG"; then
+    fail "unexpected VMM argument '$unexpected'"
+  fi
+}
+
+mkdir -p "$FAKE_BIN"
+cat > "$FAKE_BIN/fake-vmm" <<'EOF'
+#!/bin/sh
+: "${MOTOR_VM_ARG_LOG:?}"
+if [ -n "${MOTOR_VM_EXPECT_LOCK:-}" ]; then
+  exec 7> "$MOTOR_VM_EXPECT_LOCK"
+  if flock -n 7; then
+    echo "fake-vmm: runner lock was not held across exec" >&2
+    exit 1
+  fi
+fi
+printf '%s\n' "$@" > "$MOTOR_VM_ARG_LOG"
+EOF
+chmod +x "$FAKE_BIN/fake-vmm"
+ln -s fake-vmm "$FAKE_BIN/qemu-system-x86_64"
+ln -s fake-vmm "$FAKE_BIN/cloud-hypervisor-static"
+ln -s fake-vmm "$FAKE_BIN/firecracker"
+
+ # The raw standard image is opt-in. Exercise the inner make graph directly so
+# this remains independent of the top-level logging wrapper.
+make -n -C "$ROOT_DIR" MAKELEVEL=1 > "$TEST_ROOT/make-default"
+for target in all images; do
+  make -n -C "$ROOT_DIR" MAKELEVEL=1 "$target" > "$TEST_ROOT/make-$target"
+done
+for graph in default all images; do
+  if grep -Fq -- '--raw-output' "$TEST_ROOT/make-$graph"; then
+    fail "$graph make graph unexpectedly builds the raw standard image"
+  fi
+done
+make -n -C "$ROOT_DIR" MAKELEVEL=1 raw.img > "$TEST_ROOT/make-raw"
+grep -Fq -- 'motor-os.yaml --raw-output motor-os.img' "$TEST_ROOT/make-raw" ||
+  fail "raw.img make graph does not request the raw standard image"
+
+run_qemu() {
+  PATH="$FAKE_BIN:$PATH" MOTOR_VM_ARG_LOG="$ARG_LOG" \
+    MOTO_QEMU_LOCK="$TEST_ROOT/qemu.lock" "$VM_DIR/run-qemu.sh" "$@" \
+    >/dev/null 2>&1
+}
+
+run_chv() {
+  PATH="$FAKE_BIN:$PATH" MOTOR_VM_ARG_LOG="$ARG_LOG" \
+    MOTO_QEMU_LOCK="$TEST_ROOT/qemu.lock" \
+    MOTOR_VM_EXPECT_LOCK="$TEST_ROOT/qemu.lock" \
+    MOTO_CHV_RUNTIME_DIR="$TEST_ROOT/chv" "$VM_DIR/run-chv.sh" "$@" \
+    >/dev/null 2>&1
+}
+
+run_fc() {
+  PATH="$FAKE_BIN:$PATH" MOTOR_VM_ARG_LOG="$ARG_LOG" \
+    MOTO_QEMU_LOCK="${MOTO_QEMU_LOCK:-$TEST_ROOT/qemu.lock}" \
+    MOTOR_VM_EXPECT_LOCK="${MOTO_QEMU_LOCK:-$TEST_ROOT/qemu.lock}" \
+    MOTO_FC_RUNTIME_DIR="$TEST_ROOT/fc" "$VM_DIR/run-fc.sh" "$@"
+}
+
+MOTO_SHARED_MEM='' run_qemu
+assert_arg "file=$VM_DIR/motor-os.qcow2,if=none,id=drive0,format=qcow2"
+assert_no_arg "memory-backend-memfd,id=mem0,size=1024M,share=on"
+assert_no_arg "memory-backend=mem0"
+
+MOTO_MEMORY_MIB=1024 MOTO_HUGEPAGES=0 MOTO_SHARED_MEM=1 run_qemu
+assert_arg "-object"
+assert_arg "memory-backend-memfd,id=mem0,size=1024M,share=on"
+assert_arg "-machine"
+assert_arg "memory-backend=mem0"
+assert_no_arg "-mem-path"
+
+MOTO_IMAGE=motor-os-base.img run_qemu
+assert_arg "file=$VM_DIR/motor-os-base.img,if=none,id=drive0,format=raw"
+
+if MOTO_IMAGE=motor-os.bad run_qemu 2> "$ERROR_LOG"; then
+  fail "QEMU accepted an unsupported image suffix"
+fi
+
+run_chv
+assert_arg "path=$VM_DIR/motor-os.qcow2,image_type=qcow2"
+
+MOTO_IMAGE=motor-os-base.img run_chv
+assert_arg "path=$VM_DIR/motor-os-base.img,image_type=raw"
+
+
+MOTO_FC_VSOCK_UDS='' run_fc >/dev/null 2>&1
+grep -Fq '"path_on_host": "'"$VM_DIR"'/motor-os-base.img"' \
+  "$TEST_ROOT/fc/fc-config.json" || fail "Firecracker did not select the raw base image"
+if grep -Fq '"vsock"' "$TEST_ROOT/fc/fc-config.json"; then
+  fail "Firecracker enabled vsock without MOTO_FC_VSOCK_UDS"
+fi
+
+MOTO_IMAGE=motor-os.img MOTO_FC_VSOCK_UDS='' run_fc >/dev/null 2>&1
+grep -Fq '"path_on_host": "'"$VM_DIR"'/motor-os.img"' \
+  "$TEST_ROOT/fc/fc-config.json" || fail "Firecracker did not select the raw standard image"
+
+MOTO_FC_VSOCK_UDS="$TEST_ROOT/fc/vsock" run_fc >/dev/null 2>&1
+grep -Fq '"guest_cid": 3' "$TEST_ROOT/fc/fc-config.json" ||
+  fail "Firecracker vsock config lacks guest CID 3"
+grep -Fq '"uds_path": "'"$TEST_ROOT"'/fc/vsock"' \
+  "$TEST_ROOT/fc/fc-config.json" || fail "Firecracker vsock config lacks its UDS path"
+
+rm -f "$ARG_LOG"
+if MOTO_FC_VSOCK_UDS=relative/path run_fc 2> "$ERROR_LOG"; then
+  fail "Firecracker accepted a relative vsock UDS path"
+fi
+grep -Fq "MOTO_FC_VSOCK_UDS must be an absolute path" "$ERROR_LOG" ||
+  fail "Firecracker did not explain its invalid vsock UDS path"
+[ ! -e "$ARG_LOG" ] || fail "Firecracker launched with an invalid vsock UDS path"
+
+rm -f "$ARG_LOG"
+if MOTO_FC_VSOCK_UDS="$TEST_ROOT/fc/vsock bad" run_fc 2> "$ERROR_LOG"; then
+  fail "Firecracker accepted an unsafe vsock UDS path"
+fi
+grep -Fq "invalid MOTO_FC_VSOCK_UDS" "$ERROR_LOG" ||
+  fail "Firecracker did not explain its unsafe vsock UDS path"
+[ ! -e "$ARG_LOG" ] || fail "Firecracker launched with an unsafe vsock UDS path"
+
+exec 8> "$TEST_ROOT/common-vm.lock"
+flock -n 8
+rm -f "$ARG_LOG"
+if MOTO_QEMU_LOCK="$TEST_ROOT/common-vm.lock" run_fc 2> "$ERROR_LOG"; then
+  fail "Firecracker ignored the common Motor OS VM lock"
+fi
+grep -Fq "another Motor OS VM owns $TEST_ROOT/common-vm.lock" "$ERROR_LOG" ||
+  fail "Firecracker did not explain the common VM lock conflict"
+[ ! -e "$ARG_LOG" ] || fail "Firecracker launched while the common VM lock was held"
+exec 8>&-
+
+if MOTO_IMAGE=motor-os.qcow2 run_fc > /dev/null 2> "$ERROR_LOG"; then
+  fail "Firecracker accepted a qcow2 image"
+fi
+grep -Fq "Firecracker requires a raw image" "$ERROR_LOG" ||
+  fail "Firecracker did not explain its raw-image requirement"
+
+
+# Exercise all public launchers with fake VMMs, isolated from host resources.
+(
+  export PATH="$FAKE_BIN:$PATH" MOTOR_VM_ARG_LOG="$ARG_LOG"
+  export MOTO_QEMU_LOCK="$TEST_ROOT/options.lock" MOTO_HUGEPAGES=0
+  export MOTO_CHV_RUNTIME_DIR="$TEST_ROOT/chv" MOTO_FC_RUNTIME_DIR="$TEST_ROOT/fc"
+  unset MOTO_IMAGE MOTO_CPU_AFFINITY MOTO_SHARED_MEM MOTO_FC_VSOCK_UDS
+
+  run_options() {
+    "$VM_DIR/run-$runner.sh" "$@" > /dev/null 2> "$ERROR_LOG"
+  }
+
+  assert_resources() {
+    local cpus="$1" memory="$2"
+    case "$runner" in
+      fc)
+        grep -Fxq "    \"vcpu_count\": $cpus," "$TEST_ROOT/fc/fc-config.json" ||
+          fail "wrong Firecracker CPU count"
+        grep -Fxq "    \"mem_size_mib\": $memory" "$TEST_ROOT/fc/fc-config.json" ||
+          fail "wrong Firecracker memory size"
+        ;;
+      chv) assert_arg "boot=$cpus"; assert_arg "size=${memory}M" ;;
+      *) assert_arg "-smp"; assert_arg "$cpus"; assert_arg "${memory}M" ;;
+    esac
+  }
+
+  for runner in qemu qemu-echr chv fc; do
+    unset MOTO_SMP MOTO_MEMORY_MIB
+    run_options
+    case "$runner" in
+      fc) assert_resources 2 64 ;;
+      *) assert_resources 4 1024 ;;
+    esac
+    export MOTO_SMP=6 MOTO_MEMORY_MIB=768
+    run_options
+    assert_resources 6 768
+    run_options --cpus 3 --memory 512M
+    assert_resources 3 512
+    run_options --memory=2G --cpus=5 -- 'argument with spaces' --cpus=passthrough
+    assert_resources 5 2048
+    assert_arg 'argument with spaces'
+    assert_arg --cpus=passthrough
+    assert_no_arg --cpus=5
+    assert_no_arg --memory=2G
+    if [ "$runner" = qemu-echr ]; then
+      assert_arg -echr
+      assert_arg 0x14
+    fi
+
+    for option in --cpus --memory; do
+      for value in '' 0 -1 1.5 01 invalid; do
+        rm -f "$ARG_LOG"
+        if run_options "$option=$value"; then
+          fail "$runner accepted $option=$value"
+        fi
+        [ ! -e "$ARG_LOG" ] || fail "$runner launched with invalid options"
+      done
+      if run_options "$option"; then
+        fail "$runner accepted a missing $option value"
+      fi
+    done
+    for value in 512 0M 01G 1m 1g 1MB 1.5G 9000000000G 99999999999999999999M; do
+      if run_options --memory "$value"; then
+        fail "$runner accepted --memory $value"
+      fi
+    done
+    rm -f "$ARG_LOG"
+    run_options --help
+    [ ! -e "$ARG_LOG" ] || fail "$runner launched for --help"
+  done
+
+  runner=chv
+  run_options --cpus 3 --memory 1G
+  assert_arg boot=3
+  assert_arg size=1024M
+  run_options -- --cpus boot=7 --memory size=3G
+  assert_arg boot=7
+  assert_arg size=3G
+
+  runner=qemu
+  MOTO_SHARED_MEM=1 run_options --memory 2G -monitor 'unix:monitor path,server'
+  assert_arg 'memory-backend-memfd,id=mem0,size=2048M,share=on'
+  assert_arg -monitor
+  assert_arg 'unix:monitor path,server'
+
+  for runner in qemu qemu-echr chv fc; do
+    run_options
+    case "$runner" in
+      chv) assert_arg --net; assert_no_arg --cmdline ;;
+      fc)
+        grep -Fq '"host_dev_name": "moto-tap"' "$TEST_ROOT/fc/fc-config.json" ||
+          fail 'Firecracker lost its default network device'
+        default_boot_args="$(sed -n 's/.*"boot_args": "\(.*\)"/\1/p' "$TEST_ROOT/fc/fc-config.json")"
+        ;;
+      *) assert_arg -netdev ;;
+    esac
+    run_options --no-network
+    assert_no_arg --no-network
+    case "$runner" in
+      chv) assert_no_arg --net ;;
+      fc)
+        if grep -Fq '"iface_id"' "$TEST_ROOT/fc/fc-config.json"; then
+          fail 'Firecracker still has a network device'
+        fi
+        ;;
+      *)
+        assert_no_arg -netdev
+        assert_no_arg virtio-net-pci,disable-legacy=on,mac=a4:a1:c2:00:00:01,netdev=nic0
+        assert_arg -nic
+        assert_arg none
         ;;
     esac
-    run_test_vm_boot_check "$ROOT_DIR" "$BUILD" "$boot_vmm"
-  done
-fi
-
-MAIN_RUNTIME_DIR="$(mktemp -d "${TMPDIR:-/tmp}/full-test-runtime.XXXXXX")"
-export MOTO_CHV_RUNTIME_DIR="$MAIN_RUNTIME_DIR/chv"
-export MOTO_FC_RUNTIME_DIR="$MAIN_RUNTIME_DIR/fc"
-export MOTO_FC_VSOCK_UDS=''
-main_runner_args=()
-if [ "$VMM" = qemu ] && [ -n "${FULL_TEST_QEMU_ARGS:-}" ]; then
-  # Keep the suite's existing QEMU-only argument splitting.
-  main_runner_args+=(${FULL_TEST_QEMU_ARGS})
-fi
-echo ""
-echo ""
-
-
-start_test_vm "$TEST_VM_RUNNER" "$TEST_VM_LABEL" /tmp/full-test.log \
-  "${main_runner_args[@]}"
-
-ssh_split_stdout="/tmp/full-test-ssh-stdout.$$"
-ssh_split_stderr="/tmp/full-test-ssh-stderr.$$"
-# The probe's `ls` of a missing path exits 2, like ls(1); expecting that exact
-# status here also pins remote exit-status propagation through russhd.
-ssh_split_status=0
-vm_ssh "SSH_STDOUT_MARKER=ssh-stdout-marker /system/bin/printenv SSH_STDOUT_MARKER; /system/bin/ls /ssh-stderr-separation-probe" \
-  > "$ssh_split_stdout" 2> "$ssh_split_stderr" || ssh_split_status="$?"
-[ "$ssh_split_status" -eq 2 ] ||
-  fail "russhd did not deliver ls's error status (got $ssh_split_status)"
-[ "$(cat "$ssh_split_stdout")" = "SSH_STDOUT_MARKER=ssh-stdout-marker" ] ||
-  fail "russhd mixed remote stderr into SSH stdout"
-grep -q "^error reading directory '/ssh-stderr-separation-probe'\.$" "$ssh_split_stderr" ||
-  fail "russhd did not deliver remote stderr as SSH extended data"
-rm -f "$ssh_split_stdout" "$ssh_split_stderr"
-
-# A command that never reads stdin leaves it for the next one, even though the
-# client's EOF reaches the remote shell first.
-ssh_stdin_out="$(printf 'ssh-stdin-marker\n' |
-  vm_ssh '/system/bin/sysbox echo first; /system/bin/sysbox cat')" ||
-  fail "stdin across SSH commands failed"
-[ "$ssh_stdin_out" = "$(printf 'first\nssh-stdin-marker')" ] ||
-  fail "a command that never read stdin lost it: '$ssh_stdin_out'"
-
-if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
-  vm_ssh "[ ! -e /devtools ]" ||
-    fail "standard image unexpectedly packages /devtools"
-fi
-# Before uploading any test binaries, the RAM mount is empty and hides the
-# sentinel shipped on disk. Listing also exercises mounted-root metadata/name.
-out="$(vm_ssh_stdout "/system/bin/ls /none/tmp")" ||
-  fail "cannot list fresh /none/tmp"
-[ -z "$out" ] || fail "fresh memfs is not empty: $out"
-vm_ssh "[ ! -e /none/tmp/.shadowed-by-memfs ]" ||
-  fail "memfs exposes its shadowed disk contents"
-# An earlier run's leftover test directories would fail the mkdirs below.
-remove_test_roots vm_ssh
-{
-  test_root_mkdirs
-  if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" != "1" ]; then
-    printf '%s\n' \
-      "put $ROOT_DIR/build/bin/$BUILD/systest $TEST_BIN/systest" \
-      "put $ROOT_DIR/build/bin/$BUILD/wg-self-test $TEST_BIN/wg-self-test" \
-      "put $ROOT_DIR/build/bin/$BUILD/mio-test $TEST_BIN/mio-test" \
-      "put $ROOT_DIR/build/bin/$BUILD/tokio-tests $TEST_BIN/tokio-tests" \
-      "put $ROOT_DIR/build/bin/$BUILD/crossterm-smoke $TEST_BIN/crossterm-smoke" \
-      "put $ROOT_DIR/build/bin/$BUILD/rmux-probe $TEST_BIN/rmux-probe"
-  fi
-} | sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
-  -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
-  -i "$WD/test.key" motor@192.168.4.2
-
-# Fresh-boot physical placement, before allocation-heavy tests fragment the
-# block pool: eight 1 MiB pieces must land in at most 4 + S + 2 * CPUs blocks
-# (four ideal, the S blocks boot left split, two per CPU cursor).
-out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP $TEST_BIN/systest mem-placement")" ||
-  fail "systest mem-placement failed: $out"
-echo "$out"
-[ "${out##*$'\n'}" = "mem_blocks: placement PASS" ] ||
-  fail "systest mem-placement did not pass: $out"
-
-"$WD/test-unwind.sh"
-
-printf '%s\n' "put $ROOT_DIR/build/bin/$BUILD/sysbox-utility-tests $TEST_TMP/sysbox-utility-tests" |
-  sftp -b - -F /dev/null -P 2222 -o IdentitiesOnly=yes -o BatchMode=yes \
-    -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WD/test-known-hosts" \
-    -i "$WD/test.key" motor@192.168.4.2
-out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP $TEST_TMP/sysbox-utility-tests /system/bin/sysbox")" ||
-  fail "sysbox utility tests failed: $out"
-[ "${out##*$'\n'}" = "sysbox utility-tests: ALL PASS" ] || fail "sysbox utility tests did not finish: $out"
-printf '%s\n' "$out"
-
-if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
-  vm_ssh /system/bin/rush /devtools/tests/quickjs-smoke.sh || fail "QuickJS smoke failed"
-  "$WD/test-rust-analyzer-crates.sh"
-  "$WD/test-rust-analyzer-native.sh"
-  "$WD/test-rustfmt-native.sh"
-  "$WD/test-gix.sh" --guest
-fi
-
-if vm_ssh /system/bin/mkdir /fs-permissions-root-probe; then
-  fail "mkdir returned success after a denied root-level creation"
-fi
-vm_ssh "[ ! -e /fs-permissions-root-probe ]" ||
-  fail "Interactive session created a root-level directory"
-if vm_ssh /system/bin/rmdir /system/tmp; then
-  fail "rmdir returned success after a denied system-directory removal"
-fi
-vm_ssh "[ -d /system/tmp ]" ||
-  fail "Interactive session removed /system/tmp"
-# NONE's own tree: a NONE-role process writes /none/cfg and /none/tmp but
-# cannot add entries to /none itself. 0x204 is CAP_SPAWN and CAP_FS_WRITE
-# without CAP_INTERACTIVE, so only the directory modes decide.
-for none_dir in /none/cfg /none/tmp; do
-  vm_ssh "MOTOR_OS_CAPS=0x204 /system/bin/rush -c 'echo none >$none_dir/fs-permissions-none-probe'" ||
-    fail "a NONE-role process could not write $none_dir"
-  vm_ssh /system/bin/rm "$none_dir/fs-permissions-none-probe"
-done
-if vm_ssh "MOTOR_OS_CAPS=0x204 /system/bin/mkdir /none/fs-permissions-none-probe"; then
-  fail "mkdir returned success after a denied /none creation"
-fi
-vm_ssh "[ ! -e /none/fs-permissions-none-probe ]" ||
-  fail "a NONE-role process created an entry directly in /none"
-# Higher roles' temporary directories are closed. The positive controls are
-# the /none/tmp write above and the /user/tmp write below.
-if vm_ssh "MOTOR_OS_CAPS=0x204 /system/bin/ls /user/tmp" >/dev/null 2>&1; then
-  fail "a NONE-role process listed /user/tmp"
-fi
-if vm_ssh /system/bin/mkdir /system/tmp/fs-permissions-probe; then
-  fail "mkdir returned success after a denied /system/tmp creation"
-fi
-vm_ssh "[ ! -e /system/tmp/fs-permissions-probe ]" ||
-  fail "Interactive session created an entry in /system/tmp"
-vm_ssh /system/bin/mkdir "$TEST_TMP/fs-permissions-write-probe"
-vm_ssh /system/bin/rm -r "$TEST_TMP/fs-permissions-write-probe"
-if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
-  vm_ssh "/system/bin/rush -c 'echo writable >/devtools/src/.fs-permissions-write-probe'"
-  vm_ssh /system/bin/rm /devtools/src/.fs-permissions-write-probe
-fi
-
-check_bin_permissions() {
-  local directory="$1"
-  local policy="$2"
-  local listing
-  local mode
-  local name
-  local rows
-
-  listing="$(vm_ssh /system/bin/ls -l "$directory")" ||
-    fail "cannot list $directory"
-  rows="$(printf '%s\n' "$listing" | awk 'NF { print $1, $NF }')"
-  [ -n "$rows" ] || fail "$directory is empty"
-  while read -r mode name; do
-    case "$policy:$mode" in
-      system:-r-xr-xr-x) ;;
-      mutable:-r-xr-xr-x|mutable:-rwxrwxr-x) ;;
-      *) fail "$directory/$name has unexpected mode '$mode'" ;;
+    case "$runner" in
+      qemu*)
+        rm -f "$ARG_LOG"
+        if run_options --system-tty; then fail "$runner accepted --system-tty"; fi
+        grep -Fq 'disk boot has no kernel command line' "$ERROR_LOG" ||
+          fail "$runner did not explain --system-tty refusal"
+        [ ! -e "$ARG_LOG" ] || fail "$runner launched with --system-tty"
+        ;;
+      *)
+        run_options --system-tty --no-network
+        assert_no_arg --system-tty
+        assert_no_arg --no-network
+        if [ "$runner" = chv ]; then
+          assert_arg --cmdline
+          assert_arg system-tty
+          assert_no_arg --net
+          for cmdline in '' 'console=ttyS0 test="two words" system-tty=0'; do
+            run_options --system-tty -- --cmdline "$cmdline" --serial null
+            assert_arg "${cmdline:+$cmdline }system-tty"
+            assert_arg --serial
+            assert_arg null
+            run_options --system-tty -- "--cmdline=$cmdline"
+            assert_arg "${cmdline:+$cmdline }system-tty"
+          done
+          run_options -- --cmdline 'no-system-tty system-tty-extra'
+          assert_arg 'no-system-tty system-tty-extra'
+          assert_no_arg system-tty
+          if run_options --system-tty -- --cmdline; then fail 'missing command line accepted'; fi
+        else
+          grep -Fq "\"boot_args\": \"$default_boot_args system-tty\"" "$TEST_ROOT/fc/fc-config.json" ||
+            fail 'Firecracker did not preserve its boot arguments with system-tty'
+          if grep -Fq '"iface_id"' "$TEST_ROOT/fc/fc-config.json"; then
+            fail 'Firecracker system-tty boot still has a network device'
+          fi
+        fi
+        ;;
     esac
-  done <<EOF
-$rows
-EOF
-}
+  done
+)
 
-check_bin_permissions /system/bin system
-check_bin_permissions /user/bin mutable
-if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
-  check_bin_permissions /devtools/bin mutable
-  editable_script=/devtools/bin/www
-  saved_script="$TEST_TMP/fs-permissions-www.saved"
-  vm_ssh /system/bin/cp "$editable_script" "$saved_script"
-  vm_ssh "/system/bin/rush -c 'echo >>$editable_script'" ||
-    fail "Interactive session could not edit $editable_script in place"
-  vm_ssh "/system/bin/rush -c 'cat $saved_script >$editable_script'" ||
-    fail "could not restore $editable_script after its write probe"
-  # Interactive owns /devtools, where a user installs a toolchain.
-  vm_ssh "/system/bin/mv $editable_script $editable_script.renamed &&
-    /system/bin/mv $editable_script.renamed $editable_script" ||
-    fail "Interactive session could not rename $editable_script"
-  vm_ssh /system/bin/rm "$saved_script"
-  check_bin_permissions /devtools/bin mutable
+for runner in qemu chv fc; do
+  "run_$runner" --root-read-only --extra-disk first.img --extra-disk-ro second.raw >/dev/null 2>&1
+  case "$runner" in
+    qemu)
+      assert_arg "file=$VM_DIR/motor-os.qcow2,if=none,id=drive0,format=qcow2,readonly=on"
+      assert_arg "file=$VM_DIR/first.img,if=none,id=drive1,format=raw,readonly=off"
+      assert_arg "file=$VM_DIR/second.raw,if=none,id=drive2,format=raw,readonly=on"
+      ;;
+    chv)
+      assert_arg "path=$VM_DIR/motor-os.qcow2,image_type=qcow2,readonly=on"
+      assert_arg "path=$VM_DIR/first.img,image_type=raw,readonly=off"
+      assert_arg "path=$VM_DIR/second.raw,image_type=raw,readonly=on"
+      ;;
+    fc)
+      grep -Fq '"is_read_only": true' "$TEST_ROOT/fc/fc-config.json" || fail 'root read-only flag missing'
+      grep -Fq '"drive_id":"disk1","path_on_host":"'"$VM_DIR"'/first.img","is_root_device":false,"is_read_only":false' \
+        "$TEST_ROOT/fc/fc-config.json" || fail 'first extra disk missing'
+      grep -Fq '"drive_id":"disk2","path_on_host":"'"$VM_DIR"'/second.raw","is_root_device":false,"is_read_only":true' \
+        "$TEST_ROOT/fc/fc-config.json" || fail 'read-only extra disk missing'
+      ;;
+  esac
+  for bad in '' '../outside.img' 'data space.img' 'data,bad.img' 'data:bad.img' 'data.bad'; do
+    rm -f "$ARG_LOG"
+    if "run_$runner" --extra-disk "$bad" > "$ERROR_LOG" 2>&1; then
+      fail "$runner accepted invalid extra disk '$bad'"
+    fi
+    [ ! -e "$ARG_LOG" ] || fail "$runner launched with an invalid extra disk"
+  done
+  if "run_$runner" --extra-disk > "$ERROR_LOG" 2>&1; then fail "$runner accepted a missing extra disk"; fi
+done
+run_qemu --extra-disk data.qcow2
+assert_arg "file=$VM_DIR/data.qcow2,if=none,id=drive1,format=qcow2,readonly=off"
+run_chv --extra-disk data.qcow2
+assert_arg "path=$VM_DIR/data.qcow2,image_type=qcow2,readonly=off"
+if run_fc --extra-disk data.qcow2 > "$ERROR_LOG" 2>&1; then fail 'Firecracker accepted qcow2 extra disk'; fi
+PATH="$FAKE_BIN:$PATH" MOTOR_VM_ARG_LOG="$ARG_LOG" MOTO_QEMU_LOCK="$TEST_ROOT/qemu.lock" \
+  "$VM_DIR/run-qemu-echr.sh" --root-read-only --extra-disk first.img >/dev/null 2>&1
+assert_arg "file=$VM_DIR/first.img,if=none,id=drive1,format=raw,readonly=off"
+assert_arg -echr
+
+echo "test-vm-image-format: PASS"
+
+)
+
+host_vm_console_filter() (
+
+set -euo pipefail
+
+WD="$ROOT_DIR/src/tests"
+
+input=$'before\033[6nafter\033[18tmode\033[?2048$penable\033[?2048hdisable\033[?2048lend\0337\033[9999;9999H\0338'
+expected=$'beforeaftermodeenabledisableend\0337\033[9999;9999H\0338'
+actual="$(printf '%s' "$input" | filter_vm_console)"
+
+if [ "$actual" != "$expected" ]; then
+  echo "test-vm-console-filter: unexpected filtered output" >&2
+  printf 'expected: %q\nactual:   %q\n' "$expected" "$actual" >&2
+  exit 1
 fi
 
-EXPECTED_PATH=/system/bin:/user/bin
-if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
-  EXPECTED_PATH=$EXPECTED_PATH:/devtools/bin
-fi
-[ "$(vm_ssh_stdout /system/bin/printenv PATH)" = "PATH=$EXPECTED_PATH" ] ||
-  fail "russhd PATH does not match $EXPECTED_PATH"
-[ "$(vm_ssh_stdout "/system/bin/rush -c 'pwd'")" = "/user" ] ||
-  fail "russhd did not start the SSH command in /user"
-[ "$(vm_ssh_stdout /system/bin/printenv HOME)" = "HOME=/user" ] ||
-  fail "russhd did not set HOME to /user"
-rush_path="$(printf 'printenv PATH\nexit\n' |
-  vm_ssh_stdout "ENV=/system/cfg/rush.cfg /system/bin/rush --piped")"
-printf '%s\n' "$rush_path" | grep -q "PATH=$EXPECTED_PATH$" ||
-  fail "interactive Rush PATH does not match $EXPECTED_PATH: '$rush_path'"
-[ "$(vm_ssh_stdout "/system/bin/rush -c 'printenv TMPDIR'")" = "TMPDIR=/user/tmp" ] ||
-  fail "an Interactive shell did not get /user/tmp as its TMPDIR"
-[ "$(vm_ssh_stdout "TMPDIR=/chosen/tmp /system/bin/rush -c 'printenv TMPDIR'")" = "TMPDIR=/chosen/tmp" ] ||
-  fail "Rush replaced an explicit TMPDIR"
-for service in russhd strobe sys-init sys-tty dns-resolver; do
-  vm_ssh "[ ! -e /system/bin/$service ]" ||
-    fail "service $service was installed in /system/bin"
-done
+echo "test-vm-console-filter PASS"
 
-ping -c 1 -W 2 192.168.4.2
-ping -c 1 -W 2 2001:db8::2
-vm_ssh /system/bin/ping -c 1 192.168.4.1
-vm_ssh /system/bin/ping -c 1 2001:db8::1
-vm_ssh /system/bin/ping -c 1 127.0.0.1
-vm_ssh /system/bin/ping -c 1 localhost
+)
 
-test_udp_fragmentation
-test_wireguard
-for address in 192.168.4.2 2001:db8::2; do
-  vm_ssh "$TEST_BIN/wg-self-test $address"
-done
-test_ssh_client_host
+host_vm_vsock_backend() (
+# Hermetic checks of the vsock backend lookup and its one-time install: fake
+# backends and a stub cargo stand in for the network install.
 
-echo "-- Strobe I/O regressions --"
-vm_ssh /system/services/strobe --self-test
+set -euo pipefail
 
-echo "-- DNS resolver integration --"
-vm_ssh /system/services/dns-resolver --self-test
-ping_external google.com
-expect_ping_error does-not-exist.motor.invalid NotFound
+WD="$ROOT_DIR/src/tests"
 
-udp_sockets="$(read_udp_socket_count)"
-[ "$udp_sockets" = "1" ] ||
-  fail "DNS tests left $udp_sockets active UDP socket(s), expected one DNS listener"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/test-vm-vsock-backend.XXXXXX")"
+trap 'rm -rf "$TMP"' EXIT
 
-# PID of the guest process running `program`, or nothing.
-guest_pid() {
-  vm_ssh /system/bin/ps |
-    awk -v program="$1" '$NF == program { gsub(/[+*?]/, "", $1); print $1; exit }'
+fail() {
+  echo "test-vm-vsock-backend: $*" >&2
+  [ ! -s "$TMP/stderr" ] || cat "$TMP/stderr" >&2
+  exit 1
 }
 
-# Verify that numeric lookup is independent of the service, lookup failure is
-# defined, and a later per-call client reconnects after the service restarts.
-resolver_pid="$(guest_pid /system/services/dns-resolver)"
-[ -n "$resolver_pid" ] || fail "could not find the dns-resolver process"
-vm_ssh "/system/bin/rush -c 'kill $resolver_pid'"
-vm_ssh /system/bin/ping -c 1 127.0.0.1
-wait_for_ping_error google.com NotConnected
+# Create DIR/vhost-device-vsock, a fake backend that reports VERSION. The stub
+# cargo calls this under a PATH that holds nothing else, hence `command -p`.
+fake_backend() {
+  command -p mkdir -p "$1"
+  printf '#!/bin/sh\necho "vhost-device-vsock %s"\n' "$2" > "$1/vhost-device-vsock"
+  command -p chmod +x "$1/vhost-device-vsock"
+}
+fake_backend "$TMP/pinned" "$VSOCK_BACKEND_VERSION"
+fake_backend "$TMP/explicit" "$VSOCK_BACKEND_VERSION"
+fake_backend "$TMP/stale" 0.2.0
+mkdir "$TMP/empty"
 
-# A loopback listener that cannot bind must leave native resolution running.
-# Hold port 53 first; check IPC lookups and the logged startup failure.
-: > /tmp/full-test-dns-port-holder.log
-"${SSH[@]}" MOTOR_OS_CAPS=0x140 "$TEST_BIN/systest" hold-dns-port \
-  >> /tmp/full-test-dns-port-holder.log 2>&1 &
-DNS_PORT_HOLDER_SSH_PID="$!"
-holder_pid=""
-for _ in $(seq 1 100); do
-  holder_pid="$(awk '/^holding 127.0.0.1:53 as pid / { print $NF; exit }' \
-    /tmp/full-test-dns-port-holder.log)"
-  [ -z "$holder_pid" ] || break
-  sleep 0.1
-done
-[ -n "$holder_pid" ] || fail "systest did not take the loopback DNS port"
-"${SSH[@]}" MOTOR_OS_CAPS=0x148 /system/services/dns-resolver \
-  >> /tmp/full-test-dns-resolver.log 2>&1 &
-DNS_RESOLVER_SSH_PID="$!"
-# Wait only for service discovery; a failed lookup must fail the test.
-vm_ssh /system/services/dns-resolver --test-service-ready
-vm_ssh "$TEST_BIN/systest" dns-lookup motor-dns-test ||
-  fail "native resolution failed while the loopback DNS port was held"
-logged=0
-for _ in $(seq 1 50); do
-  if vm_ssh cat /system/logs/dns-resolver.log | grep -Fq 'loopback DNS startup incomplete'; then
-    logged=1
-    break
-  fi
-  sleep 0.1
-done
-[ "$logged" = "1" ] || fail "dns-resolver did not report its loopback DNS startup failure"
-resolver_pid="$(guest_pid /system/services/dns-resolver)"
-[ -n "$resolver_pid" ] || fail "could not find the IPC-only dns-resolver process"
-vm_ssh "/system/bin/rush -c 'kill $resolver_pid'"
-vm_ssh "/system/bin/rush -c 'kill $holder_pid'"
-wait_for_ping_error google.com NotConnected
-udp_sockets="$(read_udp_socket_count 0)"
-[ "$udp_sockets" = "0" ] ||
-  fail "the held DNS port and the IPC-only resolver left $udp_sockets UDP socket(s)"
-# Each SSH session ends with the status of its killed command.
-for pid in "$DNS_PORT_HOLDER_SSH_PID" "$DNS_RESOLVER_SSH_PID"; do
-  wait "$pid" || true
-done
-DNS_PORT_HOLDER_SSH_PID=""
+# Look up with only SEARCH_PATH and EXPLICIT visible, so that a backend really
+# installed on this host cannot affect the result. Prints the selected backend.
+lookup() (
+  PATH="$1"
+  VHOST_DEVICE_VSOCK="$2"
+  resolve_vsock_backend 2> "$TMP/stderr" && printf '%s\n' "$VHOST_DEVICE_VSOCK"
+)
 
-"${SSH[@]}" MOTOR_OS_CAPS=0x148 /system/services/dns-resolver \
-  >> /tmp/full-test-dns-resolver.log 2>&1 &
-DNS_RESOLVER_SSH_PID="$!"
+# A rejected lookup must name the remedy.
+expect_hint() {
+  grep -Fq -- "${VSOCK_BACKEND_INSTALL[*]}" "$TMP/stderr" ||
+    fail "$1: the diagnostic does not give the install command"
+}
 
-# The self-test waits for service discovery itself. Run assertions once so
-# a later success cannot hide a transport failure or a panic.
-vm_ssh /system/services/dns-resolver --self-test
-ping_external google.com
+[ "$(lookup "$TMP/pinned" "")" = "$TMP/pinned/vhost-device-vsock" ] ||
+  fail "the pinned backend on PATH was not selected"
+[ "$(lookup "$TMP/pinned" "$TMP/explicit/vhost-device-vsock")" = "$TMP/explicit/vhost-device-vsock" ] ||
+  fail "an explicit VHOST_DEVICE_VSOCK did not take precedence over PATH"
 
-udp_sockets="$(read_udp_socket_count)"
-[ "$udp_sockets" = "1" ] ||
-  fail "restarted DNS service left $udp_sockets active UDP socket(s), expected one DNS listener"
+if lookup "$TMP/empty" "" >/dev/null; then
+  fail "a missing backend was accepted"
+fi
+grep -Fq 'is not installed' "$TMP/stderr" || fail "a missing backend was not reported as such"
+expect_hint "missing backend"
 
-# Let systest output flow to the console as it happens; tee keeps a copy so
-# the verdict can still be checked. pipefail makes the pipeline carry
-# systest's own status rather than tee's.
-SYSTEST_LOG=/tmp/full-test-systest.log
-systest_status=0
-set -o pipefail
-# The SSH shell is Interactive, whose unadorned children no longer receive
-# CAP_LOG. The complete suite exercises logging, so grant
-# CAP_SPAWN | CAP_LOG | CAP_INTERACTIVE | CAP_VSOCK | CAP_NET | CAP_FS_WRITE
-# explicitly. --vsock runs the vsock tests, which expect this image's
-# topology (a NIC, no vsock device) and these capabilities.
-vm_ssh "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x3cc $TEST_BIN/systest --vsock" 2>&1 |
-  tee "$SYSTEST_LOG" || systest_status="$?"
-set +o pipefail
-[ "$systest_status" -eq 0 ] ||
-  fail "systest exited with status $systest_status"
+if lookup "$TMP/stale" "" >/dev/null; then
+  fail "a backend of another version was accepted"
+fi
+grep -Fq "expected vhost-device-vsock $VSOCK_BACKEND_VERSION, got 'vhost-device-vsock 0.2.0'" \
+  "$TMP/stderr" || fail "a version mismatch was not reported as such"
+expect_hint "version mismatch"
 
-# $(...) drops trailing newlines, so this is the last non-empty line.
-systest_output="$(cat "$SYSTEST_LOG")"
-[ "${systest_output##*$'\n'}" = "systest: ALL PASS" ] ||
-  fail "systest did not finish with 'systest: ALL PASS'"
+# A broken explicit choice is an error; it must not silently fall back to PATH.
+if lookup "$TMP/pinned" "$TMP/empty/vhost-device-vsock" >/dev/null; then
+  fail "a broken explicit VHOST_DEVICE_VSOCK fell back to PATH"
+fi
+expect_hint "broken explicit backend"
 
-# A full eight-phase batch with the smallest CPU budget exercises the sizing
-# hint and all futex checks without adding a minute-long soak to this suite.
-out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP $TEST_BIN/systest --host-cpus=1 futex-stress 1")" ||
-  fail "CPU-sized futex stress failed: $out"
-printf '%s\n' "$out"
-case "$out" in
-  *"1 available CPUs"*"futex-stress: PASS"*) ;;
-  *) fail "CPU-sized futex stress did not pass: $out" ;;
-esac
-# The hint changes the efficiency precondition, retaining every exchange.
-vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/systest --host-cpus=1 test-active-channel-polls"
-for host_cpus in 0 invalid; do
-  if out="$(vm_ssh_stdout "$TEST_BIN/systest --host-cpus=$host_cpus futex-stress 1" 2>&1)"; then
-    fail "systest accepted --host-cpus=$host_cpus: $out"
-  fi
-  case "$out" in
-    *"--host-cpus requires a positive CPU count"*) ;;
-    *) fail "systest did not reject --host-cpus=$host_cpus: $out" ;;
+# The harness entry point installs the pinned backend once, from the checkout.
+install_produces_backend=1
+cargo() {
+  printf '%s | %s\n' "$PWD" "$*" >> "$TMP/cargo.log"
+  [ "$*" = "install --locked --version $VSOCK_BACKEND_VERSION vhost-device-vsock" ] ||
+    fail "unexpected cargo command: $*"
+  [ "$install_produces_backend" -eq 0 ] || fake_backend "$TMP/bin" "$VSOCK_BACKEND_VERSION"
+}
+# Run with BIN as the only PATH entry, holding the INITIAL backend version or none.
+ensure() (
+  rm -rf "$TMP/bin" "$TMP/cargo.log"
+  mkdir -p "$TMP/bin"
+  : > "$TMP/cargo.log"
+  [ "$1" = none ] || fake_backend "$TMP/bin" "$1"
+  cd "$TMP"
+  PATH="$TMP/bin"
+  VHOST_DEVICE_VSOCK="${2:-}"
+  ensure_vsock_backend 2> "$TMP/stderr"
+)
+install="$VSOCK_BACKEND_CHECKOUT | install --locked --version $VSOCK_BACKEND_VERSION vhost-device-vsock"
+expect_cargo_log() {
+  [ "$(< "$TMP/cargo.log")" = "$1" ] || fail "$2: unexpected cargo calls: $(< "$TMP/cargo.log")"
+}
+ensure "$VSOCK_BACKEND_VERSION" || fail "an installed backend was rejected"
+expect_cargo_log "" "installed backend"
+ensure none || fail "a missing backend was not installed"
+expect_cargo_log "$install" "missing backend"
+ensure 0.2.0 || fail "a backend of another version was not replaced"
+expect_cargo_log "$install" "stale backend"
+if ensure none "$TMP/empty/vhost-device-vsock"; then
+  fail "a broken explicit VHOST_DEVICE_VSOCK was accepted"
+fi
+expect_cargo_log "" "explicit backend"
+install_produces_backend=0
+if ensure none; then fail "an install that produced no usable backend was accepted"; fi
+expect_cargo_log "$install" "fruitless install"
+
+echo "test-vm-vsock-backend PASS"
+
+)
+
+host_sdk_package() (
+# Test moto-sdk as crates.io would ship it.
+# Packaging leaves the src/sys workspace behind: path dependencies become
+# registry ones, and the workspace's [patch] no longer applies. This check
+# packages moto-sdk, extracts the .crate under build/ and builds it on its own,
+# against crates.io only: on Unix, where its tests run, and on Motor OS with
+# std, with std and test-support, and with only core and alloc (as rt.vdso
+# builds it). The Motor test binaries, the re-export check among them, only
+# compile here; they run natively under full-native-test.sh.
+#
+# moto-sdk/tests/package.lock pins the build. Each direct dependency is locked at
+# the lowest version the manifest allows, so the declared floors are what is
+# tested. After moto-sdk's dependencies change, --update-lock writes a new
+# lock; it needs the network.
+#
+# Testing is offline. full_prepare fetches and builds its inputs first.
+
+set -euo pipefail
+
+LOCK="$ROOT_DIR/src/sys/lib/moto-sdk/tests/package.lock"
+OUT="$ROOT_DIR/build/sdk-package"
+MOTOR=x86_64-unknown-motor
+
+mode=test
+profile_args=()
+for arg in "$@"; do
+  case "$arg" in
+    --release) profile_args=(--release) ;;
+    --prepare) mode=prepare ;;
+    --update-lock) mode=update-lock ;;
+    *) echo "usage: $0 [--release] [--prepare | --update-lock]" >&2; exit 2 ;;
   esac
 done
 
-# The SSH login shell consumes russhd's one-time capability environment.
-# Explicitly pass CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED | CAP_INTERACTIVE |
-# CAP_VSOCK | CAP_NET | CAP_FS_WRITE
-# from that shell to the focused lifetime coordinator so it can create the
-# detached Interactive child this test requires. Do not interpose another rush:
-# it deliberately would not pass detach to an untrusted program.
-lifetime_status=0
-out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x3ec $TEST_BIN/systest stdio-file-input-lifetime-suite")" ||
-  lifetime_status="$?"
-[ "$lifetime_status" -eq 0 ] ||
-  fail "privileged stdio lifetime tests exited with status $lifetime_status: '$out'"
-[ "$out" = "stdio_file_input privileged lifetime tests PASS" ] ||
-  fail "privileged stdio lifetime tests: '$out'"
+fail() {
+  echo "test-sdk-package: $*" >&2
+  exit 1
+}
 
-# Rush's explicit-mask precedence over its detach grant needs the same
-# detach-capable mask; the full systest run lacks CAP_SPAWN_DETACHED.
-rush_caps_status=0
-out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x3ec $TEST_BIN/systest rush-caps-precedence")" ||
-  rush_caps_status="$?"
-[ "$rush_caps_status" -eq 0 ] ||
-  fail "Rush capability precedence exited with status $rush_caps_status: '$out'"
-[ "$out" = "rush_caps::test_detach_grant_precedence PASS" ] ||
-  fail "Rush capability precedence: '$out'"
+network_args=(--offline)
+[ "$mode" = test ] || network_args=()
+verbosity_args=(--quiet)
+if [ "$mode" = prepare ]; then
+  verbosity_args=()
+fi
 
-# An unstarted detached child dying with its parent needs the same mask.
-raw_spawn_status=0
-out="$(vm_ssh_stdout "TMPDIR=$TEST_TMP MOTOR_OS_CAPS=0x3ec $TEST_BIN/systest raw-spawn-detached")" ||
-  raw_spawn_status="$?"
-[ "$raw_spawn_status" -eq 0 ] ||
-  fail "raw-spawn detached test exited with status $raw_spawn_status: '$out'"
-[ "$out" = "raw_spawn::test_unstarted_detached_child_dies_with_parent PASS" ] ||
-  fail "raw-spawn detached test: '$out'"
+progress() {
+  if [ "$mode" = prepare ]; then
+    echo "test-sdk-package: $*"
+  fi
+}
 
-test_rush_script_caps rush
-test_rush_script_caps sh
-test_rush_inproc_caps
+# The .crate a publish would upload.
+progress "packaging moto-sdk"
+rm -rf "$OUT/crate" "$OUT"/.staging.*
+mkdir -p "$OUT"
+(cd "$ROOT_DIR/src/sys" && CARGO_TARGET_DIR="$OUT/crate" cargo package "${verbosity_args[@]}" \
+  --locked "${network_args[@]}" --no-verify --allow-dirty -p moto-sdk)
+staging="$(mktemp -d "$OUT/.staging.XXXXXX")"
+tar -xzf "$OUT"/crate/package/moto-sdk-*.crate -C "$staging" --strip-components=1 \
+  --touch
 
-. "$WD/test-stdio-errors.sh"
-test_stdio_errors
+if [ "$mode" = update-lock ]; then
+  (cd "$staging" && cargo generate-lockfile --quiet -Zdirect-minimal-versions)
+  cp "$staging/Cargo.lock" "$LOCK"
+  rm -rf "$staging"
+  echo "wrote $LOCK"
+  exit 0
+fi
 
-# Inherited-stdio relay smoke: a nested rush spawns its child with
-# inherited stdio, so the outer rush's stdin and stdout relay tasks
-# carry both directions; the no-delay tail must not be lost to the
-# child-exit race.
-out="$(printf 'relay-smoke\n' | vm_ssh_stdout "/system/bin/rush -c 'read X && echo GOT=\$X'")"
-[ "$out" = "GOT=relay-smoke" ] || fail "stdin relay smoke: got '$out'"
-out="$(vm_ssh_stdout "/system/bin/rush -c 'echo tail-smoke'")"
-[ "$out" = "tail-smoke" ] || fail "relay tail smoke: got '$out'"
-
-# Rush reads its own stdin only through the line it needs, so the rest reaches
-# the command it runs: from the read builtin, and from the piped line reader.
-out="$(printf 'a\nb\n' | vm_ssh_stdout "/system/bin/rush -c 'read X; echo X=\$X; cat'")"
-[ "$out" = $'X=a\nb' ] || fail "rush read took the next line: got '$out'"
-for mode in --piped -i; do
-  out="$(printf 'read X\nhello\necho X=$X\n' | vm_ssh_stdout "PS1= /system/bin/rush $mode")"
-  [ "$out" = "X=hello" ] || fail "rush $mode read: got '$out'"
-  out="$(printf 'head -n 1\nhello\n' | vm_ssh_stdout "PS1= /system/bin/rush $mode")"
-  [ "$out" = "hello" ] || fail "rush $mode took head's input: got '$out'"
-done
-
-# A foreground status 130 is rush's v1 interrupt indication. It fires INT once
-# and abandons the rest of the pipeline, loop, and enclosing command list.
-rush_interrupt_cmd="/system/bin/rush -c \"trap 'echo INTERRUPTED' INT; for I in 1 2; do TMPDIR=$TEST_TMP $TEST_BIN/systest ctrl-c-exit-130 | echo PIPELINE_TAIL; echo LOOP_TAIL; done; echo LIST_TAIL\""
-rush_interrupt_status=0
-if out="$(vm_ssh_stdout "$rush_interrupt_cmd")"; then
-  fail "rush foreground status 130 unexpectedly succeeded: '$out'"
+# Cargo decides freshness by file dates, but stamps every packaged file with
+# one fixed date. So the files are dated at extraction instead, and each
+# distinct content keeps its directory: unchanged sources keep their dates,
+# and changed ones postdate every earlier build.
+cp "$LOCK" "$staging/Cargo.lock"
+key="$(cd "$staging" && find . -type f ! -name .cargo_vcs_info.json -print0 |
+  sort -z | xargs -0 sha256sum | sha256sum | cut -c1-16)"
+SOURCE="$OUT/source-$key"
+if [ -d "$SOURCE" ]; then
+  rm -rf "$staging"
 else
-  rush_interrupt_status="$?"
+  mv "$staging" "$SOURCE"
 fi
-[ "$rush_interrupt_status" -eq 130 ] && [ "$out" = "INTERRUPTED" ] ||
-  fail "rush foreground status 130 policy: status $rush_interrupt_status, '$out'"
+find "$OUT" -mindepth 1 -maxdepth 1 -name 'source-*' ! -name "source-$key" \
+  -exec rm -rf {} +
+cd "$SOURCE"
 
-# Pin rush's transport classifier, not only its final bytes. A fresh simple
-# redirect is a child File; descriptors shared by a group, loop, function, or
-# pipeline remain pipes, and a background job receives null stdin. The helper
-# exits nonzero if any fd has the wrong kind.
-route_dir=$TEST_TMP/stdio-routes
-# A debug build's runtime logs to stderr. Where a route merges stderr into the
-# compared output, drop those log lines first.
-without_runtime_logs() { sed -E '/^ *[0-9]+:[0-9]{3}: (TRACE|DEBUG|INFO|WARN|ERROR) /d' <<<"$1"; }
-vm_ssh "/system/bin/mkdir $route_dir"
-kind="TMPDIR=$TEST_TMP $TEST_BIN/systest stdio-file-direct-kind pipe"
-out="$(vm_ssh_stdout "/system/bin/rush -c '$kind file pipe >$route_dir/simple; echo RC=\$?; cat $route_dir/simple'")"
-[ "$out" = $'RC=0\nkind-ok' ] || fail "rush simple direct route: '$out'"
-out="$(vm_ssh_stdout "/system/bin/rush -c 'TMPDIR=$TEST_TMP $TEST_BIN/systest stdio-file-direct-kind null file pipe >$route_dir/background & wait; echo RC=\$?; cat $route_dir/background'")"
-[ "$out" = $'RC=0\nkind-ok' ] || fail "rush background direct route: '$out'"
-out="$(vm_ssh_stdout "/system/bin/rush -c '{ $kind pipe pipe; } >$route_dir/group; echo RC=\$?; cat $route_dir/group'")"
-[ "$out" = $'RC=0\nkind-ok' ] || fail "rush group pump route: '$out'"
-out="$(vm_ssh_stdout "/system/bin/rush -c 'for X in one; do $kind pipe pipe; done >$route_dir/loop; echo RC=\$?; cat $route_dir/loop'")"
-[ "$out" = $'RC=0\nkind-ok' ] || fail "rush loop pump route: '$out'"
-out="$(vm_ssh_stdout "/system/bin/rush -c 'F() { $kind pipe pipe; }; F >$route_dir/function; echo RC=\$?; cat $route_dir/function'")"
-[ "$out" = $'RC=0\nkind-ok' ] || fail "rush function pump route: '$out'"
-out="$(vm_ssh_stdout "/system/bin/rush -c '$kind pipe pipe | cat >$route_dir/pipeline; cat $route_dir/pipeline'")"
-[ "$out" = "kind-ok" ] || fail "rush pipeline pump route: '$out'"
-out="$(vm_ssh_stdout "/system/bin/rush -c '$kind file pipe 2>&1 1>$route_dir/split; echo RC=\$?; cat $route_dir/split'")"
-out="$(without_runtime_logs "$out")"
-[ "$out" = $'RC=0\nkind-ok' ] || fail "rush 2>&1 1>f order: '$out'"
-out="$(vm_ssh_stdout "/system/bin/rush -c '$kind file file 1>$route_dir/joined 2>&1; echo RC=\$?; cat $route_dir/joined'")"
-out="$(without_runtime_logs "$out")"
-[ "$out" = $'RC=0\nkind-ok' ] || fail "rush 1>f 2>&1 order: '$out'"
-out="$(vm_ssh_stdout "/system/bin/rush -c 'echo builtin >$route_dir/builtin; cat $route_dir/builtin'")"
-[ "$out" = "builtin" ] || fail "rush builtin pump route: '$out'"
-
-# The packaged /system/bin/rg exercises the direct-file identity route through rush
-# and ripgrep together; the in-tree systest above pins the same route directly.
-out="$(vm_ssh_stdout "/system/bin/rush -c 'mkdir $TEST_TMP/rg-stdio-e2e; cd $TEST_TMP/rg-stdio-e2e; echo alpha > input.txt; echo alpha > results.txt; TMPDIR=$TEST_TMP $TEST_BIN/systest stdio-file-direct-kind pipe file pipe results.txt >> results.txt; PROBE=\$?; echo alpha > results.txt; /system/bin/rg --files-with-matches alpha . >> results.txt; echo PROBE=\$PROBE; cat results.txt'")"
-[ "$out" = $'PROBE=0\nalpha\n./input.txt' ] ||
-  fail "ripgrep searched its own output file: got '$out'"
-echo "ripgrep file-stdio regression PASS"
-
-# A C program sees a pipeline's input end as EOF, not as an error: mlibc reports
-# what the runtime returns, whereas Rust's std turns any stdin error into EOF.
-if [ "${FULL_TEST_VERIFY_DEV_SOURCES:-0}" = "1" ]; then
-  out="$(vm_ssh_stdout "/system/bin/rush -c 'printf \"a\nb\n\" | /devtools/bin/lua -e \"for l in io.lines() do print(l) end\"; echo RC=\$?'")"
-  [ "$out" = $'a\nb\nRC=0' ] || fail "Lua did not read piped stdin to EOF: '$out'"
-  echo "C piped-stdin EOF PASS"
-
-  # The packaged sed: a pipeline, then in-place edits in both GNU forms, a
-  # script after a bare -i and an attached backup suffix. An in-place edit
-  # keeps the file's permissions, here narrower than the default.
-  sed_dir="$TEST_TMP/sed-e2e"
-  out="$(vm_ssh_stdout "/system/bin/rush -c '[ -d $sed_dir ] || mkdir $sed_dir; cd $sed_dir; printf \"alpha\nbeta\n\" | /devtools/bin/sed -n s/beta/BETA/p; echo RC=\$?; printf \"one\ntwo\n\" > f; chmod rwxrw---- f; /devtools/bin/sed -i s/one/ONE/ f; /devtools/bin/sed -i.bak -e s/two/TWO/ f; cat f f.bak; ls -l f'")"
-  [ "$out" = $'BETA\nRC=0\nONE\nTWO\nONE\ntwo\n-rwxrw---- 8 f' ] ||
-    fail "sed pipeline or in-place edit: '$out'"
-  # A writable file in a directory where no file can be created: the edit is
-  # staged in memory, and the file keeps its permissions.
-  locked="$sed_dir/locked"
-  out="$(vm_ssh_stdout "/system/bin/rush -c 'mkdir $locked; printf \"one\ntwo\n\" > $locked/f; chmod rwxrw---- $locked/f; chmod rwxr-xr-x $locked; /devtools/bin/sed -i s/one/ONE/ $locked/f; cat $locked/f; ls -l $locked/f; chmod rwxrwxr-x $locked; rm -r $locked'")"
-  [ "$out" = "ONE"$'\n'"two"$'\n'"-rwxrw---- 8 $locked/f" ] ||
-    fail "sed did not edit a file in a read-only directory in place: '$out'"
-  echo "sed PASS"
+if [ "$mode" != test ]; then
+  progress "fetching package-test dependencies"
+  cargo fetch "${verbosity_args[@]}" --locked
 fi
 
-# A background job's `$!` is the kernel's own pid for that child, so it is
-# meaningful outside rush: `ps` lists it and `kill` finds it (rush's jobs.rs,
-# docs/plans/pid-refactoring-design.md). The sleep is long enough that only a
-# kill that landed lets `wait` return.
-out="$(vm_ssh_stdout "/system/bin/rush -c 'sleep 3600 & B=\$!; /system/bin/ps; kill \$B; echo KILL_RC=\$?; wait; echo REAPED=\$B'")"
-bang="$(printf '%s\n' "$out" | sed -n 's/^REAPED=//p')"
-[ -n "$bang" ] || fail "rush did not reap the background job: '$out'"
-printf '%s\n' "$out" | grep -q '^KILL_RC=0$' ||
-  fail "kill by \$! failed: '$out'"
-printf '%s\n' "$out" |
-  awk -v pid="$bang" '{ gsub(/[+*?]/, "", $1); if ($1 == pid) found = 1 } END { exit !found }' ||
-  fail "\$! ($bang) is not a pid in the process list: '$out'"
+# Every dependency comes from crates.io: no path, Git or patched source.
+packages="$(grep -c '^\[\[package\]\]$' Cargo.lock)"
+registry="$(grep -c '^source = "registry+https://github.com/rust-lang/crates.io-index"$' Cargo.lock)"
+[ "$registry" -eq $((packages - 1)) ] ||
+  fail "$LOCK takes a dependency from outside crates.io"
 
-# rmux: a pane is a terminal to the program in it, without a pty (rmux/details.md
-# §3.1). The shell rmux spawns runs the command, and it prints its interactive
-# prompt -- which it does only when is_terminal() says it is on a terminal, and
-# which the non-interactive outer shell of an `ssh host cmd` never prints.
-# rmux renders rather than relays now, so the command's output arrives painted.
-out="$(printf 'echo $((21+21))\nexit\n' | vm_rmux 2>&1)"
-case "$out" in
-  *42*) ;;
-  *) fail "rmux pane did not run the command: '$out'" ;;
-esac
-case "$out" in
-  *motor-os*) ;;
-  *) fail "rmux pane's shell did not see a terminal: '$out'" ;;
-esac
-# And it borrows the console rather than keeping it: in on the alternate
-# screen, out again on exit, so a session leaves the scrollback as it found it.
-case "$out" in
-  *$'\033'"[?1049h"*) ;;
-  *) fail "rmux did not take the alternate screen" ;;
-esac
-case "$out" in
-  *$'\033'"[?1049l"*) ;;
-  *) fail "rmux did not give the console back" ;;
-esac
-# And it asks the console for bracketed paste, so that a paste reaches a pane as
-# one piece of text rather than as the keys it looks like -- which is what used
-# to turn a multi-line paste into a line at a time (rmux/details.md §7.6).
-case "$out" in
-  *$'\033'"[?2004h"*) ;;
-  *) fail "rmux did not ask its console for bracketed paste" ;;
-esac
-
-# Rush and rmux cooperate on Motor window names: an interactive Rush emits OSC
-# 2 around a foreground external command, while `command &` leaves the shell's
-# title in place. Drive a live client so this also covers rmux's launch marker,
-# OSC parser, auto-name policy, and status renderer.
-#
-# Synchronization is state-based. `ps` proves the uniquely long sleep is alive
-# before `refresh-client` forces a complete frame; an echo marker proves Rush
-# has regained control before the restored title is checked. No settling delay
-# is involved, which is important in this suite's heavily loaded TUI runs.
-RMUX_TITLE_OUTPUT=""
-coproc RMUX_TITLE_CLIENT {
-  vm_ssh "TMPDIR=$TEST_TMP/full-test-rmux-title" /user/bin/rmux 2>&1
-}
-RMUX_TITLE_SSH_PID="$!"
-exec {RMUX_TITLE_OUT_FD}<&"${RMUX_TITLE_CLIENT[0]}"
-exec {RMUX_TITLE_IN_FD}>&"${RMUX_TITLE_CLIENT[1]}"
-
-wait_rmux_title_output() {
-  local pattern="$1"
-  local label="$2"
-  local byte
-  local deadline=$((SECONDS + 20))
-  local remaining
-
-  while [ "$SECONDS" -lt "$deadline" ]; do
-    remaining=$((deadline - SECONDS))
-    if ! IFS= read -r -t "$remaining" -n 1 byte <&"$RMUX_TITLE_OUT_FD"; then
-      break
-    fi
-    RMUX_TITLE_OUTPUT+="$byte"
-    if [[ "$RMUX_TITLE_OUTPUT" == *"$pattern"* ]]; then
-      return
-    fi
-  done
-  fail "$label did not paint '$pattern': '$(printf '%s' "$RMUX_TITLE_OUTPUT" | tail -c 800)'"
-}
-
-wait_motor_process() {
-  local name="$1"
-  local presence="$2"
-  local label="$3"
-  local deadline=$((SECONDS + 20))
-  local processes=""
-  local found
-
-  while [ "$SECONDS" -lt "$deadline" ]; do
-    processes="$(vm_ssh /system/bin/ps)"
-    found=0
-    printf '%s\n' "$processes" | grep -Fq "$name" && found=1
-    if { [ "$presence" = present ] && [ "$found" = 1 ]; } ||
-      { [ "$presence" = absent ] && [ "$found" = 0 ]; }; then
-      return
-    fi
-    sleep 0.2
-  done
-  fail "$label did not become $presence: '$processes'"
-}
-
-printf 'sleep 314159\n' >&"$RMUX_TITLE_IN_FD"
-wait_motor_process "sleep 314159" present "rmux foreground command"
-RMUX_TITLE_OUTPUT=""
-printf '\001r' >&"$RMUX_TITLE_IN_FD"
-wait_rmux_title_output "0:sleep" "rmux foreground title"
-
-printf '\003' >&"$RMUX_TITLE_IN_FD"
-wait_motor_process "sleep 314159" absent "interrupted rmux command"
-RMUX_TITLE_OUTPUT=""
-printf 'echo RMUX_TITLE_RESTORED\n' >&"$RMUX_TITLE_IN_FD"
-wait_rmux_title_output "RMUX_TITLE_RESTORED" "rmux shell restoration marker"
-RMUX_TITLE_OUTPUT=""
-printf '\001r' >&"$RMUX_TITLE_IN_FD"
-wait_rmux_title_output "0:rush" "restored Rush title"
-
-RMUX_TITLE_OUTPUT=""
-printf 'sleep 271828 &\n' >&"$RMUX_TITLE_IN_FD"
-wait_motor_process "sleep 271828" present "rmux background command"
-printf '\001r' >&"$RMUX_TITLE_IN_FD"
-wait_rmux_title_output "0:rush" "background Rush title"
-case "$RMUX_TITLE_OUTPUT" in
-  *"0:sleep"*) fail "a background command took rmux's title" ;;
-esac
-
-printf 'kill $!\nwait\nexit 0\n' >&"$RMUX_TITLE_IN_FD"
-exec {RMUX_TITLE_IN_FD}>&-
-RMUX_TITLE_IN_FD=""
-set +e
-RMUX_TITLE_OUTPUT+="$(cat <&"$RMUX_TITLE_OUT_FD")"
-rmux_title_read_status="$?"
-wait "$RMUX_TITLE_SSH_PID"
-rmux_title_status="$?"
-set -e
-exec {RMUX_TITLE_OUT_FD}<&-
-RMUX_TITLE_OUT_FD=""
-RMUX_TITLE_SSH_PID=""
-[ "$rmux_title_read_status" -eq 0 ] ||
-  fail "rmux title output ended with status $rmux_title_read_status"
-[ "$rmux_title_status" -eq 0 ] ||
-  fail "rmux title client exited with status $rmux_title_status: '$(printf '%s' "$RMUX_TITLE_OUTPUT" | tail -c 800)'"
-
-# A terminal that goes away is not the end of a script. When an SSH connection
-# drops, russhd closes rmux's console; the session must stay for the next
-# attach instead of ending with its shell's input.
-RMUX_HANGUP_TMPDIR="$TEST_TMP/full-test-rmux-hangup"
-coproc RMUX_HANGUP_CLIENT {
-  ssh "${SSH_OPTIONS[@]}" -e none -tt motor@192.168.4.2 \
-    "TMPDIR=$RMUX_HANGUP_TMPDIR /user/bin/rmux new -s hangup" 2>&1
-}
-RMUX_HANGUP_SSH_PID="$!"
-rmux_hangup_output=""
-rmux_hangup_deadline=$((SECONDS + 20))
-while [[ "$rmux_hangup_output" != *"motor-os"* ]]; do
-  [ "$SECONDS" -lt "$rmux_hangup_deadline" ] &&
-    IFS= read -r -t 20 -n 1 rmux_hangup_byte <&"${RMUX_HANGUP_CLIENT[0]}" ||
-    fail "rmux hang-up client never reached a prompt: '$rmux_hangup_output'"
-  rmux_hangup_output+="$rmux_hangup_byte"
-done
-kill "$RMUX_HANGUP_SSH_PID"
-wait "$RMUX_HANGUP_SSH_PID" || true
-rmux_hangup_deadline=$((SECONDS + 20))
-while :; do
-  rmux_hangup_ls="$(vm_ssh "TMPDIR=$RMUX_HANGUP_TMPDIR" /user/bin/rmux ls)"
-  case "$rmux_hangup_ls" in
-    *"hangup: 1 window (attached)"*) ;;
-    *"hangup: 1 window"*) break ;;
-    *) fail "rmux session ended with its console: '$rmux_hangup_ls'" ;;
+# Each direct dependency is locked at the lowest version the manifest allows.
+direct="$(cargo tree --locked --offline --target all -e normal,build,dev \
+  --depth 1 --prefix none --format '{p}')" ||
+  fail "$LOCK does not match moto-sdk's manifest; run $0 --update-lock"
+checked=0
+while read -r name requirement; do
+  case "$requirement" in
+    "" | *[!0-9.]*) fail "$name: cannot check requirement '$requirement'" ;;
+    *.*.*) floor="$requirement" ;;
+    *.*) floor="$requirement.0" ;;
+    *) floor="$requirement.0.0" ;;
   esac
-  [ "$SECONDS" -lt "$rmux_hangup_deadline" ] ||
-    fail "rmux client outlived its console: '$rmux_hangup_ls'"
-  sleep 0.2
-done
-vm_ssh "TMPDIR=$RMUX_HANGUP_TMPDIR" /user/bin/rmux kill-session -t hangup
+  printf '%s\n' "$direct" | grep -qxE "$name v${floor//./\\.}( \(proc-macro\))?" ||
+    fail "$name is not locked at $floor, the lowest version allowed; run $0 --update-lock"
+  checked=$((checked + 1))
+done < <(awk '/^\[/ {
+    dep = ""
+    if (match($0, /dependencies\.[^]]+\]$/)) dep = substr($0, RSTART + 13, RLENGTH - 14)
+  }
+  dep != "" && /^version = / { v = $3; gsub(/"/, "", v); print dep, v; dep = "" }' Cargo.toml)
+[ "$checked" -gt 0 ] || fail "found no dependency requirements in the packaged manifest"
 
-# Delimiters and the common URL encoder's entity spellings must survive
-# real server discovery. A directory spelling the first one's escapes must
-# select a different server, not alias the same service name.
-RMUX_DELIMITERS="$TEST_TMP/full-test-rmux;:=&%3B&amp;&col;&eq;"
-RMUX_ESCAPES="$TEST_TMP/full-test-rmux%3B%3A%3D%26%253B%26amp%3B%26col%3B%26eq%3B"
-vm_ssh "/system/bin/mkdir '$RMUX_DELIMITERS'"
-vm_ssh "/system/bin/mkdir '$RMUX_ESCAPES'"
-printf '\001d' | vm_ssh "TMPDIR='$RMUX_DELIMITERS' /user/bin/rmux new -s delimiters" > /dev/null
-printf '\001d' | vm_ssh "TMPDIR='$RMUX_ESCAPES' /user/bin/rmux new -s escapes" > /dev/null
-out="$(vm_ssh "TMPDIR='$RMUX_DELIMITERS' /user/bin/rmux ls")"
-[ "$out" = "delimiters: 1 window" ] || fail "rmux delimiter directory discovery: '$out'"
-out="$(vm_ssh "TMPDIR='$RMUX_ESCAPES' /user/bin/rmux ls")"
-[ "$out" = "escapes: 1 window" ] || fail "rmux escape-spelling directory collision: '$out'"
-vm_ssh "TMPDIR='$RMUX_DELIMITERS' /user/bin/rmux kill-session -t delimiters"
-vm_ssh "TMPDIR='$RMUX_ESCAPES' /user/bin/rmux kill-session -t escapes"
+test_args=()
+[ "$mode" = test ] || test_args=(--no-run)
+export CARGO_TARGET_DIR="$OUT/target"
+progress "building host tests"
+cargo test "${verbosity_args[@]}" --locked "${network_args[@]}" "${profile_args[@]}" "${test_args[@]}"
+progress "building Motor OS tests"
+cargo test "${verbosity_args[@]}" --locked "${network_args[@]}" "${profile_args[@]}" --target "$MOTOR" --no-run
+progress "building Motor OS library with test-support"
+cargo build "${verbosity_args[@]}" --locked "${network_args[@]}" "${profile_args[@]}" --target "$MOTOR" \
+  --features test-support
+progress "building Motor OS library without default features"
+cargo build "${verbosity_args[@]}" --locked "${network_args[@]}" "${profile_args[@]}" --target "$MOTOR" \
+  --no-default-features -Zbuild-std=core,alloc
+if [ "$mode" = test ]; then
+  echo "moto-sdk package PASS"
+fi
 
-# rmux's client and server meet over moto_sdk::ipc, and a server serves only
-# clients that hold every capability it holds (src/bin/rmux/details.md §4.2.1).
-# rmux-probe is a hand-written client that can name any server, so these
-# checks do not rely on rmux's own client choosing the right one.
-RMUX_CAPS_TMPDIR="$TEST_TMP/full-test-rmux-caps"
-RMUX_PROBE="$TEST_BIN/rmux-probe"
-out="$(vm_ssh "$RMUX_PROBE errors")"
-[ "$out" = "opening and poll refusals preserved; closed peer remains EOF" ] ||
-  fail "rmux refusal/EOF probe: '$out'"
-status=0
-out="$(vm_ssh "TMPDIR=$TEST_TMP/full-test-rmux-closing $RMUX_PROBE closing")" || status=$?
-[ "$status" -eq 5 ] || fail "rmux final input lost exit 5: status=$status, '$out'"
-[ "$out" = "final input acknowledged; exit=5" ] || fail "rmux closing probe: '$out'"
-vm_ssh /system/bin/mkdir "$RMUX_CAPS_TMPDIR"
+)
 
-rmux_caps() {
-  vm_ssh "TMPDIR=$RMUX_CAPS_TMPDIR $*"
-}
+host_tool_sizes() (
+  [ "$BUILD" = release ] || return 0
+  local assembly="$ROOT_DIR/build/assembly/images" imager="$ROOT_DIR/build/obj/release/imager/release/imager"
+  local evidence variant overlay bytes_without bytes_with bytes
+  check_size() {
+    local label="$1" observed="$2" limit="$3"
+    [[ "$observed" =~ ^[0-9]+$ ]] && [ "$observed" -le "$limit" ] || {
+      echo "$label: observed=$observed bytes, approved maximum=$limit" >&2
+      return 1
+    }
+  }
+  for limit in 22020096 33554432 83886080 134217728; do
+    check_size boundary "$((limit - 1))" "$limit"
+    check_size boundary "$limit" "$limit"
+    for bad in '' -1 not-a-number "$((limit + 1))"; do
+      if check_size boundary "$bad" "$limit" 2>/dev/null; then
+        cross_fail "size check accepted $bad with limit $limit"
+      fi
+    done
+  done
+  check_size rustfmt-binary "$(stat -c %s "$assembly/rustc/user/lib/rust/bin/rustfmt")" 22020096
+  check_size analyzer-binary "$(stat -c %s "$assembly/rust-analyzer/user/lib/rust/bin/rust-analyzer")" 33554432
+  bytes="$(find "$assembly/rust-analyzer/user/lib/rust/lib/rustlib/src/rust/library" -type f -printf '%s\n' |
+    awk '{bytes += $1} END {printf "%.0f", bytes}')"
+  check_size rust-src "$bytes" 83886080
+  evidence="$(mktemp -d "$ROOT_DIR/build/tool-size.XXXXXX")"
+  trap 'status=$?; if [ "$status" = 0 ]; then rm -r "$evidence"; else echo "Tool size evidence: $evidence" >&2; fi' EXIT
+  # The input disks differ only by the measured tool. Hard links preserve all
+  # other payload bytes without another compiler-tree copy.
+  cp -al "$assembly" "$evidence/without-formatter"
+  rm "$evidence/without-formatter/rustc/user/bin/dev/rustfmt" \
+    "$evidence/without-formatter/rustc/user/lib/rust/bin/rustfmt"
+  for variant in rustc analyzer without-formatter; do
+    awk -v variant="$variant" -v destination="$evidence/$variant.qcow2" \
+      -v policy="$ROOT_DIR/src/imager/motor-os-permissions.yaml" '
+      /^permission_policy:/ {print "permission_policy: \"" policy "\""; next}
+      /^img_name:/ {print "img_name: \"" destination "\""; next}
+      /^assembly_dirs:/ {
+        print; print "  - \"rustc\""
+        if (variant == "analyzer") print "  - \"rust-analyzer\""
+        next
+      }
+      {print}
+    ' "$ROOT_DIR/src/imager/motor-os.yaml" > "$evidence/$variant.yaml"
+    overlay="$assembly"
+    [ "$variant" != without-formatter ] || overlay="$evidence/without-formatter"
+    flock "$ROOT_DIR/build/imager.lock" env MOTOR_ASSEMBLY_IMAGE_ROOT="$overlay" \
+      "$imager" "$ROOT_DIR" release "$evidence/$variant.yaml" > "$evidence/$variant.log" 2>&1
+  done
+  bytes_without="$(stat -c %s "$evidence/rustc.qcow2")"
+  bytes_with="$(stat -c %s "$evidence/analyzer.qcow2")"
+  check_size analyzer-qcow2-growth "$((bytes_with - bytes_without))" 134217728
+  bytes_with="$bytes_without"
+  bytes_without="$(stat -c %s "$evidence/without-formatter.qcow2")"
+  check_size rustfmt-qcow2-growth "$((bytes_with - bytes_without))" 22020096
+  echo 'tool size contracts: PASS'
+)
 
-wait_vm_caps() {
-  local path="$1"
-  local label="$2"
-  local deadline=$((SECONDS + 20))
-  local line=""
-
-  while [ "$SECONDS" -lt "$deadline" ]; do
-    line="$(vm_ssh /system/bin/cat "$path" 2>/dev/null)" || line=""
-    case "$line" in
-      caps=*) printf '%s' "$line"; return ;;
+host_full_toolchain() (
+  local work channel=x86_64-unknown-motor-test
+  unset RUSTC
+  work="$(mktemp -d)"
+  trap 'rm -r -- "$work"' EXIT
+  local ROOT_DIR="$work/checkout" MOTORH="$work/releases" installed="$work/custom prefix"
+  local package="motor-toolchain-$channel" rustlib=lib/rustlib/x86_64-unknown-motor
+  local images="$work/$package/images" crt=user/lib/llvm/lib/crt1.o
+  local clang="$installed/$rustlib/sysroot/bin/motor-clang"
+  local lld="$installed/lib/rustlib/x86_64-unknown-linux-gnu/bin/ld.lld"
+  local rust_version="1.0 (abc123) ($channel)" llvm_version='23.1.1 (release abc123)'
+  mkdir -p "$ROOT_DIR" "$MOTORH" "${clang%/*}" "${lld%/*}" "$installed/$rustlib/lib" \
+    "$installed/$rustlib/sysroot/${crt%/*}" "$images/llvm/${crt%/*}" \
+    "$images/rustc/user/lib/rust/$rustlib/lib" "$images/motor/user/bin/dev"
+  printf '[toolchain]\nchannel = "%s"\n' "$channel" > "$ROOT_DIR/rust-toolchain.toml"
+  rustc() {
+    case "$*" in
+      '--print sysroot') echo "$installed" ;;
+      --version) echo "rustc $rust_version" ;;
+      *) cross_fail "unexpected rustc arguments: $*" ;;
     esac
-    sleep 0.2
+  }
+  local fixture_rustup_compiler=rustc
+  rustup() { [ "$*" = 'which rustc' ] && echo "$fixture_rustup_compiler"; }
+  version_script() {
+    printf '#!/bin/sh\necho "%s"\n' "$2" > "$1"
+    chmod +x "$1"
+  }
+  version_script "$clang" "clang version $llvm_version"
+  version_script "$lld" "LLD $llvm_version (compatible with GNU linkers)"
+  as -o "$images/motor/user/bin/dev/lorry" - <<EOF
+.ident "rustc version $rust_version"
+.ident "clang version $llvm_version"
+.ident "Linker: LLD $llvm_version"
+EOF
+  echo startup > "$images/llvm/$crt"
+  echo library > "$images/rustc/user/lib/rust/$rustlib/lib/libstd.rlib"
+  cp "$images/llvm/$crt" "$installed/$rustlib/sysroot/$crt"
+  cp "$images/rustc/user/lib/rust/$rustlib/lib/libstd.rlib" "$installed/$rustlib/lib/"
+  tar --zstd -cf "$MOTORH/$package.tar.zst" -C "$work" "$package"
+
+  full_prepare() { touch "$work/prepared"; exit 0; }
+  (full_main --release)
+  [ -e "$work/prepared" ] || cross_fail 'matching toolchain did not reach build preparation'
+  rm "$work/prepared"
+  rejected() {
+    if (full_main --release) > "$work/log" 2>&1; then cross_fail 'accepted a mismatched toolchain'; fi
+    [ ! -e "$work/prepared" ] && grep -Fq -- "$1" "$work/log" ||
+      { cat "$work/log" >&2; cross_fail "missing toolchain diagnostic: $1"; }
+  }
+  other_rustc() { rust_version="1.0 (other) ($channel)" rustc "$@"; }
+  fixture_rustup_compiler=other_rustc rejected "rustc version 1.0 (other) ($channel)"
+  RUSTC=other_rustc rejected "rustc version 1.0 (other) ($channel)"
+  # Same release and commits, different embedded LLVM repository.
+  version_script "$clang" 'clang version 23.1.1 (local abc123)'
+  rejected 'clang version 23.1.1 (local abc123)'
+  version_script "$clang" "clang version $llvm_version"
+  version_script "$lld" 'LLD 23.1.1 (local abc123) (compatible with GNU linkers)'
+  rejected 'Linker: LLD 23.1.1 (local abc123)'
+  version_script "$lld" "LLD $llvm_version (compatible with GNU linkers)"
+  echo stale > "$installed/$rustlib/sysroot/$crt"
+  rejected crt1.o
+  cp "$images/llvm/$crt" "$installed/$rustlib/sysroot/$crt"
+  echo stale > "$installed/$rustlib/lib/libstd.rlib"
+  rejected libstd.rlib
+  MOTORH="$work/missing" rejected 'missing native toolchain archive'
+  echo 'full-test toolchain check: PASS'
+)
+
+host_full_options() (
+  unset MOTO_SMP MOTO_MEMORY_MIB
+  local value
+  invalid() {
+    local status=0
+    (full_options "$@") > /dev/null 2>&1 || status=$?
+    [ "$status" = 2 ] || cross_fail "accepted invalid full-test options: $*"
+  }
+  for value in '' 0 01 -1 abc; do
+    invalid --cpus "$value"
+    invalid --memory="$value"
+    (export MOTO_SMP="$value"; invalid)
+    (export MOTO_MEMORY_MIB="$value"; invalid)
   done
-  fail "$label never wrote $path: '$line'"
-}
+  for option in --cpus --memory --vmm; do invalid "$option"; done
+  invalid --cpus 1 --cpus=2
+  invalid --memory 256 --memory=512
+  invalid --vmm qemu --vmm chv
+  invalid --vmm unknown
+  invalid --release=bogus
+  invalid --all-debug=bogus
+  invalid --release --all-debug
+  invalid --all-debug --release
+  (
+    full_options
+    [ "$MEMORY_MIB:$BUILD:$TEST_BUILD:${NATIVE_ARGS[*]}" = '8192:release:debug:' ]
+  )
+  (
+    full_options --release
+    [ "$CPUS:$MEMORY_MIB:$BUILD:$TEST_BUILD:${NATIVE_ARGS[*]}:$VMM" = '4:4096:release:release:--release:chv' ]
+  )
+  (
+    full_options --all-debug
+    [ "$MEMORY_MIB:$BUILD:$TEST_BUILD:${PROFILE_ARGS[*]}:${NATIVE_ARGS[*]}" = '8192:debug:debug::' ]
+  )
+  MOTO_SMP=2 MOTO_MEMORY_MIB=512 full_options --full --vmm qemu
+  [ "$CPUS:$MEMORY_MIB:$FULL:$VMM" = '2:512:1:qemu' ]
+  MOTO_SMP=bad MOTO_MEMORY_MIB=bad full_options --cpus=1 --memory 128 --release
+  [ "$CPUS:$MEMORY_MIB" = '1:128' ]
+  echo 'full-test options: PASS'
+)
 
-rmux_refused() {
-  local label="$1"
-  local out
-  shift
-  # Stdout only: a debug runtime logs to stderr.
-  if out="$(vm_ssh "$*")"; then
-    fail "$label was served: '$out'"
-  fi
-  case "$out" in
-    "refused: "*) ;;
-    *) fail "$label was not refused: '$out'" ;;
-  esac
-}
+full_check_installation() {
+  local guest=/none/dev/toolchain-install
+  local package="$guest/$1" VM_RUNTIME_DIR="$RUN_DIR/install-checks"
+  local curl_version
+  mkdir "$VM_RUNTIME_DIR"
+  # An additional library exercises discovery, permissions, and stale-file
+  # removal independently of the known compiler and tool library names.
+  vm_ssh "/user/bin/mkdir -p $package/images/motor/user/lib/install-probe /user/lib/install-keep"
+  vm_ssh "echo payload > $package/images/motor/user/lib/install-probe/data"
+  vm_ssh "/user/bin/chmod rwxrw---- $package/images/motor/user/lib/install-probe/data"
 
-# A privileged session, left running after its pane reports its own mask.
-# An ordinary child of this ssh session computes the profile its rmux
-# server should run with.
-rmux_probe_self="$(vm_ssh "$RMUX_PROBE" whoami)"
-rmux_profile="${rmux_probe_self##*profile=}"
-printf '%s whoami > %s/priv-pane\n\001d' "$RMUX_PROBE" "$RMUX_CAPS_TMPDIR" |
-  rmux_caps /user/bin/rmux new -s priv > /dev/null
-out="$(wait_vm_caps "$RMUX_CAPS_TMPDIR/priv-pane" "privileged pane")"
-[ "${out%% *}" = "caps=$rmux_profile" ] ||
-  fail "privileged pane runs with '$out', want caps=$rmux_profile"
-rmux_service="rmux/${rmux_profile#0x}/$RMUX_CAPS_TMPDIR"
-out="$(vm_ssh "$RMUX_PROBE ls $rmux_service $rmux_profile")"
-[ "$out" = "sessions: priv: 1 window" ] ||
-  fail "a privileged probe cannot list the privileged server: '$out'"
-
-# No RPC, explicit wake, or client close may be needed to reject this peer.
-coproc RMUX_SILENT {
-  vm_ssh "MOTOR_OS_CAPS=0x44 $RMUX_PROBE silent $rmux_service"
-}
-RMUX_SILENT_SSH_PID="$!"
-IFS= read -r -t 20 out <&"${RMUX_SILENT[0]}" ||
-  fail "silent rmux client was not rejected"
-[ "$out" = "silent rejected" ] || fail "silent rmux probe: '$out'"
-[ "$(rmux_caps /user/bin/rmux ls)" = "priv: 1 window" ] ||
-  fail "silent unauthorized client blocked the privileged server"
-printf 'done\n' >&"${RMUX_SILENT[1]}"
-wait "$RMUX_SILENT_SSH_PID" || fail "silent rmux probe failed"
-
-coproc RMUX_FULL {
-  rmux_caps "$RMUX_PROBE saturate $rmux_service $rmux_profile"
-}
-RMUX_FULL_SSH_PID="$!"
-IFS= read -r -t 20 out <&"${RMUX_FULL[0]}" || fail "rmux pool did not fill"
-[ "$out" = "pool full" ] || fail "rmux pool probe: '$out'"
-for request in "ls" "attach -t priv" "new -s overflow"; do
-  if out="$(rmux_caps "/user/bin/rmux $request" 2>&1)"; then
-    fail "rmux $request succeeded with a full pool: '$out'"
-  fi
-  case "$out" in
-    *"the rmux server is busy"*) ;;
-    *) fail "rmux $request mistook a full pool for absence: '$out'" ;;
-  esac
-done
-printf 'done\n' >&"${RMUX_FULL[1]}"
-wait "$RMUX_FULL_SSH_PID" || fail "rmux pool probe failed"
-out="$(vm_ssh "$RMUX_PROBE parallel $rmux_service $rmux_profile")"
-expected="$(printf '%s\n' 'sessions: priv: 1 window' 'sessions: priv: 1 window' 'sessions: priv: 1 window')"
-[ "$out" = "$expected" ] || fail "concurrent rmux clients did not recover: '$out'"
-
-# Only a client's own process can pair with its output connection, so a
-# process that learns another's token still cannot type into its session.
-coproc RMUX_HALF {
-  vm_ssh "$RMUX_PROBE half $rmux_service"
-}
-RMUX_HALF_SSH_PID="$!"
-IFS= read -r -t 20 rmux_half <&"${RMUX_HALF[0]}" ||
-  fail "rmux-probe half did not open an output connection"
-case "$rmux_half" in
-  token=*) ;;
-  *) fail "rmux-probe half: '$rmux_half'" ;;
-esac
-rmux_refused "pairing with another process's token" \
-  "$RMUX_PROBE pair $rmux_service ${rmux_half#token=}"
-kill "$RMUX_HALF_SSH_PID"
-wait "$RMUX_HALF_SSH_PID" || true
-
-# Reduced clients can neither see nor reach the privileged server's sessions:
-# a minimal mask, the privileged one minus CAP_NET, and the privileged one
-# minus CAP_INTERACTIVE, which leaves a None-role client with every other bit.
-rmux_no_net="$(printf '%#x' $((rmux_profile & ~0x100)))"
-rmux_no_role="$(printf '%#x' $((rmux_profile & ~0x40)))"
-for rmux_mask in 0x44 "$rmux_no_net" "$rmux_no_role"; do
-  out="$(rmux_caps "MOTOR_OS_CAPS=$rmux_mask" /user/bin/rmux ls)"
-  [ -z "$out" ] || fail "rmux ls with $rmux_mask saw another server's sessions: '$out'"
-  rmux_refused "list with $rmux_mask" \
-    "MOTOR_OS_CAPS=$rmux_mask $RMUX_PROBE ls $rmux_service $rmux_profile"
-  for rmux_request in new attach kill; do
-    rmux_refused "$rmux_request with $rmux_mask" \
-      "MOTOR_OS_CAPS=$rmux_mask $RMUX_PROBE $rmux_request $rmux_service $rmux_profile priv"
+  # The installer extends PATH in /user/cfg/profile only: the SSH configuration,
+  # which holds the host key, stays byte for byte. Never print it on failure.
+  vm_ssh '/user/bin/cat /user/cfg/sshd.toml' > "$VM_RUNTIME_DIR/sshd-before.toml"
+  [ "$(vm_ssh /user/bin/printenv PATH)" = 'PATH=/user/bin' ] || cross_fail 'wrong SSH PATH before installation'
+  check_ssh_config() {
+    vm_ssh '/user/bin/cat /user/cfg/sshd.toml' > "$VM_RUNTIME_DIR/sshd-after.toml"
+    cmp -s "$VM_RUNTIME_DIR/sshd-before.toml" "$VM_RUNTIME_DIR/sshd-after.toml" ||
+      cross_fail 'installation changed the SSH configuration'
+    [ "$(vm_ssh '/user/bin/cat /user/cfg/profile' | grep -cx '# Motor toolchain PATH')" = 1 ] ||
+      cross_fail 'installation did not extend the profile PATH exactly once'
+    # Each SSH session starts a login shell, so no reboot is needed.
+    [ "$(vm_ssh /user/bin/printenv PATH)" = 'PATH=/user/bin:/user/bin/dev' ] ||
+      cross_fail 'a new SSH session did not get the development PATH'
+    if vm_ssh 'MOTOR_OS_CAPS=0x204 /user/bin/cat /user/cfg/sshd.toml' > /dev/null 2>&1; then
+      cross_fail 'None can read the SSH configuration'
+    fi
+  }
+  vm_ssh "$package/install.sh"
+  check_ssh_config
+  guest_mode /user/lib/install-probe/data -rwxrw-r--
+  for source in hello.c hello.cpp hello.rs; do
+    guest_mode "/none/dev/hello-world/$source" -rwxrw-rw-
   done
-  rmux_refused "raw input with $rmux_mask" \
-    "MOTOR_OS_CAPS=$rmux_mask $RMUX_PROBE raw $rmux_service"
-done
-[ "$(rmux_caps /user/bin/rmux ls)" = "priv: 1 window" ] ||
-  fail "a refused client changed the privileged server's sessions"
+  # Reinstallation removes stale libraries and preserves local configuration.
+  vm_ssh 'echo stale > /user/lib/llvm/stale-install && echo stale > /user/lib/rust/stale-install && echo stale > /user/lib/install-probe/stale-install'
+  vm_ssh "/user/bin/rush -c 'echo \"# installer-preservation-probe\" >> /user/cfg/cargo/config.toml'"
+  vm_ssh '/user/bin/chmod rwxr-xr-x /user/cfg/cargo && /user/bin/chmod rwxr-x--- /user/cfg/helix'
+  vm_ssh "$package/install.sh"
+  check_ssh_config
+  guest_mode /user/cfg/cargo drwxr-xr-x
+  guest_mode /user/cfg/helix drwxr-x---
+  # Restore shared settings for the following None-role compiler/editor checks.
+  vm_ssh '/user/bin/chmod rwxrwxr-x /user/cfg/cargo /user/cfg/helix'
+  if ! vm_ssh '[ ! -e /user/lib/llvm/stale-install ] && [ ! -e /user/lib/rust/stale-install ] && [ ! -e /user/lib/install-probe/stale-install ]'; then
+    cross_fail "install.sh left stale files in the toolchain directories"
+  fi
+  vm_ssh '[ -d /user/lib/install-keep ]' || cross_fail 'installation removed an unrelated library'
+  vm_ssh '/user/bin/cat /user/cfg/cargo/config.toml' | grep -qx '# installer-preservation-probe' ||
+    cross_fail "reinstallation replaced user configuration"
 
-# The same profile without detach authority still reaches the server.
-out="$(rmux_caps "MOTOR_OS_CAPS=$rmux_profile" /user/bin/rmux ls)"
-[ "$out" = "priv: 1 window" ] || fail "a same-profile client cannot list priv: '$out'"
-
-# A launcher without CAP_NET starts a narrower server of its own, whose panes
-# have that server's mask, and the two servers do not see each other.
-rmux_probe_caps="${rmux_probe_self%% *}"
-rmux_narrow="$(printf '%#x' $(((${rmux_probe_caps#caps=} | 0x20) & ~0x100)))"
-out="$(vm_ssh "MOTOR_OS_CAPS=$rmux_narrow $RMUX_PROBE whoami")"
-rmux_narrow_profile="${out##*profile=}"
-[ "$rmux_narrow_profile" != "$rmux_profile" ] ||
-  fail "dropping CAP_NET did not change the profile: '$out'"
-printf '%s whoami > %s/narrow-pane\n\001d' "$RMUX_PROBE" "$RMUX_CAPS_TMPDIR" |
-  rmux_caps "MOTOR_OS_CAPS=$rmux_narrow" /user/bin/rmux new -s narrow > /dev/null
-out="$(wait_vm_caps "$RMUX_CAPS_TMPDIR/narrow-pane" "narrow pane")"
-[ "${out%% *}" = "caps=$rmux_narrow_profile" ] ||
-  fail "narrow pane runs with '$out', want caps=$rmux_narrow_profile"
-out="$(rmux_caps "MOTOR_OS_CAPS=$rmux_narrow" /user/bin/rmux ls)"
-[ "$out" = "narrow: 1 window" ] || fail "the narrow server lists '$out'"
-[ "$(rmux_caps /user/bin/rmux ls)" = "priv: 1 window" ] ||
-  fail "the privileged server sees the narrow session"
-rmux_caps "MOTOR_OS_CAPS=$rmux_narrow" /user/bin/rmux kill-session -t narrow
-
-# Without detach authority there is no server to start, and rmux says why.
-if out="$(printf 'exit\n' | rmux_caps "MOTOR_OS_CAPS=0x44" /user/bin/rmux new 2>&1)"; then
-  fail "rmux started without CAP_SPAWN_DETACHED: '$out'"
-fi
-case "$out" in
-  *"starting one needs CAP_SPAWN_DETACHED"*) ;;
-  *) fail "rmux did not say why it cannot start a server: '$(printf '%s' "$out" | tail -c 400)'" ;;
-esac
-rmux_caps /user/bin/rmux kill-session -t priv
-
-# sysbox ls colors directory names orange, executable files bright red, and
-# other files with the terminal's default color. A file counts as executable
-# here only when the Interactive or None role may execute it, so System-only
-# executables stay uncolored. A pane supplies the terminal that enables colors;
-# the child names do not appear in the command, so they only match ls output.
-vm_ssh /system/bin/mkdir "$TEST_TMP/sysbox-ls-color"
-vm_ssh /system/bin/mkdir "$TEST_TMP/sysbox-ls-color/amber-dir"
-vm_ssh /system/bin/mkdir "$TEST_TMP/sysbox-ls-color/z-directory"
-vm_ssh /system/bin/cp /system/bin/ls "$TEST_TMP/sysbox-ls-color/a-file"
-vm_ssh /system/bin/cp /system/bin/ls "$TEST_TMP/sysbox-ls-color/default-file"
-# A runtime-created regular file grants execute to System only.
-vm_ssh "echo system-only > $TEST_TMP/sysbox-ls-color/system-only-file"
-rmux_ls() {
-  sleep 3
-  # Debug rt.vdso diagnostics intentionally share the pane's terminal. Start
-  # the color frame after the shell's completed startup records.
-  printf '\014'
-  sleep 1
-  printf '/system/bin/ls %s %s\n' "$1" "$2"
-  sleep 1
-  printf 'exit\n'
+  # Replace an actual shipped command, including the immutable image-built case.
+  printf 'put "%s" "%s/curl"\n' "$ROOT_DIR/build/bin/$BUILD/curl" "$guest" |
+    vm_sftp > /dev/null
+  vm_ssh "/user/bin/cp $guest/curl /user/bin/.curl-new &&
+    /user/bin/chmod rwxrwxr-x /user/bin/.curl-new &&
+    /user/bin/mv /user/bin/.curl-new /user/bin/curl"
+  curl_version="$(vm_ssh /user/bin/curl --version)"
+  case "$curl_version" in 'curl '*) ;; *) cross_fail 'replacement curl did not run' ;; esac
+  vm_ssh "/user/bin/rm -r $guest"
 }
 
-check_ls_colors() {
-  local option="$1"
-  local output
-  local prefix
-  local style
+host_unwind_elf() (
+  local sysroot motor llvm mode profile target binary
+  sysroot="$(cd "$ROOT_DIR" && rustc --print sysroot)"
+  motor="$sysroot/lib/rustlib/x86_64-unknown-motor/sysroot"
+  llvm="$sysroot/lib/rustlib/x86_64-unknown-linux-gnu/bin"
+  local c_environment=("MOTOR_TEST_CXX=$motor/bin/motor-clang++"
+    "MOTOR_TEST_AR=$llvm/llvm-ar" "MOTOR_TEST_CXX_LIB=$motor/user/lib/llvm/lib"
+    "CARGO_TARGET_X86_64_UNKNOWN_MOTOR_LINKER=$motor/bin/motor-clang"
+    'CARGO_TARGET_X86_64_UNKNOWN_MOTOR_RUSTFLAGS=-C link-self-contained=no -C default-linker-libraries=yes')
+  cd "$ROOT_DIR/src/sys/tests/unwind"
+  for mode in pure cxx; do
+    target="$ROOT_DIR/build/unwind-$mode"
+    for profile in release release-lto release-abort; do
+      if [ "$mode" = pure ]; then
+        cargo test --no-run --locked --offline --target x86_64-unknown-motor --profile "$profile" --target-dir "$target"
+      else
+        env "${c_environment[@]}" cargo test --no-run --locked --offline --features cxx \
+          --target x86_64-unknown-motor --profile "$profile" --target-dir "$target"
+      fi
+      binary="$target/x86_64-unknown-motor/$profile/motor-unwind-test"
+      if [ "$mode:$profile" = pure:release-abort ]; then
+        "$ROOT_DIR/src/build-scripts/validate-native-elf.sh" "$binary"
+      else
+        "$ROOT_DIR/src/build-scripts/validate-native-elf.sh" "$binary" "$binary"
+      fi
+    done
+  done
+)
 
-  output="$(rmux_ls "$option" "$TEST_TMP/sysbox-ls-color" | vm_rmux 2>&1)"
-  case "$output" in
-    *"amber-dir"*"a-file"*"system-only-file"*) ;;
-    *) fail "ls $option did not list the color-test entries: '$output'" ;;
-  esac
-  prefix="${output%%amber-dir*}"
-  style="$(printf '%s' "$prefix" | grep -Eao $'\033''\[[0-9;]*m' | tail -1)"
-  [ "$style" = $'\033'"[0;38;5;214m" ] ||
-    fail "ls $option directory style was '$style'"
-  prefix="${output%%a-file*}"
-  style="$(printf '%s' "$prefix" | grep -Eao $'\033''\[[0-9;]*m' | tail -1)"
-  [ "$style" = $'\033'"[0;91m" ] ||
-    fail "ls $option executable style was '$style'"
-  prefix="${output%%system-only-file*}"
-  style="$(printf '%s' "$prefix" | grep -Eao $'\033''\[[0-9;]*m' | tail -1)"
-  case "$style" in
-    ""|$'\033'"[0m") ;;
-    *) fail "ls $option System-only executable style was '$style'" ;;
-  esac
-
-  # Files created at run time are executable by System, so use a shipped one,
-  # listed alone: a listing of /user/cfg can wrap inside the name on the
-  # 80-column pane. The glob keeps the name out of the echoed command.
-  output="$(rmux_ls "$option" '/user/cfg/rush.t?ml' | vm_rmux 2>&1)"
-  case "$output" in
-    *"rush.toml"*) ;;
-    *) fail "ls $option did not list the non-executable test file: '$output'" ;;
-  esac
-  prefix="${output%%rush.toml*}"
-  style="$(printf '%s' "$prefix" | grep -Eao $'\033''\[[0-9;]*m' | tail -1)"
-  case "$style" in
-    ""|$'\033'"[0m") ;;
-    *) fail "ls $option non-executable style was '$style'" ;;
-  esac
-}
-check_ls_colors ""
-check_ls_colors "-l"
-
-# Directories sort before files in both output modes, with each group sorted by
-# name. The names deliberately put a file before a directory lexically. -a is
-# accepted and changes nothing: Motor FS has no hidden entries.
-for option in "" "-l" "-a" "-la"; do
-  sorted_ls="$(vm_ssh_stdout /system/bin/ls $option "$TEST_TMP/sysbox-ls-color")"
-  case "$sorted_ls" in
-    *"amber-dir"*"z-directory"*"a-file"*"default-file"*"system-only-file"*) ;;
-    *) fail "ls $option did not sort directories before files: '$sorted_ls'" ;;
-  esac
-done
-
-# Long listings use Linux-shaped type/permission fields. The three permission
-# triplets are Motor FS System, Interactive, and None roles, in that order.
-long_ls="$(vm_ssh_stdout /system/bin/ls -l "$TEST_TMP/sysbox-ls-color")"
-case "$long_ls" in
-  *"drwxrwxr-x"*"amber-dir"*) ;;
-  *) fail "ls -l did not report directory permissions: '$long_ls'" ;;
-esac
-case "$long_ls" in
-  *"-rwxr-xr-x"*"default-file"*) ;;
-  *) fail "ls -l did not report file permissions: '$long_ls'" ;;
-esac
-case "$long_ls" in
-  *"-rwxrw-r--"*"system-only-file"*) ;;
-  *) fail "ls -l did not report System-only executable permissions: '$long_ls'" ;;
-esac
-
-# rmux: scrollback and copy mode on the real thing (M8, rmux/details.md §7.5,
-# §7.6). The motions and the compacted history are unit-tested on the host in
-# milliseconds; what only Motor can show is a pane *here* keeping what it has
-# printed, and `C-a [` reading it back through this console path.
-#
-# Thirty lines overflow the 23-row pane a console with no answer to the size
-# probe gives (§3.2), so the earliest of them are in the history and nowhere
-# else. The sleeps are the ordering: input comes down a pipe all at once, and a
-# key pressed before the shell has printed anything would open copy mode on an
-# empty buffer.
-#
-# Reconstruct the indicator on screen: the frame diff can paint `[0/28]`
-# when copy mode opens, then update only the digits for `g`. Searching the
-# raw bytes for the last complete label would incorrectly keep `[0/28]`.
-# tmux's `[above/total]` is exact: a total above zero is a pane that kept
-# history, and `above == total` is `g` having reached the oldest line of it.
-# Only stdout is the screen: debug builds log to stderr, and a log line between
-# two frames scrolls the reconstruction away from the status row.
-rmux_copy_mode_keys() {
-  printf 'for I in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do echo LINE$I; done\n'
-  sleep 5
-  # `C-a [` enters copy mode, `g` goes to the oldest line kept, `q` leaves.
-  printf '\001[g'
-  sleep 2
-  printf 'q'
-  sleep 1
-  printf 'exit\n'
-}
-out="$(rmux_copy_mode_keys | vm_rmux)"
-indicator="$(printf '%s' "$out" | bash "$WD/test-rmux-copy-status.sh")"
-[ -n "$indicator" ] || fail "rmux copy mode did not open: '$out'"
-counts="${indicator##*[}"
-above="${counts%%/*}"
-total="${counts%]}"
-total="${total##*/}"
-[ "$total" -gt 0 ] || fail "the pane kept no scrollback: '$indicator'"
-[ "$above" = "$total" ] ||
-  fail "copy mode did not reach the oldest line kept: '$indicator'"
-
-# crossterm on Motor OS, on the two terminals this system has (russhd and an
-# rmux pane). There is no pty and no termios here, so what a program gets is a
-# stdio pipe with something ANSI on the far end; the port's job is to make that
-# indistinguishable from a terminal to everything built on crossterm.
-
-# Terminal negotiation and the fallback probe write escape bytes into the same
-# stdout the answers are printed on, so a reading can share a line with one;
-# pick the readings out rather than matching whole lines.
-crossterm_readings() {
-  printf '%s\n' "$1" | grep -Eao 'key=.*|end=.*|size=[0-9]+x[0-9]+|resize=[0-9]+x[0-9]+|size-after=[0-9]+x[0-9]+'
-}
-
-# Keys. All of these arrive in one write, so what is under test is the decoding
-# rather than any timing: an Enter that reaches a program as CR LF is one key
-# (two would be `Enter` and then `Ctrl+J`, since raw mode is on), and a whole
-# escape sequence is the key it spells rather than `Esc` and two letters.
-out="$(printf 'hi\r\n\033[A\003q' | vm_ssh \
-  "TMPDIR=$TEST_TMP $TEST_BIN/crossterm-smoke keys" 2>/dev/null)"
-[ "$(crossterm_readings "$out")" = "key=Char('h')
-key=Char('i')
-key=Enter
-key=Up
-key=Char('c')+KeyModifiers(CONTROL)
-key=Char('q')
-end=quit" ] || fail "crossterm decoded the keys as '$(crossterm_readings "$out")'"
-
-# An `ESC` that stays alone is the Escape key. Nothing can tell it apart from
-# the start of a sequence except a clock, so the port gives up on it after
-# `ESCAPE_TIME`; a decoder without that timer would wait here for ever.
-lone_escape() {
-  printf '\033'
-  sleep 1
-  printf 'q'
-  sleep 1
-}
-out="$(lone_escape | vm_ssh \
-  "TMPDIR=$TEST_TMP $TEST_BIN/crossterm-smoke keys" 2>/dev/null)"
-[ "$(crossterm_readings "$out")" = "key=Esc
-key=Char('q')
-end=quit" ] || fail "crossterm did not report a lone Esc: '$(crossterm_readings "$out")'"
-
-# The alternate screen, in and out again, and the same on the way out of a
-# panic: Motor OS builds abort on panic, so nothing but a panic hook can give
-# the terminal back.
-out="$(vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/crossterm-smoke screen" 2>/dev/null)"
-case "$out" in
-  *$'\033'"[?1049h"*$'\033'"[?1049l"*"screen=restored"*) ;;
-  *) fail "crossterm did not take and give back the alternate screen: '$out'" ;;
-esac
-if out="$(vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/crossterm-smoke panic" 2>&1)"; then
-  fail "crossterm-smoke panic exited successfully"
-fi
-case "$out" in
-  *$'\033'"[?1049h"*$'\033'"[?1049l"*) ;;
-  *) fail "crossterm's panic hook did not restore the screen: '$out'" ;;
-esac
-
-# Size without a pty. This is not a terminal -- is_terminal() is now
-# per-descriptor (docs/tui.md), so a descendant of a
-# non-pty ssh session answers false -- and crossterm must emit neither the
-# mode handshake nor a fallback probe; the size stays at its nonblocking
-# fallback and no resize event appears.
-out="$(vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/crossterm-smoke size" 2>/dev/null)"
-case "$out" in
-  *"size=80x24"*"size-after=80x24"*) ;;
-  *) fail "crossterm size over ssh: '$out'" ;;
-esac
-case "$out" in
-  *"resize="*) fail "crossterm reported a resize nothing answered: '$out'" ;;
-esac
-case "$out" in
-  *$'\033'"[?2048"*|*$'\033'"[6n"*|*$'\033'"[18t"*)
-    fail "crossterm queried a non-pty session: '$out'"
-    ;;
-esac
-
-# A forced SSH pty is a terminal, and russhd is the one on the far end of it:
-# it answers the DECRQM itself and takes the mode sequences out of the stream
-# rather than letting them through to the client's own terminal, which would
-# then answer as well and with a size of its own. So none of them arrive here.
-# Nor does any probe: a session whose provider has answered is not measured
-# again, by `ESC[18t` or by parking the cursor in the corner.
-#
-# This client has no terminal of its own -- stdin is a pipe -- so the size it
-# asks for is zeroes and russhd has none to report. That is the point of the
-# resize check below, which gives it one.
-out="$(printf 'q' | ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-  "TMPDIR=$TEST_TMP $TEST_BIN/crossterm-smoke keys" 2>/dev/null)"
-case "$out" in
-  *$'\033[?2048'*) fail "russhd passed a mode 2048 sequence to the client: '$out'" ;;
-esac
-case "$out" in
-  *$'\033[18t'*|*$'\033[9999;9999H'*)
-    fail "crossterm probed a session russhd had answered: '$out'"
-    ;;
-esac
-[ "$(crossterm_readings "$out")" = "key=Char('q')
-end=quit" ] || fail "crossterm pty mode check decoded '$(crossterm_readings "$out")'"
-
-# Type-ahead through Rush over a forced pty: a key typed after a command's Enter
-# is the command's, not the start of the next command line. The Enter is a
-# lone CR, as an SSH client sends it: one host write is not guaranteed to be
-# one guest write, and an LF that arrives after its CR is the command's anyway.
-out="$(printf '%s\rq' "TMPDIR=$TEST_TMP $TEST_BIN/crossterm-smoke keys" |
-  ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 /system/bin/rush 2>/dev/null)"
-[ "$(crossterm_readings "$out")" = "key=Char('q')
-end=quit" ] || fail "Rush kept its command's type-ahead: '$(crossterm_readings "$out")'"
-case "$out" in
-  *"not found"*) fail "Rush ran its command's type-ahead: '$out'" ;;
-esac
-
-# Ctrl+C remains fatal unless a TUI explicitly installs crossterm's adapter.
-# The adapter owns the process handler for life, so a second call must fail.
-out="$(printf '' | ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-  "TMPDIR=$TEST_TMP $TEST_BIN/crossterm-smoke ctrl-c" 2>/dev/null)"
-case "$out" in
-  *"ctrl-c=enabled"*"ctrl-c=already-enabled"*) ;;
-  *) fail "crossterm did not register exactly one Ctrl+C handler: '$out'" ;;
-esac
-
-# The whole chain, end to end, driven the way a user drives it: a terminal on
-# this side, a resize of it, a `window-change` on the wire, and the report
-# russhd writes into the stdin of the child that subscribed. `script` is what
-# gives the ssh client a terminal at all -- without one it reads no size to send
-# and never notices a resize -- and `stty` resizing that terminal is the
-# `SIGWINCH` the client turns into the request. The client runs in the
-# background so that the same terminal is free to be resized under it.
-#
-# `sleep` holds `script`'s own stdin open: at EOF it types the terminal's EOF
-# character into the session, and a keystroke nobody pressed has no business in
-# a test of what the terminal reports.
-ssh_pty_keys="$(printf '%q ' ssh "${SSH_OPTIONS[@]}" -tt motor@192.168.4.2 \
-  "TMPDIR=$TEST_TMP $TEST_BIN/crossterm-smoke keys")"
-out="$(sleep 8 | script -qc "stty rows 30 cols 100
-$ssh_pty_keys </dev/tty 2>/dev/null &
-sleep 2
-stty rows 20 cols 60
-wait" /dev/null)"
-readings="$(crossterm_readings "$out")"
-case "$readings" in
-  *"resize=100x30"*"resize=60x20"*) ;;
-  *) fail "russhd did not report the pty size and its change: '$readings'" ;;
-esac
-
-# rmux is a mode 2048 provider now: a pane answers the DECRQM and reports its
-# size into the child's stdin on the enable, so the client learns the pane size
-# in band and stops probing for it. Its stdin has to be held open -- rmux relays
-# a pane's input from the client, and a client that has hung up sends no reply
-# either.
-crossterm_size_in_pane() {
-  sleep 3
-  printf '\014'
-  sleep 1
-  printf 'TMPDIR=%s %s/crossterm-smoke size\n' "$TEST_TMP" "$TEST_BIN"
-  sleep 5
-  printf 'exit\n'
-  sleep 1
-}
-out="$(crossterm_size_in_pane | vm_rmux 2>/dev/null)"
-readings="$(crossterm_readings "$out")"
-case "$readings" in
-  "size=80x23"*) ;;
-  *) fail "crossterm did not read the pane size from the environment: '$readings'" ;;
-esac
-# Every one of them, not merely the last: a client that has stopped probing no
-# longer claims a stray cursor report as its own, and rush leaves one behind --
-# it probes for its own prompt width, and an answer it did not collect before
-# spawning the child lands in the child's stdin (rmux/details.md §3.2). Under
-# the probe ladder that answer became a second, different `resize=` reading.
-resizes="$(printf '%s\n' "$readings" | grep '^resize=' | sort -u)"
-[ "$resizes" = "resize=80x23" ] ||
-  fail "the pane size was not the one and only resize: '$resizes' in '$readings'"
-[ "${readings##*$'\n'}" = "size-after=80x23" ] ||
-  fail "crossterm did not keep the pane size: '$readings'"
-
-# SSH/SFTP integration tests against the running VM (before the trap shuts it down).
-"$WD/test-ssh-client.sh"
-"$WD/test-sftp.sh"
-
-vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/mio-test"
-
-vm_ssh "TMPDIR=$TEST_TMP $TEST_BIN/tokio-tests"
-
-kill -0 "$VMM_PID" 2>/dev/null ||
-  fail "owned $TEST_VM_LABEL exited before final teardown"
-cleanup_full_test 0 || exit "$?"
-# The expected OOM panic belongs to a separate guest, after ordinary tests.
-# Teardown removed the ERR trap, so name this phase on failure.
-oom_args=(--vmm "$VMM")
-if [ "$BUILD" = release ]; then
-  oom_args+=(--release)
-fi
-"$WD/test-oom-abort.sh" "${oom_args[@]}" ||
-  fail "test-oom-abort.sh failed (status $?)"
-echo "-------- MOTOR OS FULL TEST PASS ---------"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then full_main "$@"; fi

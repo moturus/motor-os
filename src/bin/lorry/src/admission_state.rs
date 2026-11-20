@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::atomic::AtomicFile;
-use crate::config::{NativeToolRole, Policy, PolicyAction, PolicyRule};
+use crate::config::{Policy, PolicyAction, PolicyRule};
 use crate::diagnostic::{Error, Result};
 use crate::hash::{Sha256, hex};
 use crate::manifest::{LockedPackage, Lockfile, Manifest, Resolver};
@@ -37,19 +37,12 @@ pub fn capabilities_from(
         if !package_evidence.build_script && !package_evidence.proc_macro {
             continue;
         }
-        let mut native_tools = admission
-            .packages
-            .get(&package.key)
-            .map(|admission| admission.native_tools.iter().copied().collect::<Vec<_>>())
-            .unwrap_or_default();
-        native_tools.sort_by_key(|role| native_tool_name(*role));
         capabilities.push(Capability {
             package: package.key.name.clone(),
             version: package.key.version.to_string(),
             checksum,
             build_script: package_evidence.build_script,
             proc_macro: package_evidence.proc_macro,
-            native_tools,
             caller_env: admission
                 .packages
                 .get(&package.key)
@@ -124,14 +117,6 @@ fn required_strings(path: &Path, table: &Table, key: &str) -> Result<Vec<String>
         .collect()
 }
 
-pub(crate) fn native_tool_name(role: NativeToolRole) -> &'static str {
-    match role {
-        NativeToolRole::CCompiler => "c-compiler",
-        NativeToolRole::CxxCompiler => "cxx-compiler",
-        NativeToolRole::Archiver => "archiver",
-    }
-}
-
 fn source_digest(source: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(source.as_bytes());
@@ -157,9 +142,7 @@ mod review {
     const MAX_EDGES: usize = 131_072;
     const MAX_FEATURES: usize = 262_144;
     const COMPACT_FORMAT_VERSION: u64 = 3;
-    const REVIEW_FORMAT_VERSION: u64 = 4;
-    // Single-package review records; vendor replaces them with a workspace review.
-    const RETIRED_REVIEW_FORMAT_VERSION: i64 = 3;
+    const REVIEW_FORMAT_VERSION: u64 = 5;
 
     /// Empty package selection means the whole workspace. Names and feature
     /// requests are normalized so the same scope reconstructs the same review.
@@ -410,7 +393,6 @@ mod review {
         pub checksum: String,
         pub build_script: bool,
         pub proc_macro: bool,
-        pub native_tools: Vec<NativeToolRole>,
         pub caller_env: Vec<String>,
     }
 
@@ -511,6 +493,8 @@ mod review {
                             directory.display()
                         ))
                     })?;
+                    #[cfg(target_os = "motor")]
+                    crate::motor_fs::directory_mode(&directory)?;
                     #[cfg(unix)]
                     fs::set_permissions(
                         &directory,
@@ -556,7 +540,7 @@ mod review {
         fn from_document(path: &Path, document: &Document) -> Result<Self> {
             if retired(document) {
                 return Err(Error::failure(format!(
-                    "Lorry dependency state `{}` uses the retired single-package review format 3",
+                    "Lorry dependency state `{}` uses the retired review format",
                     path.display()
                 ))
                 .with_help(
@@ -790,10 +774,6 @@ mod review {
                             license: Some(source.license.clone()),
                             allow_build_script: capability.is_some_and(|value| value.build_script),
                             allow_proc_macro: capability.is_some_and(|value| value.proc_macro),
-                            native_tools: capability
-                                .map(|capability| capability.native_tools.iter().copied().collect())
-                                .unwrap_or_default(),
-                            configured_native_tools: false,
                             caller_env: capability
                                 .map(|value| value.caller_env.iter().cloned().collect())
                                 .unwrap_or_default(),
@@ -1069,19 +1049,9 @@ mod review {
         )?;
         for value in values {
             identity(&value.package, &value.version, &value.checksum)?;
-            ordered_by(
-                &value.native_tools,
-                |a, b| native_tool_name(*a).cmp(native_tool_name(*b)),
-                "native-tool roles",
-            )?;
             if !value.build_script && !value.proc_macro {
                 return Err(invalid(
                     "contains a capability without an executable-code grant",
-                ));
-            }
-            if !value.build_script && !value.native_tools.is_empty() {
-                return Err(invalid(
-                    "contains native-tool grants without a build-script grant",
                 ));
             }
             ordered(&value.caller_env, "caller environment names")?;
@@ -1153,7 +1123,6 @@ mod review {
             writer.string("checksum", &value.checksum)?;
             writer.boolean("build-script", value.build_script)?;
             writer.boolean("proc-macro", value.proc_macro)?;
-            writer.names("native-tools", &value.native_tools, native_tool_name)?;
             if !value.caller_env.is_empty() {
                 writer.strings("caller-env", &value.caller_env)?;
             }
@@ -1162,11 +1131,13 @@ mod review {
     }
 
     fn retired(document: &Document) -> bool {
-        document
-            .root()
-            .get("review-format-version")
-            .and_then(Item::as_integer)
-            == Some(RETIRED_REVIEW_FORMAT_VERSION)
+        matches!(
+            document
+                .root()
+                .get("review-format-version")
+                .and_then(Item::as_integer),
+            Some(3 | 4)
+        )
     }
 
     fn compact_version(path: &Path, table: &Table, key: &str, expected: u64) -> Result<()> {
@@ -1223,22 +1194,9 @@ mod review {
                         "checksum",
                         "build-script",
                         "proc-macro",
-                        "native-tools",
                     ],
                     &["caller-env"],
                 )?;
-                let native_tools = required_strings(path, table, "native-tools")?
-                    .into_iter()
-                    .map(|value| match value.as_str() {
-                        "archiver" => Ok(NativeToolRole::Archiver),
-                        "c-compiler" => Ok(NativeToolRole::CCompiler),
-                        "cxx-compiler" => Ok(NativeToolRole::CxxCompiler),
-                        _ => Err(Error::failure(format!(
-                            "compact dependency state `{}` has unsupported native-tool role `{value}`",
-                            path.display()
-                        ))),
-                    })
-                    .collect::<Result<Vec<_>>>()?;
                 let build_script = required_item(path, table, "build-script")?
                     .as_bool()
                     .ok_or_else(|| {
@@ -1261,10 +1219,11 @@ mod review {
                     checksum: required_string(path, table, "checksum")?,
                     build_script,
                     proc_macro,
-                    native_tools,
                     caller_env: if table.contains_key("caller-env") {
                         required_strings(path, table, "caller-env")?
-                    } else { Vec::new() },
+                    } else {
+                        Vec::new()
+                    },
                 })
             })
             .collect()
@@ -1684,7 +1643,7 @@ mod review {
             compact.scope = scope.clone();
             let bytes = compact.render().unwrap();
             let text = String::from_utf8(bytes).unwrap();
-            assert!(text.contains("review-format-version = 4"));
+            assert!(text.contains("review-format-version = 5"));
             assert_eq!(
                 CompactState::parse(Path::new("state.toml"), text.clone()).unwrap(),
                 compact
@@ -1716,7 +1675,6 @@ mod review {
                 checksum: "11".repeat(32),
                 build_script: true,
                 proc_macro: false,
-                native_tools: vec![NativeToolRole::Archiver, NativeToolRole::CCompiler],
                 caller_env: Vec::new(),
             }
         }
@@ -1779,35 +1737,10 @@ mod review {
             state.capabilities.push(capability());
             state.validate().unwrap();
 
-            state.capabilities[0].native_tools.reverse();
-            assert!(state.validate().is_err());
-            state.capabilities[0].native_tools.reverse();
             state.capabilities[0].build_script = false;
             assert!(state.validate().is_err());
-            state.capabilities[0].native_tools.clear();
             state.capabilities[0].proc_macro = true;
             state.validate().unwrap();
-        }
-
-        #[test]
-        fn cxx_tool_grants_round_trip_and_bind_the_review() {
-            let mut state = compact_state();
-            let mut grant = capability();
-            grant.native_tools.push(NativeToolRole::CxxCompiler);
-            state.capabilities.push(grant.clone());
-            let text = String::from_utf8(state.render().unwrap()).unwrap();
-            assert!(
-                text.contains("native-tools = [\"archiver\", \"c-compiler\", \"cxx-compiler\"]")
-            );
-            assert_eq!(
-                CompactState::parse(Path::new("state.toml"), text).unwrap(),
-                state
-            );
-            let mut review = registry_review();
-            review.capabilities.push(grant);
-            let before = review.commitment().unwrap();
-            review.capabilities[0].native_tools.pop();
-            assert_ne!(before, review.commitment().unwrap());
         }
 
         #[test]
@@ -1885,7 +1818,6 @@ mod review {
                 assert!(state.validate().is_err(), "{names:?}");
             }
             state.capabilities[0].caller_env = vec!["PUBLIC".into()];
-            state.capabilities[0].native_tools.clear();
             state.capabilities[0].build_script = false;
             state.capabilities[0].proc_macro = true;
             assert!(state.validate().is_err());
@@ -1897,7 +1829,7 @@ mod review {
             state.capabilities.push(capability());
             let expected = br#"# Generated by Lorry. Do not edit.
 format-version = 3
-review-format-version = 4
+review-format-version = 5
 review-sha256 = "4444444444444444444444444444444444444444444444444444444444444444"
 
 [review-scope]
@@ -1916,7 +1848,6 @@ version = "1.0.0"
 checksum = "1111111111111111111111111111111111111111111111111111111111111111"
 build-script = true
 proc-macro = false
-native-tools = ["archiver", "c-compiler"]
 "#;
             assert_eq!(state.render().unwrap(), expected);
             assert_eq!(
@@ -1944,7 +1875,7 @@ native-tools = ["archiver", "c-compiler"]
 
             let invalid = [
                 source.replace("format-version = 3", "format-version = 4"),
-                source.replace("review-format-version = 4\n", ""),
+                source.replace("review-format-version = 5\n", ""),
                 source.replace(&"44".repeat(32), "invalid"),
                 source.replace("\n[[context]]", "\nunknown = true\n\n[[context]]"),
                 source.replace(
@@ -1952,11 +1883,6 @@ native-tools = ["archiver", "c-compiler"]
                     "unknown = true\ntarget = \"x86_64-unknown-motor\"",
                 ),
                 source.replace("build-script = true", "build-script = \"true\""),
-                source.replace(
-                    "[\"archiver\", \"c-compiler\"]",
-                    "[\"c-compiler\", \"archiver\"]",
-                ),
-                source.replace("\"archiver\"", "\"linker\""),
             ];
             for source in invalid {
                 assert!(CompactState::parse(path, source).is_err());
@@ -1993,7 +1919,6 @@ native-tools = ["archiver", "c-compiler"]
                 checksum: "11".repeat(32),
                 build_script: true,
                 proc_macro: false,
-                native_tools: Vec::new(),
                 caller_env: Vec::new(),
             });
             review.validate().unwrap();
@@ -2427,7 +2352,6 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     checksum: "aa".repeat(32),
                     build_script: true,
                     proc_macro: false,
-                    native_tools: Vec::new(),
                     caller_env: Vec::new(),
                 }])
                 .unwrap();
@@ -2565,12 +2489,11 @@ checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 checksum: "11".repeat(32),
                 build_script: true,
                 proc_macro: false,
-                native_tools: vec![NativeToolRole::Archiver, NativeToolRole::CCompiler],
                 caller_env: Vec::new(),
             });
 
             let bytes = review.render().unwrap();
-            let expected = br#"review-format-version = 4
+            let expected = br#"review-format-version = 5
 source-tree-format-version = 1
 cargo-lock-format-version = 4
 resolver-version = 2
@@ -2625,12 +2548,11 @@ version = "1.0.0"
 checksum = "1111111111111111111111111111111111111111111111111111111111111111"
 build-script = true
 proc-macro = false
-native-tools = ["archiver", "c-compiler"]
 "#;
             assert_eq!(bytes, expected);
             assert_eq!(
                 sha256(&bytes),
-                "bf7f482431fb470e05d678449ebb0895538a74c3ab957bee3be417ead45f6236"
+                "b1cfac3daab25543a7d8a8bd0cf00732102c2d6e48310fcd4f9195ecc5e59bb6"
             );
         }
 
@@ -2664,7 +2586,7 @@ native-tools = ["archiver", "c-compiler"]
                 proc_macro: true,
             });
             let bytes = review.render().unwrap();
-            let expected = br#"review-format-version = 4
+            let expected = br#"review-format-version = 5
 source-tree-format-version = 1
 cargo-lock-format-version = 4
 resolver-version = 2
@@ -2707,14 +2629,14 @@ proc-macro = true
             assert_eq!(bytes, expected);
             assert_eq!(
                 sha256(&bytes),
-                "54d75e09db707a9c0bd471620f5753e419f7dd803eaa24c05f1c78dfe85fb4fa"
+                "edb020a1623d6e08104302c5225517beafe80f2f19f72f4d634e9e3cf1331fa8"
             );
         }
 
         #[test]
         fn renders_and_hashes_empty_registry_review_golden() {
             let bytes = empty_review().render().unwrap();
-            let expected = b"review-format-version = 4\n\
+            let expected = b"review-format-version = 5\n\
 source-tree-format-version = 1\n\
 cargo-lock-format-version = 4\n\
 resolver-version = 2\n\
@@ -2731,7 +2653,7 @@ target = \"x86_64-unknown-motor\"\n";
             assert_eq!(bytes, expected);
             assert_eq!(
                 sha256(&bytes),
-                "e71c1f4298aba2759f97d2a070ee64e86fbf4b1bae6461d8f165ecc4a7d3387a"
+                "bd67be14d4432fa45b932729650e97b28f3384c64343678e1f1d3be99ea012d3"
             );
         }
 
@@ -2829,7 +2751,6 @@ mod tests {
                 checksum: "33".repeat(32),
                 build_script: true,
                 proc_macro: false,
-                native_tools: Vec::new(),
                 caller_env: Vec::new(),
             }],
         }
@@ -2873,7 +2794,6 @@ mod tests {
                 checksum: "33".repeat(32),
                 build_script: true,
                 proc_macro: false,
-                native_tools: Vec::new(),
                 caller_env: Vec::new(),
             }])
             .unwrap();
@@ -2896,25 +2816,24 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_retired_format_3_record_but_lets_vendor_replace_it() {
+    fn rejects_retired_records_but_lets_vendor_replace_them() {
         let fixture = Fixture::new();
         fs::create_dir(fixture.0.join(".lorry")).unwrap();
-        fs::write(
+        for version in [3, 4] {
+            fs::write(
             CompactState::path(&fixture.0),
             format!(
-                "format-version = 3\nreview-format-version = 3\nreview-sha256 = \"{}\"\n\n\
+                "format-version = 3\nreview-format-version = {version}\nreview-sha256 = \"{}\"\n\n\
                  [[context]]\nhost = \"x86_64-unknown-linux-gnu\"\ntarget = \"x86_64-unknown-motor\"\n",
                 "44".repeat(32)
             ),
         )
         .unwrap();
-        let error = CompactState::load(&fixture.0).unwrap_err().render();
-        assert!(
-            error.contains("retired single-package review format 3"),
-            "{error}"
-        );
-        assert!(error.contains("run `lorry vendor --locked` again at the workspace root"));
-        assert_eq!(CompactState::load_replaceable(&fixture.0).unwrap(), None);
+            let error = CompactState::load(&fixture.0).unwrap_err().render();
+            assert!(error.contains("retired review format"), "{error}");
+            assert!(error.contains("run `lorry vendor --locked` again at the workspace root"));
+            assert_eq!(CompactState::load_replaceable(&fixture.0).unwrap(), None);
+        }
     }
 
     #[test]
@@ -3012,8 +2931,6 @@ mod tests {
                 license: None,
                 allow_build_script: false,
                 allow_proc_macro: false,
-                native_tools: BTreeSet::new(),
-                configured_native_tools: false,
                 caller_env: Default::default(),
                 provenance: fixture.0.join("policy.toml"),
             },

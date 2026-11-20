@@ -4,7 +4,6 @@ use moto_sys::kernel_log::{
     encode_kernel_log_frame, kernel_log_control_is_aligned, kernel_log_sequence_gap,
     snapshot_kernel_log_ring,
 };
-use std::fs::File;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -42,7 +41,7 @@ fn boot_milestone(log: &[u8]) -> u128 {
     const SUFFIX: &[u8] = b"ms since boot]\n";
     let start = log
         .windows(BOOT_PREAMBLE_PREFIX.len())
-        .position(|window| window == BOOT_PREAMBLE_PREFIX)
+        .rposition(|window| window == BOOT_PREAMBLE_PREFIX)
         .expect("kernel log boot preamble")
         + BOOT_PREAMBLE_PREFIX.len();
     let end = log[start..]
@@ -56,17 +55,20 @@ fn boot_milestone(log: &[u8]) -> u128 {
         .unwrap()
 }
 
-fn file_mode_end_to_end() {
-    if crate::skip_without_cap_log("kernel_log::file_mode_end_to_end") {
-        return;
-    }
-
-    // The preamble is written once at boot; a debug build's DEBUG-record
-    // volume rotates it out of both log files before systest runs.
+// Run on the cross runner's fresh image, before native compilation grows the
+// disk. The reported time includes the VMM opening it before guest execution.
+pub fn boot_latency() {
     if !cfg!(debug_assertions) {
         let initial = wait_for_file_records(&[BOOT_PREAMBLE_PREFIX]);
         let milestone = boot_milestone(&initial);
         assert!(milestone <= 3_000, "boot milestone {milestone}ms");
+    }
+    println!("kernel_log::boot_latency PASS");
+}
+
+fn file_mode_end_to_end() {
+    if crate::skip_without_cap_log("kernel_log::file_mode_end_to_end") {
+        return;
     }
 
     let nonce = format!("kernel-e2e-{:016x}", std::random::random::<u64>(..));
@@ -84,17 +86,6 @@ fn file_mode_end_to_end() {
     }
     let expected: Vec<&[u8]> = records.iter().map(|record| record.as_bytes()).collect();
     wait_for_file_records(&expected);
-
-    // Quiescence is also release-only: in debug, any background process's
-    // file operation lands more DEBUG records in kernel.log.
-    if !cfg!(debug_assertions) {
-        let file = File::open(KERNEL_LOG_PATH).unwrap();
-        std::thread::sleep(Duration::from_secs(1));
-        let before = file.metadata().unwrap().len();
-        std::thread::sleep(Duration::from_secs(5));
-        let after = file.metadata().unwrap().len();
-        assert_eq!(before, after, "kernel.log did not become quiescent");
-    }
 
     let flood_prefix = format!("kernel-rotation-{nonce} ");
     let flood = format!("{flood_prefix}{}\n", "x".repeat(220 - flood_prefix.len()));

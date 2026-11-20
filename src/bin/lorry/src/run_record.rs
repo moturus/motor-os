@@ -12,18 +12,16 @@ use crate::build_script::{self, Directive, Output, RunOptions};
 use crate::diagnostic::{Error, Result};
 use crate::hash::{FieldDigest, hex};
 use crate::json::Value;
-use crate::sandbox::Executable;
 
 const FILE_NAME: &str = ".lorry-run-v1";
 const FORMAT: &str = "lorry-build-script-run-v1";
 
 /// Identifies a run by the script's bytes, the toolchain, the script's whole
-/// environment, and its granted tools, including each tool's file metadata.
+/// environment, including PATH and the compiler variables.
 pub fn key(
     rustc_version: &str,
     executable_sha256: &[u8; 32],
     environment: &BTreeMap<String, OsString>,
-    executables: &[Executable],
 ) -> Result<[u8; 32]> {
     let mut digest = FieldDigest::tagged(FORMAT.as_bytes());
     digest.bytes("rustc", rustc_version.as_bytes());
@@ -31,12 +29,6 @@ pub fn key(
     for (name, value) in environment {
         digest.bytes("environment-name", name.as_bytes());
         digest.bytes("environment-value", value.as_encoded_bytes());
-    }
-    for tool in executables {
-        digest.metadata("tool", &tool.path)?;
-        for argument in &tool.argument_prefix {
-            digest.bytes("tool-argument", argument.as_encoded_bytes());
-        }
     }
     Ok(digest.finish())
 }
@@ -164,27 +156,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_run_key_covers_its_tools_files() {
-        let root = std::env::temp_dir().join(format!("lorry-run-key-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        let tool = Executable {
-            path: root.join("cc"),
-            argument_prefix: Vec::new(),
-        };
-        fs::write(&tool.path, b"old compiler").unwrap();
-        let key = || {
-            key(
-                "rustc 1.99",
-                &[1; 32],
-                &BTreeMap::new(),
-                std::slice::from_ref(&tool),
-            )
-        };
-        let before = key().unwrap();
-        // An upgraded compiler at the same path runs the script again.
-        fs::write(&tool.path, b"upgraded compiler").unwrap();
-        assert_ne!(key().unwrap(), before);
-        fs::remove_dir_all(root).unwrap();
+    fn a_run_key_covers_compiler_environment() {
+        let before = key("rustc 1.99", &[1; 32], &BTreeMap::new()).unwrap();
+        for name in ["PATH", "CC", "TARGET_AR", "CXXFLAGS_x86_64_unknown_motor"] {
+            let environment = BTreeMap::from([(name.to_owned(), OsString::from("changed"))]);
+            assert_ne!(key("rustc 1.99", &[1; 32], &environment).unwrap(), before);
+        }
     }
 }

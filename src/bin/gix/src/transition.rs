@@ -172,6 +172,25 @@ pub fn prepare_restore(
     record: &Record,
     cancellation: &Cancellation,
 ) -> crate::Result<RestorePrepared> {
+    let original_tree = match record.original.id {
+        Some(id) => opened.repo.find_commit(id)?.tree_id()?.detach(),
+        None => gix::ObjectId::empty_tree(opened.repo.object_hash()),
+    };
+    prepare_restore_to(opened, current, record, original_tree, cancellation)
+}
+
+/// As `prepare_restore()`, but restore `tree` instead of the tree of the original commit.
+///
+/// A rebase uses this to put the files to the commit that its interrupted step leads to.
+/// `current` and the result tree of `record` together must name every path that the
+/// worktree may have changed.
+pub(crate) fn prepare_restore_to(
+    opened: &OpenedRepository,
+    current: &gix::index::State,
+    record: &Record,
+    original_tree: gix::ObjectId,
+    cancellation: &Cancellation,
+) -> crate::Result<RestorePrepared> {
     cancellation.check()?;
     if record.state != State::Incomplete {
         return Err(invalid("worktree restoration requires an incomplete operation").into());
@@ -180,10 +199,6 @@ pub fn prepare_restore(
     let workdir = repo
         .workdir()
         .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "a worktree is required"))?;
-    let original_tree = match record.original.id {
-        Some(id) => repo.find_commit(id)?.tree_id()?.detach(),
-        None => gix::ObjectId::empty_tree(repo.object_hash()),
-    };
     let original_index = tree_index::build(repo, &original_tree, workdir, cancellation)?;
     let result_index = tree_index::build(repo, &record.result_tree, workdir, cancellation)?;
     tracked_filters::reject_unsupported(opened, &original_index, Source::IdMapping, cancellation)?;

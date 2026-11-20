@@ -7,21 +7,17 @@ dependency updates together with their Motor-target build and component tests.
 Run the complete component gate with cached Cargo dependencies:
 
 ```sh
-bash src/bin/httpd-axum/tests/run.sh
-bash src/bin/httpd-axum/tests/run.sh --release
+cd src/bin/httpd-axum
+cargo test --locked --offline --tests
+cargo test --locked --offline --release --tests
 ```
 
-Add `--motor` to cross-compile and run all component tests in a disposable
-snapshot of an existing Motor image. It uses the repository's VM lock,
-network and SSH helpers, and uploads fresh executable paths. It does not
-build an OS image. `HTTPD_AXUM_VM_BUILD=release` selects an existing release
-image while testing debug component binaries. Motor runs include real ports
-80/443, certificate-validated TLS, HTTP/2 and listener isolation. Failed runs
-retain their build artifact list and console log under the printed `/tmp` path.
-
-`src/tests/full-test.sh` runs this driver on the host using the suite's selected
-build profile. `src/tests/full-test-dev.sh` inherits that run and also runs the
-driver in a snapshot of the developer image.
+On Motor OS, run `lorry test --locked --offline --tests` in the crate.
+`src/tests/full-native-test.sh` runs these harnesses on Linux and Motor using
+the selected profile. The full gate prepares a disposable standard image,
+installs the toolchain, and uploads sources before running native tests in
+both Interactive and None roles. Motor runs include real ports 80/443,
+certificate-validated TLS, HTTP/2 and listener isolation.
 The filesystem workload in `src/tests/stress-soak.sh` launches httpd-axum with
 `--cache=off` to preserve its per-GET filesystem coverage.
 

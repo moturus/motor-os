@@ -1,4 +1,3 @@
-use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -11,33 +10,20 @@ pub enum NetworkAccess {
     Deny,
 }
 
-/// One executable a sandboxed build script may start.
-///
-/// An empty prefix permits the exact executable with arbitrary arguments. A
-/// non-empty prefix requires a backend capable of inspecting child argv; a
-/// backend must fail closed when it cannot enforce that restriction.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Executable {
-    pub path: PathBuf,
-    pub argument_prefix: Vec<OsString>,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Policy {
     /// Package, dependency, toolchain, and runtime paths exposed read-only.
     pub read_only: Vec<PathBuf>,
     /// The assigned OUT_DIR, private temporary directory, and approved devices.
     pub writable: Vec<PathBuf>,
-    /// Child executables, excluding the initial build-script executable.
-    pub executables: Vec<Executable>,
     pub network: NetworkAccess,
 }
 
 /// Platform boundary for applying the complete build-script isolation policy.
 ///
 /// Environment construction, output capture, and time limits are portable
-/// execution concerns. This trait owns the OS-enforced filesystem, network,
-/// and child-executable restrictions.
+/// execution concerns. This trait owns OS-enforced filesystem and network
+/// restrictions.
 pub trait Sandbox {
     fn apply(&self, command: &mut Command, policy: &Policy) -> Result<()>;
 }
@@ -79,7 +65,7 @@ mod platform {
     const ACCESS_REFER: u64 = 1 << 13;
     const ACCESS_TRUNCATE: u64 = 1 << 14;
 
-    const READ_ACCESS: u64 = ACCESS_READ_FILE | ACCESS_READ_DIR;
+    const READ_ACCESS: u64 = ACCESS_READ_FILE | ACCESS_READ_DIR | ACCESS_EXECUTE;
     const WRITE_ACCESS: u64 = ACCESS_WRITE_FILE
         | ACCESS_REMOVE_DIR
         | ACCESS_REMOVE_FILE
@@ -113,20 +99,6 @@ mod platform {
                     "Linux build-script sandbox received an unsupported network policy",
                 ));
             }
-            if let Some(executable) = policy
-                .executables
-                .iter()
-                .find(|executable| !executable.argument_prefix.is_empty())
-            {
-                return Err(Error::failure(format!(
-                    "Linux build-script sandbox cannot yet enforce the argument prefix for `{}`",
-                    executable.path.display()
-                ))
-                .with_help(
-                    "use an exact executable without a prefix until the tool broker is available",
-                ));
-            }
-
             let initial_program = canonical_file(Path::new(command.get_program()), "build script")?;
             let ruleset = prepare(policy, &initial_program)?;
             // SAFETY: this closure calls only async-signal-safe syscalls, does
@@ -197,23 +169,6 @@ mod platform {
                 READ_ACCESS | ACCESS_EXECUTE,
                 "ELF interpreter",
             )?;
-        }
-        for executable in &policy.executables {
-            let path = canonical_file(&executable.path, "approved executable")?;
-            add_path_rule(
-                &ruleset,
-                &path,
-                READ_ACCESS | ACCESS_EXECUTE,
-                "approved executable",
-            )?;
-            if let Some(interpreter) = elf_interpreter(&path)? {
-                add_path_rule(
-                    &ruleset,
-                    &interpreter,
-                    READ_ACCESS | ACCESS_EXECUTE,
-                    "ELF interpreter",
-                )?;
-            }
         }
         Ok(ruleset)
     }
@@ -388,14 +343,12 @@ mod platform {
             libc::SYS_listen,
             libc::SYS_accept,
             libc::SYS_accept4,
-            libc::SYS_sendto,
             libc::SYS_sendmsg,
             libc::SYS_sendmmsg,
-            libc::SYS_recvfrom,
-            libc::SYS_recvmsg,
-            libc::SYS_recvmmsg,
         ];
-        let mut filters = Vec::with_capacity(denied.len() * 2 + 12);
+        // Rust's fork/exec status channel needs socket receives. Keep message
+        // sends denied; sendto is limited to address-free sends below.
+        let mut filters = Vec::with_capacity(denied.len() * 2 + 17);
         filters.push(libc::sock_filter {
             code: BPF_LD_W_ABS,
             jt: 0,
@@ -448,6 +401,39 @@ mod platform {
                 k: SECCOMP_RET_ERRNO | libc::EPERM as u32,
             });
         }
+        // send() passes a zero addr_len; reject per-call destinations.
+        filters.extend([
+            libc::sock_filter {
+                code: BPF_JMP_JEQ_K,
+                jt: 0,
+                jf: 4,
+                k: libc::SYS_sendto as u32,
+            },
+            libc::sock_filter {
+                code: BPF_LD_W_ABS,
+                jt: 0,
+                jf: 0,
+                k: 16 + 5 * 8, // Low 32 bits of seccomp_data.args[5]: addr_len.
+            },
+            libc::sock_filter {
+                code: BPF_JMP_JEQ_K,
+                jt: 0,
+                jf: 1,
+                k: 0,
+            },
+            libc::sock_filter {
+                code: BPF_RET_K,
+                jt: 0,
+                jf: 0,
+                k: SECCOMP_RET_ALLOW,
+            },
+            libc::sock_filter {
+                code: BPF_RET_K,
+                jt: 0,
+                jf: 0,
+                k: SECCOMP_RET_ERRNO | libc::EPERM as u32,
+            },
+        ]);
         filters.push(libc::sock_filter {
             code: BPF_RET_K,
             jt: 0,
@@ -484,9 +470,18 @@ mod platform {
     use super::*;
 
     impl Sandbox for PlatformSandbox {
-        fn apply(&self, _command: &mut Command, _policy: &Policy) -> Result<()> {
-            eprintln!(
-                "warning: Motor OS build-script sandbox is not implemented; continuing without isolation"
+        fn apply(&self, command: &mut Command, _policy: &Policy) -> Result<()> {
+            if crate::role::Role::current() != crate::role::Role::None {
+                return Err(crate::diagnostic::Error::failure(
+                    "Motor build scripts must run from a None Lorry worker",
+                ));
+            }
+            command.env(
+                "MOTOR_OS_CAPS",
+                format!(
+                    "{:#x}",
+                    crate::motor_child::build_caps(crate::motor_child::own_caps())
+                ),
             );
             Ok(())
         }
@@ -546,7 +541,14 @@ mod tests {
 
         fn policy(&self) -> Policy {
             let mut read_only = vec![self.source.clone()];
-            for path in ["/lib", "/lib64", "/usr/lib", "/etc/ld.so.cache"] {
+            for path in [
+                "/bin",
+                "/usr/bin",
+                "/lib",
+                "/lib64",
+                "/usr/lib",
+                "/etc/ld.so.cache",
+            ] {
                 if PathBuf::from(path).exists() {
                     read_only.push(PathBuf::from(path));
                 }
@@ -554,7 +556,6 @@ mod tests {
             Policy {
                 read_only,
                 writable: vec![self.output.clone(), PathBuf::from("/dev/null")],
-                executables: Vec::new(),
                 network: NetworkAccess::Deny,
             }
         }
@@ -628,17 +629,28 @@ mod tests {
     }
 
     #[test]
-    fn linux_enforces_filesystem_network_and_exec_policy() {
+    fn linux_enforces_filesystem_and_network_policy() {
+        use std::os::unix::net::UnixDatagram;
+
         let fixture = Fixture::new();
         let policy = fixture.policy();
+        let socket_path = fixture.output.join("datagram");
+        let receiver = UnixDatagram::bind(&socket_path).unwrap();
+        let sender = UnixDatagram::unbound().unwrap();
+        assert_eq!(sender.send_to(b"ok", &socket_path).unwrap(), 2);
+        let mut bytes = [0; 2];
+        assert_eq!(receiver.recv(&mut bytes).unwrap(), 2);
+        assert_eq!(&bytes, b"ok");
+
         for action in [
             "read-source",
             "write-output",
             "deny-source-write",
             "deny-outside-read",
             "deny-network",
+            "deny-addressed-datagram",
             "allow-local-ipc",
-            "deny-exec",
+            "allow-exec",
         ] {
             let output = fixture.run(action, &policy);
             assert!(
@@ -647,23 +659,12 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        let mut tool_policy = policy.clone();
-        tool_policy.executables.push(Executable {
-            path: PathBuf::from("/bin/true"),
-            argument_prefix: Vec::new(),
-        });
-        let output = fixture.run("allow-exec", &tool_policy);
-        assert!(
-            output.status.success(),
-            "allow-exec: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
         assert_eq!(fs::read(fixture.output.join("generated")).unwrap(), b"ok");
         assert_eq!(fs::read(fixture.source.join("input")).unwrap(), b"input");
     }
 
     #[test]
-    fn linux_allows_an_approved_rustc() {
+    fn linux_allows_rustc_from_a_readable_directory() {
         let fixture = Fixture::new();
         let output = Command::new("rustc")
             .args(["--print", "sysroot"])
@@ -676,10 +677,7 @@ mod tests {
         policy
             .read_only
             .push(rustc.parent().unwrap().parent().unwrap().join("lib"));
-        policy.executables.push(Executable {
-            path: rustc.clone(),
-            argument_prefix: Vec::new(),
-        });
+        policy.read_only.push(rustc.clone());
         let executable = std::env::current_exe().unwrap();
         let mut command = Command::new(executable);
         command
@@ -703,18 +701,6 @@ mod tests {
     }
 
     #[test]
-    fn linux_rejects_unenforceable_argument_prefix() {
-        let fixture = Fixture::new();
-        let mut policy = fixture.policy();
-        policy.executables.push(Executable {
-            path: PathBuf::from("/bin/true"),
-            argument_prefix: vec![OsString::from("fixed")],
-        });
-        let mut command = Command::new(std::env::current_exe().unwrap());
-        assert!(platform().apply(&mut command, &policy).is_err());
-    }
-
-    #[test]
     fn sandbox_child() {
         let Ok(action) = std::env::var("LORRY_SANDBOX_CHILD") else {
             return;
@@ -731,12 +717,42 @@ mod tests {
                 std::net::TcpStream::connect("127.0.0.1:9")
                     .is_err_and(|error| { error.kind() == std::io::ErrorKind::PermissionDenied })
             ),
-            "allow-local-ipc" => {
-                let (left, right) = std::os::unix::net::UnixStream::pair().unwrap();
-                drop((left, right));
+            "deny-addressed-datagram" => {
+                let socket = std::os::unix::net::UnixDatagram::unbound().unwrap();
+                let error = socket
+                    .send_to(b"denied", output.join("datagram"))
+                    .unwrap_err();
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
             }
-            "deny-exec" => assert!(Command::new("/bin/true").status().is_err()),
-            "allow-exec" => assert!(Command::new("/bin/true").output().unwrap().status.success()),
+            "allow-local-ipc" => {
+                use std::io::{Read, Write};
+                let (mut left, mut right) = std::os::unix::net::UnixStream::pair().unwrap();
+                left.write_all(b"ok").unwrap();
+                let mut bytes = [0; 2];
+                right.read_exact(&mut bytes).unwrap();
+                assert_eq!(&bytes, b"ok");
+
+                let (left, right) = std::os::unix::net::UnixDatagram::pair().unwrap();
+                assert_eq!(left.send(b"ok").unwrap(), 2);
+                let mut bytes = [0; 2];
+                assert_eq!(right.recv(&mut bytes).unwrap(), 2);
+                assert_eq!(&bytes, b"ok");
+            }
+            "allow-exec" => {
+                use std::os::unix::process::CommandExt;
+                for program in ["/bin/true", "/bin/lorry-nonexistent-program"] {
+                    let mut command = Command::new(program);
+                    // Force Rust's fork/exec path, which uses a local socket
+                    // pair instead of the libc posix_spawn fast path.
+                    unsafe { command.pre_exec(|| Ok(())) };
+                    let result = command.output();
+                    if program == "/bin/true" {
+                        assert!(result.unwrap().status.success());
+                    } else {
+                        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+                    }
+                }
+            }
             "allow-tool" => {
                 let tool = std::env::var_os("LORRY_SANDBOX_TOOL").unwrap();
                 assert!(

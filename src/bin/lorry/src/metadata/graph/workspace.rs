@@ -152,7 +152,6 @@ mod tests {
     use crate::config::Config;
     use crate::dependency::{RegistrySource, workspace as sources};
     use crate::resolver::{Options, workspace as solver};
-    use std::process::Command;
 
     #[test]
     fn resolved_workspace_document_matches_cargo_with_platform_and_development_edges() {
@@ -199,27 +198,7 @@ mod tests {
              [features]\nextra=[]\n[hints]\nmostly-unused=true\n",
         )
         .unwrap();
-        let cargo = |platform: Option<&str>| {
-            let mut command = Command::new(env!("CARGO"));
-            command
-                .current_dir(root)
-                .env(
-                    "RUSTC",
-                    Path::new(env!("CARGO")).parent().unwrap().join("rustc"),
-                )
-                .args(["metadata", "--offline", "--format-version=1"]);
-            if let Some(platform) = platform {
-                command.args(["--filter-platform", platform]);
-            }
-            let output = command.output().unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
-        };
-        let expected = cargo(None);
+        fs::write(root.join("Cargo.lock"), "version=4\n[[package]]\nname=\"app\"\nversion=\"1.0.0\"\ndependencies=[\"shared\",\"windows-only\"]\n[[package]]\nname=\"shared\"\nversion=\"1.0.0\"\n[[package]]\nname=\"windows-only\"\nversion=\"1.0.0\"\n").unwrap();
         let mut workspace = SourceWorkspace::load(root, None).unwrap();
         workspace.load_locked_context().unwrap();
         let config = Config::default();
@@ -272,16 +251,15 @@ mod tests {
             .collect();
         let actual =
             serde_json::to_value(resolved(&workspace, &prepared, &roots, None).unwrap()).unwrap();
-        assert_eq!(actual, expected);
+        assert_document(&actual, root, false);
         let platform = TargetInfo {
             triple: "x86_64-unknown-linux-gnu".to_owned(),
             cfg: crate::toolchain::CfgSet::parse("unix\ntarget_os=\"linux\"\n").unwrap(),
         };
-        assert_eq!(
+        let filtered =
             serde_json::to_value(resolved(&workspace, &prepared, &roots, Some(&platform)).unwrap())
-                .unwrap(),
-            cargo(Some(&platform.triple))
-        );
+                .unwrap();
+        assert_document(&filtered, root, true);
         workspace.manifest_path = root.join("app/Cargo.toml");
         let document = resolved(&workspace, &prepared, &roots, None).unwrap();
         assert!(
@@ -293,5 +271,92 @@ mod tests {
                 .ends_with("/app#1.0.0")
         );
         assert!(!root.join(".lorry").exists());
+    }
+    fn assert_document(document: &serde_json::Value, root: &Path, linux: bool) {
+        use serde_json::json;
+        let id = |name| format!("path+file://{}/{name}#1.0.0", root.display());
+        assert_eq!(document["version"], 1);
+        assert_eq!(document["workspace_root"], root.to_str().unwrap());
+        assert_eq!(
+            document["workspace_members"],
+            json!([id("app"), id("shared")])
+        );
+        assert_eq!(document["workspace_default_members"], json!([id("app")]));
+        assert!(document["resolve"]["root"].is_null());
+        let packages = document["packages"].as_array().unwrap();
+        assert_eq!(
+            packages
+                .iter()
+                .map(|package| package["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            if linux {
+                vec!["app", "shared"]
+            } else {
+                vec!["app", "shared", "windows-only"]
+            }
+        );
+        for package in packages {
+            let name = package["name"].as_str().unwrap();
+            assert_eq!(package["id"], id(name));
+            assert_eq!(package["version"], "1.0.0");
+            assert_eq!(package["edition"], "2021");
+            assert!(package["source"].is_null());
+            assert_eq!(
+                package["manifest_path"],
+                root.join(name).join("Cargo.toml").to_str().unwrap()
+            );
+        }
+        let target = "cfg(all(target_os = \"windows\"))";
+        let mut deps = vec![
+            json!({"name":"shared","pkg":id("shared"),"dep_kinds":[{"kind":null,"target":null},{"kind":null,"target":target},{"kind":"dev","target":null}]}),
+        ];
+        if !linux {
+            deps.push(json!({"name":"windows_only","pkg":id("windows-only"),"dep_kinds":[{"kind":null,"target":target}]}));
+        }
+        let dependencies = if linux {
+            vec![id("shared")]
+        } else {
+            vec![id("shared"), id("windows-only")]
+        };
+        let mut nodes = vec![
+            json!({"id":id("app"),"deps":deps,"dependencies":dependencies,"features":[]}),
+            json!({"id":id("shared"),"deps":[],"dependencies":[],"features":["dev","windows"]}),
+        ];
+        if !linux {
+            nodes.push(json!({"id":id("windows-only"),"deps":[],"dependencies":[],"features":[]}));
+        }
+        assert_eq!(document["resolve"]["nodes"], json!(nodes));
+        if !linux {
+            let dependency = &packages[2];
+            assert_eq!(dependency["hints"], json!({"mostly-unused":true}));
+            let targets = dependency["targets"].as_array().unwrap();
+            assert_eq!(targets.len(), 6);
+            assert_eq!(
+                targets
+                    .iter()
+                    .map(|target| target["kind"][0].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                [
+                    "staticlib",
+                    "bin",
+                    "example",
+                    "test",
+                    "bench",
+                    "custom-build"
+                ]
+            );
+            let test = &targets[3];
+            assert_eq!(test["name"], "integration");
+            assert_eq!(test["required-features"], json!(["extra"]));
+            assert_eq!(test["test"], false);
+            assert_eq!(test["doc"], true);
+            assert!(
+                dependency["dependencies"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|dep| dep["name"] == "unprepared-registry" && dep["kind"] == "dev")
+            );
+        }
     }
 }

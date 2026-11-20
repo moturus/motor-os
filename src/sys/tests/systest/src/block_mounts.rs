@@ -83,7 +83,7 @@ pub fn read_only_root() {
         client.flush().await.unwrap();
         client.delete_entry(writable).await.unwrap();
     });
-    let output = std::process::Command::new("/system/bin/sysbox")
+    let output = std::process::Command::new("/user/bin/sysbox")
         .args(["echo", "read-only-exec"])
         .output()
         .unwrap();
@@ -288,7 +288,7 @@ pub fn devices(phase: &str) {
 
 pub fn stress() {
     use std::io::{Read, Seek, SeekFrom, Write};
-    std::fs::create_dir_all(crate::DISK_TEMP_DIR).unwrap();
+    std::fs::create_dir_all(crate::disk_temp_dir()).unwrap();
     // Exercise the unchanged refusal floor with all disk owners/caches present.
     crate::mounts::memory();
     let barrier = std::sync::Barrier::new(5);

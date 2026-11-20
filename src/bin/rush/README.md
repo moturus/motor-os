@@ -72,17 +72,18 @@ cannot be quietly fixed or quietly introduced.
   `shift` `unset` `times` `trap` `break` `continue` `return`; regular — `cd`
   (full) `pwd` `echo` `printf` `test`/`[` `read` `true` `false` `getopts`
   `command` `type` `hash` `alias`/`unalias` `umask` `wait` `jobs` `fg` `bg`
-  `kill`;
+  `kill` (Unix only; Motor OS uses the external `sysbox kill` wrapper);
 - **Signals & traps**: `trap` on `EXIT` and any signal (by name, `SIG`-prefixed
   name, or number), `trap ''` to ignore and `trap -` to restore; `^C` at the
   prompt raises `INT` (rush detects the byte itself — no platform generates the
-  signal); `kill` with `-s`/`-NAME`/`-N`/`%job`/`-l`/`-0`;
+  signal); on Unix, `kill` with `-s`/`-NAME`/`-N`/`%job`/`-l`/`-0`;
 - **Background jobs**: `cmd &` runs concurrently, with `$!`, `wait`
   (pid/`%job`/all), `jobs`, and `fg`. `$!` is the child's real pid on both
   platforms; a job that is not a process (a backgrounded builtin or compound
-  command) gets rush's own identity instead. On Motor OS, which has no signals,
-  `kill` can only terminate — see the plan's Phase 7 for the exact
-  degradations;
+  command) gets rush's own identity instead. A background command reads from
+  nothing unless it redirects its own standard input, so it cannot take input
+  from the terminal or from a loop around it. On Motor OS, which has no signals,
+  the external `kill PID` command terminates a process directly;
 - **Shell options**, enforced: `set -e` (errexit, with the POSIX condition-context
   rules), `-u` (nounset), `-x` (xtrace via `PS4`), `-n` (noexec), `-f` (noglob),
   `-C` (noclobber, with `>|`), `-a` (allexport), `-v` (verbose), `-o pipefail`,
@@ -90,9 +91,11 @@ cannot be quietly fixed or quietly introduced.
 - **POSIX invocation**: `rush [options] script [args…]`, `-c string [name
   [args…]]`, `-s`/stdin, clustered (`-ex`) and `+`-form options, `-o name`,
   `--`; positional parameters from operands in every form;
-- **Startup & prompts**: an interactive shell sources `$ENV` (a login shell also
-  reads `/etc/profile` and `~/.profile`); `PS1`/`PS2`/`PS4` are expanded
-  variables, and `PWD`/`OLDPWD` are maintained.
+- **Startup & prompts**: a login shell (`-l`, or `$0` starting with `-`) first
+  reads its profiles, interactive or not: `/user/cfg/profile` on Motor OS,
+  `/etc/profile` and `~/.profile` elsewhere. An interactive shell then sources
+  `$ENV`. `PS1`/`PS2`/`PS4` are expanded variables, and `PWD`/`OLDPWD` are
+  maintained.
 
 ## Not yet working
 
@@ -101,6 +104,13 @@ cannot be quietly fixed or quietly introduced.
   builtin/compound command gives isolation but not concurrency (no `fork`);
 - **Redirections to fds above 2** (`exec 3>file`, `>&3`): Motor OS hands a child
   only inherit/null/pipe as its stdio, so an arbitrary fd cannot reach one at all;
+- **Input a child shares with the shell**: a command run inside
+  `while read …; do …; done < file`, or in a loop fed by a pipeline or a
+  here-document, starts at the shell's position in that input, and what it
+  leaves unread stays there. But on Motor OS, and for a here-document on both
+  platforms, what it does read is not taken from the shell, whose next `read`
+  sees those bytes again. On the Unix host a file's offset is shared, as in
+  dash;
 - `umask` affecting file creation, `times` accounting (both display-only); the
   `monitor`/`notify`/`vi`/`nolog`/`hashall`/`ignoreeof` options are accepted but
   inert; a `case` with plain `pat)` patterns *inside* `$( … )` (lexer

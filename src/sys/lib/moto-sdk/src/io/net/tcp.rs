@@ -974,7 +974,7 @@ impl TcpStream {
     // RX progress or state change (wake-all-and-recheck).
     pub fn process_incoming_msg(&self, msg: io_channel::Msg) {
         #[cfg(debug_assertions)]
-        log::debug!(
+        log::trace!(
             "incoming msg {:?} for stream 0x{:x}",
             api_net::NetCmd::try_from(msg.command).unwrap(),
             msg.handle

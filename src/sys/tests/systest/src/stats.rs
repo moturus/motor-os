@@ -31,6 +31,103 @@ const BETA_NAME: &str = "test.beta";
 const ALPHA_VALUE: u64 = 42;
 const BETA_VALUE: u64 = 1000;
 
+pub fn test_process_info() {
+    use moto_sys::stats::{PID_KERNEL, PID_SYSTEM, ProcessInfoV1, ProcessInfoV2};
+
+    // Catch a kernel writing records with the wrong ABI size or array stride.
+    #[repr(C)]
+    struct Guarded<T> {
+        records: [T; 2],
+        canary: [u64; 2],
+    }
+    const CANARY: [u64; 2] = [0xfeed_face_dead_beef; 2];
+    let mut v1 = Guarded {
+        records: [ProcessInfoV1::default(); 2],
+        canary: CANARY,
+    };
+    let mut v2 = Guarded {
+        records: [ProcessInfoV2::default(); 2],
+        canary: CANARY,
+    };
+    let compare = |v1: &Guarded<ProcessInfoV1>, v2: &Guarded<ProcessInfoV2>, count: usize| {
+        assert_eq!(v1.canary, CANARY);
+        assert_eq!(v2.canary, CANARY);
+        for (old, new) in v1.records[..count].iter().zip(&v2.records[..count]) {
+            assert_eq!(old.pid, new.pid);
+            assert_eq!(old.parent_pid, new.parent_pid);
+            assert_eq!(old.debug_name_bytes, new.debug_name_bytes);
+            assert_eq!(old.debug_name_len, new.debug_name_len);
+            assert_eq!(old.debug_name(), new.debug_name());
+            assert_eq!(old.active, new.active);
+            assert_eq!(old.process_role, new.process_role);
+            assert_eq!(new._pad, [0; 5]);
+        }
+    };
+
+    assert_eq!(core::mem::size_of::<ProcessInfoV1>(), 56);
+    assert_eq!(core::mem::size_of::<ProcessInfoV2>(), 64);
+    assert_eq!(ProcessInfoV1::list(PID_SYSTEM, &mut v1.records), Ok(2));
+    assert_eq!(ProcessInfoV2::list(PID_SYSTEM, &mut v2.records), Ok(2));
+    compare(&v1, &v2, 2);
+    assert_eq!(v1.records.map(|info| info.pid), [PID_SYSTEM, PID_KERNEL]);
+
+    let page = moto_sys::ProcessStaticPage::get();
+    assert_eq!(ProcessInfoV1::list(page.pid, &mut v1.records[..1]), Ok(1));
+    assert_eq!(ProcessInfoV2::list(page.pid, &mut v2.records[..1]), Ok(1));
+    compare(&v1, &v2, 1);
+    assert_eq!(v1.records[1].pid, PID_KERNEL);
+    assert_eq!(v2.records[1].pid, PID_KERNEL);
+    assert_eq!(v2.records[0].pid, page.pid);
+    assert_eq!(v2.records[0].active, 1);
+    assert_eq!(v2.records[0].capabilities, page.capabilities);
+    assert_eq!(
+        v2.records[0].process_role,
+        moto_sys::caps::ProcessRole::from_caps(page.capabilities) as u8
+    );
+
+    let mut children = [crate::subcommand::spawn(), crate::subcommand::spawn()];
+    let mut pids = children
+        .each_mut()
+        .map(|child| child.std_child().id() as u64);
+    pids.sort_unstable();
+    assert_eq!(
+        ProcessInfoV1::list_children(page.pid, &mut v1.records),
+        Ok(2)
+    );
+    assert_eq!(
+        ProcessInfoV2::list_children(page.pid, &mut v2.records),
+        Ok(2)
+    );
+    compare(&v1, &v2, 2);
+    assert_eq!(v2.records.map(|info| info.pid), pids);
+    for info in v2.records {
+        assert_eq!(info.parent_pid, page.pid);
+        assert_eq!(info.active, 1);
+    }
+    for child in &mut children {
+        child.do_exit(0);
+        assert!(child.wait().unwrap().success());
+    }
+
+    assert_eq!(
+        ProcessInfoV1::list(page.pid, &mut []),
+        Err(moto_rt::E_INVALID_ARGUMENT)
+    );
+    assert_eq!(
+        ProcessInfoV2::list(page.pid, &mut []),
+        Err(moto_rt::E_INVALID_ARGUMENT)
+    );
+    assert_eq!(
+        ProcessInfoV1::list_children(page.pid, &mut []),
+        Err(moto_rt::E_INVALID_ARGUMENT)
+    );
+    assert_eq!(
+        ProcessInfoV2::list_children(page.pid, &mut []),
+        Err(moto_rt::E_INVALID_ARGUMENT)
+    );
+    println!("test_process_info PASS");
+}
+
 fn descriptors() -> Vec<MetricDescWire> {
     vec![
         MetricDescWire::new(ids::ALPHA, ALPHA_NAME),

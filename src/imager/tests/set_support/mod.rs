@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub const SSH: &str = "/system/cfg/sshd.toml";
+pub const SSH: &str = "/user/cfg/sshd.toml";
 pub const CERT: &str = "/system/cfg/ssl/ssl-cert.pem";
 pub const KEY: &str = "/system/cfg/ssl/ssl-key.pem";
 pub const CA: &str = "/system/cfg/ssl/ca-certificates.crt";
@@ -20,8 +20,7 @@ pub const MOTOR_KEYS: &str = "/user/cfg/ssh/authorized_keys.motor";
 pub const CLIENT_KEY: &str = "/user/cfg/ssh/id_ed25519";
 pub const OFFSET: u64 = 4096;
 pub const BLOCKS: u64 = 256;
-pub const BASE: &str = include_str!("../../../../img_files/motor-os-base/system/cfg/sshd.toml");
-pub const DEV: &str = include_str!("../../../../img_files/motor-os-dev/system/cfg/sshd.toml");
+pub const BASE: &str = include_str!("../../../../img_files/motor-os-base/user/cfg/sshd.toml");
 pub const SHIPPED_USERS: &str =
     include_str!("../../../../img_files/motor-os-base/user/cfg/russhd/users.toml");
 pub const SHIPPED_KEYS: &str =
@@ -117,7 +116,10 @@ impl Fixture {
                         "/user",
                         RolePermissions::new(Access::Rwx, Access::Rwx, Access::Rx),
                     ),
-                    ("/user/cfg", private_directory()),
+                    (
+                        "/user/cfg",
+                        RolePermissions::new(Access::Rwx, Access::Rwx, Access::Rx),
+                    ),
                     ("/user/cfg/russhd", private_directory()),
                     ("/user/cfg/ssh", private_directory()),
                 ] {
@@ -134,7 +136,7 @@ impl Fixture {
                     dirs.insert(directory.into(), id);
                 }
                 for (path, bytes, permissions) in [
-                    (SSH, config.as_bytes(), secret_permissions()),
+                    (SSH, config.as_bytes(), credential_permissions()),
                     (
                         CERT,
                         &b"old certificate"[..],
@@ -324,4 +326,4 @@ fn convert(input: &Path, output: &Path, from: &str, to: &str) {
 }
 
 pub const LOGIN_KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPqBJXmK6lCHMhdaldFapWRqrkugRx4pgTOtD2J4R6yB imager fixture";
-pub const HOST_KEY: &str = include_str!("../../../tests/test.key");
+pub const HOST_KEY: &str = include_str!("../../../vm_scripts/test.key");

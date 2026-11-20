@@ -324,6 +324,7 @@ fn noclobber_protects_existing_files() {
 }
 
 #[test]
+#[cfg(unix)]
 fn noclobber_exempts_non_regular_files() {
     // POSIX only protects existing *regular* files, so `> /dev/null` still works.
     let run = run_c("set -C; echo x > /dev/null && echo ok");
@@ -628,12 +629,141 @@ fn a_missing_env_file_is_not_an_error() {
     assert!(run.stdout.contains("alive"), "{}", run.stdout);
 }
 
+/// A fresh `$HOME` holding `.profile`, the host's user login profile. (A host
+/// login shell also reads `/etc/profile`, so these tests check their own marks.)
+#[cfg(unix)]
+fn home_with_profile(tag: &str, profile: &str) -> std::path::PathBuf {
+    let home = temp_path(tag);
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join(".profile"), profile).unwrap();
+    home
+}
+
+#[cfg(unix)]
+#[test]
+fn a_login_shell_reads_the_profile_even_when_not_interactive() {
+    // russhd runs `rush -l -c CMD` for SSH commands: their PATH comes from the profile.
+    let home = home_with_profile("login_c", "FROM_PROFILE=yes\n");
+    let home_var = home.display().to_string();
+    for args in [
+        &["-l", "-c", "echo got=$FROM_PROFILE"][..],
+        &["-lc", "echo got=$FROM_PROFILE"],
+    ] {
+        let run = run_env(args, &[("HOME", &home_var)], "");
+        assert!(
+            run.stdout.ends_with("got=yes\n"),
+            "{args:?}: {}",
+            run.stdout
+        );
+        assert_eq!(run.code, 0, "{args:?}: {}", run.stderr);
+    }
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dash_in_argv0_makes_a_login_shell() {
+    use std::os::unix::process::CommandExt;
+    let home = home_with_profile("login_dash", "FROM_PROFILE=yes\n");
+    let out = Command::new(RUSH)
+        .arg0("-rush")
+        .args(["-c", "echo got=$FROM_PROFILE"])
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).ends_with("got=yes\n"));
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_shell_without_l_ignores_the_profile() {
+    // Scripts and `sh -c` inherit the session's environment instead.
+    let home = home_with_profile("no_login", "echo SHOULD_NOT_RUN\n");
+    let home_var = home.display().to_string();
+    for args in [
+        &["-c", "echo body"][..],
+        &["+l", "-c", "echo body"],
+        &["-l", "+l", "-c", "echo body"],
+    ] {
+        let run = run_env(args, &[("HOME", &home_var)], "");
+        assert_eq!(run.stdout, "body\n", "{args:?}");
+    }
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn an_interactive_login_shell_reads_the_profile_then_env() {
+    let home = home_with_profile("login_env", "ORDER=profile\n");
+    let env = home.join("env.sh");
+    std::fs::write(&env, "ORDER=\"$ORDER,env\"\n").unwrap();
+    let run = run_env(
+        &["-l", "--piped"],
+        &[
+            ("HOME", &home.display().to_string()),
+            ("ENV", &env.display().to_string()),
+            ("PS1", ""),
+        ],
+        "echo order=$ORDER\nexit\n",
+    );
+    assert!(run.stdout.contains("order=profile,env\n"), "{}", run.stdout);
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_profile_is_reported_and_the_session_goes_on() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = home_with_profile("login_unreadable", "echo SHOULD_NOT_RUN\n");
+    let profile = home.join(".profile");
+    std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&profile).is_ok() {
+        // Privileged test runners read it anyway; there is nothing to check.
+        std::fs::remove_dir_all(&home).unwrap();
+        return;
+    }
+    let run = run_env(
+        &["-l", "-c", "echo body"],
+        &[("HOME", &home.display().to_string())],
+        "",
+    );
+    assert!(run.stdout.ends_with("body\n"), "{}", run.stdout);
+    assert!(!run.stdout.contains("SHOULD_NOT_RUN"), "{}", run.stdout);
+    assert!(run.stderr.contains("rush: cannot read"), "{}", run.stderr);
+    assert_eq!(run.code, 0);
+    std::fs::remove_dir_all(&home).unwrap();
+}
+
+#[cfg(target_os = "motor")]
+#[test]
+fn a_motor_login_shell_reads_the_user_profile() {
+    // /user/cfg/profile is the one login profile, whatever it holds here.
+    let login = run_env(&["-l", "-c", "echo [$PATH]"], &[("PATH", "/x")], "");
+    let sourced = run_env(
+        &["-c", ". /user/cfg/profile; echo [$PATH]"],
+        &[("PATH", "/x")],
+        "",
+    );
+    assert_eq!(login.stdout, sourced.stdout, "{}", login.stderr);
+    assert!(login.stdout.starts_with("[/user/bin"), "{}", login.stdout);
+    let plain = run_env(&["-c", "echo [$PATH]"], &[("PATH", "/x")], "");
+    assert_eq!(plain.stdout, "[/x]\n");
+}
+
 #[test]
 fn prompt_variables_have_defaults_and_are_expandable() {
     // PS2/PS4 match dash; PS1 is rush's colored prompt (a documented divergence).
     assert_eq!(out("echo \"[$PS2]\""), "[> ]\n");
     assert_eq!(out("echo \"[$PS4]\""), "[+ ]\n");
-    assert!(out("echo \"$PS1\"").contains("rush"));
+    let name = if cfg!(target_os = "motor") {
+        "motor-os"
+    } else {
+        "rush"
+    };
+    assert!(out("echo \"$PS1\"").contains(name));
     // An inherited value wins over the default.
     let out = Command::new(RUSH)
         .args(["-c", "echo \"[$PS2]\""])
@@ -685,7 +815,12 @@ fn pwd_is_maintained() {
         std::env::current_dir().unwrap().to_str().unwrap()
     );
     assert_eq!(out("cd /; echo $PWD"), "/\n");
-    assert_eq!(out("cd /tmp; cd /; echo $OLDPWD"), "/tmp\n");
+    let tmp = std::env::temp_dir();
+    let tmp = tmp.display();
+    assert_eq!(
+        out(&format!("cd {tmp}; cd /; echo $OLDPWD")),
+        format!("{tmp}\n")
+    );
 }
 
 // ---- I/O errors -------------------------------------------------------------

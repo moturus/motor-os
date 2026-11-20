@@ -20,16 +20,14 @@
 //!   platform-independent, which is the whole point of routing delivery through
 //!   the shared pending bitmap. What cannot happen here is delivery from
 //!   *outside* the process.
-//! - [`kill`] can only honor the signals whose meaning is "die": `KILL` and
-//!   `TERM`. Anything else (`USR1`, `HUP`, `STOP`, …) is refused rather than
-//!   silently turned into a kill, because a script sending `USR1` wants a
-//!   notification, not a corpse.
+//! - `kill` is an external wrapper over `sysbox kill PID`, which invokes the
+//!   native termination primitive directly.
 //! - [`wait_child`] can never be interrupted, since nothing can arrive while it
 //!   blocks.
 
 use std::process::Child;
 
-use super::{Disposition, KillError, WaitOutcome};
+use super::{Disposition, WaitOutcome};
 
 // ---- signals ---------------------------------------------------------------
 
@@ -38,37 +36,6 @@ use super::{Disposition, KillError, WaitOutcome};
 /// from outside this process" and degrades gracefully.
 pub fn set_disposition(_signo: i32, _disp: Disposition) -> bool {
     false
-}
-
-/// Terminate `pid`, if the signal means "die"; check existence for signal 0.
-///
-/// Motor OS has one primitive here — an unconditional kill — so `TERM` is as
-/// hard as `KILL` (the target cannot catch or ignore it), and every other signal
-/// is refused rather than silently turned into a kill. See the module docs.
-pub fn kill(pid: u64, signo: i32) -> Result<(), KillError> {
-    const SIGKILL: i32 = 9;
-    const SIGTERM: i32 = 15;
-
-    if signo == 0 {
-        // An existence check. There is no per-pid query, but the process list is
-        // ordered by pid and includes `start` when present, so one entry decides
-        // it. A zombie (`active == 0`) is reported as gone.
-        let mut buf = [moto_sys::stats::ProcessInfoV1::default(); 1];
-        return match moto_sys::stats::ProcessInfoV1::list(pid, &mut buf) {
-            Ok(n) if n >= 1 && buf[0].pid == pid && buf[0].active != 0 => Ok(()),
-            Ok(_) => Err(KillError::NoSuchProcess),
-            Err(_) => Err(KillError::PermissionDenied),
-        };
-    }
-    if signo != SIGKILL && signo != SIGTERM {
-        return Err(KillError::Unsupported);
-    }
-    // `ErrorCode` is a bare `u16`, so these are constants rather than variants.
-    moto_sys::SysCpu::kill_pid(pid).map_err(|err| match err {
-        moto_rt::E_NOT_FOUND => KillError::NoSuchProcess,
-        moto_rt::E_NOT_ALLOWED => KillError::PermissionDenied,
-        _ => KillError::Unsupported,
-    })
 }
 
 // ---- role ------------------------------------------------------------------

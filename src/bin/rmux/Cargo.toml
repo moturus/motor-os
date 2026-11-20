@@ -4,6 +4,15 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
+# Keep the unit suite in a Cargo test target so its Motor process tests can use
+# the crate's compiled probe through CARGO_BIN_EXE_rmux-probe.
+[lib]
+test = false
+
+[[test]]
+name = "unit"
+path = "tests/unit.rs"
+
 # One dependency, and it replaces more code than it adds: crossterm is the
 # terminal layer both platforms now share (details.md §4.6's zero-dependency
 # goal gives way to §8.3's — a console that delivers one byte at a time, an

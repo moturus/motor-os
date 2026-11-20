@@ -1,6 +1,9 @@
 use crate::config::uCpus;
 use crate::mm::{PAGE_SIZE_SMALL, PAGE_SIZE_SMALL_LOG2};
+use alloc::boxed::Box;
 use core::sync::atomic::*;
+
+mod cmdline;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -249,6 +252,9 @@ fn start_bsp(arg: u64) -> ! {
     let boot_info = *boot_info;
 
     boot_info.validate();
+    let mut cmdline = [0; cmdline::MAX_CMDLINE_BYTES];
+    let cmdline_len =
+        cmdline::read(boot_info.pvh(), &mut cmdline).expect("invalid kernel command line");
     crate::config::set_num_cpus(boot_info.num_cpus as uCpus);
 
     while AP_STARTED.load(Ordering::Relaxed) != (boot_info.num_cpus - 1) {
@@ -256,6 +262,9 @@ fn start_bsp(arg: u64) -> ! {
     }
 
     let new_stack = crate::mm::init_mm_bsp_stage1(&boot_info);
+    // The heap is ready; retain the bytes before switching away from the boot stack.
+    let cmdline = Box::leak(Box::new(cmdline[..cmdline_len].to_vec()));
+    crate::config::get().cmdline.set(cmdline);
     place_sys_io(boot_info.pvh().sys_io_bytes());
     let cpu_main_addr = cpu_main as *const fn(u64) as usize as u64;
     unsafe {
@@ -344,6 +353,8 @@ fn cpu_main(this_cpu: u64) -> ! {
         crate::xray::logger::init_logging();
 
         crate::mm::init_mm_bsp_stage2();
+        #[cfg(debug_assertions)]
+        cmdline::self_test();
         crate::xray::stats::init();
         #[cfg(debug_assertions)]
         crate::xray::stats::tests::run();

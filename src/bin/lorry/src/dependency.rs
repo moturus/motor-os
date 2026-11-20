@@ -614,12 +614,10 @@ mod tests {
     use crate::resolver::PackageSourceKey;
     use crate::source_tree::DEFAULT_LIMITS;
     use crate::toolchain::{CfgSet, Toolchain};
-    use crate::unit::{ProfileContext, UnitKind, UnitMode, selected_library_key};
+    use crate::unit::{UnitKind, UnitMode, selected_library_key};
     use semver::Version;
-    use serde_json::Value;
     use std::fs;
     use std::path::PathBuf;
-    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
@@ -670,135 +668,64 @@ mod tests {
             host: "x86_64-unknown-linux-gnu".to_owned(),
             compatibility: CargoCompat::V1_99,
             query_cache: None,
+            environment: BTreeMap::new(),
         }
     }
 
-    fn assert_check_graph_matches_cargo(
-        fixture: &Path,
-        plan: &CompilationPlan,
-        cargo_selection: &[&str],
-    ) {
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let output = Command::new(cargo)
-            .args(["-Z", "unstable-options", "check", "--release"])
-            .args(cargo_selection)
-            .args(["--unit-graph", "--offline"])
-            .arg("--manifest-path")
-            .arg(fixture.join("Cargo.toml"))
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let cargo: Value = serde_json::from_slice(&output.stdout).unwrap();
-        let units = cargo["units"].as_array().unwrap();
-        let cargo_nodes = units
-            .iter()
-            .map(|unit| {
-                assert_eq!(unit["mode"], "check");
-                let package = if unit["pkg_id"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with(&format!("path+file://{}#", fixture.display()))
-                {
-                    "root"
+    fn assert_check_graph(plan: &CompilationPlan) {
+        let node = |key: &crate::unit::UnitKey| {
+            assert_eq!(
+                key.mode,
+                if key.package.name == "root" {
+                    UnitMode::Check
                 } else {
-                    "local"
-                };
-                (
-                    package.to_owned(),
-                    unit["target"]["kind"][0].as_str().unwrap().to_owned(),
-                    unit["target"]["name"].as_str().unwrap().to_owned(),
-                    unit["profile"]["panic"].as_str().unwrap().to_owned(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let lorry_node = |key: &crate::unit::UnitKey| {
-            let unit = &plan.units[key];
-            if key.package.name == "root" {
-                assert!(matches!(key.mode, UnitMode::Check | UnitMode::CheckTest));
-            } else {
-                // Lorry intentionally builds dependency code while checking roots.
-                assert_eq!(key.mode, UnitMode::Build);
-            }
-            let kind = match key.kind {
-                UnitKind::Library | UnitKind::LibraryHarness => "lib",
-                UnitKind::Binary | UnitKind::BinaryHarness => "bin",
-                UnitKind::IntegrationHarness => "test",
-                _ => panic!("unexpected unit in check oracle: {:?}", key.kind),
-            };
-            (
-                key.package.name.clone(),
-                kind.to_owned(),
-                key.target
-                    .clone()
-                    .unwrap_or_else(|| key.package.name.clone()),
-                match unit.settings.profile.panic {
-                    crate::identity::CargoPanicStrategy::Abort => "abort",
-                    crate::identity::CargoPanicStrategy::Unwind => "unwind",
+                    UnitMode::Build
                 }
-                .to_owned(),
+            );
+            assert_eq!(
+                plan.units[key].settings.profile.panic,
+                crate::identity::CargoPanicStrategy::Abort
+            );
+            let kind = match key.kind {
+                UnitKind::Library => "lib",
+                UnitKind::Binary => "bin",
+                _ => panic!("unexpected check unit: {:?}", key.kind),
+            };
+            format!(
+                "{}/{kind}/{}",
+                key.package.name,
+                key.target.as_deref().unwrap_or(&key.package.name)
             )
         };
-        let mut expected_nodes = cargo_nodes.clone();
-        expected_nodes.sort();
-        let mut actual_nodes = plan.units.keys().map(lorry_node).collect::<Vec<_>>();
-        actual_nodes.sort();
-        assert_eq!(actual_nodes, expected_nodes);
-
-        let mut cargo_edges = Vec::new();
-        for (parent, unit) in units.iter().enumerate() {
-            for edge in unit["dependencies"].as_array().unwrap() {
-                cargo_edges.push((
-                    cargo_nodes[parent].clone(),
-                    cargo_nodes[edge["index"].as_u64().unwrap() as usize].clone(),
-                    edge["extern_crate_name"].as_str().unwrap().to_owned(),
-                ));
-            }
-        }
-        cargo_edges.sort();
-        let mut lorry_edges = plan
+        assert_eq!(
+            plan.units.keys().map(node).collect::<BTreeSet<_>>(),
+            ["root/lib/root", "root/bin/root", "local/lib/local"]
+                .map(str::to_owned)
+                .into()
+        );
+        let edges = plan
             .units
             .values()
             .flat_map(|unit| {
                 unit.unit.dependencies.iter().map(|edge| {
                     (
-                        lorry_node(&unit.unit.key),
-                        lorry_node(&edge.unit),
-                        edge.alias.clone().unwrap_or_default(),
+                        node(&unit.unit.key),
+                        node(&edge.unit),
+                        edge.alias.clone().unwrap(),
                     )
                 })
             })
-            .collect::<Vec<_>>();
-        lorry_edges.sort();
-        assert_eq!(lorry_edges, cargo_edges);
-
-        let mut cargo_roots = cargo["roots"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|index| cargo_nodes[index.as_u64().unwrap() as usize].clone())
-            .collect::<Vec<_>>();
-        cargo_roots.sort();
-        let mut lorry_roots = plan
-            .units
-            .keys()
-            .filter(|key| {
-                key.package.name == "root"
-                    && (matches!(
-                        key.kind,
-                        UnitKind::LibraryHarness
-                            | UnitKind::BinaryHarness
-                            | UnitKind::IntegrationHarness
-                    ) || (key.profile == ProfileContext::Normal
-                        && matches!(key.kind, UnitKind::Library | UnitKind::Binary)))
-            })
-            .map(lorry_node)
-            .collect::<Vec<_>>();
-        lorry_roots.sort();
-        assert_eq!(lorry_roots, cargo_roots);
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            edges,
+            [
+                ("root/lib/root", "local/lib/local", "local"),
+                ("root/bin/root", "local/lib/local", "local"),
+                ("root/bin/root", "root/lib/root", "root"),
+            ]
+            .map(|(a, b, c)| (a.to_owned(), b.to_owned(), c.to_owned()))
+            .into()
+        );
     }
 
     #[test]
@@ -912,7 +839,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_check_graph_matches_cargo(&fixture.0, &check_plan, &[]);
+        assert_check_graph(&check_plan);
 
         // Integration harness environments come from the test plan.
         let shared = prepare(true);

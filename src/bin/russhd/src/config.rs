@@ -16,9 +16,6 @@ struct ServiceConfig {
     host_key: String,  // openssh host key (private)
 
     #[serde(default)]
-    path: String,
-
-    #[serde(default)]
     allow_tcp_forwarding: bool,
 
     #[serde(default)]
@@ -31,7 +28,6 @@ struct ServiceConfig {
 pub struct Config {
     listen_on: SocketAddr,
     host_key: russh::keys::PrivateKey,
-    path: String,
     auth_store: Arc<AuthStore>,
     allow_tcp_forwarding: bool,
     gateway_ports: bool,
@@ -84,7 +80,6 @@ nl+jD/WcRBBUjL54uT3TAAAAAAECAwQF
         Ok(Arc::new(Self {
             listen_on,
             host_key,
-            path: conf.path,
             auth_store: Arc::new(auth_store),
             allow_tcp_forwarding: conf.allow_tcp_forwarding,
             gateway_ports: conf.gateway_ports,
@@ -97,10 +92,6 @@ nl+jD/WcRBBUjL54uT3TAAAAAAECAwQF
 
     pub fn host_key(&self) -> &russh::keys::PrivateKey {
         &self.host_key
-    }
-
-    pub fn path(&self) -> &str {
-        &self.path
     }
 
     pub fn auth_store(&self) -> &Arc<AuthStore> {

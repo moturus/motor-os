@@ -1,6 +1,6 @@
 # QuickJS on Motor OS
 
-The developer image includes QuickJS-NG 0.18.0, built natively for Motor OS.
+The toolchain archive includes QuickJS-NG 0.18.0, built natively for Motor OS.
 The JavaScript engine is upstream code. Only its platform layer,
 `quickjs-libc.c`, and one helper in `cutils.h` carry Motor changes.
 `os.platform` reports `motor`.
@@ -9,13 +9,12 @@ The JavaScript engine is upstream code. Only its platform layer,
 
 | Path | Contents |
 | --- | --- |
-| `/devtools/bin/qjs` | The interpreter and REPL. It also creates standalone executables. |
-| `/devtools/bin/qjsc` | The compiler: JavaScript to C source or to bytecode. |
-| `/devtools/quickjs/include/` | `quickjs.h` and `quickjs-libc.h`. |
-| `/devtools/quickjs/lib/libqjs.a` | The engine with the `qjs:std`, `qjs:os` and `qjs:bjson` modules. |
-| `/devtools/quickjs/LICENSE` | QuickJS-NG's license. |
-| `/devtools/tests/quickjs-*` | The smoke test and its fixtures. |
-| `/devtools/www/quickjs.html` | This guide in the image's HTML documentation. |
+| `/user/bin/dev/qjs` | The interpreter and REPL. It also creates standalone executables. |
+| `/user/bin/dev/qjsc` | The compiler: JavaScript to C source or to bytecode. |
+| `/user/lib/quickjs/include/` | `quickjs.h` and `quickjs-libc.h`. |
+| `/user/lib/quickjs/lib/libqjs.a` | The engine with the `qjs:std`, `qjs:os` and `qjs:bjson` modules. |
+| `/user/lib/quickjs/LICENSE` | QuickJS-NG's license. |
+| `/user/lib/www/quickjs.html` | This guide in the image's HTML documentation. |
 
 `libqjs.a` holds only QuickJS's C objects. The normal C toolchain supplies
 mlibc and its runtime shim, so a program links only `libqjs.a` explicitly.
@@ -27,7 +26,7 @@ Run a script, or compile it to a native program:
 ```sh
 qjs hello.js
 qjsc -e -o hello.c hello.js
-cc -I/devtools/quickjs/include hello.c /devtools/quickjs/lib/libqjs.a -o hello
+cc -I/user/lib/quickjs/include hello.c /user/lib/quickjs/lib/libqjs.a -o hello
 ./hello
 ```
 
@@ -52,8 +51,8 @@ Processes use mlibc's native spawn, because Motor OS has no `fork`.
 - `os.kill` supports signal 0, `SIGTERM` and `SIGKILL`, with Motor's
   permission checks. `SIGTERM` always terminates. Other signals to another
   process return `-ENOSYS`. There are no process groups.
-- `std.popen` runs `/system/bin/rush -c` and returns a normal stream.
-- `std.urlGet` runs `/system/bin/curl` with long options. HTTP is tested over
+- `std.popen` runs `/user/bin/rush -c` and returns a normal stream.
+- `std.urlGet` runs `/user/bin/curl` with long options. HTTP is tested over
   loopback. HTTPS uses curl's normal certificate checks, but has not been
   tested end to end.
 - Workers use pthreads. They wait through the runtime's poll and wake calls
@@ -90,7 +89,7 @@ Linux. The cause is mlibc's handling of allocations above 32 KiB; see
 3. It compiles with `-O2`, whatever the OS build profile. Upstream checks in
    its generated sources, so no host QuickJS or CMake is needed.
 4. It stages the overlay at `build/assembly/images/quickjs`, which
-   `make dev.img` puts into the image.
+   `make toolchain-archive` includes in the native archive.
 
 To change the patch, apply it to a checkout of the tag, edit, and write the
 result back with `git diff > src/build-scripts/quickjs-0.18.0-motor.patch`. To
@@ -100,21 +99,22 @@ expected Test262 result below.
 
 ## Tests
 
-- `/devtools/tests/quickjs-smoke.sh` runs from `src/tests/full-test.sh` when it
-  tests the developer image. It covers the language and modules, `qjsc` and
+- The Cargo harness in `src/sys/tests/toolchain` covers the language and modules, `qjsc` and
   standalone builds, processes, Workers, `popen`, HTTP over loopback, and the
   mlibc calls the port relies on. It is the only test of that platform layer.
-- `src/tests/test-quickjs-test262.sh` runs from `src/tests/full-test-dev.sh`
-  with `--release`. It builds QuickJS's `run-test262` natively on a copy of
-  the developer image and runs the full upstream configuration. It expects
+- Its release Test262 case builds QuickJS's `run-test262` natively on a
+  disposable standard image with the toolchain installed, then runs the
+  full upstream configuration. It expects
   `Result: 40/82220 errors, 4802 excluded, 5736 skipped`, the same as Linux.
   Its value is in catching compiler and libc regressions.
 
 The Test262 corpus is the `test262` submodule that the QuickJS tag pins.
-The script fetches it once, before the VM boots, into
+`src/build-scripts/native-test-inputs.sh` fetches it before the VM boots into
 `external-sources/test262-<revision>`. The VM run uses no Internet. The suite
 takes about 3.5 minutes on 4 vCPUs, against 35 seconds on the Linux host.
-Almost all of the difference is the allocator issue above.
+Almost all of the difference is the allocator issue above. Both cases run
+through `src/tests/full-native-test.sh` and the full gate in each Motor role;
+all sources and inputs are uploaded at test time.
 
 ## Related changes
 

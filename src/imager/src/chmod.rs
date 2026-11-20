@@ -173,6 +173,8 @@ pub(crate) fn is_qcow2(image: &Path) -> io::Result<bool> {
 }
 
 pub fn chmod_image(image: &Path, path: &Path, permissions: RolePermissions) -> io::Result<()> {
+    crate::permissions::validate_path_mode(path, permissions)
+        .map_err(|reason| io::Error::new(ErrorKind::InvalidInput, reason))?;
     if !is_qcow2(image)? {
         return chmod_raw(image, path, permissions);
     }

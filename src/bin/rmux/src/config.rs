@@ -86,7 +86,7 @@ impl Default for Config {
             // `unbind C-b` / `set -g prefix C-a`.
             prefix: Key::ctrl('a'),
             // Prefer bash on Linux when PATH can resolve it; Motor uses
-            // `/system/bin/sh` -> rush (§4.3). `$SHELL` is not consulted.
+            // `/user/bin/sh` -> rush (§4.3). `$SHELL` is not consulted.
             default_shell: native_shell().to_owned(),
             history_limit: crate::grid::DEFAULT_HISTORY_LIMIT,
             renumber_windows: true,

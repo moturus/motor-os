@@ -1259,7 +1259,7 @@ impl MotoSocket {
                     &moto_socket,
                     |_socket_id, netstack_socket, _state| {
                         if netstack_socket.can_recv() {
-                            log::debug!("RX: socket 0x{socket_id:x} can_recv.");
+                            log::trace!("RX: socket 0x{socket_id:x} can_recv.");
                             return Poll::Ready(true);
                         }
                         if !netstack_socket.may_recv() {
@@ -1274,7 +1274,7 @@ impl MotoSocket {
                         {
                             let (state, can_recv) =
                                 (netstack_socket.state(), netstack_socket.can_recv());
-                            log::debug!(
+                            log::trace!(
                                 "RX: socket 0x{_socket_id:x} can_recv: {can_recv} in {state:?}"
                             );
                         }
@@ -1320,7 +1320,7 @@ impl MotoSocket {
                             Ok(len) => {
                                 rx_buf.consume(len);
                                 tcp_state.stat_rx_bytes += len as u64;
-                                log::debug!("TCP socket 0x{socket_id:x} RX {len} bytes.");
+                                log::trace!("TCP socket 0x{socket_id:x} RX {len} bytes.");
                             }
                             Err(err) => {
                                 if netstack_socket.may_recv() {
@@ -1397,7 +1397,7 @@ impl MotoSocket {
                 Self::with_tcp_netstack_socket(
                     &moto_socket,
                     |_socket_id, netstack_socket, _state| {
-                        log::debug!(
+                        log::trace!(
                             "TX polling socket 0x{socket_id:x} in {:?}",
                             netstack_socket.state()
                         );
@@ -1421,7 +1421,7 @@ impl MotoSocket {
             };
 
             // Step 2: wait for bytes to TX.
-            log::debug!("TX task for socket 0x{socket_id:x}: waiting for bytes to send.");
+            log::trace!("TX task for socket 0x{socket_id:x}: waiting for bytes to send.");
             loop {
                 {
                     let Some(moto_socket) = weak_socket.upgrade() else {
@@ -1460,7 +1460,7 @@ impl MotoSocket {
             } // loop
 
             // Step 3: TX bytes out.
-            log::debug!("TX task for socket 0x{socket_id:x}: maybe got bytes to send.");
+            log::trace!("TX task for socket 0x{socket_id:x}: maybe got bytes to send.");
             {
                 let Some(moto_socket) = weak_socket.upgrade() else {
                     break 'outer;
@@ -1479,7 +1479,7 @@ impl MotoSocket {
                             match netstack_socket.send_slice(tx_buf.bytes()) {
                                 Ok(sz) => {
                                     tx_buf.consume(sz);
-                                    log::debug!(
+                                    log::trace!(
                                         "TCP TX: enqueued {sz} bytes into socket 0x{socket_id:x}."
                                     );
                                     if tx_buf.is_consumed() {

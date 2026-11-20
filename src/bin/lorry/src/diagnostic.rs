@@ -3,14 +3,14 @@ use std::path::{Path, PathBuf};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErrorKind {
     Usage,
     Failure,
     Interrupted,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct Error {
     kind: ErrorKind,
     message: String,

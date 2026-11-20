@@ -1,7 +1,7 @@
 use std::process::Stdio;
 
 use moto_sys::*;
-use sys_init::{process_service_line, process_tty_line, TtyRole};
+use sys_init::{process_service_line, process_tty_line, tty_role_for_cmdline, TtyRole};
 
 #[derive(Debug)]
 struct Config {
@@ -80,7 +80,12 @@ fn main() {
     // sys-tty first: the console is what the user waits for, and it needs
     // strobe only for kernel-log forwarding, which retries on its own. Then
     // strobe, then the services, which log to it from the start.
-    let role_cap = match config.tty_role {
+    let mut cmdline = [0; SysRay::MAX_CMDLINE_LEN];
+    let (len, total) =
+        SysRay::query_cmdline(&mut cmdline).expect("cannot read kernel command line");
+    assert_eq!(len, total, "kernel command line truncated");
+    let tty_role = tty_role_for_cmdline(config.tty_role, &cmdline[..len]);
+    let role_cap = match tty_role {
         TtyRole::System => moto_sys::caps::CAP_SYS,
         TtyRole::Interactive => moto_sys::caps::CAP_INTERACTIVE,
         TtyRole::None => 0,

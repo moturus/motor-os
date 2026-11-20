@@ -5,18 +5,15 @@
 
 time ./x.py build --stage 2 clippy library src/tools/remote-test-server
 
-# Copy:
+# Boot a disposable standard-image copy, then upload the server:
 
-cp ./build/x86_64-unknown-linux-gnu/stage2-tools/x86_64-unknown-motor/release/remote-test-server ../motor-os/img_files/motor-os-dev/devtools/tests/
-
-# Rebuild the development image:
-
-make -C ../motor-os dev.img
+scp -P 2222 -i ../motor-os/vm_images/release/test.key ./build/x86_64-unknown-linux-gnu/stage2-tools/x86_64-unknown-motor/release/remote-test-server motor@192.168.4.2:/none/tmp/remote-test-server
 
 
 # Run in Motor OS:
 
-/devtools/tests/remote-test-server --verbose --bind 0.0.0.0:12345
+chmod r-xr-xr-x /none/tmp/remote-test-server
+/none/tmp/remote-test-server --verbose --bind 0.0.0.0:12345
 
 # Run tests (doesn't work yet)
 

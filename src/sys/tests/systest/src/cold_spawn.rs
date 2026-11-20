@@ -626,6 +626,19 @@ fn phdr(bytes: &[u8], p_type: u32) -> usize {
         .unwrap()
 }
 
+/// GNU ld emits a build-id NOTE; native lld can omit it. Both linkers emit
+/// GNU_STACK, which Motor's loader also ignores, after the load headers.
+fn spare_phdr(bytes: &[u8]) -> usize {
+    const PT_NOTE: u32 = 4;
+    const PT_GNU_STACK: u32 = 0x6474_e551;
+    let kind = if program_headers(bytes).iter().any(|h| h.0 == PT_NOTE) {
+        PT_NOTE
+    } else {
+        PT_GNU_STACK
+    };
+    phdr(bytes, kind)
+}
+
 /// The file offset and byte size of the RELA table the dynamic section names.
 fn rela_table(bytes: &[u8]) -> (usize, usize) {
     let headers = program_headers(bytes);
@@ -670,7 +683,7 @@ fn retarget_relocation_into_rodata(bytes: &mut [u8]) {
 /// The custom region supports eager mappings, but cannot be file-paged.
 fn test_high_segment(dir: &Path) {
     let path = copy(dir, "high-segment", EXEC, |bytes| {
-        let at = phdr(bytes, 4); // Replace the ignored PT_NOTE after the load headers.
+        let at = spare_phdr(bytes);
         bytes[at..at + 56].fill(0);
         bytes[at..at + 4].copy_from_slice(&PT_LOAD.to_le_bytes());
         bytes[at + 4..at + 8].copy_from_slice(&4_u32.to_le_bytes()); // Read-only.
@@ -752,7 +765,7 @@ fn test_bss_relocations(dir: &Path) {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
 
-        let at = phdr(bytes, 4); // Replace PT_NOTE after the load headers.
+        let at = spare_phdr(bytes);
         bytes[at..at + 56].fill(0);
         bytes[at..at + 4].copy_from_slice(&PT_LOAD.to_le_bytes());
         bytes[at + 4..at + 8].copy_from_slice(&6_u32.to_le_bytes()); // R+W.

@@ -455,10 +455,11 @@ pub fn test_child_stdin_eof_on_process_exit() {
     let _ = std::fs::remove_file(&ready);
     let caps = format!(
         "0x{:x}",
-        moto_sys::caps::CAP_SPAWN
-            | moto_sys::caps::CAP_SPAWN_DETACHED
-            | moto_sys::caps::CAP_INTERACTIVE
-            | moto_sys::caps::CAP_FS_WRITE
+        moto_sys::ProcessStaticPage::get().capabilities
+            & (moto_sys::caps::CAP_SPAWN
+                | moto_sys::caps::CAP_SPAWN_DETACHED
+                | moto_sys::caps::CAP_INTERACTIVE
+                | moto_sys::caps::CAP_FS_WRITE)
     );
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .arg(STDIN_EXIT_PARENT)

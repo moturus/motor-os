@@ -28,7 +28,9 @@
 //! redirections to fds > 2, are not wired (Motor OS cannot hand a child an
 //! arbitrary fd at all); `&` on anything but a lone external command delivers
 //! isolation but not concurrency (there is no `fork` — see
-//! [`exec_background`]).
+//! [`exec_background`]); a child's reads from input it shares with the shell
+//! do not move the shell's position, for a file on Motor OS (see
+//! [`ChildIn::File`]) and for a here-document everywhere (see [`Heredoc`]).
 
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
@@ -36,7 +38,7 @@ use std::io::{IsTerminal, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::ast::{
     AndOr, AndOrOp, Assignment, CaseClause, Command as AstCommand, CompoundCommand, ForClause,
@@ -106,8 +108,93 @@ enum FdSource {
     // Keep the original descriptor when a redirection copies this source.
     Inherit(u8),
     File(Arc<File>),
-    /// stdin fed from a here-document body via a pipe (written after spawn).
-    Heredoc(Arc<String>),
+    /// stdin from a here-document body; a child is fed it through a pipe.
+    Heredoc(Arc<Heredoc>),
+    /// stdin with nothing to read: what an asynchronous list starts with.
+    Null,
+}
+
+/// A here-document body and how much of it has been read.
+///
+/// The commands under one redirection share the position as they would share
+/// a file offset: in `{ read a; read b; } <<EOF` the second `read` continues
+/// where the first stopped. An external command is fed what is left, but
+/// through a pipe, so what it reads cannot be counted and is not taken from
+/// the shell.
+struct Heredoc {
+    body: String,
+    pos: AtomicUsize,
+}
+
+impl Heredoc {
+    fn unread(&self) -> &[u8] {
+        let pos = self.pos.load(Ordering::Relaxed);
+        self.body.as_bytes().get(pos..).unwrap_or_default()
+    }
+}
+
+/// Reads a here-document from its shared position, and advances it.
+struct HeredocReader(Arc<Heredoc>);
+
+impl Read for HeredocReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let unread = self.0.unread();
+        let len = unread.len().min(buf.len());
+        buf[..len].copy_from_slice(&unread[..len]);
+        self.0.pos.fetch_add(len, Ordering::Relaxed);
+        Ok(len)
+    }
+}
+
+/// Reads a regular file for `read`, which takes one line per call. Reading it
+/// a byte at a time, as an unbuffered reader must, costs a request to the
+/// filesystem service per byte. This reads a block instead and, when dropped,
+/// moves the shared file offset back to the first byte `read` did not take, so
+/// the next reader of the file, `read` again or a child, continues there.
+struct LineFileReader {
+    file: File,
+    block: [u8; 512],
+    pos: usize,
+    len: usize,
+}
+
+impl LineFileReader {
+    /// Hands the file back unless it is a regular file: bytes read ahead from
+    /// a pipe or a device could not be returned to it.
+    fn new(file: File) -> Result<Self, File> {
+        if !file.metadata().is_ok_and(|meta| meta.is_file()) {
+            return Err(file);
+        }
+        Ok(Self {
+            file,
+            block: [0; 512],
+            pos: 0,
+            len: 0,
+        })
+    }
+}
+
+impl Read for LineFileReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.pos == self.len {
+            (self.pos, self.len) = (0, 0);
+            self.len = self.file.read(&mut self.block)?;
+        }
+        let count = buf.len().min(self.len - self.pos);
+        buf[..count].copy_from_slice(&self.block[self.pos..self.pos + count]);
+        self.pos += count;
+        Ok(count)
+    }
+}
+
+impl Drop for LineFileReader {
+    fn drop(&mut self) {
+        let ahead = (self.len - self.pos) as i64;
+        if ahead != 0 {
+            // A failure here has no caller to report to.
+            let _ = self.file.seek(std::io::SeekFrom::Current(-ahead));
+        }
+    }
 }
 
 impl FdSource {
@@ -120,7 +207,7 @@ impl FdSource {
                 .try_clone()
                 .map(|x| Box::new(x) as Box<dyn Write>)
                 .unwrap_or_else(|_| Box::new(std::io::stdout())),
-            FdSource::Heredoc(_) => Box::new(std::io::sink()),
+            FdSource::Heredoc(_) | FdSource::Null => Box::new(std::io::sink()),
         }
     }
 
@@ -133,21 +220,24 @@ impl FdSource {
                 .try_clone()
                 .map(|x| Box::new(x) as Box<dyn Write>)
                 .unwrap_or_else(|_| Box::new(std::io::stderr())),
-            FdSource::Heredoc(_) => Box::new(std::io::sink()),
+            FdSource::Heredoc(_) | FdSource::Null => Box::new(std::io::sink()),
         }
     }
 
     /// A reader for this fd used as *standard input* (for `read`): `Inherit` →
     /// the shell's stdin, unbuffered so that the bytes after the line stay for
-    /// the next command; a file → the file; a here-document → its body.
+    /// the next command; a file → the file, read a block at a time when it is
+    /// a regular file; a here-document → what is left of its body.
     fn reader(&self) -> Box<dyn Read> {
         match self {
             FdSource::Inherit(_) => Box::new(crate::sys::RawStdin::default()),
-            FdSource::File(f) => f
-                .try_clone()
-                .map(|x| Box::new(x) as Box<dyn Read>)
-                .unwrap_or_else(|_| Box::new(std::io::empty())),
-            FdSource::Heredoc(b) => Box::new(std::io::Cursor::new(b.as_bytes().to_vec())),
+            FdSource::File(f) => match f.try_clone().map(LineFileReader::new) {
+                Ok(Ok(reader)) => Box::new(reader),
+                Ok(Err(file)) => Box::new(file),
+                Err(_) => Box::new(std::io::empty()),
+            },
+            FdSource::Heredoc(doc) => Box::new(HeredocReader(doc.clone())),
+            FdSource::Null => Box::new(std::io::empty()),
         }
     }
 }
@@ -214,6 +304,12 @@ fn exec_background(and_or: &AndOr, shell: &mut Shell, io: &IoEnv) -> i32 {
     if noexec(shell) {
         return 0;
     }
+    // Without job control an asynchronous list reads from nothing, unless it
+    // redirects its own standard input (POSIX §2.9.3). Otherwise it would take
+    // input from the terminal, or from the loop or pipeline around it.
+    let io = &IoEnv {
+        fds: [FdSource::Null, io.fds[1].clone(), io.fds[2].clone()],
+    };
     let started = shell.jobs.started();
     let status = match lone_simple(and_or) {
         Some(simple) => {
@@ -616,7 +712,7 @@ fn spawn_background(
         program,
         &argv[1..],
         &env,
-        child_in(&fds[0], true, sole_use[0]),
+        child_in(&fds[0], true),
         child_out(&fds[1], sole_use[1], 1),
         child_out(&fds[2], sole_use[2], 2),
     ) {
@@ -1263,7 +1359,7 @@ fn run_shell_script(
     let mut file = open_shell_script(program)?;
     // A capability mask needs a real child: environment changes
     // cannot reduce this process's immutable capabilities. Run Rush directly,
-    // since the native loader cannot use the /system/bin/sh script as an ELF
+    // since the native loader cannot use the /user/bin/sh script as an ELF
     // interpreter.
     #[cfg(not(unix))]
     if jobs::has_explicit_env(
@@ -1274,7 +1370,7 @@ fn run_shell_script(
         child_args.push(program.to_string());
         child_args.extend_from_slice(args);
         return Some(spawn_child(
-            "/system/bin/rush",
+            "/user/bin/rush",
             program,
             &child_args,
             env,
@@ -1351,7 +1447,7 @@ fn spawn_child(
         program,
         args,
         env,
-        child_in(&fds[0], false, sole_use[0]),
+        child_in(&fds[0], false),
         child_out(&fds[1], sole_use[1], 1),
         child_out(&fds[2], sole_use[2], 2),
     ) {
@@ -1401,13 +1497,13 @@ fn report_spawn_error(program: &str, e: std::io::Error, err_fd: &FdSource) -> i3
 
 /// The child stdin for an fd source. Background jobs read from nothing rather
 /// than competing with the shell for the terminal (POSIX §2.9.3).
-fn child_in(fd: &FdSource, background: bool, sole_use: bool) -> ChildIn {
+fn child_in(fd: &FdSource, background: bool) -> ChildIn {
     match fd {
         FdSource::Inherit(_) if background => ChildIn::Null,
         FdSource::Inherit(_) => ChildIn::Inherit,
-        FdSource::File(f) if sole_use => ChildIn::DirectFile(f.clone()),
         FdSource::File(f) => ChildIn::File(f.clone()),
-        FdSource::Heredoc(b) => ChildIn::Heredoc(b.clone()),
+        FdSource::Heredoc(doc) => ChildIn::Heredoc(doc.unread().to_vec()),
+        FdSource::Null => ChildIn::Null,
     }
 }
 
@@ -1421,6 +1517,8 @@ fn child_out(fd: &FdSource, sole_use: bool, destination: u8) -> ChildOut {
         FdSource::File(f) => ChildOut::File(f.clone()),
         // A here-document as *output* is meaningless; behave like inherit.
         FdSource::Heredoc(_) => ChildOut::Inherit,
+        // `>&0` under an asynchronous list: nothing to read, nowhere to write.
+        FdSource::Null => ChildOut::Null,
     }
 }
 
@@ -1488,7 +1586,8 @@ fn build_fds_for_simple(
                 } else {
                     expand::expand_heredoc_body(&doc.body, shell, io)
                 };
-                fds[fd_num] = FdSource::Heredoc(Arc::new(body));
+                let pos = AtomicUsize::new(0);
+                fds[fd_num] = FdSource::Heredoc(Arc::new(Heredoc { body, pos }));
                 sole_use[fd_num] = false;
             }
         }
@@ -1559,10 +1658,11 @@ enum StageInput {
 /// Run a multi-stage pipeline. Every stage runs in an emulated subshell whose
 /// stdin is staged through a temp file (so `read` in a `while` loop advances)
 /// and whose stdout is captured for the next stage — or the real fd 1 when it is
-/// last. External stages spawn the program (with file-backed stdio pumped
-/// through pipes, per Motor OS's constraints); builtins/compounds/functions run
-/// in-process. The pipeline's status is the last stage's — or, under
-/// `set -o pipefail`, the last *failing* stage's.
+/// last. External stages spawn the program, which reads the staged input file
+/// itself; its file-backed output is pumped through pipes, per Motor OS's
+/// constraints. Builtins/compounds/functions run in-process. The pipeline's
+/// status is the last stage's — or, under `set -o pipefail`, the last *failing*
+/// stage's.
 fn run_pipeline(cmds: &[AstCommand], shell: &mut Shell, io: &IoEnv) -> i32 {
     let n = cmds.len();
     let mut prev = StageInput::Ambient;
@@ -1614,8 +1714,8 @@ fn run_pipeline(cmds: &[AstCommand], shell: &mut Shell, io: &IoEnv) -> i32 {
 /// `sio`, in [`exec_simple`]'s order: words, the capability check, redirections,
 /// then assignment values, all in that environment, so `echo x | echo "$(cat)"`
 /// reads the pipe as in dash. The stage is a subshell (the caller restores
-/// state), and an external command's files are pumped rather than moved into
-/// the child.
+/// state), and an external command's output files are pumped rather than moved
+/// into the child.
 fn run_simple_stage(simple: &SimpleCommand, shell: &mut Shell, sio: &IoEnv) -> i32 {
     let mut argv = Vec::new();
     for word in &simple.words {

@@ -35,6 +35,26 @@ pub struct ProcessInfoV1 {
 
 const _: () = assert!(core::mem::size_of::<ProcessInfoV1>() == 56);
 
+// ProcessInfoV1 plus the capability mask; version 2 of the process list query
+// returns it. V1 stays as it is, at 56 bytes: published crates are built
+// against that layout, and version 1 of the query still serves them.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct ProcessInfoV2 {
+    // NOTE: pids are positive i32 only, for posix compatibility. They were u64
+    // originally, but a lot of places, including Rust stdlib, assume 32-bit pids.
+    pub pid: u64, // PID_SYSTEM, PID_KERNEL, or actual process ID.
+    pub parent_pid: u64,
+    pub debug_name_bytes: [u8; MAX_DEBUG_NAME_BYTES],
+    pub debug_name_len: u8,
+    pub active: u8,       // 0 => zombie; 1 => active.
+    pub process_role: u8, // ProcessRole as u8.
+    pub _pad: [u8; 5],    // Zero. Explicit, so that the record has no padding bytes.
+    pub capabilities: u64,
+}
+
+const _: () = assert!(core::mem::size_of::<ProcessInfoV2>() == 64);
+
 #[cfg(feature = "userspace")]
 impl ProcessInfoV1 {
     pub const MAX_DEBUG_NAME_BYTES: usize = MAX_DEBUG_NAME_BYTES;
@@ -48,6 +68,27 @@ impl ProcessInfoV1 {
     // List direct children of the process. @parent will not be included.
     pub fn list_children(parent: u64, buf: &mut [ProcessInfoV1]) -> Result<usize, ErrorCode> {
         crate::SysRay::list_processes_v1(parent, false, buf)
+    }
+
+    pub fn debug_name(&self) -> &str {
+        core::str::from_utf8(&self.debug_name_bytes[0..(self.debug_name_len as usize)])
+            .unwrap_or("~")
+    }
+}
+
+#[cfg(feature = "userspace")]
+impl ProcessInfoV2 {
+    pub const MAX_DEBUG_NAME_BYTES: usize = MAX_DEBUG_NAME_BYTES;
+
+    // List processes, in PID order. Completed processes without running
+    // descendants may not be listed. @start will be included, if present.
+    pub fn list(start: u64, buf: &mut [ProcessInfoV2]) -> Result<usize, ErrorCode> {
+        crate::SysRay::list_processes_v2(start, true, buf)
+    }
+
+    // List direct children of the process. @parent will not be included.
+    pub fn list_children(parent: u64, buf: &mut [ProcessInfoV2]) -> Result<usize, ErrorCode> {
+        crate::SysRay::list_processes_v2(parent, false, buf)
     }
 
     pub fn debug_name(&self) -> &str {

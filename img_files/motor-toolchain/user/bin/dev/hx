@@ -1,0 +1,6 @@
+#!/user/bin/rush
+
+# Configuration is shared; each role keeps its cache in its own scratch tree.
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-/user/cfg}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$TMPDIR/.cache}"
+exec /user/lib/helix/hx "$@"

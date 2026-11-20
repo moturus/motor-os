@@ -1,8 +1,0 @@
-[package]
-name = "zeta"
-version = "1.1.0"
-edition = "2021"
-license = "MIT"
-
-[dependencies]
-u = { version = "=1.0.0" }

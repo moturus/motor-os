@@ -336,7 +336,7 @@ impl VirtioDevice {
                 log::error!("NET: RX: no posted buffers left; RX stopped.");
                 return;
             };
-            log::debug!("NET: RX: waiting for completion");
+            log::trace!("NET: RX: waiting for completion");
             let (packet, result) = completion.await;
 
             // A failed or rejected completion carries no data and its buffer
@@ -352,7 +352,7 @@ impl VirtioDevice {
                     packet
                 }
                 Ok(meta) => {
-                    log::debug!("NET: RX {} bytes.", packet.len());
+                    log::trace!("NET: RX {} bytes.", packet.len());
                     stats
                         .device_rx_packets
                         .set(stats.device_rx_packets.get() + 1);
@@ -375,7 +375,7 @@ impl VirtioDevice {
                 }
             };
 
-            log::debug!("NET: RX: posting read.");
+            log::trace!("NET: RX: posting read.");
             completions.push_back(net_dev.clone().post_read(next_buf).await);
             while let Some(refill) =
                 allocate_rx_refill(&mut rx_deficit, || buf_cache.pop_buf(SMALL_BUF_SIZE))
@@ -424,7 +424,7 @@ impl VirtioDevice {
 
             match maybe_tx_vec {
                 Some((packet, tso_seg_size)) => {
-                    log::debug!("NET TX {} bytes", packet.len());
+                    log::trace!("NET TX {} bytes", packet.len());
                     stats
                         .device_tx_packets
                         .set(stats.device_tx_packets.get() + 1);
@@ -463,7 +463,7 @@ impl moto_netstack::phy::RxToken for VirtioRxToken {
     where
         F: FnOnce(&[u8]) -> R,
     {
-        log::debug!("RxToken: consume {}", self.buf.len());
+        log::trace!("RxToken: consume {}", self.buf.len());
         f(self.buf.as_ref())
     }
 
@@ -527,7 +527,7 @@ impl moto_netstack::phy::TxToken for VirtioTxToken {
             .push_packet(packet, self.tso_seg_size);
         self.reserved = false;
         self.tx_notify.notify_one();
-        log::debug!("TxToken: consume {len}.");
+        log::trace!("TxToken: consume {len}.");
         result
     }
 }
@@ -547,12 +547,12 @@ impl moto_netstack::phy::Device for VirtioDevice {
         &mut self,
         timestamp: moto_netstack::time::Instant,
     ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        log::debug!("VirtioDevice::receive()");
+        log::trace!("VirtioDevice::receive()");
         if self.rx_queue.borrow().is_empty() || !self.tx_queue.borrow_mut().reserve() {
             return None;
         }
         self.rx_queue.borrow_mut().pop_front().map(|(buf, meta)| {
-            log::debug!("VirtioDevice::receive(): have {} bytes.", buf.len());
+            log::trace!("VirtioDevice::receive(): have {} bytes.", buf.len());
             (
                 VirtioRxToken {
                     buf: ManuallyDrop::new(buf),
@@ -573,7 +573,7 @@ impl moto_netstack::phy::Device for VirtioDevice {
     }
 
     fn transmit(&mut self, timestamp: moto_netstack::time::Instant) -> Option<Self::TxToken<'_>> {
-        log::debug!("VirtioDevice::transmit()");
+        log::trace!("VirtioDevice::transmit()");
         if !self.tx_queue.borrow_mut().reserve() {
             return None;
         }

@@ -1,9 +1,13 @@
 #![feature(io_error_more, motor_ext)]
 
 mod commands;
+mod format;
+
+use format::format_bytes;
 
 fn print_usage_and_exit(exit_code: i32) -> ! {
     println!("sysbox commands:");
+    println!("\tsysbox caps");
     println!("\tsysbox cat");
     println!("\tsysbox chmod");
     println!("\tsysbox cp");
@@ -16,6 +20,7 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     println!("\tsysbox free");
     println!("\tsysbox head");
     println!("\tsysbox help");
+    println!("\tsysbox kill");
     println!("\tsysbox less");
     println!("\tsysbox loop");
     println!("\tsysbox ls");
@@ -45,25 +50,6 @@ fn print_usage_and_exit(exit_code: i32) -> ! {
     std::process::exit(exit_code);
 }
 
-fn format_bytes(bytes: u64) -> String {
-    const KIB: u64 = 1 << 10;
-    const MIB: u64 = 1 << 20;
-    const GIB: u64 = 1 << 30;
-    const TIB: u64 = 1 << 40;
-
-    if bytes >= TIB {
-        format!("{:.2}T", bytes as f64 / TIB as f64)
-    } else if bytes >= GIB {
-        format!("{:.2}G", bytes as f64 / GIB as f64)
-    } else if bytes >= MIB {
-        format!("{:.2}M", bytes as f64 / MIB as f64)
-    } else if bytes >= KIB {
-        format!("{:.2}K", bytes as f64 / KIB as f64)
-    } else {
-        format!("{}", bytes)
-    }
-}
-
 fn main() {
     let args: Vec<_> = std::env::args().collect();
 
@@ -72,6 +58,7 @@ fn main() {
     }
 
     match args[1].as_str() {
+        "caps" => commands::caps::do_command(&args[1..]),
         "cat" => {
             if !commands::cat::do_command(&args[1..]) {
                 std::process::exit(1);
@@ -88,6 +75,7 @@ fn main() {
         "free" => commands::free::do_command(&args[1..]),
         "head" => commands::head::do_command(&args[1..]),
         "help" => print_usage_and_exit(0),
+        "kill" => commands::kill::do_command(&args[1..]),
         "less" => commands::less::do_command(&args[1..]),
         "loop" => commands::loop_cmd::do_command(&args[1..]),
         "ls" => commands::ls::do_command(&args[1..]),

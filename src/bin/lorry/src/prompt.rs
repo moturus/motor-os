@@ -25,6 +25,10 @@ pub fn set_machine_messages(enabled: bool) {
 /// Whether Lorry may ask the user: stdin is a terminal and no program is
 /// reading Lorry's messages.
 pub fn interactive() -> bool {
+    #[cfg(target_os = "motor")]
+    if let Some(interactive) = crate::motor_child::interactive() {
+        return interactive;
+    }
     !MACHINE_MESSAGES.load(Ordering::Relaxed) && io::stdin().is_terminal()
 }
 

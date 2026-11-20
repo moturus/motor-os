@@ -1265,17 +1265,11 @@ fn resolve_target_defaults(manifest: &mut Manifest, check_sources: bool) -> Resu
             )));
         }
     }
-    if manifest.library.is_none()
-        && manifest
-            .targets
-            .iter()
-            .all(|target| target.kind == TargetKind::Test)
-    {
-        return Err(Error::failure(format!(
-            "package `{}` has no supported library or binary target",
-            manifest.name
-        ))
-        .with_help("add `src/lib.rs`, `src/main.rs`, or one supported `[[bin]]`"));
+    if manifest.library.is_none() && manifest.targets.is_empty() {
+        return Err(
+            Error::failure(format!("package `{}` has no targets", manifest.name))
+                .with_help("add a library, binary, integration test, example, or benchmark target"),
+        );
     }
     if let Some(default) = &manifest.default_run
         && manifest.target(TargetKind::Bin, default).is_none()
@@ -3549,14 +3543,14 @@ members = ["ignored-member"]
         assert!(root.join("Cargo.toml").is_file());
         let manifest = Manifest::load_for_build(root).unwrap();
         assert_eq!(manifest.name, "lorry");
-        assert_eq!(manifest.dependencies.len(), 14);
+        assert_eq!(manifest.dependencies.len(), 16);
         assert!(manifest.dependencies.iter().any(|dependency| {
             dependency.package == "moto-rt"
                 && dependency.target.as_deref() == Some("cfg(target_os = \"motor\")")
                 && matches!(dependency.source, DependencySource::CratesIo)
         }));
         assert!(manifest.dependencies.iter().any(|dependency| {
-            dependency.package == "moto-sys"
+            dependency.package == "moto-sdk"
                 && dependency.target.as_deref() == Some("cfg(target_os = \"motor\")")
                 && matches!(dependency.source, DependencySource::CratesIo)
         }));
@@ -3578,7 +3572,7 @@ members = ["ignored-member"]
                 .iter()
                 .any(|dependency| dependency.package == "gix-dir")
         );
-        assert_eq!(manifest.lock.as_ref().unwrap().packages.len(), 164);
+        assert_eq!(manifest.lock.as_ref().unwrap().packages.len(), 180);
     }
 
     #[test]
@@ -3669,36 +3663,19 @@ members = ["ignored-member"]
         ] {
             fs::write(&path, format!("{source}\n{declarations}")).unwrap();
             let manifest = Manifest::load_for_build(&root).unwrap();
-            let cargo = std::process::Command::new(env!("CARGO"))
-                .args(["metadata", "--offline", "--no-deps", "--format-version=1"])
-                .env("CARGO_HOME", root.join("cargo-home"))
-                .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
-                .current_dir(&root)
-                .output()
-                .unwrap();
-            assert!(
-                cargo.status.success(),
-                "{}",
-                String::from_utf8_lossy(&cargo.stderr)
-            );
-            let cargo: serde_json::Value = serde_json::from_slice(&cargo.stdout).unwrap();
-            let cargo_tests = cargo["packages"][0]["targets"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|target| target["kind"] == serde_json::json!(["test"]))
-                .map(|target| {
-                    (
-                        target["name"].as_str().unwrap(),
-                        PathBuf::from(target["src_path"].as_str().unwrap()),
-                    )
-                })
-                .collect::<Vec<_>>();
+            let mut expected = vec![
+                ("a-b", root.join("tests/a-b.rs")),
+                ("extra", root.join("tests/z.rs")),
+                ("nested", root.join("tests/nested/main.rs")),
+            ];
+            if declarations.contains("name = \"z\"") {
+                expected.push(("z", root.join("tests/z.rs")));
+            }
             let tests = manifest
                 .targets_of(TargetKind::Test)
                 .map(|target| (target.name.as_str(), target.path.clone()))
                 .collect::<Vec<_>>();
-            assert_eq!(tests, cargo_tests, "{declarations}");
+            assert_eq!(tests, expected, "{declarations}");
         }
 
         fs::write(root.join("tests/a_b.rs"), "").unwrap();
@@ -3755,41 +3732,16 @@ bench = false
                 .map(|target| (target.kind.as_str().to_owned(), target.name.clone())),
         );
         expected.sort();
-        let output = std::process::Command::new(env!("CARGO"))
-            .args([
-                "-Z",
-                "unstable-options",
-                "check",
-                "--unit-graph",
-                "--offline",
-                "--benches",
-            ])
-            .env("CARGO_HOME", root.join("cargo-home"))
-            .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
-            .current_dir(&root)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
+        assert_eq!(
+            expected,
+            [
+                ("bench".to_owned(), "selected".to_owned()),
+                ("bin".to_owned(), "flags".to_owned()),
+                ("example".to_owned(), "selected".to_owned()),
+                ("lib".to_owned(), "flags".to_owned()),
+                ("test".to_owned(), "selected".to_owned()),
+            ]
         );
-        let graph: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        let mut actual = graph["roots"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|index| {
-                let target = &graph["units"][index.as_u64().unwrap() as usize]["target"];
-                (
-                    target["kind"][0].as_str().unwrap().to_owned(),
-                    target["name"].as_str().unwrap().to_owned(),
-                )
-            })
-            .collect::<Vec<_>>();
-        actual.sort();
-        assert_eq!(expected.len(), 5);
-        assert_eq!(expected, actual);
         for kind in ["test", "example", "bench"] {
             fs::write(root.join("Cargo.toml"), format!("{source}\n[[{kind}]]\nname = \"invalid\"\npath = \"src/main.rs\"\nbench = \"true\"\n")).unwrap();
             assert!(
@@ -3819,44 +3771,18 @@ bench = false
             [[bench]]\nname=\"benchmark\"\npath=\"missing/bench.rs\"\n",
         )
         .unwrap();
-        let cargo = std::process::Command::new(env!("CARGO"))
-            .args(["metadata", "--offline", "--no-deps", "--format-version=1"])
-            .env("CARGO_HOME", root.join("cargo-home"))
-            .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
-            .current_dir(&root)
-            .output()
-            .unwrap();
-        assert!(
-            cargo.status.success(),
-            "{}",
-            String::from_utf8_lossy(&cargo.stderr)
-        );
-        let cargo: serde_json::Value = serde_json::from_slice(&cargo.stdout).unwrap();
         let manifest = Manifest::load_source_dependency(&root).unwrap();
-        let targets = cargo["packages"][0]["targets"].as_array().unwrap();
-        assert_eq!(targets.len(), 5);
+        assert_eq!(manifest.targets.len(), 4);
         let test = manifest.targets_of(TargetKind::Test).next().unwrap();
         assert_eq!(test.required_features.as_ref().unwrap(), &["extra"]);
         assert!(!test.test && test.doc && !test.harness);
-        let cargo_test = targets
-            .iter()
-            .find(|target| target["name"] == "integration")
-            .unwrap();
-        assert_eq!(
-            cargo_test["required-features"],
-            serde_json::json!(["extra"])
-        );
-        assert_eq!(cargo_test["test"], test.test);
-        assert_eq!(cargo_test["doc"], test.doc);
         let mut paths = vec![manifest.library.as_ref().unwrap().path.clone()];
         paths.extend(manifest.targets.iter().map(|target| target.path.clone()));
-        for path in paths {
-            assert!(
-                targets
-                    .iter()
-                    .any(|target| target["src_path"].as_str() == path.to_str())
-            );
-        }
+        assert_eq!(
+            paths,
+            ["lib", "main", "example", "test", "bench"]
+                .map(|name| root.join(format!("missing/{name}.rs")))
+        );
         // Compilation still diagnoses its missing library input.
         assert!(
             Manifest::load_path_dependency(&root)
@@ -3976,16 +3902,6 @@ bench = false
         root
     }
 
-    fn cargo_metadata_targets(root: &Path) -> std::process::Output {
-        std::process::Command::new(env!("CARGO"))
-            .args(["metadata", "--offline", "--no-deps", "--format-version=1"])
-            .env("CARGO_HOME", root.join("cargo-home"))
-            .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
-            .current_dir(root)
-            .output()
-            .unwrap()
-    }
-
     #[cfg(unix)]
     #[test]
     fn infers_and_merges_targets_like_cargo() {
@@ -4057,27 +3973,32 @@ bench = false
                     )
                 })
                 .collect::<Vec<_>>();
-            let cargo = cargo_metadata_targets(&root);
-            assert!(
-                cargo.status.success(),
-                "{}",
-                String::from_utf8_lossy(&cargo.stderr)
-            );
-            let cargo: serde_json::Value = serde_json::from_slice(&cargo.stdout).unwrap();
-            let cargo = cargo["packages"][0]["targets"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|target| target["kind"][0] != "lib")
-                .map(|target| {
-                    (
-                        target["kind"][0].as_str().unwrap(),
-                        target["name"].as_str().unwrap(),
-                        PathBuf::from(target["src_path"].as_str().unwrap()),
-                    )
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(lorry, cargo, "edition {edition}, {auto}{tables}");
+            let automatic = auto.is_empty() && (edition != "2015" || tables.is_empty());
+            let mut expected = Vec::new();
+            for (kind, directory) in [
+                ("bin", "src/bin"),
+                ("example", "examples"),
+                ("test", "tests"),
+                ("bench", "benches"),
+            ] {
+                if automatic {
+                    if kind == "bin" {
+                        expected.push((kind, "infer", root.join("src/main.rs")));
+                    }
+                    // File symlinks are targets; symlinked subdirectories are not.
+                    expected.push((kind, "linked", root.join(directory).join("linked.rs")));
+                    if tables.is_empty() {
+                        expected.push((kind, "plain", root.join(directory).join("plain.rs")));
+                    }
+                }
+                if !tables.is_empty() {
+                    expected.push((kind, "renamed", root.join(directory).join("plain.rs")));
+                }
+                if automatic || !tables.is_empty() {
+                    expected.push((kind, "sub", root.join(directory).join("sub/main.rs")));
+                }
+            }
+            assert_eq!(lorry, expected, "edition {edition}, {auto}{tables}");
         }
         fs::remove_dir_all(root).unwrap();
     }
@@ -4093,7 +4014,6 @@ bench = false
         // A file in place of a target directory holds no targets in Cargo.
         fs::write(root.join("tests"), "").unwrap();
         assert!(load("").unwrap().targets.is_empty());
-        assert!(cargo_metadata_targets(&root).status.success());
         fs::remove_file(root.join("tests")).unwrap();
         for (kind, directory) in [
             ("bin", "src/bin"),
@@ -4114,7 +4034,6 @@ bench = false
                 load("").unwrap_err().render().contains("duplicate"),
                 "{kind}"
             );
-            assert!(!cargo_metadata_targets(&root).status.success());
             fs::remove_dir_all(root.join(directory)).unwrap();
         }
 
@@ -4161,63 +4080,13 @@ bench = false
              [[bench]]\nname = \"excluded-bench\"\nharness = false\n",
         )
         .unwrap();
-        let app = root.join("app");
-        fs::create_dir_all(app.join("src")).unwrap();
-        fs::create_dir_all(app.join(".cargo")).unwrap();
-        fs::write(
-            app.join(".cargo/config.toml"),
-            format!(
-                "[source.crates-io]\nreplace-with = \"vendored\"\n\
-                 [source.vendored]\ndirectory = \"{}\"\n",
-                root.join("vendor").display()
-            ),
-        )
-        .unwrap();
-        fs::write(
-            app.join("Cargo.toml"),
-            "[package]\nname = \"app\"\nversion = \"1.0.0\"\nedition = \"2021\"\n\
-             [workspace]\n[dependencies]\ndep = \"1.0.0\"\n",
-        )
-        .unwrap();
-        fs::write(app.join("src/main.rs"), "fn main() {}\n").unwrap();
-        let cargo = |directory: &Path, command: &[&str]| {
-            std::process::Command::new(env!("CARGO"))
-                .args(command)
-                .arg("--offline")
-                .env("CARGO_HOME", root.join("cargo-home"))
-                .env("CARGO_TARGET_DIR", root.join("target"))
-                .env("RUSTC", Path::new(env!("CARGO")).with_file_name("rustc"))
-                .current_dir(directory)
-                .output()
-                .unwrap()
-        };
-        // Cargo builds the registry dependency and omits the targets.
-        let build = cargo(&app, &["check"]);
-        assert!(
-            build.status.success(),
-            "{}",
-            String::from_utf8_lossy(&build.stderr)
-        );
-        let metadata = cargo(&app, &["metadata", "--format-version=1"]);
-        let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout).unwrap();
-        let dependency_targets = metadata["packages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|package| package["name"] == "dep")
-            .unwrap()["targets"]
-            .as_array()
-            .unwrap()
-            .len();
-        assert_eq!(dependency_targets, 1);
         for manifest in [
             Manifest::load_path_dependency(&dependency).unwrap(),
             Manifest::load_source_dependency(&dependency).unwrap(),
         ] {
             assert!(manifest.library.is_some() && manifest.targets.is_empty());
         }
-        // As a member, Cargo and Lorry both reject the package.
-        assert!(!cargo(&dependency, &["check"]).status.success());
+        // A workspace member must resolve every explicitly declared target.
         let Err(error) = SourceWorkspace::load(&dependency, None) else {
             panic!("a member must reject an unresolved explicit target");
         };

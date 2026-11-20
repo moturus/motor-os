@@ -344,10 +344,11 @@ fn peek_after_the_writer_vanishes(mode: &str) {
     let _ = std::fs::remove_file(&release);
     let caps = format!(
         "0x{:x}",
-        moto_sys::caps::CAP_SPAWN
-            | moto_sys::caps::CAP_SPAWN_DETACHED
-            | moto_sys::caps::CAP_INTERACTIVE
-            | moto_sys::caps::CAP_FS_WRITE
+        moto_sys::ProcessStaticPage::get().capabilities
+            & (moto_sys::caps::CAP_SPAWN
+                | moto_sys::caps::CAP_SPAWN_DETACHED
+                | moto_sys::caps::CAP_INTERACTIVE
+                | moto_sys::caps::CAP_FS_WRITE)
     );
     let mut writer = Command::new(std::env::current_exe().unwrap())
         .arg(PEEK_WRITER)

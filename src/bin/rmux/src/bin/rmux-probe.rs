@@ -1,4 +1,4 @@
-//! A hand-written rmux client for adversarial tests (src/tests/full-test.sh).
+//! A hand-written rmux client for the crate's native adversarial tests.
 //!
 //! rmux's own client only looks for the server its capabilities would start.
 //! This one names any server, so a test can check that a server refuses a
@@ -50,11 +50,72 @@ mod motor {
 
     const REFUSED: i32 = 3;
 
+    fn size(output: &str) -> i32 {
+        use crossterm::{event, terminal};
+        let (columns, rows) = terminal::size().unwrap();
+        let mut readings = format!("size={columns}x{rows}\n");
+        let deadline = std::time::Instant::now() + Duration::from_millis(2500);
+        while std::time::Instant::now() < deadline {
+            if event::poll(Duration::from_millis(200)).unwrap() {
+                if let event::Event::Resize(columns, rows) = event::read().unwrap() {
+                    readings.push_str(&format!("resize={columns}x{rows}\n"));
+                }
+            }
+        }
+        let (columns, rows) = terminal::size().unwrap();
+        readings.push_str(&format!("size-after={columns}x{rows}\n"));
+        std::fs::write(output, readings).unwrap();
+        0
+    }
+
     pub fn run(args: &[String]) -> i32 {
         let words: Vec<&str> = args.iter().map(String::as_str).collect();
         match words.as_slice() {
+            ["echo"] => {
+                let mut input = std::io::stdin().lock();
+                let mut output = std::io::stdout().lock();
+                let mut bytes = [0; 4096];
+                loop {
+                    let count = input.read(&mut bytes).unwrap();
+                    if count == 0 {
+                        return 0;
+                    }
+                    output.write_all(&bytes[..count]).unwrap();
+                    output.flush().unwrap();
+                }
+            }
             ["errors"] => errors(),
             ["closing"] => closing(),
+            ["size", output] => size(output),
+            ["terminal", output] => {
+                use std::io::IsTerminal;
+                let mask = || {
+                    [
+                        std::io::stdin().is_terminal(),
+                        std::io::stdout().is_terminal(),
+                        std::io::stderr().is_terminal(),
+                    ]
+                };
+                assert!(std::env::var("MOTURUS_STDIO_IS_TERMINAL").is_err());
+                let before = mask();
+                unsafe { std::env::set_var("MOTURUS_STDIO_IS_TERMINAL", "true") };
+                assert_eq!(mask(), before);
+                unsafe { std::env::remove_var("MOTURUS_STDIO_IS_TERMINAL") };
+                assert_eq!(mask(), before);
+                assert_eq!(before, [true; 3]);
+                let fd = moto_sdk::rt::fs::duplicate(moto_sdk::rt::FD_STDOUT).unwrap();
+                assert!(fd > 2 && moto_sdk::rt::fs::is_terminal(fd));
+                moto_sdk::rt::fs::close(fd).unwrap();
+                std::fs::write(output, "terminal descriptor invariants PASS\n").unwrap();
+                0
+            }
+            ["ctrl-c-default"] => {
+                println!("RMUX_DEFAULT_READY");
+                std::io::stdout().flush().unwrap();
+                loop {
+                    std::hint::spin_loop();
+                }
+            }
             ["silent", name] => silent(name),
             ["saturate", name, profile] => saturate(name, profile),
             ["parallel", name, profile] => {

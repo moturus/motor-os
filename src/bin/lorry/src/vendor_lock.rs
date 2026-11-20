@@ -41,6 +41,8 @@ impl ProjectVendorLock {
             ))
         })?;
         verify_open_file(&file, &path, "project vendor lock")?;
+        #[cfg(target_os = "motor")]
+        crate::fs_check::set_file_mode(&file, &path, false)?;
         file.lock().map_err(|error| {
             Error::failure(format!(
                 "failed to acquire project vendor lock `{}`: {error}",

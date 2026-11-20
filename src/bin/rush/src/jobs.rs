@@ -95,27 +95,32 @@ pub fn has_explicit_env<'a>(key: &str, names: impl IntoIterator<Item = &'a str>)
 
 // ---- child stdio ------------------------------------------------------------
 
-/// A child's standard input: inherited, empty, or piped and fed by us.
-///
-/// Shared shell-level files are pumped so their one live position stays in
-/// rush. A file opened solely for one external command can move directly into
-/// that child instead.
+/// A child's standard input: inherited, empty, a file, or a here-document
+/// that we feed through a pipe.
 pub enum ChildIn {
     Inherit,
     /// Nothing to read: an immediate EOF. A background job's stdin, so it cannot
     /// steal input from the terminal (POSIX §2.9.3).
     Null,
-    DirectFile(Arc<File>),
+    /// The child reads the file itself, starting at the shell's position, so
+    /// what it leaves unread is still there for the shell's next command.
+    ///
+    /// On the Unix host the two share one offset. On Motor OS the child gets a
+    /// copy of the offset, so what it does read is not taken from the shell,
+    /// which sees those bytes again (a documented limit, see the README).
     File(Arc<File>),
-    Heredoc(Arc<String>),
+    /// What is left of a here-document, which we feed through a pipe.
+    Heredoc(Vec<u8>),
 }
 
-/// A child's standard output/error: inherited, or pumped into a file (a captured
-/// pipeline stage's output is a temp file, so it is `File` too).
+/// A child's standard output/error: inherited, discarded, or pumped into a file
+/// (a captured pipeline stage's output is a temp file, so it is `File` too).
 pub enum ChildOut {
     Inherit,
     ParentStdout,
     ParentStderr,
+    /// Nowhere: what the child writes is discarded.
+    Null,
     DirectFile(Arc<File>),
     File(Arc<File>),
 }
@@ -126,12 +131,12 @@ pub enum ChildOut {
 /// wire directly.
 ///
 /// Motor OS's sys-io is not reentrant under concurrent filesystem access from
-/// one process, so rush keeps all of its own FS I/O on the main thread: input
-/// files are read *before* the child starts, captured output is written *after*
-/// it exits ([`finish`](Self::finish)), and the pump threads in between touch
-/// only pipes. For a background job that means its redirected output lands in
+/// one process, so rush keeps all of its own FS I/O on the main thread:
+/// captured output is written *after* the child exits
+/// ([`finish`](Self::finish)), and the pump threads before that touch only
+/// pipes. For a background job that means its redirected output lands in
 /// the file when it is reaped rather than as it is produced — see
-/// `rush-to-sh-plan.md` §7.
+/// `rush-to-sh-plan.md` §7. An input file is never pumped: the child reads it.
 pub struct PumpedChild {
     child: Option<Child>,
     feed: Option<JoinHandle<()>>,
@@ -167,35 +172,33 @@ pub fn spawn(
         cmd.env(key, val);
     }
 
-    // Read file-backed input up front: FS access must stay on this thread.
-    let feed: Option<Vec<u8>> = match &stdin {
-        ChildIn::Inherit | ChildIn::Null | ChildIn::DirectFile(_) => None,
-        ChildIn::Heredoc(b) => Some(b.as_bytes().to_vec()),
-        ChildIn::File(f) => Some(read_all(f)),
+    // Only a here-document is fed by us. Draining a file here instead would
+    // take input from the shell that the child may never read.
+    let (child_stdin, feed) = match stdin {
+        ChildIn::Inherit => (Stdio::inherit(), None),
+        ChildIn::Null => (Stdio::null(), None),
+        ChildIn::File(file) => (Stdio::from(file.try_clone()?), None),
+        ChildIn::Heredoc(bytes) => (Stdio::piped(), Some(bytes)),
     };
     let out_file = match &stdout {
         ChildOut::Inherit | ChildOut::ParentStdout | ChildOut::ParentStderr => None,
-        ChildOut::DirectFile(_) => None,
+        ChildOut::Null | ChildOut::DirectFile(_) => None,
         ChildOut::File(f) => Some(f.clone()),
     };
     let err_file = match &stderr {
         ChildOut::Inherit | ChildOut::ParentStdout | ChildOut::ParentStderr => None,
-        ChildOut::DirectFile(_) => None,
+        ChildOut::Null | ChildOut::DirectFile(_) => None,
         ChildOut::File(f) => Some(f.clone()),
     };
 
-    cmd.stdin(match &stdin {
-        ChildIn::DirectFile(file) => Stdio::from(file.try_clone()?),
-        _ if feed.is_some() => Stdio::piped(),
-        ChildIn::Null => Stdio::null(),
-        _ => Stdio::inherit(),
-    });
+    cmd.stdin(child_stdin);
     cmd.stdout(match &stdout {
         ChildOut::DirectFile(file) => Stdio::from(file.try_clone()?),
         ChildOut::File(_) => Stdio::piped(),
         ChildOut::Inherit => Stdio::inherit(),
         ChildOut::ParentStdout => Stdio::from(std::io::stdout()),
         ChildOut::ParentStderr => Stdio::from(std::io::stderr()),
+        ChildOut::Null => Stdio::null(),
     });
     cmd.stderr(match &stderr {
         ChildOut::DirectFile(file) => Stdio::from(file.try_clone()?),
@@ -203,6 +206,7 @@ pub fn spawn(
         ChildOut::Inherit => Stdio::inherit(),
         ChildOut::ParentStdout => Stdio::from(std::io::stdout()),
         ChildOut::ParentStderr => Stdio::from(std::io::stderr()),
+        ChildOut::Null => Stdio::null(),
     });
 
     let mut child = cmd.spawn()?;
@@ -289,19 +293,6 @@ impl PumpedChild {
         }
     }
 
-    /// Terminate the child through its handle.
-    ///
-    /// Motor OS only: it has no pid to aim a kill at, so this is the sole way to
-    /// stop a job there. The Unix host signals by pid instead, so that
-    /// `kill -USR1 %1` can mean what it says (see [`Jobs::signal`]).
-    #[cfg(not(unix))]
-    pub fn kill(&mut self) -> std::io::Result<()> {
-        match self.child.as_mut() {
-            Some(child) => child.kill(),
-            None => Ok(()),
-        }
-    }
-
     /// Join the pump threads and flush any captured output to its file.
     ///
     /// Must be called on the main thread, and only once the child has exited:
@@ -318,15 +309,6 @@ impl PumpedChild {
         }
         self.child = None;
     }
-}
-
-/// Read an entire file into memory (single-threaded FS access).
-fn read_all(f: &Arc<File>) -> Vec<u8> {
-    let mut buf = Vec::new();
-    if let Ok(mut c) = f.try_clone() {
-        let _ = c.read_to_end(&mut buf);
-    }
-    buf
 }
 
 /// Read a pipe to end (no FS).
@@ -534,36 +516,14 @@ impl Jobs {
 
     /// Send a signal to a job's process. `None` if the job has no process (see
     /// [`Job::child`]) or has already finished.
+    #[cfg(unix)]
     pub fn signal(&mut self, idx: usize, signo: i32) -> Option<Result<(), sys::KillError>> {
         let job = self.jobs.get_mut(idx)?;
         if job.done().is_some() {
             return Some(Err(sys::KillError::NoSuchProcess));
         }
-        let pid = job.pid;
-        let child = job.child.as_mut()?;
-        Some(Self::signal_child(child, pid, signo))
-    }
-
-    /// Deliver a signal to one running child.
-    ///
-    /// Split per platform because the two have nothing in common: the Unix host
-    /// signals by pid, so `kill -USR1 %1` means what it says, while Motor OS
-    /// has exactly one thing it can do to a child — so a KILL/TERM goes through
-    /// the handle rush already owns (no pid to race with reuse) and anything
-    /// else is refused rather than quietly turned into a kill.
-    #[cfg(unix)]
-    fn signal_child(_child: &mut PumpedChild, pid: u64, signo: i32) -> Result<(), sys::KillError> {
-        sys::kill(pid, signo)
-    }
-
-    #[cfg(not(unix))]
-    fn signal_child(child: &mut PumpedChild, _pid: u64, signo: i32) -> Result<(), sys::KillError> {
-        const SIGKILL: i32 = 9;
-        const SIGTERM: i32 = 15;
-        if signo != SIGKILL && signo != SIGTERM {
-            return Err(sys::KillError::Unsupported);
-        }
-        child.kill().map_err(|_| sys::KillError::NoSuchProcess)
+        job.child.as_ref()?;
+        Some(sys::kill(job.pid, signo))
     }
 
     /// Forget finished jobs. POSIX has the shell report and then discard a
