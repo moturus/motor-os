@@ -93,7 +93,7 @@ filter_vm_console() {
 }
 
 boot_test_image() {
-  local name="$1" command children
+  local name="$1" command pid_file
   shift
   [ -z "$VMM_PID" ] || cross_fail 'a VM is already running'
   CONSOLE_LOG="$RUN_DIR/$name.console.log"
@@ -104,19 +104,19 @@ boot_test_image() {
   mkfifo "$RUN_DIR/$name.stdin"
   exec {VM_SERIAL_FD}<> "$RUN_DIR/$name.stdin"
   if [ "$VMM" = chv ]; then
+    # A rejected guest can exit between host polls. Have the PTY child record
+    # its PID before exec so the caller can still check its console and status.
+    pid_file="$MOTO_CHV_RUNTIME_DIR.pid"
     printf -v command '%q ' "$VM_DIR/run-$VMM.sh" "$@"
-    script -qef -E never -c "exec $command" /dev/null <&"$VM_SERIAL_FD" > "$CONSOLE_LOG" 2>&1 &
+    printf -v command 'echo $$ > %q && exec %s' "$pid_file" "$command"
+    script -qef -E never -c "$command" /dev/null <&"$VM_SERIAL_FD" > "$CONSOLE_LOG" 2>&1 &
     VMM_PID=$!
     for _ in $(seq 1 100); do
-      children="$(pgrep -P "$VMM_PID" || true)"
-      if [ "$(printf '%s\n' "$children" | sed '/^$/d' | wc -l)" = 1 ]; then
-        VM_CHILD_PID="$children"
-        break
-      fi
-      kill -0 "$VMM_PID" 2>/dev/null || cross_fail "CHV wrapper exited; see $CONSOLE_LOG"
+      [ ! -s "$pid_file" ] && kill -0 "$VMM_PID" 2>/dev/null || break
       sleep 0.1
     done
-    [ -n "$VM_CHILD_PID" ] || cross_fail 'CHV wrapper did not acquire a child'
+    [ -s "$pid_file" ] && read -r VM_CHILD_PID < "$pid_file" ||
+      cross_fail "CHV wrapper did not report its child; see $CONSOLE_LOG"
   else
     "$VM_DIR/run-$VMM.sh" "$@" <&"$VM_SERIAL_FD" > "$CONSOLE_LOG" 2>&1 &
     VMM_PID=$!
