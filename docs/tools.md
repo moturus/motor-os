@@ -102,6 +102,19 @@ The shell is somewhat barebones now (contributions are welcome!).
 - `ls /user/bin` shows the standard commands; installing the toolchain archive
   adds development tools in `/user/bin/dev` and extends `PATH`;
 - `free`, `kill`, `ping`, `printenv`, `ps`, `ss`, and `top` are worth mentioning;
+- `chmod [-r] MODE PATH...` sets [filesystem permissions](fs-permissions.md).
+  MODE is nine characters in System/Interactive/None order, such as
+  `rwxr-xr--`, or a change such as `n+w`: one or more of the roles `s`, `i`
+  and `n`, then `+`, `-` or `=`, then zero or more of `r`, `w` and `x`.
+  Removing `r` also removes `w` and `x`, and a permission removed from a role
+  is also removed from the roles below it. A change that would leave `w` or
+  `x` without `r`, or give a role more than the role above it, fails instead
+  of granting anything else. `-r` also changes everything inside each
+  directory, including mounted filesystems. A directory change that removes
+  permissions is made after the directory's contents, any other one before
+  them, so a caller can narrow or restore its own `w` on a whole tree. An
+  entry that cannot be changed is reported, the others are still changed,
+  and the exit status is 1;
 - `mkdir [-p | --parents] [--] DIRECTORY...` creates directories. With `-p`,
   it creates missing parents and accepts directories that already exist;
   files blocking a directory are errors. Other creation flags are refused;

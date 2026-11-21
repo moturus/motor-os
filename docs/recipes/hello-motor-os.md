@@ -244,8 +244,8 @@ ssh -p 2222 -o IdentitiesOnly=yes -i "$SSH_KEY" \
   motor@192.168.4.2 /user/bin/chmod rwxr-xr-x /user/tmp/hello/hello
 ```
 
-Motor OS `chmod` takes a nine-character mode such as `rwxr-xr-x`, not an
-octal number.
+Motor OS `chmod` takes a nine-character mode such as `rwxr-xr-x`, or a
+change such as `n+w`, not an octal number.
 
 Start the server through SSH or from a Motor OS shell:
 

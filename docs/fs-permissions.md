@@ -404,7 +404,9 @@ under `/user/dev/lorry`. Published images contain neither tests nor `/devtools`.
   `sys-net.toml`, remains readable by None. Narrowing those reads requires an
   audit of None-role services.
 - The model has no users, ownership, groups, ACLs, sticky directories,
-  symlinks, numeric Unix modes, or recursive chmod.
+  symlinks, or numeric Unix modes. Recursive and symbolic changes, such as
+  `chmod -r n+w DIR`, are made by the `chmod` command one entry at a time
+  (see [tools.md](tools.md)), not atomically.
 - Non-writable files can be replaced where their parent directory is
   writable, unless an executable lock applies. A permanent System seal
   requires `r--` or `---`, which also removes execute or directory traversal

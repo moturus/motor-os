@@ -96,6 +96,9 @@ Notes:
     capabilities are expected to happen in the near future, stop and ask, don't assume a feature
     is not available.
 
+(6) Markdown documentation resides in docs/; html documentation resides in
+    img_files/motor-toolchain/user/lib/www/. Keep them in sync unless instructed otherwise.
+
 General commands:
 
 * build (debug): `make -j$(nproc)`

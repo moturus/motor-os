@@ -422,7 +422,7 @@ and no notion of users, links, or numeric Unix modes.</p>
   <li><strong>Limits.</strong> File names up to 255 bytes; paths up to 1,024 bytes. File
   sizes are 64-bit.</li>
   <li><strong>Not there.</strong> Symbolic links, hard links, users, groups, ownership,
-  ACLs, sticky directories, numeric modes, and recursive chmod.</li>
+  ACLs, sticky directories, and numeric modes.</li>
 </ul>
 <p>The implementation is <code>src/sys/lib/motor-fs</code> (about 10,000 lines) on top
 of moto-sdk's <code>async_fs</code>, an abstraction that also runs on a Linux host so that images
@@ -602,9 +602,12 @@ not parse.</p>
   that mode. Where the parent denies it, or the mode would exceed a higher role's
   byte, the copy is refused before truncation; replacing such a file's contents in
   place takes an ordinary write.</li>
-  <li><code>chmod MODE PATH...</code> takes the nine-character mode in System,
-  Interactive, None order; <code>cp</code> preserves file permissions the same
-  way.</li>
+  <li><code>chmod [-r] MODE PATH...</code> takes the nine-character mode in System,
+  Interactive, None order, or a change such as <code>n+w</code>; <code>cp</code>
+  preserves file permissions the same way.</li>
+  <li>Recursive and symbolic changes, such as <code>chmod -r n+w DIR</code>, are made
+  by the <code>chmod</code> command one entry at a time (see
+  <a href="commands.html">Commands</a>), not atomically.</li>
 </ul>
 
 <p>For offline changes, see <a href="imager.html#change-guest-permissions">imager chmod</a>

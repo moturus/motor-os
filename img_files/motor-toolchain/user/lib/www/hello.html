@@ -616,7 +616,8 @@ ssh -p 2222 -o IdentitiesOnly=yes -i "$KEY" motor@192.168.4.2 /user/bin/chmod rw
 <p><code>test.key</code> is in the image directory next to <code>run-qemu.sh</code>
 (<code>src/vm_scripts/test.key</code> is the same key). <code>scp</code> carries the executable
 bit over; the <code>chmod</code> makes sure of it. Motor OS <code>chmod</code> takes a
-nine-character mode such as <code>rwxr-xr-x</code>, not an octal number.</p>
+nine-character mode such as <code>rwxr-xr-x</code>, or a change such as
+<code>n+w</code>, not an octal number.</p>
 
 <h2>Run it</h2>
 <p>On the VM's console, or over <code>ssh-into-motor-os-vm.sh</code>:</p>
