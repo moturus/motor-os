@@ -203,8 +203,9 @@ make clean
 src/build-motor-os.sh
 ```
 
-`make clean` removes all of `build/`, the assembly included, and the other
-build artifacts in the tree, but not `external-sources/`.
+`make clean` removes `build/`, VM images, Cargo and Lorry outputs, and the
+downloaded Lua and WASI SDK releases. It preserves external Git checkouts,
+local edits to tracked files, and files outside the build output paths.
 
 ## Building and testing the repository
 

@@ -39,13 +39,14 @@ DO_BUILD = cargo build --target x86_64-unknown-motor $(CARGO_RELEASE)
 
 DO_CLIPPY = cargo clippy --target x86_64-unknown-motor $(CARGO_RELEASE)
 
-# A top-level invocation runs its goals in one logged sub-make through the
-# driver, which ends a failed build with a summary of exactly what failed.
+# Top-level build goals run in one logged sub-make with failure diagnostics.
+# A standalone clean skips the driver so it can remove the whole log directory.
 ifeq ($(MAKELEVEL),0)
 MAKE_GOALS := $(or $(MAKECMDGOALS),all)
+MAKE_DRIVER := $(if $(filter-out clean,$(MAKE_GOALS)),$(ROOT_DIR)/src/build-scripts/make-driver.sh)
 .PHONY: $(MAKE_GOALS)
 $(firstword $(MAKE_GOALS)):
-	@$(ROOT_DIR)/src/build-scripts/make-driver.sh $(MAKE) --no-print-directory BUILD=$(BUILD) $(MAKE_GOALS)
+	@$(MAKE_DRIVER) $(MAKE) --no-print-directory BUILD=$(BUILD) $(MAKE_GOALS)
 ifneq ($(words $(MAKE_GOALS)),1)
 $(filter-out $(firstword $(MAKE_GOALS)),$(MAKE_GOALS)): $(firstword $(MAKE_GOALS))
 	@:
@@ -342,16 +343,6 @@ clippy: vdso
 	cd src/imager && CARGO_TARGET_DIR="$(IMAGER_TARGET_DIR)" cargo clippy $(CARGO_RELEASE)
 
 clean:
-	rm -rf build/*
-	rm -rf vm_images
-	rm -rf src/sys/target
-	rm -rf src/sys/tests/*/target
-	rm -rf src/boot/*/target
-	rm -rf src/third_party/*/target
-	rm -rf src/third_party/*/Cargo.lock
-	rm -rf src/imager/target
-	cd src/bin && rm -rf */target
-	cd src/sys && rm -rf */target
-	rm -f src/sys/lib/rt.vdso/rt.vdso
+	@bash src/build-scripts/clean.sh
 
 endif

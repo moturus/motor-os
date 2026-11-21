@@ -126,9 +126,9 @@ its owning repository; the build does not repair it. See the
 
 Every run of `src/build-motor-os.sh` builds all external sources again, which
 Cargo keeps incremental. After installing a different or rebuilt toolchain,
-run `make clean` first: it removes all build artifacts, including the assembly
-and images, while keeping `external-sources/`. There are no toolchain or
-assembly content keys to isolate old objects. Follow the
+run `make clean` first. It removes build artifacts, including the assembly,
+images, and downloaded releases, while keeping external Git checkouts. There
+are no toolchain or assembly content keys to isolate old objects. Follow the
 [toolchain update procedure](toolchain.md#7-changing-the-toolchain), including
 its validation gates, for either a new version or a replacement `-dev` build.
 
