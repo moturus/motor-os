@@ -782,8 +782,10 @@ tui_rmux_once() { # tmpdir
   exec {in_fd}>"$fifo"
 
   # A subshell per write: if ssh is gone, SIGPIPE ends it, not this workload.
-  ( printf '/devtools/tests/crossterm-smoke keys\n' >&"$in_fd" ) 2>/dev/null
-  wait_file_for "$cur" 'crossterm-smoke\*' 240 && ( printf 'q' >&"$in_fd" ) 2>/dev/null
+  # Split the name in the command echo. Only the foreground window title
+  # contains the whole name, so seeing it means Rush has handed off input.
+  ( printf '/devtools/tests/crossterm-""smoke keys\n' >&"$in_fd" ) 2>/dev/null
+  wait_file_for "$cur" 'crossterm-smoke' 240 && ( printf 'q' >&"$in_fd" ) 2>/dev/null
   wait_file_for "$cur" 'end=(quit|timeout|[A-Z])' 40
   ( printf 'exit\n' >&"$in_fd" ) 2>/dev/null
   exec {in_fd}>&-
