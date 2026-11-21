@@ -102,6 +102,8 @@ The shell is somewhat barebones now (contributions are welcome!).
 - `ls /user/bin` shows the standard commands; installing the toolchain archive
   adds development tools in `/user/bin/dev` and extends `PATH`;
 - `free`, `kill`, `ping`, `printenv`, `ps`, `ss`, and `top` are worth mentioning;
+- `caps [PID]` prints a process's [capability mask](caps.md) in hex and by
+  name; without a PID it prints the shell's own mask;
 - `chmod [-r] MODE PATH...` sets [filesystem permissions](fs-permissions.md).
   MODE is nine characters in System/Interactive/None order, such as
   `rwxr-xr--`, or a change such as `n+w`: one or more of the roles `s`, `i`

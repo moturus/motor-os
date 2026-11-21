@@ -303,9 +303,22 @@ this kernel-supplied value, as sys-io and strobe do.
 
 Process statistics expose the derived role as `process_role`, and
 `ProcessInfoV2` (version 2 of the process list query) also carries the full
-capability mask; `sysbox caps [PID]` prints it. Statistics are for
-observation: a PID can be reused between a listing and its use, so use the
-connection-bound capability query for peer authorization.
+capability mask. From the shell, `caps PID` prints a process's mask in hex
+and by name, and `caps` alone prints the shell's own:
+
+```
+$ caps
+PID 10: capabilities: 0x3ec = CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED | CAP_INTERACTIVE | CAP_VSOCK | CAP_NET | CAP_FS_WRITE
+$ MOTOR_OS_CAPS=0x204 caps
+PID 13: capabilities: 0x204 = CAP_SPAWN | CAP_FS_WRITE
+```
+
+Without a PID, `caps` (`sysbox caps`) reports its parent process. Rush runs
+the `/user/bin/caps` wrapper script in its own process, so the parent is the
+shell; with a mask, it is the restricted rush started for the script.
+Statistics are for observation: a PID can be reused between a listing and
+its use, so use the connection-bound capability query for peer
+authorization.
 
 ## Named IPC services
 

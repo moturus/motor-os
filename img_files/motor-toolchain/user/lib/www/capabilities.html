@@ -566,8 +566,19 @@ let can_spawn = caps &amp; moto_sys::caps::CAP_SPAWN != 0;</code></pre>
 <code>SysObj::get_capabilities(handle)</code> returns that process's mask, and
 <code>SysObj::get_pid(handle)</code> its PID. Both answers come from the kernel, so they
 cannot be forged; servers should authorize with them, as sys-io, strobe, and the DNS
-resolver do. Process statistics (<code>ps</code>, <code>top</code>) show only the derived
-role, not the mask, and are for observation, not authorization.</p>
+resolver do.</p>
+<p>From the shell, <code>caps PID</code> prints a process's mask in hex and by name, and
+<code>caps</code> alone prints the shell's own:</p>
+<pre><code>$ caps
+PID 10: capabilities: 0x3ec = CAP_SPAWN | CAP_LOG | CAP_SPAWN_DETACHED | CAP_INTERACTIVE | CAP_VSOCK | CAP_NET | CAP_FS_WRITE
+$ MOTOR_OS_CAPS=0x204 caps
+PID 13: capabilities: 0x204 = CAP_SPAWN | CAP_FS_WRITE</code></pre>
+<p>Without a PID, <code>caps</code> reports its parent process. Rush runs the
+<code>/user/bin/caps</code> wrapper script in its own process, so the parent is the shell;
+with a mask, it is the restricted rush started for the script. <code>ps</code> and
+<code>top</code> show only the derived role. Process statistics, including
+<code>caps</code>, are for observation, not authorization: a PID can be reused between a
+listing and its use.</p>
 
 <h2 id="named-ipc-services">Named IPC services</h2>
 <p>A server registers a service name by creating a listener for it, usually through
