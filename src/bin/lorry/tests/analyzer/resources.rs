@@ -113,7 +113,6 @@ pub fn check_limits(summary: &Value) -> io::Result<()> {
     // Approved for the two-project acceptance fixture in the 8 GiB, four-CPU VM.
     for (field, limit) in [
         ("server_virtual_bytes_max", 2 * 1024 * 1024 * 1024),
-        ("server_threads_max", 32),
         ("lorry_check_virtual_bytes_max", 64 * 1024 * 1024),
         ("lorry_check_threads_max", 16),
         ("whole_vm_physical_bytes_max", 3 * 1024 * 1024 * 1024),

@@ -1,7 +1,5 @@
 # Future work -- recorded, deliberately not scheduled
 
-## lorry builds on 12 vCPUs run slower than on 4 vCPUs
-
 ## A failed output relay loses the output without an error (2026-11-17)
 
 A process whose standard output or error is a file relays the output of a
