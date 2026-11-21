@@ -410,9 +410,10 @@ and no notion of users, links, or numeric Unix modes.</p>
   <li><strong>On-disk structures.</strong> 4 KiB blocks, B+ trees for directories and
   file data, and inline data for small files (up to 3,640 bytes live in the entry
   itself). The partition type is <code>0x2e</code>.</li>
-  <li><strong>Block cache</strong> of 4,096 blocks (16 MiB) for root, less on guests below
-  256 MiB, with readahead and a
-  hit/miss/dedup-wait counter set exposed as metrics.</li>
+  <li><strong>Block cache.</strong> Root gets 1 MiB per 32 MiB of RAM on guests below
+  256 MiB, with a 1 MiB minimum. Larger guests get 16 MiB until sys-io’s RAM estimate
+  reaches 1.6 GiB, then 32 MiB, plus another 16 MiB at each whole GiB starting at 2 GiB.
+  The filesystem supports readahead and reports cache hits, misses and deduplication waits.</li>
   <li><strong>Operations.</strong> stat, create (optionally with an explicit permission
   set), delete, read, write, resize and truncate, rename with and without replacing the
   target, directory iteration, parent lookup, permission changes, copy-file-range,

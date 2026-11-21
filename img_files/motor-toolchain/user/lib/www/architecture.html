@@ -505,7 +505,7 @@ its hot paths. Two small helper threads answer synchronous statistics queries.</
   devices are opened only when a configured mount uses them. Any number of network devices
   are supported.</li>
   <li><strong>Filesystems</strong>: the journaling Motor OS filesystem for root and any
-  configured disk mounts, each with its own block cache (16 MiB for root on guests with 256 MiB or more),
+  configured disk mounts, each with its own block cache,
   and memfs for the volatile <code>tmp</code> directories; readahead and a lock manager
   for advisory locks (see
   <a href="filesystem.html">Filesystem</a>).</li>

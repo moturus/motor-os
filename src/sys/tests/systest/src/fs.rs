@@ -915,19 +915,18 @@ pub fn smoke_test() {
     println!("    ---- FS: smoke_test PASS");
 }
 
-/// sys-io sizes its block cache from the guest's memory: 1 MiB per 32 MiB of
-/// RAM, at least 1 MiB, and 16 MiB from 256 MiB up.
+/// Check the capacity reported by the mounted root filesystem.
 fn block_cache_capacity_test() {
     let ram_mib = crate::guest_ram_mib();
-    let expected_mib = if ram_mib >= 256 {
-        16
-    } else {
-        (ram_mib / 32).max(1)
+    let expected_mib = match ram_mib {
+        0..256 => (ram_mib / 32).max(1),
+        256..1639 => 16,
+        _ => (ram_mib / 1024 + 1) * 16,
     };
     assert_eq!(
         crate::tcp::read_sys_io_metric("fs.cache.capacity_bytes"),
         expected_mib << 20,
-        "block cache capacity for {ram_mib} MiB of RAM"
+        "block cache capacity for {ram_mib} MiB of estimated RAM"
     );
     println!("    ---- FS: block_cache_capacity_test PASS ({expected_mib} MiB)");
 }
