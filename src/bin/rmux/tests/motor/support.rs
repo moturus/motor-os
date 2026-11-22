@@ -4,7 +4,11 @@ use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-pub const RMUX: &str = env!("CARGO_BIN_EXE_rmux");
+// A harness cross-built for the soak runs the standard image's installed rmux.
+pub const RMUX: &str = match option_env!("RMUX_TEST_BINARY") {
+    Some(path) => path,
+    None => env!("CARGO_BIN_EXE_rmux"),
+};
 pub const PROBE: &str = env!("CARGO_BIN_EXE_rmux-probe");
 
 pub fn caps() -> u64 {

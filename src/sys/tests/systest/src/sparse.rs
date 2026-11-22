@@ -278,16 +278,19 @@ fn shared_alloc_rollback_race(check_recovery: bool) {
     let source = SysMem::alloc(PAGE_SIZE_SMALL, PAGES).unwrap();
     let done = Arc::new(AtomicBool::new(false));
     let ready = Arc::new(Barrier::new(3));
-    let go = Arc::new(Barrier::new(3));
+    let go = Arc::new(Barrier::new(2));
+    let first_map = Arc::new(Barrier::new(2));
 
     // Both threads are up before the normal region is filled: their stacks
     // need address space, and nothing they do below allocates any.
     let sharer = {
         let (done, ready, go) = (done.clone(), ready.clone(), go.clone());
+        let first_map = first_map.clone();
         std::thread::spawn(move || {
             ready.wait();
             go.wait();
             let (mut strays, mut stray_count) = ([0_u64; MAX_STRAYS], 0_usize);
+            let mut raced_strays = 0_u64;
             let (mut undone, mut occupied) = (0_u32, 0_u32);
             for _ in 0..ROUNDS {
                 // The target side takes the hole, the caller's side finds
@@ -302,34 +305,49 @@ fn shared_alloc_rollback_race(check_recovery: bool) {
                     PAGE_SIZE_SMALL,
                     PAGES,
                 ) {
-                    Err(moto_rt::E_OUT_OF_MEMORY) => undone += 1,
-                    Err(moto_rt::E_INVALID_ARGUMENT) => occupied += 1,
-                    // The caller's side found a gap the runtime freed: keep
-                    // it, so the next call fails again. The mapper takes
-                    // the hole back, as it does with anything there.
+                    Err(moto_rt::E_OUT_OF_MEMORY) => {
+                        undone += 1;
+                        if undone == 1 {
+                            // Let the mapper take the rolled-back address before racing it.
+                            first_map.wait();
+                            first_map.wait();
+                        }
+                    }
+                    Err(moto_rt::E_INVALID_ARGUMENT) => {
+                        assert!(undone > 0, "the target was occupied before the mapper ran");
+                        occupied += 1;
+                    }
+                    // Keep a gap the runtime freed on the caller's side.
                     Ok((here, there)) => {
                         assert_eq!(here, HOLE);
                         assert!(stray_count < MAX_STRAYS, "too many stray gaps");
                         strays[stray_count] = there;
                         stray_count += 1;
+                        if undone == 0 {
+                            // The mapper is still parked, so the sharer must free the target.
+                            SysMem::unmap(target, 0, u64::MAX, HOLE).unwrap();
+                        } else {
+                            raced_strays += 1;
+                        }
                     }
                     Err(err) => panic!("shared map failed with {err:?}"),
                 }
             }
             done.store(true, Ordering::Release);
-            (undone, occupied, strays, stray_count)
+            (undone, occupied, strays, stray_count, raced_strays)
         })
     };
     let mapper = {
-        let (done, ready, go) = (done.clone(), ready.clone(), go.clone());
+        let (done, ready) = (done.clone(), ready.clone());
         std::thread::spawn(move || {
             ready.wait();
-            go.wait();
+            first_map.wait();
             let (mut rounds, mut misses) = (0_u64, 0_u64);
             while !done.load(Ordering::Acquire) {
-                // Whatever is at the hole goes, as the scenario demands:
-                // nothing, or what the sharer left there.
-                let _ = SysMem::unmap(target, 0, u64::MAX, HOLE);
+                // The first rollback must leave the hole free. Later a stray may own it.
+                if rounds > 0 {
+                    let _ = SysMem::unmap(target, 0, u64::MAX, HOLE);
+                }
                 let mapped = SysMem::map(
                     target,
                     SysMem::F_SHARE_SELF | SysMem::F_READABLE,
@@ -338,7 +356,10 @@ fn shared_alloc_rollback_race(check_recovery: bool) {
                     PAGE_SIZE_SMALL,
                     PAGES,
                 );
-                if mapped.is_err() {
+                if rounds == 0 {
+                    assert_eq!(mapped, Ok(HOLE), "the rolled-back address was unavailable");
+                    first_map.wait();
+                } else if mapped.is_err() {
                     misses += 1;
                     continue;
                 }
@@ -363,7 +384,7 @@ fn shared_alloc_rollback_race(check_recovery: bool) {
     }
 
     go.wait();
-    let (undone, occupied, strays, stray_count) = sharer.join().unwrap();
+    let (undone, occupied, strays, stray_count, raced_strays) = sharer.join().unwrap();
     let (rounds, misses) = mapper.join().unwrap();
     let _ = SysMem::unmap(target, 0, u64::MAX, HOLE);
     for addr in strays.iter().take(stray_count).chain(fillers.iter()) {
@@ -378,8 +399,8 @@ fn shared_alloc_rollback_race(check_recovery: bool) {
     // half-built mapping, as it could when the locks were released in
     // between, fails that map too, and shows as misses beyond that.
     assert!(
-        misses <= stray_count as u64,
-        "{misses} misses against {stray_count} stray gaps: a rollback took the mapper's mapping"
+        misses <= raced_strays,
+        "{misses} misses against {raced_strays} concurrent stray gaps: a rollback took the mapper's mapping"
     );
     if check_recovery {
         assert_recovered(used_before, DRIFT_TOLERANCE_PAGES, "the rollback race");
