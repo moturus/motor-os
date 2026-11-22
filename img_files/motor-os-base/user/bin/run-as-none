@@ -1,0 +1,4 @@
+#!/user/bin/rush
+
+# CAP_FS_WRITE | CAP_NET | CAP_SPAWN_DETACHED | CAP_SPAWN
+MOTOR_OS_CAPS=0x324 "$@"
