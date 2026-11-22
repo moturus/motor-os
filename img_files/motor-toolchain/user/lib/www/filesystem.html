@@ -450,8 +450,10 @@ mount time. On the host, <code>imager mkfs</code> creates a bare filesystem imag
 <code>imager mkdir</code> and <code>put</code> add a mount target and configuration to an image
 (see <a href="imager.html#create-a-data-filesystem">Imager</a>). A later mount may sit inside an earlier one, and mounted filesystems keep
 their stored permissions. Additional mounts share a cache budget equal to root's unless
-<code>cache_mb</code> sets one. Any invalid entry or missing source stops boot before the
-filesystem service starts. GPT, hotplug, and mounting or unmounting at run time are not
+<code>cache_mb</code> sets one. sys-io reports a failed mount entry on the serial console
+and continues with the next entry. Any other error in the file, including TOML that does not
+parse, stops the boot, and so does a read-only root left without its writable
+<code>/system/logs</code> mount. GPT, hotplug, and mounting or unmounting at run time are not
 supported.</p>
 <p>With <code>read_only = true</code>, every modifying request on that mount fails with
 <code>PermissionDenied</code> for every role, System included; reads, execution, locks,

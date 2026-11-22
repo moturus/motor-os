@@ -56,10 +56,11 @@ mount. Motor FS preserves the mounted filesystem's stored permissions.
 Root keeps its usual cache budget; additional Motor FS mounts share another
 budget of the same size equally, in whole 4 KiB blocks. A positive integer
 `cache_mb` overrides only that mount's share and may exceed this default budget.
-Every cache must be at least 1 MiB. Invalid configuration or a missing,
-malformed or repeated source aborts startup before filesystem services become
-available. `findmnt` shows `virtio1p2` for a partition or `virtio1` for a
-whole device.
+Every cache must be at least 1 MiB. sys-io reports a failed mount entry on the
+serial console and continues with the next entry. Any other error in the file,
+including TOML that does not parse, stops the boot, and so does a read-only
+root left without its writable `/system/logs` mount. `findmnt` shows
+`virtio1p2` for a partition or `virtio1` for a whole device.
 
 ## Permission model
 

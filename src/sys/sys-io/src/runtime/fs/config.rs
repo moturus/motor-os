@@ -1,4 +1,4 @@
-//! Bounded boot configuration, fully validated before applying any mount.
+//! Bounded boot configuration; a mount entry that fails is reported and skipped.
 use super::{FS, devices::Devices, memory, mounts};
 use moto_sdk::async_fs::{
     AccessPermissions, EntryKind, FileSystem, ROOT_ID, Role, RolePermissions,
@@ -73,7 +73,7 @@ enum Backend {
 
 struct ValidatedConfig {
     root_read_only: bool,
-    mounts: Vec<ValidatedMount>,
+    mounts: Vec<Result<ValidatedMount>>,
 }
 
 fn invalid(message: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> std::io::Error {
@@ -150,7 +150,7 @@ fn parse(
     if config.mount.len() > 255 {
         return Err(invalid("more than 255 mounts"));
     }
-    let mut mounts: Vec<ValidatedMount> = Vec::with_capacity(config.mount.len());
+    let mut mounts: Vec<Result<ValidatedMount>> = Vec::with_capacity(config.mount.len());
     let disk_count = config
         .mount
         .iter()
@@ -158,7 +158,8 @@ fn parse(
         .count();
     let default_cache = budget.checked_div(disk_count).unwrap_or(0);
     let mut sources: Vec<_> = root_source.into_iter().collect();
-    for (index, table) in config.mount.into_iter().enumerate() {
+    // An error fails its own entry only. `mounts` holds the entries before it.
+    let mut validate = |index: usize, table: toml::Table, mounts: &[Result<ValidatedMount>]| {
         let name = match table.get("path") {
             Some(toml::Value::String(path)) => path.clone(),
             _ => format!("#{}", index + 1),
@@ -255,7 +256,6 @@ fn parse(
             if let Some(error) = error {
                 return Err(named(&error));
             }
-            sources.push(*source);
         }
         if !path.starts_with('/')
             || path.len() > moto_rt::fs::MAX_PATH_LEN
@@ -271,14 +271,22 @@ fn parse(
         }
         if mounts
             .iter()
+            .flatten()
             .any(|earlier| earlier.path == path || ancestor(&path, &earlier.path))
         {
             return Err(named(&"mount hides an earlier mount"));
         }
-        mounts.push(ValidatedMount { path, backend });
+        if let Backend::MotorFs { source, .. } = backend {
+            sources.push(source);
+        }
+        Ok(ValidatedMount { path, backend })
+    };
+    for (index, table) in config.mount.into_iter().enumerate() {
+        let mount = validate(index, table, &mounts);
+        mounts.push(mount);
     }
     if config.root.read_only
-        && !mounts.iter().any(|mount| {
+        && !mounts.iter().flatten().any(|mount| {
             mount.path == "/system/logs"
                 && matches!(
                     mount.backend,
@@ -397,10 +405,14 @@ async fn mount_motor(
     table: &Rc<RefCell<mounts::MountTable>>,
     devices: &mut Devices,
     path: String,
-    source: super::devices::Source,
+    source: MountBlockSource,
     cache_blocks: usize,
     read_only: bool,
 ) -> Result<()> {
+    let source = devices.resolve(source).await?;
+    if devices.read_only(source.identity)? && !read_only {
+        return Err(invalid("writable mount on read-only device"));
+    }
     let (id, kind) = mounts::stat_path(table, Role::System, &path).await?;
     if kind != EntryKind::Directory {
         return Err(ErrorKind::NotADirectory.into());
@@ -451,61 +463,45 @@ pub(super) async fn load(
             "root /, {source:?}: writable mount on read-only device"
         )));
     }
-    let mut resolved = Vec::with_capacity(config.mounts.len());
-    for (index, mount) in config.mounts.iter().enumerate() {
-        if let Backend::MotorFs {
-            source, read_only, ..
-        } = mount.backend
-        {
-            let extent = devices.resolve(source).await.map_err(|error| {
-                invalid(format!(
-                    "mount {} at {:?}, {}: {error}",
-                    index + 1,
-                    mount.path,
-                    source_name(source)
-                ))
-            })?;
-            if devices.read_only(source)? && !read_only {
-                return Err(invalid(format!(
-                    "mount {} at {:?}, {}: writable mount on read-only device",
-                    index + 1,
-                    mount.path,
-                    source_name(source)
-                )));
-            }
-            resolved.push(Some(extent));
-        } else {
-            resolved.push(None);
-        }
-    }
-    for (index, (mount, source)) in config.mounts.into_iter().zip(resolved).enumerate() {
+    for (index, mount) in config.mounts.into_iter().enumerate() {
+        let Ok(mount) = mount.inspect_err(|error| {
+            log::error!("Ignoring mount in /system/cfg/sys-fs.toml: {error}");
+        }) else {
+            continue;
+        };
         let context = format!(
             "entry {}, path {:?}, source {}",
             index + 1,
             mount.path,
-            source.map_or_else(|| "memfs".into(), |source| source_name(source.identity))
+            match mount.backend {
+                Backend::MotorFs { source, .. } => source_name(source),
+                Backend::MemFs { .. } => "memfs".into(),
+            }
         );
         let result = match mount.backend {
             Backend::MemFs { .. } => mount_one(table, caches, mount, Role::System).await,
             Backend::MotorFs {
+                source,
                 cache_blocks,
                 read_only,
-                ..
-            } => {
-                mount_motor(
-                    table,
-                    devices,
-                    mount.path,
-                    source.unwrap(),
-                    cache_blocks,
-                    read_only,
-                )
-                .await
-            }
+            } => mount_motor(table, devices, mount.path, source, cache_blocks, read_only).await,
         };
-        result.map_err(|error| invalid(format!("{context}: {error}")))?;
+        if let Err(error) = result {
+            log::error!("Ignoring mount in /system/cfg/sys-fs.toml: {context}: {error}");
+        }
     }
-    table.borrow_mut().find_mut(0).unwrap().read_only = config.root_read_only;
+    let mut table = table.borrow_mut();
+    // A skipped mount must not leave a read-only root without its log storage.
+    if config.root_read_only
+        && !table
+            .iter()
+            .any(|mount| mount.path() == "/system/logs" && !mount.read_only && !mount.corrupted)
+    {
+        return Err(invalid(
+            "read-only root requires a writable mount at exactly /system/logs",
+        ));
+    }
+    table.find_mut(0).unwrap().read_only = config.root_read_only;
     log::log!(
         if config.root_read_only {
             log::Level::Info
@@ -529,7 +525,7 @@ pub(super) mod self_test {
     ];
 
     fn parse(text: &str) -> Result<Vec<ValidatedMount>> {
-        super::parse(
+        parse_with(
             text,
             Some(MountBlockSource {
                 device: 0,
@@ -537,7 +533,16 @@ pub(super) mod self_test {
             }),
             4096,
         )
-        .map(|config| config.mounts)
+    }
+
+    /// The first invalid entry fails the configuration, to expose its error.
+    fn parse_with(
+        text: &str,
+        root_source: Option<MountBlockSource>,
+        budget: usize,
+    ) -> Result<Vec<ValidatedMount>> {
+        let config = super::parse(text, root_source, budget)?;
+        config.mounts.into_iter().collect()
     }
 
     fn disk_config() -> std::result::Result<(), String> {
@@ -590,11 +595,11 @@ pub(super) mod self_test {
             device: 0,
             partition: None,
         });
-        st_assert!(super::parse(&entry("/a", 0, "partition=1"), bare_root, 4096).is_err());
+        st_assert!(parse_with(&entry("/a", 0, "partition=1"), bare_root, 4096).is_err());
 
         let two = entry("/a", 1, "") + &entry("/b", 2, "partition=4");
         for budget in [1024, 4096] {
-            let mounts = super::parse(&two, None, budget).unwrap().mounts;
+            let mounts = parse_with(&two, None, budget).unwrap();
             for mount in mounts {
                 st_assert!(
                     matches!(mount.backend, Backend::MotorFs { cache_blocks, .. } if cache_blocks == budget / 2)
@@ -620,8 +625,8 @@ pub(super) mod self_test {
         let four: String = (1..=4)
             .map(|device| entry(&format!("/m{device}"), device, ""))
             .collect();
-        st_assert!(super::parse(&four, None, 1024).is_ok());
-        st_assert!(super::parse(&(four + &entry("/fifth", 5, "")), None, 1024).is_err());
+        st_assert!(parse_with(&four, None, 1024).is_ok());
+        st_assert!(parse_with(&(four + &entry("/fifth", 5, "")), None, 1024).is_err());
 
         let root = "[root]\nread_only=true\n";
         st_assert!(parse(root).is_err());

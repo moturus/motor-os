@@ -3213,6 +3213,14 @@ reject_guest() {
   VM_SERIAL_FD=
 }
 
+skip_mount_boot() {
+  local name="$1" diagnostic="$2"
+  shift 2
+  block_start "$name" "$@"
+  grep -F 'Ignoring mount in /system/cfg/sys-fs.toml:' "$CONSOLE_LOG" |
+    grep -F "$diagnostic" >/dev/null || cross_fail "missing mount diagnostic: $diagnostic"
+}
+
 # Both data-only MBR disks and whole-device files must obey the backing flag.
 for format in parted bare; do
   cp --sparse=always "$SCRATCH/partitions/root.img" "$VM_DIR/recovery-root.img"
@@ -3236,12 +3244,16 @@ TOML
   shutdown_test_image
   [ "$(sha256sum "$VM_DIR/recovery-data.img")" = "$data_before" ] || cross_fail 'clean read-only data changed'
   "$imager" block-mount-fixture config "$VM_DIR/$MOTO_IMAGE" "$SCRATCH/recovery-writable.toml"
-  reject_guest "$format-writable-on-ro" 'writable mount on read-only device' --extra-disk-ro recovery-data.img
+  skip_mount_boot "$format-writable-on-ro" 'writable mount on read-only device' --extra-disk-ro recovery-data.img
+  vm_ssh '[ ! -e /user/data/label ]'
+  shutdown_test_image
   [ "$(sha256sum "$VM_DIR/recovery-data.img")" = "$data_before" ] || cross_fail 'rejected writable data changed'
   "$imager" block-mount-fixture config "$VM_DIR/$MOTO_IMAGE" "$SCRATCH/recovery.toml"
   "$imager" block-mount-fixture dirty "$VM_DIR/recovery-data.img"
   dirty_before="$(sha256sum "$VM_DIR/recovery-data.img")"
-  reject_guest "$format-dirty-ro" 'Motor FS journal recovery required on read-only backing' --extra-disk-ro recovery-data.img
+  skip_mount_boot "$format-dirty-ro" 'Motor FS journal recovery required on read-only backing' --extra-disk-ro recovery-data.img
+  vm_ssh '[ ! -e /user/data/label ]'
+  shutdown_test_image
   [ "$(sha256sum "$VM_DIR/recovery-data.img")" = "$dirty_before" ] || cross_fail 'dirty read-only data changed'
   block_start "$format-recover-ro-mount" --extra-disk recovery-data.img
   vm_ssh '[ -d /user/data/recovery-probe ] && cat /user/data/label'
@@ -3292,11 +3304,37 @@ shutdown_test_image
 cp --sparse=always "$SCRATCH/partitions/root.img" "$VM_DIR/rejection-root.img"
 cp --sparse=always "$SCRATCH/partitions/bare.img" "$VM_DIR/rejection-data.img"
 export MOTO_IMAGE=rejection-root.img
+
+cat > "$SCRATCH/mixed.toml" <<'TOML'
+mount = [
+  {path = "/user/bare", type = "memfs"},
+  {path = "/user/data", type = "invalid"},
+  {path = "/user/test-tmp", type = "motor-fs", device = 9},
+  {path = "/none/cfg/ro-probe", type = "memfs"},
+  {path = "/user/data", type = "motor-fs", device = 1},
+]
+TOML
+"$imager" block-mount-fixture config "$VM_DIR/$MOTO_IMAGE" "$SCRATCH/mixed.toml"
+skip_mount_boot mixed 'entry 2' --extra-disk rejection-data.img
+grep -Fq 'entry 3, path "/user/test-tmp", source virtio9' "$CONSOLE_LOG"
+grep -Fq 'entry 4, path "/none/cfg/ro-probe", source memfs' "$CONSOLE_LOG"
+vm_ssh findmnt | awk '
+  $2 == "/user/bare" && $4 == "memfs" { memfs = 1 }
+  $2 == "/user/data" && $3 == "virtio1" && $4 == "motor-fs" { motorfs = 1 }
+  $1 ~ /^[0-9]+$/ { count++ }
+  END { exit !(memfs && motorfs && count == 3) }'
+shutdown_test_image
+
 reject_config() {
   local name="$1" diagnostic="$2"
   cat > "$SCRATCH/rejected.toml"
   "$imager" block-mount-fixture config "$VM_DIR/$MOTO_IMAGE" "$SCRATCH/rejected.toml"
-  reject_guest "$name" "$diagnostic" --extra-disk rejection-data.img
+  if [ "${3:-}" = fatal ]; then
+    reject_guest "$name" "$diagnostic" --extra-disk rejection-data.img
+  else
+    skip_mount_boot "$name" "$diagnostic" --extra-disk rejection-data.img
+    shutdown_test_image
+  fi
 }
 entry=$'[[mount]]\npath="/user/data"\ntype="motor-fs"\ndevice=1'
 while IFS='|' read -r name field diagnostic; do
@@ -3317,9 +3355,13 @@ motor-unknown|unknown=true|unknown field
 motor-ro-type|read_only=1|entry 1, device 1
 CASES
 reject_config missing-device 'missing field `device`' <<< $'[[mount]]\npath="/user/data"\ntype="motor-fs"'
-reject_config root-key 'unknown field' <<< $'[root]\ncache_mb=4'
-reject_config root-ro-type 'read_only' <<< $'[root]\nread_only="true"'
-reject_config root-needs-logs 'read-only root requires a writable mount' <<< $'[root]\nread_only=true'
+reject_config root-key 'unknown field' fatal <<< $'[root]\ncache_mb=4'
+reject_config root-ro-type 'read_only' fatal <<< $'[root]\nread_only="true"'
+reject_config root-needs-logs 'read-only root requires a writable mount' fatal <<< $'[root]\nread_only=true'
+reject_config root-logs-read-only 'read-only root requires a writable mount' fatal \
+  <<< $'[root]\nread_only=true\n[[mount]]\npath="/system/logs"\ntype="motor-fs"\ndevice=1\nread_only=true'
+reject_config root-logs-unavailable 'read-only root requires a writable mount' fatal \
+  <<< $'[root]\nread_only=true\n[[mount]]\npath="/system/logs"\ntype="motor-fs"\ndevice=9'
 for field in 'device=1' 'partition=1' 'cache_mb=1' 'read_only=false'; do
   reject_config "memfs-${field%%=*}" 'unknown field' <<< $'[[mount]]\npath="/user/data"\ntype="memfs"\n'"$field"
 done
@@ -3349,13 +3391,13 @@ reject_config whole-after-partition 'repeated source or whole-device/partition c
 reject_config missing-device-index 'virtio9' <<< "${entry/device=1/device=9}"
 reject_config missing-target 'path "/user/absent"' <<< "${entry/\/user\/data/\/user\/absent}"
 reject_config file-target 'path "/none/cfg/ro-probe"' <<< "${entry/\/user\/data/\/none\/cfg\/ro-probe}"
-reject_config bad-toml 'Cannot apply /system/cfg/sys-fs.toml' <<< '[['
+reject_config bad-toml 'Cannot apply /system/cfg/sys-fs.toml' fatal <<< '[['
 printf '%65537s' ' ' > "$SCRATCH/too-long.toml"
-reject_config too-long 'configuration must be a file of at most 64 KiB' < "$SCRATCH/too-long.toml"
+reject_config too-long 'configuration must be a file of at most 64 KiB' fatal < "$SCRATCH/too-long.toml"
 for index in $(seq 1 256); do
   printf '[[mount]]\npath="/m%s"\ntype="memfs"\n' "$index"
 done > "$SCRATCH/too-many.toml"
-reject_config too-many 'more than 255 mounts' < "$SCRATCH/too-many.toml"
+reject_config too-many 'more than 255 mounts' fatal < "$SCRATCH/too-many.toml"
 if [ "$MOTO_MEMORY_MIB" = 128 ]; then
   for index in 1 2 3 4 5; do
     printf '[[mount]]\npath="/m%s"\ntype="motor-fs"\ndevice=%s\n' "$index" "$index"
