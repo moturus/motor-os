@@ -114,16 +114,23 @@ pub fn run() {
         &["-b", "-m", "-o", "smoke.bin", "quickjs-smoke.js"],
     );
     assert!(fs::metadata(root.join("smoke.bin")).unwrap().len() > 0);
-    let repl = success(
-        &mut command(root, "/user/bin/dev/qjs"),
-        b"print(40 + 2); std.exit(0)\n",
-    );
-    assert!(
-        String::from_utf8(repl.stdout)
-            .unwrap()
-            .lines()
-            .any(|line| line == "42")
-    );
+    // The REPL ends on std.exit, and at the end of its input. The time limit
+    // turns a REPL that spins there into a failure.
+    for input in [&b"print(40 + 2); std.exit(0)\n"[..], b"print(40 + 2)\n"] {
+        let repl = success(
+            command(root, "/user/bin/timeout")
+                .env("XDG_STATE_HOME", root)
+                .args(["60", "/user/bin/dev/qjs"]),
+            input,
+        );
+        assert!(
+            String::from_utf8(repl.stdout)
+                .unwrap()
+                .lines()
+                .any(|line| line == "42"),
+            "{input:?}"
+        );
+    }
     println!("QuickJS smoke and native compilation: PASS");
 
     if std::env::var_os("MOTOR_TEST_RELEASE").is_some() {
@@ -592,6 +599,24 @@ check(file.getline() === 'Motor QuickJS');
 check(file.close() === 0);
 check(std.loadFile(path) === 'Motor QuickJS\n');
 check(os.stat(path)[1] === 0);
+const fd = os.open(path, os.O_RDONLY);
+const byte = new Uint8Array(1);
+check(os.seek(fd, 0, std.SEEK_END) > 0);
+const count = await new Promise((resolve, reject) => {
+    const timer = os.setTimeout(() => {
+        os.setReadHandler(fd, null);
+        reject(Error('read handler lost after EOF'));
+    }, 5000);
+    os.setReadHandler(fd, () => {
+        os.setReadHandler(fd, null);
+        os.clearTimeout(timer);
+        resolve(os.read(fd, byte.buffer, 0, 1));
+    });
+    check(os.read(fd, byte.buffer, 0, 1) === 0);
+    check(os.seek(fd, 0, std.SEEK_SET) === 0);
+});
+check(count === 1 && byte[0] === 'M'.charCodeAt(0));
+check(os.close(fd) === 0);
 check(os.remove(path) === 0);
 await os.sleepAsync(1);
 await new Promise(resolve => os.setTimeout(resolve, 1));

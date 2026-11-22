@@ -261,16 +261,26 @@ fetch_quickjs() {
 build_quickjs() {
 	log "building QuickJS-NG $QUICKJS_VER and staging commands in /user/bin/dev and libraries in /user/lib/quickjs"
 	fetch_quickjs
-	local source="$QUICKJS_BUILD/src" cc="$SYSROOT/bin/motor-clang" name objects=()
+	local source="$QUICKJS_BUILD/src" cc="$SYSROOT/bin/motor-clang" file name objects=()
+	local sources=(dtoa.c libregexp.c libunicode.c quickjs.c quickjs-libc.c)
+	local host_qjsc="$ASSEMBLY_BUILD_ROOT/qjsc-$QUICKJS_REV"
 	rm -rf "$QUICKJS_BUILD"
 	mkdir -p "$source"
 	git -C "$EXTERNAL_SOURCES/quickjs-$QUICKJS_VER" archive HEAD | tar -x -C "$source"
+	# Bytecode belongs to this engine revision. Build its host compiler once
+	# from the pristine copy, then use it on the patched REPL below.
+	if [ ! -x "$host_qjsc" ]; then
+		( cd "$source" && cc -D_GNU_SOURCE qjsc.c "${sources[@]}" -lm -ldl -pthread -o "$QUICKJS_BUILD/host-qjsc" )
+		mv "$QUICKJS_BUILD/host-qjsc" "$host_qjsc"
+	fi
 	# Inside the Motor OS worktree, git would resolve the patch against it and
 	# skip its paths without failing; the ceiling keeps it from finding one.
 	( cd "$source" && export GIT_CEILING_DIRECTORIES="$QUICKJS_BUILD" &&
-		git apply --check "$QUICKJS_PATCH" && git apply "$QUICKJS_PATCH" )
-	for name in dtoa libregexp libunicode quickjs quickjs-libc; do
-		"$cc" -O2 -D_GNU_SOURCE -I"$source" -c "$source/$name.c" -o "$QUICKJS_BUILD/$name.o"
+		git apply --check "$QUICKJS_PATCH" && git apply "$QUICKJS_PATCH" &&
+		"$host_qjsc" -ss -o gen/repl.c -m repl.js )
+	for file in "${sources[@]}"; do
+		name="${file%.c}"
+		"$cc" -O2 -D_GNU_SOURCE -I"$source" -c "$source/$file" -o "$QUICKJS_BUILD/$name.o"
 		objects+=("$QUICKJS_BUILD/$name.o")
 	done
 	"$LLVM_TOOLS/llvm-ar" rcs "$QUICKJS_BUILD/libqjs.a" "${objects[@]}"

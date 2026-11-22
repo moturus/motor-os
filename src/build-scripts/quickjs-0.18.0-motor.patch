@@ -16,7 +16,7 @@ index d441bba..4e8c30d 100644
  static inline int js_exepath(char *buffer, size_t *size) {
      ssize_t n;
 diff --git a/quickjs-libc.c b/quickjs-libc.c
-index 42d7f03..f3f95aa 100644
+index 42d7f03..fab8b23 100644
 --- a/quickjs-libc.c
 +++ b/quickjs-libc.c
 @@ -56,7 +56,9 @@
@@ -345,3 +345,40 @@ index 42d7f03..f3f95aa 100644
  
      ts = js_mallocz_rt(rt, sizeof(*ts));
      if (!ts) {
+diff --git a/repl.js b/repl.js
+index 6cc9f16..479fbfb 100644
+--- a/repl.js
++++ b/repl.js
+@@ -190,9 +190,19 @@ import * as bjson from "qjs:bjson";
+         handle_byte(3);
+     }
+
++    function termClose() {
++        os.signal(os.SIGINT, null);
++        os.setReadHandler(term_fd, null);
++        save_history();
++    }
++
+     function term_read_handler() {
+         var l, i;
+         l = os.read(term_fd, term_read_buf.buffer, 0, term_read_buf.length);
++        if (l === 0) {
++            termClose();
++            return;
++        }
+         for(i = 0; i < l; i++)
+             handle_byte(term_read_buf[i]);
+     }
+@@ -945,11 +955,7 @@ import * as bjson from "qjs:bjson";
+                 readline_cb(null);
+                 return;
+             case -3:
+-                /* uninstall a Ctrl-C signal handler */
+-                os.signal(os.SIGINT, null);
+-                /* uninstall the stdin read handler */
+-                os.setReadHandler(term_fd, null);
+-                save_history();
++                termClose();
+                 return;
+             }
+             last_fun = this_fun;
