@@ -7,7 +7,7 @@ use moto_sdk::async_fs::FileSystem;
 use moto_sdk::async_fs::Role;
 use moto_sdk::async_fs::RolePermissions;
 use moto_sdk::async_fs::file_block_device::AsyncFileBlockDevice;
-use rand::Rng;
+use rand::RngExt;
 use std::cell::Cell;
 use std::io::ErrorKind;
 use std::io::Result;
@@ -1949,9 +1949,8 @@ fn test_hash_debug() {
 }
 
 async fn random_file_test() -> Result<()> {
-    use rand::RngCore;
-    use rand::thread_rng;
-    let mut rng = thread_rng();
+    use rand::Rng;
+    let mut rng = rand::rng();
 
     const PARTITION_SZ: u64 = 1024 * 1024 * 8;
     const NUM_BLOCKS: u64 = PARTITION_SZ / 4096;
@@ -1985,7 +1984,7 @@ async fn random_file_test() -> Result<()> {
 
     // Fill the file up to FILE_SZ at random offsets: this tests btree insertion.
     while !blocks.is_empty() {
-        let block_idx: usize = rng.r#gen::<usize>() % blocks.len();
+        let block_idx = rng.random_range(0..blocks.len());
         let block_no = blocks.remove(block_idx);
 
         let mut block = Box::new(moto_sdk::async_fs::Block::new_zeroed());
@@ -2066,7 +2065,7 @@ async fn random_file_test() -> Result<()> {
     // Remove blocks at random offsets: this tests btree deletion.
     let mut blocks = (0..bytes.len()).collect::<Vec<_>>();
     while !blocks.is_empty() {
-        let block_idx: usize = rng.r#gen::<usize>() % blocks.len();
+        let block_idx = rng.random_range(0..blocks.len());
         let block_no = blocks.remove(block_idx);
 
         fs.test_remove_block_at_offset(file_id, (block_no * 4096) as u64)
@@ -2972,10 +2971,9 @@ async fn resize_truncate_no_alloc_test() -> Result<()> {
 
 async fn write_speed_test() -> Result<()> {
     // use futures::StreamExt;
-    use rand::RngCore;
-    use rand::thread_rng;
+    use rand::Rng;
 
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
 
     const PARTITION_SZ: u64 = 1024 * 1024 * 256;
     const NUM_BLOCKS: u64 = PARTITION_SZ / 4096;
@@ -3027,10 +3025,9 @@ async fn write_speed_test() -> Result<()> {
 }
 
 async fn native_write_speed_test() -> Result<()> {
-    use rand::RngCore;
-    use rand::thread_rng;
+    use rand::Rng;
 
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
 
     const PARTITION_SZ: u64 = 1024 * 1024 * 256;
     const NUM_BLOCKS: u64 = PARTITION_SZ / 4096;
@@ -3060,11 +3057,10 @@ async fn native_write_speed_test() -> Result<()> {
 }
 
 async fn native_write_speed_async_test() -> Result<()> {
-    use rand::RngCore;
-    use rand::thread_rng;
+    use rand::Rng;
     use tokio::io::AsyncWriteExt;
 
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
 
     const PARTITION_SZ: u64 = 1024 * 1024 * 256;
     const NUM_BLOCKS: u64 = PARTITION_SZ / 4096;

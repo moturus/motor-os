@@ -144,11 +144,7 @@ native_crates() {
   core_crate src/sys/lib/moto-sys
   core_crate src/sys/lib/moto-sdk
   core_crate src/sys/lib/moto-sdk --no-default-features
-  if [ "$OS" = linux ]; then
-    core_crate src/sys/lib/frusa
-  elif [ "$LIST" != 1 ]; then
-    echo 'SKIP Motor frusa unit tests: the test RNG does not build; see docs/plans/future-work.md'
-  fi
+  core_crate src/sys/lib/frusa
   core_crate src/sys/lib/memfs
   core_crate src/sys/tests/unwind
   test_cxx_unwind
@@ -162,7 +158,7 @@ native_crates() {
     test_crate src/bin/rush --features dev-tty --test phase8
   else
     if [ "$LIST" != 1 ]; then
-      echo 'SKIP Motor motor-fs unit tests: the test RNG does not build; see docs/plans/future-work.md'
+      echo 'SKIP Motor motor-fs unit tests: they need tokio and a file-backed device; see docs/plans/future-work.md'
     fi
     core_crate src/sys/tools/sysbox
     run_crate src/sys/tests/systest
@@ -176,11 +172,13 @@ native_crates() {
     test_crate src/sys/tests/wasmtime-smoke --test installed
   fi
   net_features=async,assembler-max-segment-count-32,fragmentation-buffer-size-65536,iface-neighbor-cache-count-64,medium-ethernet,medium-ip,proto-ipv4,proto-ipv4-fragmentation,proto-ipv6,proto-ipv6-fragmentation,reassembly-buffer-count-4,reassembly-buffer-size-65536,socket-dhcpv4,socket-icmp,socket-tcp,socket-udp
-  if [ "$OS" = linux ]; then
+  # On Motor these run in debug only: Lorry needs 3.5 minutes there to build
+  # them in release, and Linux runs them in both profiles.
+  if [ "$OS" = linux ] || [ "$BUILD" = debug ]; then
     core_crate src/sys/sys-io/netstack --no-default-features --features "$net_features"
     core_crate src/sys/sys-io/netstack --no-default-features --features "$net_features,proto-ipv6-slaac" --lib iface::
   elif [ "$LIST" != 1 ]; then
-    echo 'SKIP Motor netstack unit tests: the test RNG does not build; see docs/plans/future-work.md'
+    echo 'SKIP Motor netstack unit tests in release: they run in debug; see docs/plans/future-work.md'
   fi
 }
 

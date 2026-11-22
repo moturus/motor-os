@@ -772,8 +772,8 @@ fn reclaim_returns_empty_batches_and_keeps_used_ones() {
 
 #[test]
 fn reclaim_test() {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
+    use rand::RngExt;
+    let mut rng = rand::rng();
 
     let frusa: Frusa4K = Frusa4K::new(&BACK_END);
 
@@ -784,7 +784,7 @@ fn reclaim_test() {
 
     let mut ptrs: Vec<(*mut u8, Layout)> = Vec::with_capacity(ALLOCS);
     for _ in 0..ALLOCS {
-        let alloc_bucket: usize = 4 + (rng.r#gen::<u16>() % 8) as usize;
+        let alloc_bucket: usize = 4 + (rng.random::<u16>() % 8) as usize;
         let sz = 1 << alloc_bucket;
         let layout = Layout::from_size_align(sz, 8).unwrap();
         let ptr = unsafe { frusa.alloc(layout) };
@@ -821,9 +821,9 @@ unsafe impl Sync for FlakyBackEndAllocator {}
 unsafe impl GlobalAlloc for FlakyBackEndAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if FLAKY.load(Ordering::Relaxed) {
-            use rand::Rng;
-            let mut rng = rand::thread_rng();
-            if rng.r#gen::<u8>() < 50 {
+            use rand::RngExt;
+            let mut rng = rand::rng();
+            if rng.random::<u8>() < 50 {
                 return core::ptr::null_mut();
             }
         }
@@ -839,6 +839,10 @@ static FLAKY_BACK_END: FlakyBackEndAllocator = FlakyBackEndAllocator {};
 static FLAKY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[test]
+#[cfg_attr(
+    all(target_os = "motor", not(debug_assertions)),
+    ignore = "takes minutes on Motor in release; see docs/plans/future-work.md"
+)]
 fn stress_test() {
     FLAKY.store(false, Ordering::Relaxed);
     static STRESSED_FRUSA: Frusa4K = Frusa4K::new(&FLAKY_BACK_END);
@@ -849,11 +853,11 @@ fn stress_test() {
     const STEPS: usize = 1_000_000;
 
     let thread_fn = || {
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
+        use rand::RngExt;
+        let mut rng = rand::rng();
 
         for step in 0..STEPS {
-            let alloc_bucket: usize = 4 + (rng.r#gen::<u16>() % 20) as usize;
+            let alloc_bucket: usize = 4 + (rng.random::<u16>() % 20) as usize;
             let sz = 1 << alloc_bucket;
 
             if step == 50 {
@@ -881,13 +885,13 @@ fn stress_test() {
     }
 
     // Concurrently with threads above, do alloc + reclaim.
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
+    use rand::RngExt;
+    let mut rng = rand::rng();
     for _ in 0..100 {
         const ALLOCS: usize = STEPS / 100;
         let mut ptrs: Vec<(*mut u8, Layout)> = Vec::with_capacity(ALLOCS);
         for _ in 0..ALLOCS {
-            let alloc_bucket: usize = 4 + (rng.r#gen::<u16>() % 10) as usize;
+            let alloc_bucket: usize = 4 + (rng.random::<u16>() % 10) as usize;
             let sz = 1 << alloc_bucket;
             let layout = Layout::from_size_align(sz, 8).unwrap();
             let ptr = loop {

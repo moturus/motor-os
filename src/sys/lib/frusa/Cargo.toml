@@ -10,7 +10,7 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 
 [dev-dependencies]
-rand = "0.8"
+rand = "0.10"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [ 'cfg(test)'] }

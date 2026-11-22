@@ -124,14 +124,13 @@ type TxnBatchSender = tokio::sync::mpsc::Sender<CommitterMessage>;
 
 #[cfg(test)]
 fn maybe_inject_test_error(error_pct: u8) -> Result<()> {
-    use rand::RngCore;
-    use rand::thread_rng;
+    use rand::Rng;
 
     if error_pct == 0 {
         return Ok(());
     }
 
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
 
     let rng_val: u32 = rng.next_u32();
     if rng_val as f64 / (u32::MAX as f64) < (error_pct as f64) * 0.01 {
