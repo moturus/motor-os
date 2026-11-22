@@ -284,6 +284,14 @@ fn move_noreplace() {
 }
 
 #[test]
+fn move_replaces_same_kind_only() {
+    init_logger();
+    let rt = tokio::runtime::LocalRuntime::new().unwrap();
+
+    rt.block_on(move_replaces_same_kind_only_test()).unwrap();
+}
+
+#[test]
 fn readdir() {
     init_logger();
     let rt = tokio::runtime::LocalRuntime::new().unwrap();
@@ -858,6 +866,60 @@ async fn move_noreplace_test() -> Result<()> {
     );
 
     println!("move_noreplace_test PASS");
+    Ok(())
+}
+
+/// A rename replaces a file with a file and an empty directory with a
+/// directory, never one kind with the other.
+async fn move_replaces_same_kind_only_test() -> Result<()> {
+    const NUM_BLOCKS: u64 = 256;
+    let mut fs = create_fs("motor_fs_move_replaces_same_kind_only_test", NUM_BLOCKS).await?;
+    let root = crate::ROOT_DIR_ID;
+    let mode = RolePermissions::all(AccessPermissions::Rwx);
+    let (dir, file) = (EntryKind::Directory, EntryKind::File);
+
+    let source_file = fs
+        .create_entry(Role::System, root, file, "sf", mode)
+        .await?;
+    let source_dir = fs.create_entry(Role::System, root, dir, "sd", mode).await?;
+    let target_file = fs
+        .create_entry(Role::System, root, file, "tf", mode)
+        .await?;
+    let target_dir = fs.create_entry(Role::System, root, dir, "td", mode).await?;
+
+    let err = fs
+        .move_entry(Role::System, source_file, root, "td")
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::IsADirectory);
+    let err = fs
+        .move_entry(Role::System, source_dir, root, "tf")
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::NotADirectory);
+    for (name, id, kind) in [
+        ("sf", source_file, file),
+        ("sd", source_dir, dir),
+        ("tf", target_file, file),
+        ("td", target_dir, dir),
+    ] {
+        assert_eq!(fs.stat(Role::System, root, name).await?, Some((id, kind)));
+    }
+
+    fs.move_entry(Role::System, source_file, root, "tf").await?;
+    fs.move_entry(Role::System, source_dir, root, "td").await?;
+    assert_eq!(
+        fs.stat(Role::System, root, "tf").await?,
+        Some((source_file, file))
+    );
+    assert_eq!(
+        fs.stat(Role::System, root, "td").await?,
+        Some((source_dir, dir))
+    );
+    assert!(fs.stat(Role::System, root, "sf").await?.is_none());
+    assert!(fs.stat(Role::System, root, "sd").await?.is_none());
+
+    println!("move_replaces_same_kind_only_test PASS");
     Ok(())
 }
 

@@ -315,13 +315,27 @@ impl<'a, BD: AsyncBlockDevice + 'static> Txn<'a, BD> {
         // existence check uses the unenforced lookup: the move is already gated
         // by write on both parents, so it must not additionally require
         // traverse/`x` on the destination.
-        if let Some((target, _)) = txn.fs().lookup_child(new_parent_id, new_name).await? {
+        if let Some((target, target_kind)) = txn.fs().lookup_child(new_parent_id, new_name).await? {
             if !replace {
                 return Err(ErrorKind::AlreadyExists.into());
             }
             let target_id: EntryIdInternal = target.into();
             if target_id == entry_id {
                 return Err(ErrorKind::InvalidInput.into());
+            }
+            // A file replaces a file and a directory an empty directory, as
+            // in POSIX: neither may replace the other kind.
+            let entry_block = txn.get_block(entry_id.block_no).await?;
+            let entry_kind = dir_entry!(entry_block).kind();
+            drop(entry_block);
+            match (entry_kind, target_kind) {
+                (EntryKind::File, EntryKind::Directory) => {
+                    return Err(ErrorKind::IsADirectory.into());
+                }
+                (EntryKind::Directory, EntryKind::File) => {
+                    return Err(ErrorKind::NotADirectory.into());
+                }
+                _ => {}
             }
             log::debug!("move_entry: deleting target {target_id:?}");
             DirEntryBlock::delete_entry(&mut txn, target_id).await?;

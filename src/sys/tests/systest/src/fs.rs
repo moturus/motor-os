@@ -292,6 +292,45 @@ fn move_noreplace_test() {
     println!("    ---- FS: move_noreplace_test PASS");
 }
 
+/// A rename replaces a file with a file and an empty directory with a
+/// directory, on the RAM filesystem and on the disk. It refuses the other two
+/// combinations and leaves both entries as they were.
+fn rename_kinds_test() {
+    use std::io::ErrorKind;
+
+    for root in [
+        crate::temp_path("systest-rename-kinds"),
+        crate::disk_temp_path("systest-rename-kinds"),
+    ] {
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let (file, dir) = (root.join("file"), root.join("dir"));
+        let (target_file, target_dir) = (root.join("target-file"), root.join("target-dir"));
+        std::fs::write(&file, b"file").unwrap();
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(&target_file, b"target").unwrap();
+        std::fs::create_dir(&target_dir).unwrap();
+
+        // Motor OS has no error code of its own for "is a directory" yet.
+        let err = std::fs::rename(&file, &target_dir).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput, "{root:?}");
+        let err = std::fs::rename(&dir, &target_file).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::NotADirectory, "{root:?}");
+        assert_eq!(std::fs::read(&file).unwrap(), b"file");
+        assert!(std::fs::metadata(&dir).unwrap().is_dir());
+        assert_eq!(std::fs::read(&target_file).unwrap(), b"target");
+        assert!(std::fs::metadata(&target_dir).unwrap().is_dir());
+
+        std::fs::rename(&file, &target_file).unwrap();
+        assert_eq!(std::fs::read(&target_file).unwrap(), b"file");
+        std::fs::rename(&dir, &target_dir).unwrap();
+        assert!(!std::fs::exists(&dir).unwrap());
+        assert!(std::fs::metadata(&target_dir).unwrap().is_dir());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+    println!("    ---- FS: rename_kinds_test PASS");
+}
+
 fn competing_move_noreplace_test(root: &std::path::Path) {
     let target = root.join("published");
     let start = root.join("publish-start");
@@ -1804,6 +1843,7 @@ pub fn run_tests() {
     concurrent_large_file_read_test();
     vectored_shared_position_test();
     move_noreplace_test();
+    rename_kinds_test();
     smoke_test();
     hot_cache_read_test();
     copy_test();

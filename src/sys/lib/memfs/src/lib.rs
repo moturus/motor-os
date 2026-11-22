@@ -444,6 +444,17 @@ impl MemFs {
             if target == id {
                 return Err(ErrorKind::InvalidInput.into());
             }
+            // A file replaces a file and a directory an empty directory, as
+            // in POSIX: neither may replace the other kind.
+            match (entry.metadata.kind(), self.entries[&target].metadata.kind()) {
+                (EntryKind::File, EntryKind::Directory) => {
+                    return Err(ErrorKind::IsADirectory.into());
+                }
+                (EntryKind::Directory, EntryKind::File) => {
+                    return Err(ErrorKind::NotADirectory.into());
+                }
+                _ => {}
+            }
             self.entries[&target].removable()?;
             removed += self.entries[&target].charge();
         }

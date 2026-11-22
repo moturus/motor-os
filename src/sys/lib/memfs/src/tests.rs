@@ -100,6 +100,64 @@ fn trait_namespace_and_metadata() {
     });
 }
 
+/// A rename replaces a file with a file and an empty directory with a
+/// directory, never one kind with the other.
+#[test]
+fn move_replaces_same_kind_only() {
+    run(async {
+        let mut fs = fs(64 * 1024, 0);
+        let (dir, file) = (EntryKind::Directory, EntryKind::File);
+        let source_file = fs
+            .create_entry(SYS, ROOT_ID, file, "sf", MODE)
+            .await
+            .unwrap();
+        let source_dir = fs
+            .create_entry(SYS, ROOT_ID, dir, "sd", MODE)
+            .await
+            .unwrap();
+        let target_file = fs
+            .create_entry(SYS, ROOT_ID, file, "tf", MODE)
+            .await
+            .unwrap();
+        let target_dir = fs
+            .create_entry(SYS, ROOT_ID, dir, "td", MODE)
+            .await
+            .unwrap();
+
+        error(
+            fs.move_entry(SYS, source_file, ROOT_ID, "td").await,
+            ErrorKind::IsADirectory,
+        );
+        error(
+            fs.move_entry(SYS, source_dir, ROOT_ID, "tf").await,
+            ErrorKind::NotADirectory,
+        );
+        for (name, id, kind) in [
+            ("sf", source_file, file),
+            ("sd", source_dir, dir),
+            ("tf", target_file, file),
+            ("td", target_dir, dir),
+        ] {
+            assert_eq!(fs.stat(SYS, ROOT_ID, name).await.unwrap(), Some((id, kind)));
+        }
+
+        fs.move_entry(SYS, source_file, ROOT_ID, "tf")
+            .await
+            .unwrap();
+        fs.move_entry(SYS, source_dir, ROOT_ID, "td").await.unwrap();
+        assert_eq!(
+            fs.stat(SYS, ROOT_ID, "tf").await.unwrap(),
+            Some((source_file, file))
+        );
+        assert_eq!(
+            fs.stat(SYS, ROOT_ID, "td").await.unwrap(),
+            Some((source_dir, dir))
+        );
+        assert_eq!(fs.stat(SYS, ROOT_ID, "sf").await.unwrap(), None);
+        assert_eq!(fs.stat(SYS, ROOT_ID, "sd").await.unwrap(), None);
+    });
+}
+
 #[test]
 fn sparse_boundaries_and_zeroing() {
     run(async {
@@ -395,7 +453,7 @@ fn invalid_namespace_operations() {
         );
         error(
             fs.move_entry(SYS, file, 0, "parent").await,
-            ErrorKind::DirectoryNotEmpty,
+            ErrorKind::IsADirectory,
         );
         error(
             fs.move_noreplace(SYS, child, 0, "file").await,
@@ -447,9 +505,12 @@ fn invalid_namespace_operations() {
             fs.delete_entry(SYS, id).await.unwrap();
         }
         fs.delete_entry(SYS, child).await.unwrap();
-        // motor-fs allows replacement across kinds when the directory is empty.
-        fs.move_entry(SYS, file, 0, "parent").await.unwrap();
-        error(fs.metadata(SYS, parent).await, ErrorKind::InvalidInput);
+        // As in motor-fs, a file does not replace a directory, empty or not.
+        error(
+            fs.move_entry(SYS, file, 0, "parent").await,
+            ErrorKind::IsADirectory,
+        );
+        fs.metadata(SYS, parent).await.unwrap();
     });
 }
 
