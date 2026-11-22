@@ -4639,7 +4639,10 @@ verify_https_push() {
   cargo build --manifest-path "$APP_DIR/Cargo.toml" --locked --offline "${profile[@]}" \
     --test https-server --message-format=json > "$temporary/host-artifacts.json"
   https_server="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "https-server") | .executable' "$temporary/host-artifacts.json")"
-  cargo build --manifest-path "$APP_DIR/Cargo.toml" --locked --offline "${profile[@]}" \
+  # The Motor helper is a release build in every mode, like the image's gix.
+  # A debug build keeps zlib-rs's unused C allocator hooks, which need malloc
+  # and free, and this pure Rust link has neither.
+  cargo build --manifest-path "$APP_DIR/Cargo.toml" --locked --offline --release \
     --features native-test-support --target x86_64-unknown-motor \
     --test native-port --message-format=json > "$temporary/motor-artifacts.json"
   native_port_binary="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "native-port") | .executable' "$temporary/motor-artifacts.json")"
