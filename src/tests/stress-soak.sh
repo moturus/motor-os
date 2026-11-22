@@ -16,9 +16,12 @@
 #
 # Usage:
 #   bash src/tests/stress-soak.sh [debug|release] [duration-sec] [run-tag]
+#   Build the standard image first (make main.img BUILD=release for the default).
+#   The soak installs the pinned native toolchain into a private copy of it.
 #
 # Environment overrides:
 #   MOTOR_STRESS_OUT   base dir for run output (default /tmp/motor-stress).
+#   MOTORH             directory containing the native archive (default: repo parent).
 #   MOTO_SMP           guest vCPU count (default 4). Read by run-qemu.sh.
 #   MOTO_MEMORY_MIB    guest RAM in MiB (run-qemu.sh default: 1024).
 #   MOTO_CPU_AFFINITY  host cpuset to pin qemu to via taskset (default: no pin).
@@ -47,11 +50,7 @@
 # be run from anywhere. Run output goes OUTSIDE the repo (see MOTOR_STRESS_OUT)
 # so a soak never dirties the working tree.
 #
-# NOTE: run this via `bash stress-soak.sh` in the BACKGROUND. Its own command
-# line is "bash .../stress-soak.sh", so the char-class pkill patterns below do
-# not self-match (an inline command containing "qemu-system"/"run-qemu" would
-# SIGKILL its own wrapper).
-set -u
+set -eu
 
 # ------------------------------------------------------------------ config
 BUILD="${1:-release}"
@@ -69,13 +68,20 @@ ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"        # repo root: src/tests -> ../..
 OUT_BASE="${MOTOR_STRESS_OUT:-/tmp/motor-stress}"
 OUT="$OUT_BASE/run-$RUN_TAG"
 mkdir -p "$OUT_BASE"
-mkdir "$OUT" || { echo "run output already exists: $OUT" >&2; exit 2; }
+mkdir -m 700 "$OUT" || { echo "run output already exists: $OUT" >&2; exit 2; }
 
 VM_IP=192.168.4.2
 SSH_PORT=2222
-KEY="$ROOT/src/tests/test.key"
 IMG_DIR="$ROOT/vm_images/$BUILD"
-export MOTO_IMAGE=motor-os-dev.qcow2
+export MOTO_IMAGE=motor-os.qcow2
+VM_DIR="$OUT/vm"
+KEY="$VM_DIR/test.key"
+CHANNEL="$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' "$ROOT/rust-toolchain.toml")"
+[[ "$CHANNEL" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "invalid toolchain channel" >&2; exit 1; }
+PACKAGE="motor-toolchain-$CHANNEL"
+ARCHIVE="${MOTORH:-$ROOT/..}/$PACKAGE.tar.zst"
+TEST_BIN=/none/tmp/motor-tests/tests
+GUEST_PROGRAMS=(systest mio-test tokio-tests crossterm-smoke rnetbench)
 HOST_RNET="$ROOT/src/bin/rnetbench/target/release/rnetbench"
 # Ask the host scheduler to resolve ranges and overlapping affinity entries.
 # Leave the guest's default sizing alone when no host affinity was requested.
@@ -100,9 +106,23 @@ MON_INTERVAL=20          # monitor tick, seconds
 PROGRESS_INTERVAL=300    # healthy-progress message interval, seconds
 LIVENESS_FAILS_MAX=3     # consecutive ssh liveness failures => vm-unreachable
 
-echo "building host-side rnetbench (release)"
-(cd "$ROOT/src/bin/rnetbench" && cargo build --release) ||
-  { echo "failed to build host-side rnetbench" >&2; exit 1; }
+for file in "$IMG_DIR/$MOTO_IMAGE" "$IMG_DIR/run-qemu.sh" "$IMG_DIR/vm-options.sh" \
+            "$ROOT/src/vm_scripts/test.key" "$ARCHIVE"; do
+  [ -r "$file" ] || { echo "missing soak prerequisite: $file" >&2; exit 1; }
+done
+[ -x "$IMG_DIR/run-qemu.sh" ] || { echo "cannot execute $IMG_DIR/run-qemu.sh" >&2; exit 1; }
+profile=()
+[ "$BUILD" != release ] || profile=(--release)
+echo "building guest workloads and host peers ($BUILD)"
+make -C "$ROOT" -j"$(nproc)" BUILD="$BUILD" "${GUEST_PROGRAMS[@]}"
+(cd "$ROOT/src/bin/rnetbench" && cargo build --target-dir target --release --locked --offline)
+(cd "$ROOT/src/bin/russhd" && cargo build --target-dir target --locked --offline "${profile[@]}" \
+  --features cross-test-support --bin sftp-permissions)
+(cd "$ROOT/src/bin/rmux" && RMUX_TEST_BINARY=/user/bin/rmux \
+  CARGO_TARGET_DIR="$ROOT/build/obj/$BUILD/rmux" cargo test --locked --offline "${profile[@]}" \
+  --target x86_64-unknown-motor --test motor --no-run --message-format=json-render-diagnostics) \
+  > "$OUT/rmux-build.json"
+RMUX_HARNESS="$(jq -ser 'map(select(.reason == "compiler-artifact" and .target.name == "motor")) | .[].executable' "$OUT/rmux-build.json")"
 
 SSH_OPTS=(-F /dev/null -p "$SSH_PORT" -o IdentitiesOnly=yes
           -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
@@ -115,6 +135,16 @@ run_timeout() { timeout --foreground --kill-after=5 "$@"; }
 # vssh_n so terminal input can never job-control-stop their ssh process.
 vssh() { run_timeout "${VSSH_TMO:-20}" ssh "${SSH_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" "$@"; }
 vssh_n() { run_timeout "${VSSH_TMO:-20}" ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" "$@"; }
+vsftp() {
+  sftp -b - -F /dev/null -P "$SSH_PORT" -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR motor@"$VM_IP"
+}
+sftp_suite() {
+  ROOT_DIR="$ROOT" BUILD="$BUILD" RUSSHD_KEY="$KEY" RUSSHD_HOST="$VM_IP" \
+    RUSSHD_PORT="$SSH_PORT" MOTOR_TEST_TMP=/user/tmp/motor-tests \
+    MOTOR_NONE_TEST_TMP=/none/tmp/motor-tests/tmp run_timeout "$1" \
+    bash -c 'source "$1"; cross_sftp' _ "$SCRIPT_DIR/cross-test.sh"
+}
 
 log() { echo "[$(date +%H:%M:%S) +$(( $(date +%s) - START ))s] $*" | tee -a "$OUT/soak.log"; }
 
@@ -128,30 +158,20 @@ STOP_REASON=""
 DNS_RESOLVER_SSH_PID=""
 QEMU_WRAPPER_PID=""
 
-# Dry-run (STRESS_DRYRUN=1): resolve every derived path through the real config
-# above and confirm the host-side prerequisites exist, then exit before booting.
-# This validates the script is runnable from any working directory (paths derive
-# from $SCRIPT_DIR, not $PWD) without paying for a full soak. Placed before the
-# EXIT trap is installed, so exiting here does not run teardown.
+# Dry-run builds the same inputs as a real run and stops before copying the disk.
 if [ "${STRESS_DRYRUN:-0}" = 1 ]; then
-  echo "stress-soak dry-run:"
-  echo "  invoked as : ${BASH_SOURCE[0]}"
-  echo "  cwd        : $(pwd)"
-  echo "  SCRIPT_DIR : $SCRIPT_DIR"
-  echo "  ROOT       : $ROOT"
-  echo "  KEY        : $KEY"
-  echo "  IMG_DIR    : $IMG_DIR"
-  echo "  HOST_RNET  : $HOST_RNET"
-  echo "  systest CPU: ${SYSTEST_CPU_ARG:-guest default}"
-  rc=0
-  [ -f "$KEY" ]                 && echo "  [ok]      ssh key present"        || { echo "  [MISSING] ssh key"; rc=1; }
-  [ -x "$IMG_DIR/run-qemu.sh" ] && echo "  [ok]      run-qemu.sh present"    || { echo "  [MISSING] $IMG_DIR/run-qemu.sh (run: make BUILD=$BUILD all)"; rc=1; }
-  [ -x "$HOST_RNET" ]           && echo "  [ok]      host rnetbench present" || { echo "  [MISSING] $HOST_RNET"; rc=1; }
-  [ "$rc" = 0 ] && echo "  DRY-RUN OK" || echo "  DRY-RUN FOUND MISSING PREREQS"
-  exit "$rc"
+  echo "DRY-RUN OK: $IMG_DIR/$MOTO_IMAGE, $ARCHIVE, guest and host test programs"
+  exit 0
 fi
 
+mkdir "$VM_DIR"
+trap 'rm -r -- "$VM_DIR"' EXIT
+cp --reflink=auto --sparse=always "$IMG_DIR/$MOTO_IMAGE" "$VM_DIR/"
+cp "$IMG_DIR/run-qemu.sh" "$IMG_DIR/vm-options.sh" "$VM_DIR/"
+install -m 600 "$ROOT/src/vm_scripts/test.key" "$KEY"
 mkfifo "$CONSOLE_IN"
+# Workload and monitor code below records nonzero statuses itself.
+set +e
 
 # ------------------------------------------------------------------ forensics
 mon_cmd() { { printf '%s\n' "$1"; sleep 1; } | run_timeout 8 nc "$MON_HOST" "$MON_PORT" 2>/dev/null; }
@@ -203,7 +223,9 @@ teardown() {
   exec 3>&-
   for p in "${SERVER_PIDS[@]}"; do kill "$p" 2>/dev/null; done
   # best-effort graceful VM shutdown
-  VSSH_TMO=15 vssh_n shutdown 2>/dev/null
+  if [ "${ssh_ready:-0}" = 1 ] && kill -0 "$QEMU_WRAPPER_PID" 2>/dev/null; then
+    VSSH_TMO=15 vssh_n shutdown 2>/dev/null
+  fi
   sleep 2
   if [ -n "$DNS_RESOLVER_SSH_PID" ]; then
     kill "$DNS_RESOLVER_SSH_PID" 2>/dev/null
@@ -217,6 +239,7 @@ teardown() {
     kill -KILL -- "-$QEMU_WRAPPER_PID" 2>/dev/null
   fi
   wait "$QEMU_WRAPPER_PID" 2>/dev/null
+  rm -r -- "$VM_DIR"
   # final summary
   {
     echo "==== STRESS SOAK SUMMARY ($RUN_TAG, build=$BUILD) ===="
@@ -235,12 +258,8 @@ trap 'STOP_REASON="INTERRUPTED: SIGHUP"; exit 129' HUP
 
 # ------------------------------------------------------------------ boot
 log "=== stress soak start: build=$BUILD duration=${DURATION}s out=$OUT ==="
-[ -x "$IMG_DIR/run-qemu.sh" ] || { STOP_REASON="BOOT-FAILED: no image at $IMG_DIR (run: make dev.img BUILD=$BUILD)"; log "$STOP_REASON"; exit 1; }
-[ -x "$HOST_RNET" ] || { STOP_REASON="BOOT-FAILED: missing $HOST_RNET"; log "$STOP_REASON"; exit 1; }
-chmod 600 "$KEY"
-
-log "booting VM ($IMG_DIR/run-qemu.sh) with TCP monitor $MON_HOST:$MON_PORT"
-setsid "$IMG_DIR/run-qemu.sh" -monitor "tcp:$MON_HOST:$MON_PORT,server,nowait" \
+log "booting private copy of $IMG_DIR/$MOTO_IMAGE with TCP monitor $MON_HOST:$MON_PORT"
+setsid "$VM_DIR/run-qemu.sh" -monitor "tcp:$MON_HOST:$MON_PORT,server,nowait" \
   < "$CONSOLE_IN" &> "$CONSOLE" &
 QEMU_WRAPPER_PID=$!
 # Keep the serial console writable for the sys-tty TUI workload. Opening the
@@ -248,7 +267,7 @@ QEMU_WRAPPER_PID=$!
 exec 3> "$CONSOLE_IN"
 
 log "waiting for ssh ..."
-up=0
+ssh_ready=0
 for _ in $(seq 1 40); do
   if ! kill -0 "$QEMU_WRAPPER_PID" 2>/dev/null; then
     STOP_REASON="BOOT-FAILED: qemu exited during boot"; log "$STOP_REASON"
@@ -256,16 +275,15 @@ for _ in $(seq 1 40); do
     exit 1
   fi
   if run_timeout 12 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=8 -o ConnectionAttempts=1 \
-       motor@"$VM_IP" /user/bin/rush -c true >/dev/null 2>&1; then up=1; break; fi
+       motor@"$VM_IP" /user/bin/rush -c true >/dev/null 2>&1; then ssh_ready=1; break; fi
   sleep 3
 done
-[ "$up" = 1 ] || { STOP_REASON="BOOT-FAILED: VM never reachable over ssh"; log "$STOP_REASON"; exit 1; }
+[ "$ssh_ready" = 1 ] && kill -0 "$QEMU_WRAPPER_PID" 2>/dev/null ||
+  { STOP_REASON="BOOT-FAILED: own VM never reachable over ssh"; log "$STOP_REASON"; exit 1; }
 log "VM is up."
 
 # ------------------------------------------------------------------ VM gate
-# Run every guest-side assertion from full-test.sh before adding stress load.
-# Host-only cargo/rmux tests and the build itself deliberately remain outside
-# this harness.
+# Run the soak's one-time guest checks before adding concurrent load.
 GATE_LOG="$OUT/vm-gate.log"
 
 gate_fail() {
@@ -354,17 +372,29 @@ gate_udp_socket_count() {
   gate_fail "stats did not report net.udp_sockets"
 }
 
-gate_rmux_copy_keys() {
-  printf 'for I in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do echo LINE$I; done\n'
-  sleep 5
-  printf '\001[g'
-  sleep 2
-  printf 'q'
-  sleep 1
-  printf 'exit\n'
+put_executable() {
+  printf 'put "%s" "%s/%s"\nchmod 755 "%s/%s"\n' "$1" "$TEST_BIN" "$2" "$TEST_BIN" "$2"
 }
 
-log "running mandatory VM-side full-test gate"
+INSTALL_DIR=/none/dev/toolchain-install
+gate_ssh 30 "create toolchain and test directories" \
+  "mkdir -p $INSTALL_DIR $TEST_BIN /user/tmp/motor-tests /none/tmp/motor-tests/tmp"
+log "installing $ARCHIVE"
+printf 'put "%s" "%s/%s.tar.zst"\n' "$ARCHIVE" "$INSTALL_DIR" "$PACKAGE" | vsftp \
+  >>"$GATE_LOG" 2>&1 || gate_fail "native toolchain upload failed"
+ssh "${SSH_NI_OPTS[@]}" motor@"$VM_IP" \
+  "tar -xf $INSTALL_DIR/$PACKAGE.tar.zst -C $INSTALL_DIR && $INSTALL_DIR/$PACKAGE/install.sh" \
+  >>"$GATE_LOG" 2>&1 || gate_fail "native toolchain install failed (see $GATE_LOG)"
+gate_ssh 30 "verify installed debugger" '[ -x /user/bin/dev/mdbg ]'
+log "uploading guest tests to $TEST_BIN"
+{
+  for name in "${GUEST_PROGRAMS[@]}"; do
+    put_executable "$ROOT/build/bin/$BUILD/$name" "$name"
+  done
+  put_executable "$RMUX_HARNESS" rmux-motor
+} | vsftp >>"$GATE_LOG" 2>&1 || gate_fail "guest test upload failed"
+
+log "running one-time guest checks"
 gate_ssh 30 "ping 127.0.0.1" /user/bin/ping -c 1 127.0.0.1
 gate_ssh 30 "ping localhost" /user/bin/ping -c 1 localhost
 gate_ssh 60 "DNS resolver self-test" /system/services/dns-resolver --self-test
@@ -400,7 +430,7 @@ gate_udp_socket_count
 
 log "VM gate: systest"
 run_timeout 900 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
-  "MOTOR_OS_CAPS=0x3cc /devtools/tests/systest $SYSTEST_CPU_ARG --vsock" 2>&1 | tee -a "$GATE_LOG" "$OUT/gate-systest.log"
+  "MOTOR_OS_CAPS=0x3cc $TEST_BIN/systest $SYSTEST_CPU_ARG --vsock" 2>&1 | tee -a "$GATE_LOG" "$OUT/gate-systest.log"
 gate_rc=${PIPESTATUS[0]}
 [ "$gate_rc" -eq 0 ] || gate_fail "systest (rc=$gate_rc)"
 [ "$(tail -n 1 "$OUT/gate-systest.log")" = "systest: ALL PASS" ] ||
@@ -423,30 +453,22 @@ case "$out" in *motor-os*) ;; *) gate_fail "rmux shell was not interactive" ;; e
 case "$out" in *$'\033'"[?1049h"*) ;; *) gate_fail "rmux did not take alternate screen" ;; esac
 case "$out" in *$'\033'"[?1049l"*) ;; *) gate_fail "rmux did not restore screen" ;; esac
 
-out="$(gate_rmux_copy_keys | vssh "/user/bin/rmux" 2>>"$GATE_LOG")"
-# rmux repaints only the changed cells, so a later indicator need not appear
-# whole in the byte stream; read it from the rendered screen, as full-test does.
-indicator="$(printf '%s' "$out" | bash "$SCRIPT_DIR/test-rmux-copy-status.sh")"
-[ -n "$indicator" ] || gate_fail "rmux copy mode did not open"
-counts="${indicator##*[}"; above="${counts%%/*}"
-total="${counts%]}"; total="${total##*/}"
-[ "$total" -gt 0 ] || gate_fail "rmux pane kept no scrollback: '$indicator'"
-[ "$above" = "$total" ] ||
-  gate_fail "rmux copy mode did not reach oldest line: '$indicator'"
+rmux_case=pane_terminal_screen_titles_scrollback_and_disconnect
+gate_ssh 120 "rmux pane and scrollback" "MOTOR_OS_CAPS=0x3ec $TEST_BIN/rmux-motor --exact $rmux_case"
+grep -q '^test result: ok\. 1 passed; 0 failed;' "$GATE_LOG" || gate_fail "rmux did not run $rmux_case"
 
 log "VM gate: SFTP integration"
-RUSSHD_HOST="$VM_IP" RUSSHD_PORT="$SSH_PORT" RUSSHD_KEY="$KEY" \
-  run_timeout 300 "$SCRIPT_DIR/test-sftp.sh" 2>&1 | tee -a "$GATE_LOG"
+sftp_suite 300 2>&1 | tee -a "$GATE_LOG"
 gate_rc=${PIPESTATUS[0]}
 [ "$gate_rc" -eq 0 ] || gate_fail "SFTP integration (rc=$gate_rc)"
-gate_ssh 300 "mio-test" "/devtools/tests/mio-test"
-gate_ssh 300 "tokio-tests" "/devtools/tests/tokio-tests"
-log "mandatory VM-side full-test gate passed"
+gate_ssh 300 "mio-test" "$TEST_BIN/mio-test"
+gate_ssh 300 "tokio-tests" "$TEST_BIN/tokio-tests"
+log "one-time guest checks passed"
 
 # ------------------------------------------------------------------ binaries + fetch target (from src/imager/motor-os.yaml)
-RNETBENCH=/devtools/tests/rnetbench
-TOKIO=/devtools/tests/tokio-tests
-MIO=/devtools/tests/mio-test
+RNETBENCH=$TEST_BIN/rnetbench
+TOKIO=$TEST_BIN/tokio-tests
+MIO=$TEST_BIN/mio-test
 HTTPD=/user/bin/httpd
 HTTPD_AXUM=/user/bin/httpd-axum
 log "binaries: httpd=$HTTPD httpd-axum=$HTTPD_AXUM"
@@ -458,10 +480,8 @@ FETCH_URLPATH="/soak-asset.png"
 head -c 108776 /dev/urandom > "$OUT/soak-asset.png"
 vssh_n "/user/bin/rush -c '[ -d $SERVE_DIR ] || /user/bin/mkdir $SERVE_DIR'" >/dev/null 2>&1 ||
   gate_fail "could not create $SERVE_DIR"
-printf 'put %s %s%s\n' "$OUT/soak-asset.png" "$SERVE_DIR" "$FETCH_URLPATH" |
-  sftp -b - -F /dev/null -P "$SSH_PORT" -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
-    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-    motor@"$VM_IP" >"$OUT/asset-upload.log" 2>&1 ||
+printf 'put "%s" "%s%s"\n' "$OUT/soak-asset.png" "$SERVE_DIR" "$FETCH_URLPATH" |
+  vsftp >"$OUT/asset-upload.log" 2>&1 ||
   gate_fail "could not upload the http fetch asset (see asset-upload.log)"
 log "http fetch target: $SERVE_DIR$FETCH_URLPATH"
 
@@ -571,7 +591,7 @@ w_futex() {
   while :; do
     n=$((n+1))
     run_timeout 300 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
-      "/devtools/tests/systest $SYSTEST_CPU_ARG futex-stress 60" >>"$OUT/futex.log" 2>&1; rc=$?
+      "$TEST_BIN/systest $SYSTEST_CPU_ARG futex-stress 60" >>"$OUT/futex.log" 2>&1; rc=$?
     echo "iter=$n rc=$rc" >>"$OUT/futex.log"
     [ "$rc" -ne 0 ] && f=$((f+1)); write_stat futex "$n" "$f" "$rc" "futex-stress"; pace "$rc"
   done
@@ -585,7 +605,7 @@ w_systest() { # paging-soak|sparse-soak|swap-cancel-soak
   while :; do
     n=$((n+1))
     run_timeout 300 ssh "${SSH_NI_OPTS[@]}" -o ConnectTimeout=10 motor@"$VM_IP" \
-      "MOTOR_OS_CAPS=0x3cc /devtools/tests/systest $SYSTEST_CPU_ARG $name" >"$current" 2>&1
+      "MOTOR_OS_CAPS=0x3cc $TEST_BIN/systest $SYSTEST_CPU_ARG $name" >"$current" 2>&1
     rc=$?
     if [ "$rc" -eq 0 ] && [ "$(tail -n 1 "$current")" != "$name PASS" ]; then
       rc=96
@@ -606,8 +626,7 @@ w_fs_sftp() {
   local n=0 f=0 rc
   while :; do
     n=$((n+1))
-    RUSSHD_HOST="$VM_IP" RUSSHD_PORT="$SSH_PORT" RUSSHD_KEY="$KEY" \
-      run_timeout 600 "$SCRIPT_DIR/test-sftp.sh" >>"$OUT/fs-sftp.log" 2>&1
+    sftp_suite 600 >>"$OUT/fs-sftp.log" 2>&1
     rc=$?
     [ "$rc" -ne 0 ] && f=$((f+1))
     write_stat fs-sftp "$n" "$f" "$rc" "sftp-integration"
@@ -647,7 +666,7 @@ w_tui_console() {
   local n=0 f=0 rc before
   while :; do
     n=$((n+1)); rc=0; before=$(wc -c < "$CONSOLE")
-    printf '/devtools/tests/crossterm-smoke keys\n' >&3 || rc=$?
+    printf '%s/crossterm-smoke keys\n' "$TEST_BIN" >&3 || rc=$?
     if [ "$rc" -eq 0 ] &&
        ! wait_console_since "$before" $'\033[?2048h'; then
       rc=96
@@ -676,7 +695,7 @@ tui_pty_once() {
   TUI_PTY_RC=1
   coproc TUI_SSH {
     run_timeout 90 ssh "${SSH_OPTS[@]}" -tt \
-      motor@"$VM_IP" "/devtools/tests/crossterm-smoke keys" 2>&1
+      motor@"$VM_IP" "$TEST_BIN/crossterm-smoke keys" 2>&1
   }
   # Bash owns the descriptors in the coproc array and may close them as soon as
   # it reaps the child. Keep independent descriptors until all output is read.
@@ -784,7 +803,7 @@ tui_rmux_once() { # tmpdir
   # A subshell per write: if ssh is gone, SIGPIPE ends it, not this workload.
   # Split the name in the command echo. Only the foreground window title
   # contains the whole name, so seeing it means Rush has handed off input.
-  ( printf '/devtools/tests/crossterm-""smoke keys\n' >&"$in_fd" ) 2>/dev/null
+  ( printf '%s/crossterm-""smoke keys\n' "$TEST_BIN" >&"$in_fd" ) 2>/dev/null
   wait_file_for "$cur" 'crossterm-smoke' 240 && ( printf 'q' >&"$in_fd" ) 2>/dev/null
   wait_file_for "$cur" 'end=(quit|timeout|[A-Z])' 40
   ( printf 'exit\n' >&"$in_fd" ) 2>/dev/null
@@ -953,7 +972,7 @@ while :; do
   fi
 
   if [ "$up" -ge "$DURATION" ]; then
-    for name in paging-soak sparse-soak swap-cancel-soak; do
+    for name in "${WL_NAMES[@]}"; do
       if [ ! -f "$OUT/$name.stat" ]; then
         STOP_REASON="ANOMALY workload-incomplete:$name (increase requested duration)"
         capture_forensics "$STOP_REASON"; break 2
