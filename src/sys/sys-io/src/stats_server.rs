@@ -24,37 +24,25 @@ pub fn start() {
         .spawn(stats_thread);
 }
 
-/// Register this provider with the stats registry.
+/// Register this provider with the stats registry. strobe, which runs the
+/// registry, starts after sys-io, so the first attempts can fail.
 fn register_stats_provider() -> bool {
-    // This is called on bootup. "strobe" (the stats registry daemon) won't start
-    // until some time later.
-    std::thread::sleep(std::time::Duration::from_millis(1_000));
-
-    let mut tries = 0u64;
-    loop {
-        match moto_sdk::stats::Collector::register(PROVIDER_NAME, STATS_URL) {
-            Ok(()) => {
-                log::debug!("sys-io: registered stats provider after {tries} tries");
-                return true;
-            }
-            Err(_) => {
-                tries += 1;
-                // Give up loudly after a while.
-                if tries == 30 {
-                    log::warn!("sys-io: stats registry (strobe) unreachable");
-                    return false;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(1_00));
-            }
+    const ATTEMPTS: u64 = 40;
+    for tries in 0..ATTEMPTS {
+        if moto_sdk::stats::Collector::register(PROVIDER_NAME, STATS_URL).is_ok() {
+            log::debug!("sys-io: registered stats provider after {tries} tries");
+            return true;
         }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    // Give up loudly.
+    log::warn!("sys-io: stats registry (strobe) unreachable");
+    false
 }
 
 fn stats_thread() {
-    if !register_stats_provider() {
-        return;
-    }
-
+    // Listen before registering: a provider that the registry lists must
+    // already accept connections.
     let mut server = match LocalServer::new(STATS_URL, ChannelSize::Small, 4, 2) {
         Ok(s) => s,
         Err(err) => {
@@ -62,6 +50,9 @@ fn stats_thread() {
             return;
         }
     };
+    if !register_stats_provider() {
+        return;
+    }
 
     log::debug!("sys-io stats server started");
 
