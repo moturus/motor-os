@@ -69,7 +69,7 @@ pub fn run_suite(suite: &mut Suite) -> Result<()> {
     // Command lifecycle: stdio, exit status, traps and interruption.
     let (stdout, stderr) = suite.command("stdio", &invocation("0", "", "lifecycle"), 0)?;
     expect("stdio stdout", &stdout, "out\n")?;
-    expect("stdio stderr", &stderr, "err\n")?;
+    suite.expect_stderr("stdio", &stderr, "err\n")?;
     suite.command(
         "exit-seven",
         &invocation("0", "--invoke exit-seven", "lifecycle"),

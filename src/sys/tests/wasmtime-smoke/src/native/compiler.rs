@@ -12,7 +12,7 @@ pub(super) fn run(suite: &mut Suite) -> Result<()> {
         0,
     )?;
     expect("native stdout", &out, "out\n")?;
-    expect("native stderr", &err, "err\n")?;
+    suite.expect_stderr("native-raw-run", &err, "err\n")?;
     suite.command(
         "native-compile",
         &format!("MOTOR_OS_CAPS=0x200 {COMPILER} compile {FIXTURES}/lifecycle.wat -o native.cwasm"),
@@ -25,7 +25,7 @@ pub(super) fn run(suite: &mut Suite) -> Result<()> {
             0,
         )?;
         expect("loaded stdout", &out, "out\n")?;
-        expect("loaded stderr", &err, "err\n")?;
+        suite.expect_stderr(name, &err, "err\n")?;
     }
     suite.refusal(
         "runtime-no-compiler",
@@ -50,5 +50,5 @@ pub(super) fn run(suite: &mut Suite) -> Result<()> {
         0,
     )?;
     expect("Pulley stdout", &out, "out\n")?;
-    expect("Pulley stderr", &err, "err\n")
+    suite.expect_stderr("pulley-raw-run", &err, "err\n")
 }

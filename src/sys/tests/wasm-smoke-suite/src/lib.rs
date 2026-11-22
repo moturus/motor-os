@@ -20,6 +20,7 @@ pub struct Suite {
     name: &'static str,
     output: Box<dyn Write>,
     pub root: PathBuf,
+    debug_image: bool,
     cases: usize,
 }
 
@@ -59,6 +60,7 @@ impl Suite {
             name,
             output,
             root,
+            debug_image: std::env::var("MOTOR_TEST_IMAGE_PROFILE").as_deref() == Ok("debug"),
             cases: 0,
         })
     }
@@ -173,6 +175,15 @@ impl Suite {
         Ok(())
     }
 
+    /// Compare command output while retaining the complete stderr in failures.
+    pub fn expect_stderr(&self, label: &str, stderr: &str, expected: &str) -> Result<()> {
+        if output::stderr_matches(stderr, expected, self.debug_image) {
+            Ok(())
+        } else {
+            Err(format!("{label}: expected stderr {expected:?}, got {stderr:?}").into())
+        }
+    }
+
     pub fn same_bytes(&self, first: &str, second: &str) -> Result<()> {
         let mut first = fs::File::open(self.root.join(first))?;
         let mut second = fs::File::open(self.root.join(second))?;
@@ -235,7 +246,11 @@ impl Job {
                 );
             }
             if self.started.elapsed() >= DEADLINE {
-                return Err(format!("{}: no {text:?} within {DEADLINE:?}", self.label).into());
+                return Err(format!(
+                    "{}: no {text:?} within {DEADLINE:?}\n{stdout}\n{stderr}",
+                    self.label
+                )
+                .into());
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -270,7 +285,12 @@ impl Job {
             if fs::metadata(path)?.len() > 256 * 1024 {
                 return Err(format!("oversized command log: {path:?}").into());
             }
-            Ok(fs::read_to_string(path)?)
+            Ok(String::from_utf8(fs::read(path)?).map_err(|err| {
+                format!(
+                    "{path:?}: invalid UTF-8 in command output: {}",
+                    err.as_bytes().escape_ascii()
+                )
+            })?)
         };
         Ok((read(&self.stdout_path)?, read(&self.stderr_path)?))
     }

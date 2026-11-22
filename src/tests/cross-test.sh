@@ -4188,14 +4188,14 @@ cross_wasm() {
     printf 'get "/user/bin/dev/%s" "%s/installed-%s"\n' "$tool" "$RUN_DIR" "$tool" | vm_sftp
     cmp "$ROOT_DIR/build/assembly/images/$name/user/bin/dev/$tool" "$RUN_DIR/installed-$tool"
   done
-  vm_ssh '/none/dev/wasm-tests/javy-smoke --linux-identity'
+  vm_ssh "MOTOR_TEST_IMAGE_PROFILE=$BUILD /none/dev/wasm-tests/javy-smoke --linux-identity"
   vm_ssh 'MOTOR_OS_CAPS=0x200 /user/bin/dev/wasmtime compile --target x86_64-unknown-motor /none/dev/wasm-tests/wasmtime-tests/lifecycle.wat -o /none/dev/wasm-tests/native.cwasm'
   printf 'get /none/dev/wasm-tests/native.cwasm "%s/wasmtime-native.cwasm"\n' "$RUN_DIR" | vm_sftp
   cmp "$ROOT_DIR/build/assembly/tests/wasmtime/lifecycle.cwasm" "$RUN_DIR/wasmtime-native.cwasm"
   # This second execution qualifies the same native cases at the supported
   # memory floor; ordinary Cargo runs above use the selected full-gate memory.
   for name in javy-smoke wasmtime-smoke; do
-    vm_ssh "/none/dev/wasm-tests/$name" | tee "$RUN_DIR/$name-256.log"
+    vm_ssh "MOTOR_TEST_IMAGE_PROFILE=$BUILD /none/dev/wasm-tests/$name" | tee "$RUN_DIR/$name-256.log"
   done
   vm_ssh 'MOTOR_OS_CAPS=0x204 mkdir /none/dev/wasm-services'
   vm_ssh 'for input in /none/dev/wasm-tests/wasmtime-tests/p2_cli_serve_hello_world.cwasm /none/dev/wasm-tests/wasmtime-tests/p3_cli_serve_hello_world.cwasm /none/dev/wasm-tests/wasmtime-tests/p2_cli_serve_hello_world.wasm /none/dev/wasm-tests/wasmtime-tests/engine-tests /none/dev/wasm-tests/javy-tests/plugin-p1.wasm; do cp "$input" /none/dev/wasm-services/ || exit; done'
@@ -4210,13 +4210,13 @@ CFG
     boot_test_image wasm-services
     wait_vm_ssh
     echo 'SKIP QEMU: System Wasm role matrix'
-    vm_ssh '/none/dev/wasm-tests/wasmtime-smoke --boot-services'
+    vm_ssh "MOTOR_TEST_IMAGE_PROFILE=$BUILD /none/dev/wasm-tests/wasmtime-smoke --boot-services"
   else
     boot_test_image wasm-services --system-tty
     wait_vm_ssh
     wait_console_line 1 '/user\$'
-    printf 'MOTOR_OS_CAPS=0x34d /none/dev/wasm-tests/wasmtime-smoke --roles &\r' >&"$VM_SERIAL_FD"
-    vm_ssh '/none/dev/wasm-tests/wasmtime-smoke --services' | tee "$RUN_DIR/wasm-services.log"
+    printf 'MOTOR_OS_CAPS=0x34d MOTOR_TEST_IMAGE_PROFILE=%s /none/dev/wasm-tests/wasmtime-smoke --roles &\r' "$BUILD" >&"$VM_SERIAL_FD"
+    vm_ssh "MOTOR_TEST_IMAGE_PROFILE=$BUILD /none/dev/wasm-tests/wasmtime-smoke --services" | tee "$RUN_DIR/wasm-services.log"
     for name in none none-extra interactive system; do
       grep -Eq "^PASS $name-serve-runtime: exit=0 elapsed_ms=[0-9]+ sampled_vm_peak_bytes=[1-9][0-9]* max_gap_us=[0-9]+$" "$RUN_DIR/wasm-services.log"
     done

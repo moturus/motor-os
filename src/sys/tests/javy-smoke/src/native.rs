@@ -34,10 +34,10 @@ impl JavyTools for Suite {
             &format!("MOTOR_OS_CAPS=0 /user/bin/dev/wasmi {module} {flags}"),
             0,
         )?;
-        if stdout != expected || !stderr.is_empty() {
+        if stdout != expected {
             return Err(format!("{label}: unexpected output {stdout:?}, stderr {stderr:?}").into());
         }
-        Ok(())
+        self.expect_stderr(label, &stderr, "")
     }
 }
 
@@ -73,7 +73,7 @@ pub fn run() -> Result<()> {
         0,
     )?;
     assert_eq!(stdout, "hello from Motor 42\n");
-    assert!(stderr.is_empty());
+    suite.expect_stderr("hello-inherited-role-execute", &stderr, "")?;
     suite.execute("hello-execute", "hello.wasm", "", "hello from Motor 42\n")?;
     suite.compile(
         "hello-explicit-plugin",

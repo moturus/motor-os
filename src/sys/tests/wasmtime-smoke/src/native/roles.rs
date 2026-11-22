@@ -103,7 +103,7 @@ pub(super) fn run() -> Result<()> {
                 0,
             )?;
             expect(label, &out, "roles\n")?;
-            expect(label, &err, "")?;
+            suite.expect_stderr(label, &err, "")?;
         }
         for (label, tool, extension) in [("full", COMPILER, "wasm"), ("runtime", RUNTIME, "cwasm")]
         {

@@ -226,7 +226,7 @@ full_native_guest() {
   local caps
   for caps in 0x3ec 0x3a4; do
     echo "full-test: native Motor tests, capabilities=$caps"
-    vm_ssh "MOTOR_OS_CAPS=$caps NATIVE_TEST_CAPS=$caps /user/bin/rush /none/dev/motor-os/src/tests/full-native-test.sh ${NATIVE_ARGS[*]}"
+    vm_ssh "MOTOR_OS_CAPS=$caps NATIVE_TEST_CAPS=$caps MOTOR_TEST_IMAGE_PROFILE=$BUILD /user/bin/rush /none/dev/motor-os/src/tests/full-native-test.sh ${NATIVE_ARGS[*]}"
   done
   shutdown_test_image
 }
