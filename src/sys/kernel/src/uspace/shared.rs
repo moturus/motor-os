@@ -147,13 +147,16 @@ pub(super) fn init() {
     IPC_PAIR_URL.set(Box::leak(Box::new(Arc::new("ipc_pair".to_owned()))));
 }
 
+/// Creates a listener and publishes it. Also returns its wake count from
+/// before publication, which is where the creator's handle must start: a
+/// peer can connect and wake the listener before that handle exists.
 pub(super) fn create(
     owner: Arc<Process>,
     url: String,
     owner_addr: u64,
     page_type: PageType,
     page_num: u16,
-) -> Result<Arc<SysObject>, ErrorCode> {
+) -> Result<(Arc<SysObject>, u64), ErrorCode> {
     // Only sys-io can create "sys-io" listeners.
     if url == "sys-io" && owner.pid() != super::process::SYS_IO_PID {
         return Err(moto_rt::E_NOT_ALLOWED);
@@ -200,9 +203,10 @@ pub(super) fn create(
         (*ptr).sharer = Arc::downgrade(&sharer);
     }
 
+    let wake_count = sharer.wake_count();
     service.endpoints += 1;
     service.pending.insert(sharer.id(), self_);
-    Ok(sharer)
+    Ok((sharer, wake_count))
 }
 
 pub(super) fn get(

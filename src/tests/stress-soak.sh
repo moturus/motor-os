@@ -600,7 +600,7 @@ w_futex() {
 # These modes retain content/lifetime assertions with bounded resident memory
 # while faults, filesystem traffic, and network traffic compete in sys-io.
 # Each mode ends with "<name> PASS" on success.
-w_systest() { # paging-soak|sparse-soak|swap-cancel-soak
+w_systest() { # paging-soak|sparse-soak|swap-cancel-soak|listener-wake-soak
   local name="$1" n=0 f=0 rc current="$OUT/$1.current"
   while :; do
     n=$((n+1))
@@ -845,6 +845,7 @@ start_workload() { # name function [args...]
 }
 start_workload suites w_suites
 start_workload futex w_futex
+start_workload listener-wake-soak w_systest listener-wake-soak
 start_workload paging-soak w_systest paging-soak
 start_workload sparse-soak w_systest sparse-soak
 start_workload swap-cancel-soak w_systest swap-cancel-soak

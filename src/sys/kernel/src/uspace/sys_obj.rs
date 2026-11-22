@@ -156,30 +156,26 @@ fn sys_handle_shared(
         }
     }
 
-    if url.is_none() || address.is_none() || page_type.is_none() || page_num.is_none() {
+    let (Some(url), Some(address), Some(page_type), Some(page_num)) =
+        (url, address, page_type, page_num)
+    else {
         log::debug!("sys_handle_shared: bad arguments: {args}");
         return Err(moto_rt::E_INVALID_ARGUMENT.into());
-    }
-
-    let obj = match op {
-        SysObj::OP_CREATE => super::shared::create(
-            thread.owner(),
-            url.unwrap(),
-            address.unwrap(),
-            page_type.unwrap(),
-            page_num.unwrap(),
-        )?,
-        SysObj::OP_GET => super::shared::get(
-            retry,
-            thread.owner(),
-            url.unwrap(),
-            address.unwrap(),
-            page_type.unwrap(),
-            page_num.unwrap(),
-        )?,
-        _ => unreachable!(),
     };
-    Ok(thread.owner().add_object(obj))
+
+    let owner = thread.owner();
+    match op {
+        SysObj::OP_CREATE => {
+            let (obj, wake_count) =
+                super::shared::create(owner.clone(), url, address, page_type, page_num)?;
+            Ok(owner.add_object_at(obj, wake_count))
+        }
+        SysObj::OP_GET => {
+            let obj = super::shared::get(retry, owner.clone(), url, address, page_type, page_num)?;
+            Ok(owner.add_object(obj))
+        }
+        _ => unreachable!(),
+    }
 }
 
 fn sys_handle_get(

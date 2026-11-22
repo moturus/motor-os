@@ -443,7 +443,21 @@ impl Process {
     }
 
     pub(super) fn add_object(&self, object: Arc<SysObject>) -> SysHandle {
-        self.insert_object(&mut self.wait_objects.lock(line!()), object)
+        let mut objects = self.wait_objects.lock(line!());
+        self.insert_object(&mut objects, WaitObject::new(object))
+    }
+
+    /// As `add_object`, for an object that peers could already wake before
+    /// this handle existed: the handle starts from `wake_count`, so a wait
+    /// reports every wake after it.
+    pub(super) fn add_object_at(&self, sys_object: Arc<SysObject>, wake_count: u64) -> SysHandle {
+        self.insert_object(
+            &mut self.wait_objects.lock(line!()),
+            WaitObject {
+                sys_object,
+                wake_count,
+            },
+        )
     }
 
     // The lookup and the new handle share one table lock: put_object removes
@@ -451,20 +465,20 @@ impl Process {
     pub(super) fn dup_object(&self, handle: &SysHandle) -> Option<SysHandle> {
         let mut objects = self.wait_objects.lock(line!());
         let object = objects.get(handle)?.sys_object.clone();
-        Some(self.insert_object(&mut objects, object))
+        Some(self.insert_object(&mut objects, WaitObject::new(object)))
     }
 
     fn insert_object(
         &self,
         objects: &mut BTreeMap<SysHandle, WaitObject>,
-        object: Arc<SysObject>,
+        object: WaitObject,
     ) -> SysHandle {
-        object.add_process_handle();
+        object.sys_object.add_process_handle();
         let object_id = self
             .next_wait_object_id
             .fetch_add(1, Ordering::Relaxed)
             .into();
-        objects.insert(object_id, WaitObject::new(object));
+        objects.insert(object_id, object);
         object_id
     }
 

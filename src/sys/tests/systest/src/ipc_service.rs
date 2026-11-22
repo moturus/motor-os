@@ -26,6 +26,7 @@ fn connect_unmapped(url: &str) -> Result<SysHandle, moto_rt::ErrorCode> {
 pub fn run_command(args: &[String]) -> bool {
     match args.get(1).map(String::as_str) {
         Some("test-ipc-service-ownership") => run_tests(),
+        Some("listener-wake-soak") => listener_wake_soak(),
         Some("ipc-service-busy") if args.len() == 3 => {
             assert_eq!(listen(&args[2]).err(), Some(moto_rt::E_INVALID_ARGUMENT));
         }
@@ -174,6 +175,88 @@ impl Peer {
     }
 }
 
+/// A peer can find a new listener, connect to it and wake it before the kernel
+/// has given the listener's creator its handle. The creator must still see
+/// that wake: its handle counts wakes from before the listener was published.
+fn listener_wake_soak() {
+    use moto_sys::{SysCpu, SysMem};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const ROUNDS: usize = 10_000;
+    let url = format!("systest-ipc-wake-race-{}", std::process::id());
+    let round = Arc::new(AtomicUsize::new(0));
+
+    // Connects the moment a listener can be found, once a round.
+    let client = std::thread::spawn({
+        let (url, round) = (url.clone(), round.clone());
+        move || {
+            let mut conn = ClientConnection::new(ChannelSize::Small).unwrap();
+            for current in 0..ROUNDS {
+                while conn.connect(&url).is_err() {
+                    core::hint::spin_loop();
+                }
+                while round.load(Ordering::Acquire) == current {
+                    core::hint::spin_loop();
+                }
+                conn.disconnect();
+            }
+        }
+    });
+
+    // The creator's handle goes into the process's handle table, and these
+    // threads keep that table busy: the creator then gets its handle later,
+    // which gives the peer's wake the time to come first.
+    let stop = Arc::new(AtomicUsize::new(0));
+    let (ring, doorbell) = SysObj::create_ipc_pair(SysHandle::SELF, SysHandle::SELF, 0).unwrap();
+    let hammers: Vec<_> = (0..2)
+        .map(|_| {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while stop.load(Ordering::Relaxed) == 0 {
+                    SysObj::put(SysObj::dup(ring).unwrap()).unwrap();
+                }
+            })
+        })
+        .collect();
+
+    let url = moto_sys::url_encode(&url);
+    for current in 0..ROUNDS {
+        let page = moto_sys::sys_mem::PAGE_SIZE_SMALL;
+        let address = SysMem::map(SysHandle::SELF, 0, u64::MAX, u64::MAX, page, 1).unwrap();
+        let listener = SysObj::create(
+            SysHandle::SELF,
+            0,
+            &format!("shared:url={url};address={address};page_type=small;page_num=1"),
+        )
+        .unwrap();
+        let deadline = moto_rt::time::Instant::now() + std::time::Duration::from_secs(10);
+        // A late wake of an earlier listener may end a wait without a waker.
+        let mut wakers = [SysHandle::NONE];
+        while wakers[0] != listener {
+            wakers[0] = listener;
+            SysCpu::wait(
+                &mut wakers,
+                SysHandle::NONE,
+                SysHandle::NONE,
+                Some(deadline),
+            )
+            .unwrap_or_else(|err| panic!("round {current}: the connect wake was lost ({err})"));
+        }
+        SysObj::put(listener).unwrap();
+        SysMem::unmap(SysHandle::SELF, 0, u64::MAX, address).unwrap();
+        round.store(current + 1, Ordering::Release);
+    }
+    client.join().unwrap();
+    stop.store(1, Ordering::Relaxed);
+    for hammer in hammers {
+        hammer.join().unwrap();
+    }
+    SysObj::put(ring).unwrap();
+    SysObj::put(doorbell).unwrap();
+    println!("listener-wake-soak PASS");
+}
+
 pub fn run_tests() {
     test_silent_connections();
     let url = format!("systest-ipc-owner-{}", std::process::id());
@@ -261,6 +344,8 @@ fn test_silent_connections() {
     for _ in 0..4 {
         let mut client = ClientConnection::new(ChannelSize::Small).unwrap();
         client.connect(&url).unwrap();
+        // Connect before the first wait. The listener must deliver the wake
+        // even when the peer has not sent a request and stays connected.
         let ready = server.wait(SysHandle::NONE, &[]).unwrap();
         assert_eq!(ready.len(), 1);
         let conn = server.get_connection(ready[0]).unwrap();
