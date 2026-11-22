@@ -170,7 +170,7 @@ pub(in crate::runtime) fn runtime() -> Result<FsRuntime> {
         channel_budget: Default::default(),
         exec_locks: exec_locks.clone(),
         spawn_stats: Default::default(),
-        pager: Rc::new(spawn::pager::Pager::new(exec_locks)),
+        pager: Rc::new(spawn::pager::Pager::new_isolated(exec_locks)),
     })
 }
 

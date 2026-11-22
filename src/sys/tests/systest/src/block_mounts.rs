@@ -1,5 +1,39 @@
 use moto_sdk::io::fs::{AccessPermissions, EntryKind, FsClient, MountKind, RolePermissions};
 
+pub fn live_filesystem_tests() {
+    use moto_sdk::ipc::sync::{ChannelSize, ClientConnection, RequestHeader, ResponseHeader};
+    use moto_sdk::sys_io::stats::{CMD_TEST_LIVE_FILESYSTEMS, URL_IO_STATS};
+    use moto_sys::caps::{CAP_FS_WRITE, CAP_SYS};
+
+    let required = CAP_SYS | CAP_FS_WRITE;
+    let caps = moto_sys::ProcessStaticPage::get().capabilities;
+    let expected = if caps & required == required {
+        moto_rt::E_OK
+    } else {
+        moto_rt::E_NOT_ALLOWED
+    };
+    let mut conn = ClientConnection::new(ChannelSize::Small).unwrap();
+    conn.connect(URL_IO_STATS).unwrap();
+    for (version, flags, result) in [
+        (1, 0, moto_rt::E_INVALID_ARGUMENT),
+        (0, 1, moto_rt::E_INVALID_ARGUMENT),
+        (0, 0, expected),
+    ] {
+        let req = conn.req::<RequestHeader>();
+        req.cmd = CMD_TEST_LIVE_FILESYSTEMS;
+        req.ver = version;
+        req.flags = flags;
+        conn.do_rpc(None).unwrap();
+        let resp = conn.resp::<ResponseHeader>();
+        assert_eq!(
+            resp.result, result,
+            "live filesystem tests with caps {caps:#x}"
+        );
+        assert_eq!(resp.ver, 0);
+    }
+    println!("live filesystem tests with caps {caps:#x} PASS");
+}
+
 fn denied<T>(result: Result<T, moto_rt::Error>) {
     assert!(matches!(result, Err(moto_rt::Error::NotAllowed)));
 }

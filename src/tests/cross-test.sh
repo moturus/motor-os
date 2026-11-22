@@ -1989,6 +1989,11 @@ cross_system_console() {
   boot_test_image system --system-tty
   wait_vm_ssh
   cross_upload_programs
+  if [ "$BUILD" = debug ]; then
+    vm_ssh "$TEST_BIN/systest live-filesystem-tests"
+    console_status "MOTOR_OS_CAPS=0x5 $TEST_BIN/systest live-filesystem-tests" FS_WITHOUT_WRITE_STATUS
+    console_status "MOTOR_OS_CAPS=0x205 $TEST_BIN/systest live-filesystem-tests" LIVE_FS_STATUS
+  fi
   printf 'put "%s" "%s/sysbox-commands"\n' "$SYSBOX_COMMAND_PROBE" "$TEST_BIN" | vm_sftp
   local CHECK_STDERR="$ROOT_DIR/src/sys/tests/cross-peer/target/$BUILD/console-stderr"
   wait_guest_file() {
@@ -3036,12 +3041,13 @@ cross_block_mounts() {
   # Start with the standard raw image. No fixture image is built or published.
   copy_test_image "$ROOT_DIR/vm_images/$BUILD/motor-os.img" block
   image="$VM_DIR/$MOTO_IMAGE"
-  cat > "$SCRATCH/read-only.toml" <<'TOML'
+  cat > "$SCRATCH/read-only-small-tmp.toml" <<'TOML'
 [root]
 read_only = true
 [[mount]]
 path = "/none/tmp"
 type = "memfs"
+max_size = "16K"
 [[mount]]
 path = "/system/tmp"
 type = "memfs"
@@ -3057,7 +3063,7 @@ TOML
   "$imager" put --mode rw-rw-rw- "$image" "$SCRATCH/ro-probe" /none/cfg/ro-probe
   "$imager" mkdir "$image" /user/test-tmp
   "$imager" put --mode r-xr-xr-x "$image" "$ROOT_DIR/build/bin/$BUILD/systest" /user/test-tmp/systest
-  "$imager" block-mount-fixture config "$image" "$SCRATCH/read-only.toml"
+  "$imager" block-mount-fixture config "$image" "$SCRATCH/read-only-small-tmp.toml"
   baseline="$(sha256sum "$image")"
   block_start() {
     local name="$1"; shift
@@ -3080,11 +3086,14 @@ for boot in 1 2; do
   else
     echo 'SKIP QEMU: System read-only root checks'
   fi
-  vm_ssh 'findmnt'
+  vm_ssh 'findmnt' | awk '$2 == "/none/tmp" && $4 == "memfs" && $5 == "rw" && $7 == 16384 {found=1} END {exit !found}'
   # Require a guest-requested exit; forced cleanup is not a successful reboot.
   shutdown_test_image
   [ "$(sha256sum "$image")" = "$baseline" ] || cross_fail "read-only root changed its backing image"
 done
+# The small mount exercises ordinary boot. Later fixtures use the default size.
+sed '/^max_size = "16K"$/d' "$SCRATCH/read-only-small-tmp.toml" > "$SCRATCH/read-only.toml"
+"$imager" block-mount-fixture config "$image" "$SCRATCH/read-only.toml"
 # An actual DHCP ACK must reach the snapshot and resolver on a read-only root.
 # QEMU supplies DHCP locally; these checks send no Internet traffic.
 if [ "$VMM" = qemu ] || [ "$VMM" = chv ]; then

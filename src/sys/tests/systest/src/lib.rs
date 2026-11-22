@@ -1380,6 +1380,10 @@ pub fn run() {
         dns_service::lookup(&args[2]);
         return;
     }
+    if args.len() == 2 && args[1] == "live-filesystem-tests" {
+        block_mounts::live_filesystem_tests();
+        return;
+    }
     if args.len() == 2 && args[1] == "block-ro-root" {
         block_mounts::read_only_root();
         return;

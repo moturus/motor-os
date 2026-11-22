@@ -262,9 +262,7 @@ pub(crate) fn descriptors() -> Vec<MetricDescWire> {
 enum StatsRequest {
     Snapshot(moto_sdk::async_runtime::oneshot::Sender<Vec<MetricEntry>>),
     #[cfg(debug_assertions)]
-    TestExecutableLocks(moto_sdk::async_runtime::oneshot::Sender<Result<(), String>>),
-    #[cfg(debug_assertions)]
-    TestPagerWindows(moto_sdk::async_runtime::oneshot::Sender<Result<(), String>>),
+    TestLiveFilesystems(moto_sdk::async_runtime::oneshot::Sender<Result<(), String>>),
 }
 
 /// Sender half of the request channel. Set once, when the FS runtime spawns its
@@ -302,13 +300,8 @@ async fn stats_responder_task(
                 let _ = respond_to.send(snapshot);
             }
             #[cfg(debug_assertions)]
-            StatsRequest::TestExecutableLocks(respond_to) => {
-                let result = super::spawn::self_test::queued_mutations(&runtime).await;
-                let _ = respond_to.send(result);
-            }
-            #[cfg(debug_assertions)]
-            StatsRequest::TestPagerWindows(respond_to) => {
-                let result = super::spawn::pager::self_test::coalesced_windows(&runtime).await;
+            StatsRequest::TestLiveFilesystems(respond_to) => {
+                let result = super::spawn::self_test::test_live_filesystems(&runtime).await;
                 let _ = respond_to.send(result);
             }
         }
@@ -337,30 +330,16 @@ pub(crate) fn query_metrics() -> Vec<MetricEntry> {
     })
 }
 
-/// Run a native regression on the FS runtime through the existing on-demand
-/// self-test endpoint; only that runtime can touch its locks and poll its
-/// handlers. `request` wraps the reply sender in the matching request.
+/// Run the live tests on the FS runtime that owns the locks and pager.
 #[cfg(debug_assertions)]
-fn run_fs_self_test(
-    request: fn(moto_sdk::async_runtime::oneshot::Sender<Result<(), String>>) -> StatsRequest,
-) -> Result<(), String> {
+pub(crate) fn test_live_filesystems() -> Result<(), String> {
     let requests = STATS_REQUESTS.get().ok_or("FS runtime not started")?;
     moto_sdk::async_runtime::LocalRuntime::new().block_on(async {
         let (respond_to, response) = moto_sdk::async_runtime::oneshot();
         requests
-            .send(request(respond_to))
+            .send(StatsRequest::TestLiveFilesystems(respond_to))
             .await
             .map_err(|_| "FS runtime stopped")?;
         response.await.map_err(|_| "FS self-test reply lost")?
     })
-}
-
-#[cfg(debug_assertions)]
-pub(super) fn test_executable_locks() -> Result<(), String> {
-    run_fs_self_test(StatsRequest::TestExecutableLocks)
-}
-
-#[cfg(debug_assertions)]
-pub(super) fn test_pager_windows() -> Result<(), String> {
-    run_fs_self_test(StatsRequest::TestPagerWindows)
 }

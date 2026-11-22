@@ -40,17 +40,30 @@ pub(in crate::runtime::fs) async fn quarantined_read(
     Ok(())
 }
 
-pub(in crate::runtime::fs) async fn queued_mutations(runtime: &FsRuntime) -> Result<(), String> {
-    for path in ["/", "/none/tmp"] {
-        let (id, _) = fs::mounts::stat_path(&runtime.mounts, Role::System, path)
+/// The System test runner provides a disposable image with both writable backends.
+pub(in crate::runtime::fs) async fn test_live_filesystems(
+    runtime: &FsRuntime,
+) -> Result<(), String> {
+    use api_fs::MountKind;
+    for (path, kind) in [("/", MountKind::MotorFs), ("/none/tmp", MountKind::MemFs)] {
+        let parent = runtime
+            .mounts
+            .borrow()
+            .iter()
+            .find(|mount| mount.path() == path && mount.kind == kind && !mount.read_only)
+            .map(|mount| fs::mounts::join(mount.id, moto_sdk::async_fs::ROOT_ID))
+            .ok_or_else(|| format!("expected a writable {kind:?} at {path}"))?;
+        queued_mutations(runtime, parent)
             .await
-            .map_err(|err| err.to_string())?;
-        check_mount(runtime, id).await?;
+            .map_err(|err| format!("queued mutations on {path}: {err}"))?;
+        super::pager::self_test::coalesced_windows(runtime, parent)
+            .await
+            .map_err(|err| format!("pager windows on {path}: {err}"))?;
     }
     Ok(())
 }
 
-async fn check_mount(runtime: &FsRuntime, parent: EntryId) -> Result<(), String> {
+async fn queued_mutations(runtime: &FsRuntime, parent: EntryId) -> Result<(), String> {
     let name = format!(
         ".spawn-lock-test-{}",
         moto_rt::time::Instant::now().as_u64()

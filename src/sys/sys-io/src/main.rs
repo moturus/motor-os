@@ -87,6 +87,9 @@ fn main() {
     stats_server::start();
     runtime::net::stats::start_socket_stats_service();
 
+    #[cfg(debug_assertions)]
+    self_test::run_at_boot();
+
     init_join_handle.wait().unwrap();
 
     #[cfg(debug_assertions)]

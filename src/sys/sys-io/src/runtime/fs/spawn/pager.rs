@@ -69,11 +69,17 @@ pub(crate) struct Pager {
     pub failed_fills: Cell<u64>,
     /// Microseconds spent serving fills, excluding the wait for a ticket.
     pub serve_us: Cell<u64>,
+    /// The isolated self-test pager must leave the process's kernel queue
+    /// to the live pager, which can serve the faulting threads.
+    #[cfg(debug_assertions)]
+    serves_kernel: bool,
 }
 
 impl Pager {
     pub fn new(exec_locks: Rc<RefCell<ExecLocks>>) -> Self {
         Self {
+            #[cfg(debug_assertions)]
+            serves_kernel: true,
             mappings: RefCell::new(BTreeMap::new()),
             pending: RefCell::new(VecDeque::new()),
             exec_locks,
@@ -81,6 +87,14 @@ impl Pager {
             filled_pages: Cell::new(0),
             failed_fills: Cell::new(0),
             serve_us: Cell::new(0),
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    pub(in crate::runtime::fs) fn new_isolated(exec_locks: Rc<RefCell<ExecLocks>>) -> Self {
+        Self {
+            serves_kernel: false,
+            ..Self::new(exec_locks)
         }
     }
 
@@ -98,6 +112,10 @@ impl Pager {
     /// now. Retirements are queued before an exit becomes visible, so a
     /// drain lets a mutation that follows a waited-for exit proceed.
     pub fn drain(&self) {
+        #[cfg(debug_assertions)]
+        if !self.serves_kernel {
+            return;
+        }
         let mut events = [[0_u64; 2]; SysMem::PAGER_MAX_EVENTS];
         loop {
             let count = match SysMem::pager_dequeue(&mut events) {

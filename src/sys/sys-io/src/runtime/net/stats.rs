@@ -19,8 +19,6 @@ use moto_sdk::sys_io::stats::{
     GetTcpSocketStatsResponse, ListExternalNetDevicePidsResponse, MAX_TCP_SOCKET_STATS,
     TcpSocketStatsV1, URL_IO_STATS,
 };
-#[cfg(debug_assertions)]
-use moto_sdk::sys_io::stats::{CMD_SELF_TEST, MAX_SELF_TEST_FAILURE_LEN, SelfTestResponse};
 use moto_sys::SysHandle;
 use std::{cell::Cell, rc::Rc, sync::OnceLock};
 
@@ -899,6 +897,28 @@ fn process_socket_stats(server: &mut LocalServer, waker: SysHandle) {
             resp.socket_stats[..stats.len()].copy_from_slice(&stats);
             resp.header.result = moto_rt::E_OK;
         }
+        #[cfg(debug_assertions)]
+        moto_sdk::sys_io::stats::CMD_TEST_LIVE_FILESYSTEMS => {
+            use moto_sys::caps::{CAP_FS_WRITE, CAP_SYS};
+            let result = (|| {
+                if version != 0 || flags != 0 {
+                    return Err(moto_rt::E_INVALID_ARGUMENT);
+                }
+                let caps = moto_sys::SysObj::get_capabilities(conn.handle())?;
+                let required = CAP_SYS | CAP_FS_WRITE;
+                if caps & required != required {
+                    return Err(moto_rt::E_NOT_ALLOWED);
+                }
+                crate::runtime::fs::stats::test_live_filesystems().map_err(|err| {
+                    log::error!("live filesystem self-tests failed: {err}");
+                    moto_rt::E_INTERNAL_ERROR
+                })
+            })();
+            conn.resp::<RequestHeader>().flags = 0;
+            let resp = conn.resp::<ResponseHeader>();
+            resp.ver = 0;
+            resp.result = result.err().unwrap_or(moto_rt::E_OK);
+        }
         CMD_LIST_EXTERNAL_NET_DEVICE_PIDS => {
             let result = (|| {
                 if version != 0 || flags != 0 {
@@ -924,22 +944,6 @@ fn process_socket_stats(server: &mut LocalServer, waker: SysHandle) {
                 }
                 Err(error) => error,
             };
-        }
-        // Runs on this thread. Tests needing FS state dispatch to that runtime;
-        // the pure tests run here without blocking the network runtime.
-        #[cfg(debug_assertions)]
-        CMD_SELF_TEST => {
-            let outcome = crate::self_test::run_all();
-            let raw = conn.raw_channel();
-            let resp = unsafe { raw.get_mut::<SelfTestResponse>() };
-            resp.tests_run = outcome.tests_run;
-            resp.failures = outcome.failures;
-
-            let failure = outcome.first_failure.as_bytes();
-            let len = failure.len().min(MAX_SELF_TEST_FAILURE_LEN);
-            resp.failure_len = len as u32;
-            resp.first_failure[..len].copy_from_slice(&failure[..len]);
-            resp.header.result = moto_rt::E_OK;
         }
         _ => {
             let raw = conn.raw_channel();

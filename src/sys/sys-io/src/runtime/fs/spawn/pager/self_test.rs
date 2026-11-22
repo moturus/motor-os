@@ -6,17 +6,7 @@ use moto_sdk::async_fs::{AccessPermissions, EntryKind, FileSystem, Role, RolePer
 use moto_sys::{SysHandle, SysMem, SysObj, syscalls::RaiiHandle};
 use std::task::Poll;
 
-pub(in crate::runtime::fs) async fn coalesced_windows(runtime: &FsRuntime) -> Result<(), String> {
-    for path in ["/", "/none/tmp"] {
-        let (id, _) = crate::runtime::fs::mounts::stat_path(&runtime.mounts, Role::System, path)
-            .await
-            .map_err(|err| err.to_string())?;
-        check_mount(runtime, id).await?;
-    }
-    Ok(())
-}
-
-async fn check_mount(
+pub(in crate::runtime::fs) async fn coalesced_windows(
     runtime: &FsRuntime,
     parent: moto_sdk::async_fs::EntryId,
 ) -> Result<(), String> {
