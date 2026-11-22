@@ -320,7 +320,7 @@ impl AsyncFsClient {
 
     /// `file_open`, also reporting whether the call created the entry.
     fn file_open_inner(&self, path: &str, opts: u32) -> Result<(File, bool)> {
-        log::debug!("file_open('{path}', {opts:x})");
+        log::trace!("file_open('{path}', {opts:x})");
 
         if (opts & moto_rt::fs::O_NONBLOCK) != 0 {
             // Not yet.
@@ -381,7 +381,7 @@ impl AsyncFsClient {
             0
         };
 
-        log::debug!("file_open('{}', {opts:x}) -> {entry_id:x}", path.abs_path);
+        log::trace!("file_open('{}', {opts:x}) -> {entry_id:x}", path.abs_path);
         let file = File {
             entry_id,
             open_id: NEXT_OPEN_ID.fetch_add(1, Ordering::Relaxed),
