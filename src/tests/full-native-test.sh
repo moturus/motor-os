@@ -7,6 +7,8 @@ ROOT_DIR="$(cd "$script_dir/../.." && pwd)"
 BUILD=debug
 RELEASE=
 FULL=0
+CORE=0
+core_entry=0
 LIST=0
 OS=linux
 [ ! -x /user/bin/rush ] || OS=motor
@@ -14,10 +16,14 @@ for option in "$@"; do
   case "$option" in
     --release) BUILD=release; RELEASE=--release ;;
     --full) FULL=1 ;;
+    --core) CORE=1 ;;
     --list) LIST=1 ;;
-    *) echo "usage: $0 [--release] [--full] [--list]" >&2; exit 2 ;;
+    *) echo "usage: $0 [--release] [--full | --core] [--list]" >&2; exit 2 ;;
   esac
 done
+if [ "$FULL" = 1 ] && [ "$CORE" = 1 ]; then
+  echo "usage: $0 [--release] [--full | --core] [--list]" >&2; exit 2
+fi
 
 fail() { echo "full-native-test: $*" >&2; exit 1; }
 
@@ -70,6 +76,9 @@ admit_crate() (
 test_crate() (
   crate="$1"
   shift
+  subcommand="${crate_command:-test}"
+  # --core runs only the crates listed through core_crate.
+  if [ "$CORE" = 1 ] && [ "$core_entry" != 1 ]; then exit 0; fi
   profile="$RELEASE"
   for argument in "$@"; do
     [ "$argument" != --profile ] || profile=
@@ -83,7 +92,9 @@ test_crate() (
   cd "$ROOT_DIR/$crate"
   echo "full-native-test: $OS $crate $* ($BUILD)"
   if [ "$OS" = linux ]; then
-    cargo test --locked --offline $profile "$@"
+    cargo "$subcommand" --locked --offline $profile "$@"
+    # The core gate tests the OS crates; Lorry on Linux is not part of it.
+    [ "$CORE" = 0 ] || exit 0
     if [ "$crate" = src/sys/tools/wg ]; then
       # Linux cdylib support in Lorry is outside the image-layout migration.
       echo 'full-native-test: WireGuard uses Cargo only on Linux'
@@ -91,13 +102,26 @@ test_crate() (
     fi
   fi
   admit_crate "$@"
-  run_lorry test --locked --offline $profile "$@"
+  run_lorry "$subcommand" --locked --offline $profile "$@"
+)
+
+# Builds a test program and runs it directly, as `lorry run`.
+run_crate() (
+  crate_command=run
+  test_crate "$@"
 )
 
 test_cxx_unwind() (
   native_cxx_unwind=1
   test_crate src/sys/tests/unwind --features cxx "$@"
 )
+
+# A crate that src/tests/core-test.sh also runs.
+core_crate() {
+  core_entry=1
+  test_crate "$@"
+  core_entry=0
+}
 
 native_crates() {
   if [ "$OS" = linux ]; then
@@ -115,18 +139,18 @@ native_crates() {
   test_crate src/bin/gix --features native-test-support --lib --test native-port --test cli
   test_crate src/bin/rnetbench
   test_crate src/sys/tools/wg
-  test_crate src/sys/sys-init --lib
-  test_crate src/sys/lib/moto-rt
-  test_crate src/sys/lib/moto-sys
-  test_crate src/sys/lib/moto-sdk
-  test_crate src/sys/lib/moto-sdk --no-default-features
+  core_crate src/sys/sys-init --lib
+  core_crate src/sys/lib/moto-rt
+  core_crate src/sys/lib/moto-sys
+  core_crate src/sys/lib/moto-sdk
+  core_crate src/sys/lib/moto-sdk --no-default-features
   if [ "$OS" = linux ]; then
-    test_crate src/sys/lib/frusa
+    core_crate src/sys/lib/frusa
   elif [ "$LIST" != 1 ]; then
     echo 'SKIP Motor frusa unit tests: the test RNG does not build; see docs/plans/future-work.md'
   fi
-  test_crate src/sys/lib/memfs
-  test_crate src/sys/tests/unwind
+  core_crate src/sys/lib/memfs
+  core_crate src/sys/tests/unwind
   test_cxx_unwind
   test_crate src/sys/tests/unwind --profile release-lto
   test_cxx_unwind --profile release-lto
@@ -134,16 +158,18 @@ native_crates() {
   test_cxx_unwind --profile release-abort
   test_crate src/sys/tests/wasm-smoke-suite
   if [ "$OS" = linux ]; then
-    test_crate src/sys/lib/motor-fs --features image-admin
+    core_crate src/sys/lib/motor-fs --features image-admin
     test_crate src/bin/rush --features dev-tty --test phase8
   else
     if [ "$LIST" != 1 ]; then
       echo 'SKIP Motor motor-fs unit tests: the test RNG does not build; see docs/plans/future-work.md'
     fi
-    test_crate src/sys/tools/sysbox
-    test_crate src/sys/tests/systest
-    test_crate src/sys/tests/mio-test
-    test_crate src/sys/tests/tokio-tests
+    core_crate src/sys/tools/sysbox
+    run_crate src/sys/tests/systest
+    # The stdlib Command formatting tests live next to systest.
+    test_crate src/sys/tests/systest --test command_debug
+    run_crate src/sys/tests/mio-test
+    run_crate src/sys/tests/tokio-tests
     test_crate src/sys/tests/crossterm-smoke
     test_crate src/sys/tests/toolchain
     test_crate src/sys/tests/javy-smoke --test installed
@@ -151,8 +177,8 @@ native_crates() {
   fi
   net_features=async,assembler-max-segment-count-32,fragmentation-buffer-size-65536,iface-neighbor-cache-count-64,medium-ethernet,medium-ip,proto-ipv4,proto-ipv4-fragmentation,proto-ipv6,proto-ipv6-fragmentation,reassembly-buffer-count-4,reassembly-buffer-size-65536,socket-dhcpv4,socket-icmp,socket-tcp,socket-udp
   if [ "$OS" = linux ]; then
-    test_crate src/sys/sys-io/netstack --no-default-features --features "$net_features"
-    test_crate src/sys/sys-io/netstack --no-default-features --features "$net_features,proto-ipv6-slaac" --lib iface::
+    core_crate src/sys/sys-io/netstack --no-default-features --features "$net_features"
+    core_crate src/sys/sys-io/netstack --no-default-features --features "$net_features,proto-ipv6-slaac" --lib iface::
   elif [ "$LIST" != 1 ]; then
     echo 'SKIP Motor netstack unit tests: the test RNG does not build; see docs/plans/future-work.md'
   fi
@@ -182,6 +208,12 @@ else
 fi
 [ -x "$LORRY" ] || fail "Lorry is not executable: $LORRY"
 export LORRY
+
+if [ "$CORE" = 1 ]; then
+  native_crates
+  echo "full-native-test: PASS ($OS, $BUILD, core)"
+  exit
+fi
 
 # Give the curl harness a fresh output directory so an old test executable
 # cannot be mistaken for the one built from the current working tree.

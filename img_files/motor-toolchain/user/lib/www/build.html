@@ -581,6 +581,14 @@ client, and <code>ssh-copy-id -t</code> needs version 9.4 or newer. No test runs
 <code>sshd</code>. <code>cross-test.sh --benchmark physical|plain|wireguard</code> retains
 the networking benchmarks. <code>stress-soak.sh</code> remains a separate repository
 script, outside the full gate.</p>
+<pre><code>src/tests/core-test.sh              # debug
+src/tests/core-test.sh --release</code></pre>
+<p><code>core-test.sh</code> is a fast gate for core OS changes. It runs the
+<code>src/sys</code> part of the full gate: <code>cargo test</code> on Linux, the whole
+<code>systest</code> sequence, <code>mio-test</code> and <code>tokio-tests</code>,
+<code>lorry test</code> inside Motor OS as Interactive, and
+the System console and OOM abort checks. It prints the time of each step at the end.
+<code>full-test.sh</code> still runs everything.</p>
 
 <h2>Working on the compilers</h2>
 <p>The compilers are built by

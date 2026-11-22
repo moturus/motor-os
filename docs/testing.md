@@ -1,13 +1,17 @@
 # Testing Motor OS
 
-Three runners in `src/tests/` cover the repository:
+Four runners in `src/tests/` cover the repository:
 
 - `full-test.sh` is the main gate. It builds the images, runs host checks and
   native tests on Linux, installs the toolchain into a disposable copy of the
   standard image, runs the host/guest cross checks, then runs the native tests
   inside Motor OS as Interactive (`0x3ec`) and None (`0x3a4`).
+- `core-test.sh` is a fast gate for core OS changes. It runs the `src/sys`
+  part of `full-test.sh` and times each step.
 - `full-native-test.sh` runs the native tests on the machine it runs on:
-  `cargo test` and `lorry test` on Linux, `lorry test` on Motor OS.
+  `cargo test` and `lorry test` on Linux, `lorry test` on Motor OS. On
+  Motor OS, `systest`, `mio-test` and `tokio-tests` run with `lorry run`
+  instead: they are test programs, not test harnesses.
 - `cross-test.sh` runs the host/guest checks against an image that already has
   the toolchain installed.
 
@@ -64,16 +68,40 @@ about 7; on the release image they take 67 and 33 seconds. It also does not
 pass at present: see "`full-test.sh --all-debug` does not pass" in
 [plans/future-work.md](plans/future-work.md).
 
+## `core-test.sh`
+
+```sh
+src/tests/core-test.sh [--release]
+```
+
+It uses the release image and Cloud Hypervisor, like the default
+`full-test.sh`. `--release` runs the native tests in release. The gate:
+
+- runs `cargo test` on Linux for the `src/sys` crates (no Lorry on Linux);
+- boots the base image, and installs the toolchain into a copy of the
+  standard image (no installer checks);
+- runs the fresh-boot checks, then the whole `systest` sequence, then
+  `mio-test` and `tokio-tests`, all as Interactive. `mio-test` and
+  `tokio-tests` are built on the host in the native-test profile;
+- runs `lorry test` inside Motor OS for the `src/sys` crates, as Interactive
+  only;
+- runs the System console and System OOM abort checks.
+
+It leaves out `src/bin`, the toolchain and wasm tests, WireGuard, the other
+cross checks, and the host checks. `full-test.sh` still runs everything.
+At the end it prints the time of each step and of each crate.
+
 ## `full-native-test.sh`
 
 ```sh
-src/tests/full-native-test.sh [--release] [--full] [--list]
+src/tests/full-native-test.sh [--release] [--full | --core] [--list]
 ```
 
 | Option | Effect |
 | --- | --- |
 | `--release` | Runs the tests with `--release`. |
 | `--full` | Adds the optional native Helix build. |
+| `--core` | Runs only the crates `core-test.sh` needs, and only `cargo test` on Linux. |
 | `--list` | Prints the crates and arguments it would test, without running anything. |
 
 `full-test.sh` runs it on Linux and inside Motor OS with the profile selected

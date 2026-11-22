@@ -1920,9 +1920,22 @@ cross_prepare_programs() {
   [ "$VMM" != qemu ] || ensure_vsock_backend
   (cd "$ROOT_DIR/src/bin/russhd" && cargo build --locked --offline "${profile[@]}" --features cross-test-support --bins)
   (cd "$ROOT_DIR/src/bin/russhd" && cargo build --locked --offline "${profile[@]}" --features cross-test-support --target x86_64-unknown-motor --bin ssh-socks-probe)
-  (cd "$ROOT_DIR/src/sys/tests/cross-peer" && cargo build --locked --offline "${profile[@]}")
   (cd "$ROOT_DIR/src/bin/rnetbench" && cargo build --release --locked --offline)
   (cd "$ROOT_DIR/src/sys/tools/wg/host-peer" && cargo build --release --locked --offline)
+  cross_prepare_console_programs
+  if [ "$VMM" != fc ]; then
+    for crate in javy-smoke wasmtime-smoke; do
+      (cd "$ROOT_DIR/src/sys/tests/$crate" && cargo build --release --locked --offline \
+        --target x86_64-unknown-motor --bin "$crate")
+    done
+  fi
+}
+
+# The programs cross_upload_programs and cross_system_console need.
+cross_prepare_console_programs() {
+  local profile=()
+  [ "$BUILD" != release ] || profile=(--release)
+  (cd "$ROOT_DIR/src/sys/tests/cross-peer" && cargo build --locked --offline "${profile[@]}")
   (cd "$ROOT_DIR/src/bin/rush" && cargo test --no-run --locked --offline "${profile[@]}" \
     --target x86_64-unknown-motor --test motor_caps --message-format=json) > "$RUN_DIR/rush-caps.json"
   RUSH_CAPS_PROBE="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "motor_caps") | .executable' "$RUN_DIR/rush-caps.json")"
@@ -1931,12 +1944,6 @@ cross_prepare_programs() {
     "${profile[@]}" --target x86_64-unknown-motor --test commands --message-format=json > "$RUN_DIR/sysbox-commands.json"
   SYSBOX_COMMAND_PROBE="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "commands") | .executable' "$RUN_DIR/sysbox-commands.json")"
   [ -x "$SYSBOX_COMMAND_PROBE" ] || cross_fail 'sysbox command harness was not built'
-  if [ "$VMM" != fc ]; then
-    for crate in javy-smoke wasmtime-smoke; do
-      (cd "$ROOT_DIR/src/sys/tests/$crate" && cargo build --release --locked --offline \
-        --target x86_64-unknown-motor --bin "$crate")
-    done
-  fi
 }
 
 cross_upload_programs() {
@@ -5127,11 +5134,9 @@ cross_base() {
   echo 'base image boot and layout: PASS'
 }
 
-cross_run() {
-  cross_prepare_programs
-  prepare_identity_workspace
-  test_host_identity
-  cross_base
+# Boots a copy of the standard image and runs the checks that need a fresh
+# boot. The VM keeps running, with the test programs uploaded.
+cross_fresh_boot() {
   copy_test_image "$CROSS_IMAGE" standard
   # A private disk marker verifies that the fresh RAM mount hides its backing
   # directory. No marker is present in either published image.
@@ -5151,6 +5156,14 @@ cross_run() {
     vm_ssh "MOTOR_OS_CAPS=0x3ec $TEST_BIN/systest kernel-log-boot"
   fi
   check_guest_image_layout
+}
+
+cross_run() {
+  cross_prepare_programs
+  prepare_identity_workspace
+  test_host_identity
+  cross_base
+  cross_fresh_boot
   if [ "$VMM" != fc ]; then check_installed_tools; fi
   test_guest_identity
   cross_network_checks

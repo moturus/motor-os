@@ -14,6 +14,7 @@ full_options() {
   VMM=chv
   CPUS="${MOTO_SMP-4}"
   FULL=0
+  CORE=0 # Set by src/tests/core-test.sh.
   local option value
   local -A seen=()
   while [ "$#" -gt 0 ]; do
@@ -168,7 +169,13 @@ full_install_toolchain() {
   printf 'put "%s" "/none/dev/toolchain-install/%s.tar.zst"\n' "$archive" "$package" | vm_sftp
   # Preserve archive permissions relative to the Interactive installer.
   vm_ssh "tar -xf /none/dev/toolchain-install/$package.tar.zst -C /none/dev/toolchain-install"
-  full_check_installation "$package"
+  if [ "$CORE" = 1 ]; then
+    # The core gate needs a working toolchain, not the installer checks.
+    vm_ssh "/none/dev/toolchain-install/$package/install.sh"
+    vm_ssh '/user/bin/rm -r /none/dev/toolchain-install'
+  else
+    full_check_installation "$package"
+  fi
   shutdown_test_image
 }
 
@@ -202,7 +209,7 @@ full_upload_native_inputs() {
   if vm_ssh "MOTOR_OS_CAPS=0x204 /user/bin/rush -c 'echo denied >>/user/dev/lorry/vendor/repository.toml'" >/dev/null 2>&1; then
     cross_fail 'None can modify the Interactive dependency repository'
   fi
-  if [ "$TEST_BUILD" = release ]; then
+  if [ "$TEST_BUILD" = release ] && [ "$CORE" = 0 ]; then
     vm_ssh 'MOTOR_OS_CAPS=0x204 mkdir /none/dev/quickjs-test262'
     vm_ssh 'MOTOR_OS_CAPS=0x204 tar -xf - -C /none/dev/quickjs-test262' < "$inputs/quickjs-source.tar"
     vm_ssh 'MOTOR_OS_CAPS=0x204 tar -xf - -C /none/dev/quickjs-test262' < "$inputs/quickjs-test262.tar.zst"

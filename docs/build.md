@@ -246,6 +246,9 @@ toolchain installation, native guest tests, and cross checks that need
 development tools. Each skip is named. Cloud Hypervisor runs require QEMU for
 the DHCP check on a read-only root. `--full` adds the optional native Helix build.
 
+`src/tests/core-test.sh [--release]` is a faster gate for core OS changes. It
+runs the `src/sys` part of the full gate and prints how long each step took.
+
 `src/tests/full-native-test.sh` runs Cargo and Lorry harnesses on Linux, with
 WireGuard using Cargo only, or Lorry harnesses on Motor.
 `src/tests/cross-test.sh --image IMAGE` runs the

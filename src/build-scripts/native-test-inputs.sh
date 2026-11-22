@@ -5,13 +5,16 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 release=0
 full=0
+core=0
 for option in "$@"; do
   case "$option" in
     --release) release=1 ;;
     --full) full=1 ;;
-    *) echo "usage: $0 [--release] [--full]" >&2; exit 2 ;;
+    --core) core=1 ;;
+    *) echo "usage: $0 [--release] [--full | --core]" >&2; exit 2 ;;
   esac
 done
+[ "$full" = 0 ] || [ "$core" = 0 ] || { echo "usage: $0 [--release] [--full | --core]" >&2; exit 2; }
 inputs="$ROOT_DIR/build/native-test-inputs"
 prepare_home="$inputs/home"
 source_tree="$inputs/source"
@@ -81,14 +84,20 @@ if [ -d "$source_tree" ]; then
     cp -a "$git_sources" "$staging/${relative%/*}/"
   done < <(find "$source_tree" -type d -path '*/.lorry/vendor/git' -print0 -prune)
 fi
-rm -r "$source_tree"
+# The snapshot keeps working-tree modes, and ssh needs test.key read-only.
+rm -rf "$source_tree"
 mv "$staging" "$source_tree"
 
-"$ROOT_DIR/src/tests/full-native-test.sh" --list > "$inputs/harnesses"
-# These Motor-only harnesses belong to the same sys workspace. Fetching a
-# workspace takes every locked package, including target-specific dependencies.
-printf '%s\n' src/sys/tests/systest src/sys/tools/sysbox src/sys/tests/toolchain \
-  src/sys/tests/javy-smoke src/sys/tests/wasmtime-smoke >> "$inputs/harnesses"
+if [ "$core" = 1 ]; then
+  # The core Motor-only crates are all in the sys workspace listed below.
+  "$ROOT_DIR/src/tests/full-native-test.sh" --list --core > "$inputs/harnesses"
+else
+  "$ROOT_DIR/src/tests/full-native-test.sh" --list > "$inputs/harnesses"
+  # These Motor-only harnesses belong to the same sys workspace. Fetching a
+  # workspace takes every locked package, including target-specific dependencies.
+  printf '%s\n' src/sys/tests/systest src/sys/tools/sysbox src/sys/tests/toolchain \
+    src/sys/tests/javy-smoke src/sys/tests/wasmtime-smoke >> "$inputs/harnesses"
+fi
 [ "$full" != 1 ] || printf '%s\n' external-sources/helix >> "$inputs/harnesses"
 : > "$inputs/workspaces"
 while read -r crate options; do
@@ -99,9 +108,10 @@ done < "$inputs/harnesses" | LC_ALL=C sort -u > "$inputs/workspaces"
 
 # Source snapshots change on every run; fetching is needed only when manifests,
 # locks or source preparation change. Offline admission verifies all inputs later.
-fetch_key="$(cd "$source_tree" && find . -type d \( -name target -o -name .lorry \) -prune -o \
+# The key includes the workspace list, because a --core run fetches fewer.
+fetch_key="$(cd "$source_tree" && { find . -type d \( -name target -o -name .lorry \) -prune -o \
   -type f \( -name Cargo.toml -o -name Cargo.lock -o -path '*/.cargo/config*' \) \
-  -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum)"
+  -print0 | LC_ALL=C sort -z | xargs -0 sha256sum; cat "$inputs/workspaces"; } | sha256sum)"
 previous_key="$(cat "$inputs/fetch-key" 2>/dev/null || true)"
 while IFS= read -r manifest; do
   workspace="${manifest%/Cargo.toml}"
@@ -123,7 +133,7 @@ if [ "$full" = 1 ]; then
   tar -C "$source_tree" -cf "$inputs/helix-source.tar" external-sources/helix
 fi
 
-if [ "$release" = 1 ]; then
+if [ "$release" = 1 ] && [ "$core" = 0 ]; then
   checkout="$ROOT_DIR/external-sources/quickjs-0.18.0"
   quickjs="$ROOT_DIR/build/assembly/build/quickjs/src"
   [ -f "$quickjs/run-test262.c" ] && [ -d "$checkout/.git" ] || {
