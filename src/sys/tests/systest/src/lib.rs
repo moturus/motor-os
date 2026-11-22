@@ -168,6 +168,17 @@ pub(crate) fn has_cap_log() -> bool {
     moto_sys::ProcessStaticPage::get().capabilities & moto_sys::caps::CAP_LOG != 0
 }
 
+/// Whether the kernel holds this thread parked in `SysCpu::wait`.
+fn parked_in_wait(tid: u64) -> bool {
+    if tid == 0 {
+        return false; // The thread has not started yet.
+    }
+    let thread = moto_sys::SysRay::dbg_get_thread_data_v1(SysHandle::SELF, tid).unwrap();
+    matches!(thread.status, moto_sys::stats::ThreadStatus::LiveInWait)
+        && thread.syscall_num == moto_sys::syscalls::SYS_CPU
+        && thread.syscall_op == moto_sys::SysCpu::OP_WAIT
+}
+
 /// Prints the skip notice for `test` and returns true when `CAP_LOG` is missing.
 pub(crate) fn skip_without_cap_log(test: &str) -> bool {
     if has_cap_log() {

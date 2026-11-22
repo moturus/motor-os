@@ -978,6 +978,116 @@ pub fn test_ready_close_churn() {
     println!("-- test_ready_close_churn PASS");
 }
 
+/// Closing a registry releases the registrations that its sources hold. A
+/// source without events used to keep one, and the closed registry's memory,
+/// for every registry that had watched it.
+pub fn test_registry_close_releases_registrations() {
+    const ROUNDS: u64 = 50_000;
+    // A leak is some hundreds of bytes a round: at least 3,000 pages in all.
+    const TOLERANCE_PAGES: u64 = 512;
+
+    // A registry is itself a source, and this one is never woken.
+    let quiet = poll::new().unwrap();
+    let churn = || {
+        for token in 0..ROUNDS {
+            let registry = poll::new().unwrap();
+            poll::add(registry, quiet, token, poll::POLL_READABLE).unwrap();
+            moto_rt::fs::close(registry).unwrap();
+        }
+    };
+    // The first pass grows the heap to its working size.
+    churn();
+    let used_before = crate::memory::used_pages();
+    churn();
+    crate::memory::assert_recovered(used_before, TOLERANCE_PAGES, "closing poll registries");
+
+    moto_rt::fs::close(quiet).unwrap();
+    println!("-- test_registry_close_releases_registrations PASS");
+}
+
+/// A wait that has acquired the registry can finish after its final fd closes.
+fn test_close_registry_during_wait() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let registry = poll::new().unwrap();
+    let alias = moto_rt::fs::duplicate(registry).unwrap();
+    let source = poll::new().unwrap();
+    let tid = AtomicU64::new(0);
+    let deadline = moto_rt::time::Instant::now() + Duration::from_secs(10);
+    std::thread::scope(|scope| {
+        let waiter = scope.spawn(|| {
+            let mut event = poll::Event::default();
+            tid.store(
+                moto_sys::UserThreadControlBlock::this_thread_tid(),
+                Ordering::Release,
+            );
+            assert_eq!(poll::wait(registry, &mut event, 1, Some(deadline)), Ok(1));
+            assert_eq!(event.token, 42);
+        });
+        while !crate::parked_in_wait(tid.load(Ordering::Acquire)) {
+            assert!(
+                moto_rt::time::Instant::now() < deadline,
+                "poller never parked"
+            );
+            std::thread::yield_now();
+        }
+        moto_rt::fs::close(registry).unwrap();
+        poll::add(alias, source, 42, poll::POLL_READABLE).unwrap();
+        moto_rt::fs::close(alias).unwrap();
+        poll::wake(source).unwrap();
+        waiter.join().unwrap();
+    });
+    moto_rt::fs::close(source).unwrap();
+}
+
+/// A successful duplicate keeps every watch that a concurrent add installed.
+fn test_close_registry_during_dup_and_add() {
+    let source = poll::new().unwrap();
+    let extra = poll::new().unwrap();
+    for _ in 0..32 {
+        let registry = poll::new().unwrap();
+        poll::add(registry, source, 1, poll::POLL_READABLE).unwrap();
+        let start = std::sync::Barrier::new(3);
+        std::thread::scope(|scope| {
+            let dup = scope.spawn(|| {
+                start.wait();
+                moto_rt::fs::duplicate(registry)
+            });
+            let add = scope.spawn(|| {
+                start.wait();
+                poll::add(registry, extra, 2, poll::POLL_READABLE)
+            });
+            start.wait();
+            moto_rt::fs::close(registry).unwrap();
+            let added = match add.join().unwrap() {
+                Ok(()) => true,
+                Err(moto_rt::Error::BadHandle) => false,
+                Err(err) => panic!("poll add failed: {err:?}"),
+            };
+            match dup.join().unwrap() {
+                Ok(alias) => {
+                    poll::wake(source).unwrap();
+                    poll::wake(extra).unwrap();
+                    let mut events = [poll::Event::default(); 2];
+                    let now = moto_rt::time::Instant::now();
+                    let count =
+                        poll::wait(alias, events.as_mut_ptr(), events.len(), Some(now)).unwrap();
+                    assert_eq!(count, 1 + usize::from(added));
+                    assert_eq!(events[0].token, 1);
+                    if added {
+                        assert_eq!(events[1].token, 2);
+                    }
+                    moto_rt::fs::close(alias).unwrap();
+                }
+                Err(moto_rt::Error::BadHandle) => {}
+                Err(err) => panic!("dup failed: {err:?}"),
+            }
+        });
+    }
+    moto_rt::fs::close(extra).unwrap();
+    moto_rt::fs::close(source).unwrap();
+}
+
 pub fn run_all_tests() {
     test_multi_poller();
     test_refused_connect_reports_writable();
@@ -995,4 +1105,7 @@ pub fn run_all_tests() {
     test_remote_close_races_local_close();
     test_same_source_dup_reuse();
     test_ready_close_churn();
+    test_close_registry_during_wait();
+    test_close_registry_during_dup_and_add();
+    test_registry_close_releases_registrations();
 }

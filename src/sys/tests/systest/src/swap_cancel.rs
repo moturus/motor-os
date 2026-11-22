@@ -186,17 +186,6 @@ fn spill_wait(tid: &AtomicU64) -> ! {
     }
 }
 
-/// Whether the kernel holds this thread parked in `SysCpu::wait`.
-fn parked_in_wait(tid: u64) -> bool {
-    if tid == 0 {
-        return false; // The thread has not started yet.
-    }
-    let thread = moto_sys::SysRay::dbg_get_thread_data_v1(SysHandle::SELF, tid).unwrap();
-    matches!(thread.status, moto_sys::stats::ThreadStatus::LiveInWait)
-        && thread.syscall_num == moto_sys::syscalls::SYS_CPU
-        && thread.syscall_op == SysCpu::OP_WAIT
-}
-
 fn run_spill_worker(root: &Path) -> ! {
     let tids: Arc<Vec<AtomicU64>> =
         Arc::new((0..SPILL_WAITERS).map(|_| AtomicU64::new(0)).collect());
@@ -208,7 +197,7 @@ fn run_spill_worker(root: &Path) -> ! {
     // parent's readiness deadline bounds this loop.
     while !tids
         .iter()
-        .all(|tid| parked_in_wait(tid.load(Ordering::Acquire)))
+        .all(|tid| crate::parked_in_wait(tid.load(Ordering::Acquire)))
     {
         std::thread::sleep(Duration::from_millis(1));
     }

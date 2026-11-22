@@ -65,7 +65,7 @@ struct RegState {
 }
 
 pub(crate) struct Registration {
-    registry: Weak<Registry>,
+    queue: Weak<PollQueue>,
     source: Weak<dyn PosixFile>,
     r_id: u64,
     source_fd: RtFd,
@@ -79,7 +79,7 @@ enum DeliveryResult {
 
 impl Registration {
     fn new(
-        registry: Weak<Registry>,
+        queue: Weak<PollQueue>,
         source: Weak<dyn PosixFile>,
         r_id: u64,
         source_fd: RtFd,
@@ -87,7 +87,7 @@ impl Registration {
         interests: Interests,
     ) -> Arc<Self> {
         Arc::new(Self {
-            registry,
+            queue,
             source,
             r_id,
             source_fd,
@@ -120,7 +120,7 @@ impl Registration {
     }
 
     fn deliver(self: &Arc<Self>, events: EventBits) -> DeliveryResult {
-        let Some(registry) = self.registry.upgrade() else {
+        let Some(queue) = self.queue.upgrade() else {
             return DeliveryResult::Remove;
         };
 
@@ -136,7 +136,7 @@ impl Registration {
         state.queued |= events;
         let wake = if state.lifecycle == RegLifecycle::Active && !state.pending {
             state.pending = true;
-            registry.ready.lock().push_back(self.clone());
+            queue.ready.lock().push_back(self.clone());
             true
         } else {
             false
@@ -144,15 +144,12 @@ impl Registration {
         drop(state);
 
         if wake {
-            registry.poller.wake();
+            queue.poller.wake();
         }
         DeliveryResult::Keep
     }
 
-    fn activate(self: &Arc<Self>) -> bool {
-        let Some(registry) = self.registry.upgrade() else {
-            return false;
-        };
+    fn activate(self: &Arc<Self>, queue: &PollQueue) -> bool {
         let mut state = self.state.lock();
         if state.lifecycle != RegLifecycle::Adding {
             return false;
@@ -161,11 +158,11 @@ impl Registration {
         let wake = state.queued != 0 && !state.pending;
         if wake {
             state.pending = true;
-            registry.ready.lock().push_back(self.clone());
+            queue.ready.lock().push_back(self.clone());
         }
         drop(state);
         if wake {
-            registry.poller.wake();
+            queue.poller.wake();
         }
         true
     }
@@ -174,7 +171,6 @@ impl Registration {
     /// retirement -- `false` means something else (a local close, a
     /// replacing add) got there first.
     fn retire(self: &Arc<Self>) -> bool {
-        let registry = self.registry.upgrade();
         let mut state = self.state.lock();
         if state.lifecycle == RegLifecycle::Retired {
             return false;
@@ -183,8 +179,8 @@ impl Registration {
         state.queued = 0;
         if state.pending {
             state.pending = false;
-            if let Some(registry) = registry {
-                registry
+            if let Some(queue) = self.queue.upgrade() {
+                queue
                     .ready
                     .lock()
                     .retain(|queued| !Arc::ptr_eq(queued, self));
@@ -505,7 +501,7 @@ impl EventSourceUnmanaged {
     pub fn reset_interest(&self, interest: Interests) {
         let mut registries = self.base.registries.lock();
         registries.retain(|_, registration| {
-            if registration.registry.upgrade().is_none() {
+            if registration.queue.strong_count() == 0 {
                 return false;
             }
             let mut state = registration.state.lock();
@@ -737,17 +733,18 @@ impl PollerSlot {
     }
 }
 
+// Producers hold their source lock during delivery. Giving them only the
+// queue keeps final registry cleanup, which locks sources, out of that path.
+struct PollQueue {
+    ready: SpinLock<VecDeque<Arc<Registration>>>,
+    poller: PollerSlot,
+}
+
 pub struct Registry {
     id: u64,
-    self_ref: Weak<Registry>,
-    ready: SpinLock<VecDeque<Arc<Registration>>>,
-    ops: moto_rt::mutex::Mutex<()>,
-    poller: PollerSlot,
+    queue: Arc<PollQueue>,
     event_source: EventSourceManaged,
-
-    // Keep the registration, rather than only a weak source reference: the
-    // object is the identity shared by the source map and ready queue.
-    pollees: SpinLock<BTreeMap<RtFd, Arc<Registration>>>,
+    pollees: moto_rt::mutex::Mutex<BTreeMap<RtFd, Arc<Registration>>>,
 }
 
 impl PosixFile for Registry {
@@ -798,42 +795,54 @@ impl PosixFile for Registry {
     }
 }
 
+impl Drop for Registry {
+    fn drop(&mut self) {
+        // Duplicates and in-flight calls have all released the registry.
+        // Unlink the sources and let the entire ready queue drop together.
+        let pollees = core::mem::take(&mut *self.pollees.lock());
+        for registration in pollees.into_values() {
+            if let Some(source) = registration.source.upgrade() {
+                let _ = source.poll_del(&registration);
+            }
+        }
+    }
+}
+
 impl Registry {
     pub fn new() -> Arc<Self> {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
 
-        Arc::new_cyclic(|self_ref| Self {
+        Arc::new(Self {
             id,
-            self_ref: self_ref.clone(),
-            ready: SpinLock::new(VecDeque::new()),
-            ops: moto_rt::mutex::Mutex::new(()),
-            poller: PollerSlot::new(),
+            queue: Arc::new(PollQueue {
+                ready: SpinLock::new(VecDeque::new()),
+                poller: PollerSlot::new(),
+            }),
             event_source: EventSourceManaged::new(moto_rt::poll::POLL_READABLE),
-            pollees: SpinLock::new(BTreeMap::new()),
+            pollees: moto_rt::mutex::Mutex::new(BTreeMap::new()),
         })
     }
 
     pub fn add(&self, source_fd: RtFd, token: Token, interests: Interests) -> ErrorCode {
-        let _ops = self.ops.lock();
+        let mut pollees = self.pollees.lock();
         let Some(posix_file) = posix::get_file(source_fd) else {
             return E_BAD_HANDLE;
         };
 
-        let existing = self.pollees.lock().get(&source_fd).cloned();
-        if let Some(existing) = existing {
+        if let Some(existing) = pollees.get(&source_fd) {
             if existing.is_live_for(&posix_file) {
                 return E_INVALID_ARGUMENT;
             }
-            self.remove_pollee_if(source_fd, &existing);
             existing.retire();
             if let Some(source) = existing.source.upgrade() {
-                let _ = source.poll_del(&existing);
+                let _ = source.poll_del(existing);
             }
+            pollees.remove(&source_fd);
         }
 
         let registration = Registration::new(
-            self.self_ref.clone(),
+            Arc::downgrade(&self.queue),
             Arc::downgrade(&posix_file),
             self.id,
             source_fd,
@@ -857,18 +866,17 @@ impl Registry {
             return E_BAD_HANDLE;
         }
 
-        self.pollees.lock().insert(source_fd, registration.clone());
-        if !registration.activate() {
-            self.remove_pollee_if(source_fd, &registration);
+        if !registration.activate(&self.queue) {
             let _ = posix_file.poll_del(&registration);
             return E_BAD_HANDLE;
         }
+        pollees.insert(source_fd, registration);
         E_OK
     }
 
     pub fn set(&self, source_fd: RtFd, token: Token, interests: Interests) -> ErrorCode {
-        let _ops = self.ops.lock();
-        let Some(registration) = self.pollees.lock().get(&source_fd).cloned() else {
+        let pollees = self.pollees.lock();
+        let Some(registration) = pollees.get(&source_fd) else {
             return E_BAD_HANDLE;
         };
         let Some(posix_file) = registration.source.upgrade() else {
@@ -882,7 +890,7 @@ impl Registry {
         }
 
         posix_file
-            .poll_set(&registration, token, interests)
+            .poll_set(registration, token, interests)
             .map_or_else(|err| err, |()| E_OK)
     }
 
@@ -898,8 +906,8 @@ impl Registry {
     /// so, the source's error stands -- the deregister-after-close
     /// contract `run_self_stdio_close_child` pins.
     pub fn del(&self, source_fd: RtFd) -> ErrorCode {
-        let _ops = self.ops.lock();
-        let Some(registration) = self.pollees.lock().remove(&source_fd) else {
+        let mut pollees = self.pollees.lock();
+        let Some(registration) = pollees.remove(&source_fd) else {
             return E_BAD_HANDLE;
         };
 
@@ -915,16 +923,6 @@ impl Registry {
         }
     }
 
-    fn remove_pollee_if(&self, source_fd: RtFd, registration: &Arc<Registration>) {
-        let mut pollees = self.pollees.lock();
-        if pollees
-            .get(&source_fd)
-            .is_some_and(|current| Arc::ptr_eq(current, registration))
-        {
-            pollees.remove(&source_fd);
-        }
-    }
-
     pub fn wake(&self) -> ErrorCode {
         self.event_source.on_event(moto_rt::poll::POLL_READABLE);
         E_OK
@@ -937,17 +935,17 @@ impl Registry {
 
         loop {
             // Wait phase: arm before the event check (see arm()).
-            let ticket = self.poller.arm();
+            let ticket = self.queue.poller.arm();
 
             let collected = self.collect_events(events_buf);
             if collected > 0 {
-                self.poller.disarm(ticket);
+                self.queue.poller.disarm(ticket);
                 return collected as i32;
             }
 
-            self.poller.park(&ticket, deadline);
+            self.queue.poller.park(&ticket, deadline);
             // The claim is only needed while parked.
-            self.poller.disarm(ticket);
+            self.queue.poller.disarm(ticket);
 
             let collected = self.collect_events(events_buf);
             if collected > 0 {
@@ -970,7 +968,7 @@ impl Registry {
     fn collect_events(&self, events_buf: &mut [Event]) -> usize {
         let mut idx = 0;
         while idx < events_buf.len() {
-            let Some(registration) = self.ready.lock().pop_front() else {
+            let Some(registration) = self.queue.ready.lock().pop_front() else {
                 break;
             };
             let mut state = registration.state.lock();
