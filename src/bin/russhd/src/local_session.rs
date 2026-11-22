@@ -518,7 +518,9 @@ async fn pump_output(
 
     let name = output_stream.name();
     let mut scanner = mode2048::Scanner::new(true);
-    let mut buf = [0_u8; 256];
+    // A read returns at most what the child's stdio pipe holds, 2 KiB. Each
+    // read becomes one SSH packet, and 256 bytes halved bulk throughput.
+    let mut buf = [0_u8; 2048];
     let mut coordinator_open = true;
 
     loop {
