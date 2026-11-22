@@ -51,6 +51,11 @@ pub fn is_child(args: &[String]) -> bool {
 
 pub fn run_child(args: &[String]) -> ! {
     match args[1].as_str() {
+        // Runs this file's tests alone: `systest stdio-file-relay-tests`.
+        "stdio-file-relay-tests" => {
+            run_tests();
+            std::process::exit(0)
+        }
         "stdio-file-relay-writer" => writer_child(args),
         "stdio-file-relay-exit-parent" => exit_parent(args),
         "stdio-file-relay-exit-writer" => exit_writer(args),
@@ -65,6 +70,10 @@ pub fn run_child(args: &[String]) -> ! {
         "stdio-file-relay-failure-parent" => failure_parent(),
         "stdio-file-relay-alias-parent" => alias_parent(),
         "stdio-file-relay-dual-writer" => dual_writer(),
+        "stdio-file-relay-refused-parent" => refused_parent(),
+        "stdio-file-relay-refused-writer" => {
+            refused_writer(args.get(2).is_some_and(|mode| mode == "bulk"))
+        }
         _ => panic!("unknown file-relay child: {}", args[1]),
     }
 }
@@ -448,6 +457,88 @@ fn failure_parent() -> ! {
     std::process::exit(0)
 }
 
+const REFUSED_EXIT: i32 = 14;
+
+/// Relays for a writer although sys-io refuses every write of this process.
+fn refused_parent() -> ! {
+    let caps = moto_sys::ProcessStaticPage::get().capabilities;
+    assert_eq!(0, caps & moto_sys::caps::CAP_FS_WRITE);
+    for mode in ["paced", "bulk"] {
+        let child = spawn(
+            &["stdio-file-relay-refused-writer", mode],
+            moto_rt::process::STDIO_NULL,
+            moto_rt::process::STDIO_INHERIT,
+            moto_rt::process::STDIO_NULL,
+        )
+        .unwrap();
+        let status = crate::wait_child(child.handle).unwrap();
+        if status != REFUSED_EXIT {
+            std::process::exit(status);
+        }
+    }
+    std::process::exit(REFUSED_EXIT)
+}
+
+/// Writes through Rust's stdout until a write fails. The relay loses the first
+/// line; a later write must say that the reader is gone. Exits with 1 if no
+/// write fails and with 2 on any other error.
+fn refused_writer(bulk: bool) -> ! {
+    use std::io::Write;
+
+    // A bulk write exceeds the relay ring and can be waiting when the relay exits.
+    let data = if bulk {
+        vec![b'x'; 128 * 1024]
+    } else {
+        b"refused\n".to_vec()
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        match std::io::stdout().write_all(&data) {
+            Ok(()) if !bulk => std::thread::sleep(std::time::Duration::from_millis(1)),
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(moto_rt::E_NOT_CONNECTED.into()) => {
+                std::process::exit(REFUSED_EXIT)
+            }
+            Err(_) => std::process::exit(2),
+        }
+    }
+    std::process::exit(1)
+}
+
+/// A relay that the file refuses must not leave the child writing into a ring
+/// that nothing reads.
+fn refused_relay_test() {
+    use moto_sys::caps::{CAP_FS_WRITE, MOTOR_OS_CAPS_ENV_KEY};
+
+    let path = crate::temp_path("stdio-relay-refused");
+    let output = moto_rt::fs::open(
+        path.to_str().unwrap(),
+        moto_rt::fs::O_CREATE | moto_rt::fs::O_TRUNCATE | moto_rt::fs::O_WRITE,
+    )
+    .unwrap();
+    let caps = moto_sys::ProcessStaticPage::get().capabilities & !CAP_FS_WRITE;
+    let mut env: Vec<(String, String)> = std::env::vars().collect();
+    env.push((MOTOR_OS_CAPS_ENV_KEY.to_owned(), format!("0x{caps:x}")));
+    let parent = moto_rt::process::spawn(moto_rt::process::SpawnArgs {
+        program: std::env::current_exe()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned(),
+        args: vec!["stdio-file-relay-refused-parent".to_owned()],
+        env,
+        cwd: None,
+        stdin: moto_rt::process::STDIO_NULL,
+        stdout: output,
+        stderr: moto_rt::process::STDIO_NULL,
+    })
+    .unwrap();
+    assert_eq!(crate::wait_child(parent.handle).unwrap(), REFUSED_EXIT);
+    moto_rt::fs::close(output).unwrap();
+    assert!(std::fs::read(&path).unwrap().is_empty());
+    std::fs::remove_file(&path).unwrap();
+}
+
 pub fn run_tests() {
     let output_path = crate::temp_path("stdio-relay-concurrent");
     let output = moto_rt::fs::open(
@@ -474,6 +565,7 @@ pub fn run_tests() {
 
     concurrent_stdout_stderr_test();
     exit_flush_test();
+    refused_relay_test();
 
     conflict_and_cleanup_tests();
     std::fs::remove_file(&output_path).unwrap();

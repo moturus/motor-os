@@ -863,6 +863,12 @@ async fn relay_file_output(
     mut shutdown: moto_sdk::async_runtime::oneshot::Receiver<()>,
 ) -> Result<(), ErrorCode> {
     let result = transfer_file_output(claim, &pipe, &mut shutdown).await;
+    if result.is_err() {
+        // The file took no more bytes. Tell the child before the pipe drops:
+        // its next write then fails as a lost reader. A dropped handle alone
+        // reads as a closed descriptor, which Rust's stdout treats as success.
+        let _ = pipe.close_reader();
+    }
     claim.source.file().cancel_output_relay();
     // Before `pipe` drops and its handle goes back to the kernel, so process
     // exit can never wake a number that has since been handed to something
