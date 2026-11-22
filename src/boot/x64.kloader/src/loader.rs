@@ -174,7 +174,7 @@ impl ElfLoader for KernelLoader {
 
     fn load(&mut self, _flags: Flags, base: VAddr, region: &[u8]) -> Result<(), ElfLoaderErr> {
         let dest = (crate::mm::kernel_offset() + base) as usize as *mut u8;
-        if region.as_ptr() as usize == dest as usize {
+        if core::ptr::eq(region.as_ptr(), dest) {
             return Ok(()); // Placed by the VMM: file and memory layouts agree.
         }
         unsafe {
