@@ -521,15 +521,15 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        target_os = "motor",
-        ignore = "a peer close is reported as ConnectionReset; see docs/plans/future-work.md"
-    )]
     fn a_truncated_flow_is_an_error_rather_than_a_short_read() {
-        let (client, release, peer) = stalled_connection();
-        let mut client = client;
-        drop(release); // Drops the peer's end, so the read sees EOF immediately.
-        peer.join().unwrap();
+        // The peer sends the start of the flow and closes. A peer that closes
+        // without sending anything would not do: Motor OS resets a connection
+        // that never carried a byte of the closing side.
+        let listener = TcpListener::bind(TEST_ADDR).unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        write_exact_pattern(&mut peer, 256, 1024).unwrap();
+        drop(peer);
 
         let err = read_exact_pattern(&mut client, 1024, 8192).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
