@@ -221,7 +221,14 @@ impl CachedBlock {
 
         // This is important: do copy-on-write.
         if block_ref.dirty_block.is_none() {
-            let rc_copy = block_ref.supporting_caches.borrow_mut().pop_free_block();
+            let rc_copy = {
+                let mut caches = block_ref.supporting_caches.borrow_mut();
+                #[cfg(debug_assertions)]
+                {
+                    caches.dirty_blocks += 1;
+                }
+                caches.pop_free_block()
+            };
             let Ok(mut box_copy) = Rc::try_unwrap(rc_copy) else {
                 panic!();
             };
@@ -250,21 +257,25 @@ impl CachedBlock {
         let dirty = Rc::new(dirty);
         let mut clean = dirty.clone();
         core::mem::swap(&mut clean, &mut inner_ref.clean_block);
+        let mut caches = inner_ref.supporting_caches.borrow_mut();
+        #[cfg(debug_assertions)]
+        {
+            caches.dirty_blocks -= 1;
+        }
         if Rc::strong_count(&clean) == 1 {
-            inner_ref
-                .supporting_caches
-                .borrow_mut()
-                .push_free_block(clean);
+            caches.push_free_block(clean);
         }
     }
 
     pub fn discard_dirty(&self) {
         let mut block_ref = self.inner.borrow_mut();
         let dirty = block_ref.dirty_block.take().unwrap();
-        block_ref
-            .supporting_caches
-            .borrow_mut()
-            .push_free_block(Rc::new(dirty));
+        let mut caches = block_ref.supporting_caches.borrow_mut();
+        #[cfg(debug_assertions)]
+        {
+            caches.dirty_blocks -= 1;
+        }
+        caches.push_free_block(Rc::new(dirty));
     }
 }
 
@@ -293,6 +304,11 @@ impl core::fmt::Debug for BackgroundMessage {
 struct SupportingCaches {
     free_blocks: Vec<Rc<BlockHolder>>,
     expiring_blocks: BTreeMap<u64, Weak<RefCell<InnerCachedBlock>>>,
+    /// How many blocks are dirty now. Debug builds check after every
+    /// transaction that none is; counting keeps that check off the size of
+    /// the cache.
+    #[cfg(debug_assertions)]
+    dirty_blocks: usize,
 }
 
 impl SupportingCaches {
@@ -554,6 +570,8 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
         };
 
         let supporting_caches = Rc::new(RefCell::new(SupportingCaches {
+            #[cfg(debug_assertions)]
+            dirty_blocks: 0,
             free_blocks: Vec::new(),
             expiring_blocks: BTreeMap::new(),
         }));
@@ -889,10 +907,10 @@ impl<BD: AsyncBlockDevice + 'static> BlockCache<BD> {
         block
     }
 
+    /// No block may be dirty between transactions.
     #[cfg(debug_assertions)]
     pub fn debug_check_clean(&self) {
-        for (block_no, block) in self.lru_cache.borrow().iter() {
-            assert!(!block.is_dirty(), "Block {block_no} is dirty.");
-        }
+        let dirty = self.supporting_caches.borrow().dirty_blocks;
+        assert_eq!(0, dirty, "{dirty} blocks are dirty.");
     }
 }
