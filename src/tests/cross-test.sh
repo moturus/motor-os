@@ -129,10 +129,17 @@ vm_alive() {
 }
 
 wait_vm_ssh() {
-  local deadline=$((SECONDS + 120))
-  until ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
-      motor@192.168.4.2 /user/bin/rush -c true >/dev/null 2>&1; do
+  local deadline=$((SECONDS + 120)) status
+  while :; do
+    status=0
+    # Past the key exchange ssh has no timeout of its own: a guest that stops
+    # answering there would hold this attempt for 15 minutes. That is a
+    # failure, not a reason to try again.
+    timeout --foreground 60 ssh "${SSH_OPTIONS[@]}" -o ConnectTimeout=5 -o ConnectionAttempts=1 \
+      motor@192.168.4.2 /user/bin/rush -c true >/dev/null 2>&1 || status=$?
+    [ "$status" != 0 ] || break
     vm_alive || { cat "$CONSOLE_LOG" >&2; cross_fail 'VM exited before SSH was ready'; }
+    [ "$status" != 124 ] || cross_fail "an SSH attempt hung; see $CONSOLE_LOG"
     [ "$SECONDS" -lt "$deadline" ] || cross_fail "SSH was not ready; see $CONSOLE_LOG"
     sleep 1
   done
