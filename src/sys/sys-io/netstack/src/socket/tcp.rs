@@ -1703,25 +1703,32 @@ impl<'a> Socket<'a> {
         if self.growth_deferred() || !self.rx_buffer.is_empty() || !self.assembler.is_empty() {
             return;
         }
-        if let Some(target) = self.pending_rx_capacity.take() {
-            // Re-clamp: the shift may have shrunk since the request
-            // latched (a peer without window scaling zeroes it).
-            let target = target.min(65535usize << self.remote_win_shift);
-            if target > self.rx_buffer.capacity() {
-                self.rx_buffer.grow_to(target);
-                self.assembler.set_bound(Self::assembler_bound(target));
+        let Some(target) = self.pending_rx_capacity else {
+            return;
+        };
+        // Re-clamp: the shift may have shrunk since the request
+        // latched (a peer without window scaling zeroes it).
+        let target = target.min(65535usize << self.remote_win_shift);
+        if target > self.rx_buffer.capacity() {
+            // A refused growth stays latched: the socket keeps the ring it
+            // has, and the next time the ring is empty tries again.
+            if !self.rx_buffer.grow_to(target) {
+                return;
             }
+            self.assembler.set_bound(Self::assembler_bound(target));
         }
+        self.pending_rx_capacity = None;
     }
 
     fn apply_pending_tx_growth(&mut self) {
         if self.growth_deferred() || !self.tx_buffer.is_empty() {
             return;
         }
-        if let Some(target) = self.pending_tx_capacity.take()
-            && target > self.tx_buffer.capacity()
+        // As for the receive ring: a refused growth stays latched.
+        if let Some(target) = self.pending_tx_capacity
+            && (target <= self.tx_buffer.capacity() || self.tx_buffer.grow_to(target))
         {
-            self.tx_buffer.grow_to(target);
+            self.pending_tx_capacity = None;
         }
     }
 
@@ -2121,6 +2128,9 @@ impl<'a> Socket<'a> {
             && self.assembler.is_empty()
             && self.tx_buffer.is_empty()
         {
+            // Dispatch retries latched growth. The orphan no longer needs it.
+            self.pending_rx_capacity = None;
+            self.pending_tx_capacity = None;
             let floor = if self.state == State::TimeWait {
                 TIME_WAIT_RING_FLOOR
             } else {
@@ -3011,10 +3021,10 @@ impl<'a> Socket<'a> {
             );
             self.tx_buffer.dequeue_allocated(ack_len);
 
-            self.apply_pending_tx_growth();
             // The ACK of our FIN usually acknowledges the last data too, and
             // the state change above ran before that data left the ring.
             self.release_orphan_rings();
+            self.apply_pending_tx_growth();
 
             // There's new room available in tx_buffer, wake the waiting task if any.
             #[cfg(feature = "async")]
@@ -5225,6 +5235,21 @@ mod test {
         );
         assert_eq!(s.send_capacity(), 256);
         assert_eq!(s.effective_send_capacity(), 256);
+    }
+
+    #[test]
+    fn test_refused_tx_growth_stays_latched() {
+        // More than any allocation may ask for, so the reservation is
+        // refused. The socket keeps its ring, and a later request applies.
+        let mut s = socket_established();
+        s.socket.grow_tx_capacity(usize::MAX);
+        assert_eq!(s.send_capacity(), 64);
+        assert_eq!(s.effective_send_capacity(), usize::MAX);
+
+        s.socket.grow_tx_capacity(256);
+        assert_eq!(s.send_capacity(), 256);
+        assert_eq!(s.effective_send_capacity(), 256);
+        assert_eq!(s.socket.send_slice(b"abcdef"), Ok(6));
     }
 
     #[test]
@@ -8365,6 +8390,11 @@ mod test {
                     ..RECV_TEMPL
                 }]
             );
+            // RX growth was refused on an earlier pass. TX growth is still
+            // waiting for the ACK of the payload and FIN.
+            s.pending_rx_capacity = Some(65535);
+            s.grow_tx_capacity(65535);
+            assert_eq!(s.pending_tx_capacity, Some(65535));
             send!(
                 s,
                 TcpRepr {
@@ -8384,8 +8414,23 @@ mod test {
                 (State::FinWait2, 16384)
             };
             assert_eq!(s.state, state);
+            if peer_fin {
+                recv!(
+                    s,
+                    [TcpRepr {
+                        seq_number: LOCAL_SEQ + 1 + 6 + 1,
+                        ack_number: Some(REMOTE_SEQ + 1 + 1),
+                        window_len: 1,
+                        ..RECV_TEMPL
+                    }]
+                );
+            } else {
+                recv_nothing!(s);
+            }
             assert_eq!(s.rx_buffer.capacity(), floor);
             assert_eq!(s.tx_buffer.capacity(), floor);
+            assert_eq!(s.effective_recv_capacity(), floor);
+            assert_eq!(s.effective_send_capacity(), floor);
         }
     }
 

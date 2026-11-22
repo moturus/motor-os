@@ -73,11 +73,15 @@ impl<'a, T: 'a> RingBuffer<'a, T> {
     /// elements there is nothing to relocate, so the storage can simply be
     /// extended. Callers that may hold data must drain first.
     ///
+    /// Returns `false`, with the ring unchanged, if the memory cannot be had:
+    /// sys-io must survive a refusal at the memory floor.
+    ///
     /// # Panics
     /// Panics if the ring is not empty, if `new_capacity` is smaller than
     /// the current capacity (shrinking is not supported), or if the
     /// storage is borrowed rather than owned.
-    pub fn grow_to(&mut self, new_capacity: usize)
+    #[must_use]
+    pub fn grow_to(&mut self, new_capacity: usize) -> bool
     where
         T: Clone + Default,
     {
@@ -87,13 +91,20 @@ impl<'a, T: 'a> RingBuffer<'a, T> {
             "grow_to cannot shrink the ring"
         );
         if new_capacity == self.capacity() {
-            return;
+            return true;
         }
         match &mut self.storage {
             ManagedSlice::Borrowed(_) => panic!("grow_to on borrowed ring storage"),
-            ManagedSlice::Owned(vec) => vec.resize(new_capacity, T::default()),
+            ManagedSlice::Owned(vec) => {
+                // Reserve first: `resize` aborts the process when refused.
+                if vec.try_reserve_exact(new_capacity - vec.len()).is_err() {
+                    return false;
+                }
+                vec.resize(new_capacity, T::default());
+            }
         }
         self.read_at = 0;
+        true
     }
 
     /// Shrink an empty ring buffer to `new_capacity` elements, freeing the
@@ -860,7 +871,7 @@ mod test {
         assert_eq!(ring.dequeue_slice(&mut buf[..]), 3);
         assert!(ring.is_empty());
 
-        ring.grow_to(8);
+        assert!(ring.grow_to(8));
         assert_eq!(ring.capacity(), 8);
         assert_eq!(ring.window(), 8);
         assert!(ring.is_empty());
@@ -874,8 +885,20 @@ mod test {
     #[test]
     fn test_buffer_grow_to_same_capacity() {
         let mut ring = RingBuffer::new(vec![b'.'; 4]);
-        ring.grow_to(4);
+        assert!(ring.grow_to(4));
         assert_eq!(ring.capacity(), 4);
+    }
+
+    #[test]
+    fn test_buffer_grow_to_refused() {
+        let mut ring = RingBuffer::new(vec![b'.'; 4]);
+        // More than any allocation may ask for: the reservation is refused.
+        assert!(!ring.grow_to(usize::MAX));
+        assert_eq!(ring.capacity(), 4);
+        assert_eq!(ring.enqueue_slice(b"abcd"), 4);
+        let mut buf = [0; 4];
+        assert_eq!(ring.dequeue_slice(&mut buf[..]), 4);
+        assert_eq!(&buf[..], b"abcd");
     }
 
     #[test]
@@ -883,14 +906,14 @@ mod test {
     fn test_buffer_grow_to_nonempty() {
         let mut ring = RingBuffer::new(vec![b'.'; 4]);
         assert_eq!(ring.enqueue_slice(b"a"), 1);
-        ring.grow_to(8);
+        let _ = ring.grow_to(8);
     }
 
     #[test]
     #[should_panic(expected = "grow_to cannot shrink the ring")]
     fn test_buffer_grow_to_shrink() {
         let mut ring = RingBuffer::new(vec![b'.'; 4]);
-        ring.grow_to(2);
+        let _ = ring.grow_to(2);
     }
 
     #[test]
@@ -898,7 +921,7 @@ mod test {
     fn test_buffer_grow_to_borrowed() {
         let mut storage = [0u8; 4];
         let mut ring: RingBuffer<u8> = RingBuffer::new(&mut storage[..]);
-        ring.grow_to(8);
+        let _ = ring.grow_to(8);
     }
 
     #[test]
