@@ -144,6 +144,26 @@ impl PipeBuffer {
         Self::reader_closing_at(self.buf_addr).load(Ordering::SeqCst) != 0
     }
 
+    // The reader publishes its close flag before it drops the IPC handle.
+    // A failed wake or wait may be the writer's first observation of either.
+    fn write_error(&self, err: ErrorCode) -> ErrorCode {
+        if matches!(err, moto_rt::E_OK | moto_rt::E_BAD_HANDLE) && self.reader_closing() {
+            moto_rt::E_NOT_CONNECTED
+        } else {
+            err
+        }
+    }
+
+    fn failed_write(&mut self, err: ErrorCode, written: usize) -> Result<usize, ErrorCode> {
+        self.error_code = err;
+        let written = written.saturating_sub(self.unwrite());
+        if written == 0 {
+            Err(self.write_error(err))
+        } else {
+            Ok(written)
+        }
+    }
+
     fn assert_invariants(&self) {
         assert!(
             self.reader_counter().load(Ordering::SeqCst)
@@ -213,6 +233,21 @@ impl PipeBuffer {
             self.reader_counter().fetch_add(to_read, Ordering::SeqCst);
         }
         to_read
+    }
+
+    /// Deliver buffered bytes before reporting a peer error. A failed wake
+    /// belongs to a later read, once the reader has drained the ring.
+    fn read_available(&mut self, dst: &mut [u8]) -> Option<usize> {
+        let read = self.read(dst);
+        if read == 0 {
+            return self.read_after_close(dst);
+        }
+        if self.error_code == moto_rt::E_OK
+            && let Err(err) = SysCpu::wake(self.ipc_handle)
+        {
+            self.error_code = err;
+        }
+        Some(read)
     }
 
     // Assuming the reader is gone, restore the unread bytes.
@@ -552,22 +587,27 @@ impl StdioPipe {
     }
 
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, ErrorCode> {
-        self.read_timeout(buf, None)
-    }
-
-    pub fn read_timeout(
-        &self,
-        buf: &mut [u8],
-        timeout: Option<moto_rt::time::Instant>,
-    ) -> Result<usize, ErrorCode> {
         if !self.is_reader {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
-
-        if let Some(buffer) = self.buffer.as_ref() {
-            Self::read_timeout_impl(&mut buffer.lock(), buf, timeout)
-        } else {
-            Ok(0)
+        let Some(buffer) = self.buffer.as_ref() else {
+            return Ok(0);
+        };
+        let mut buffer = buffer.lock();
+        buffer.assert_invariants();
+        if buf.is_empty() {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
+        loop {
+            if let Some(read) = buffer.read_available(buf) {
+                return Ok(read);
+            }
+            if buffer.error_code != moto_rt::E_OK {
+                return Err(buffer.error_code);
+            }
+            if let Err(err) = SysCpu::wait(&mut [self.handle], self.handle, SysHandle::NONE, None) {
+                buffer.error_code = err;
+            }
         }
     }
 
@@ -581,31 +621,13 @@ impl StdioPipe {
 
         let mut buffer = buffer.lock();
 
-        // Read before looking at error_code: bytes the remote left in the buffer
-        // are ours to deliver even once it is gone, so an error is reported only
-        // after the buffer has been drained. read_timeout_impl() does the same.
-        let sz = buffer.read(buf);
-        if sz == 0 {
-            if let Some(sz) = buffer.read_after_close(buf) {
-                return Ok(sz);
-            }
-            if buffer.error_code != moto_rt::E_OK {
-                return Err(buffer.error_code);
-            }
-            return Err(moto_rt::E_NOT_READY);
+        if let Some(read) = buffer.read_available(buf) {
+            return Ok(read);
         }
-
-        if buffer.error_code == moto_rt::E_OK
-            && let Err(e) = SysCpu::wake(self.handle)
-        {
-            // Cache the error: this read succeeded, so the error surfaces on
-            // a later call, once there is nothing left to hand out. Returning
-            // it now would drop the bytes already copied into the caller's
-            // buffer.
-            buffer.error_code = e;
+        if buffer.error_code != moto_rt::E_OK {
+            return Err(buffer.error_code);
         }
-
-        Ok(sz)
+        Err(moto_rt::E_NOT_READY)
     }
 
     /// What [`Self::nonblocking_read`] would return, without consuming it: the
@@ -633,10 +655,6 @@ impl StdioPipe {
         Err(moto_rt::E_NOT_READY)
     }
 
-    pub fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
-        self.write_timeout(buf, None)
-    }
-
     pub fn flush_nonblocking(&self) -> Result<(), ErrorCode> {
         if self.is_reader {
             return Err(moto_rt::E_INVALID_ARGUMENT);
@@ -648,24 +666,20 @@ impl StdioPipe {
 
         let mut buffer = buffer_ref.lock();
 
+        if !buffer.can_read() {
+            return Ok(());
+        }
+        if buffer.error_code == moto_rt::E_OK
+            && let Err(err) = SysCpu::wake(self.handle)
+        {
+            buffer.error_code = err;
+        }
+        if !buffer.can_read() {
+            return Ok(());
+        }
         if buffer.error_code != moto_rt::E_OK {
-            return Err(buffer.error_code);
+            return Err(buffer.write_error(buffer.error_code));
         }
-
-        if !buffer.can_read() {
-            return Ok(());
-        }
-
-        if let Err(e) = SysCpu::wake(self.handle) {
-            // Cache the error.
-            buffer.error_code = e;
-            return Err(e);
-        }
-
-        if !buffer.can_read() {
-            return Ok(());
-        }
-
         Err(moto_rt::E_NOT_READY)
     }
 
@@ -681,6 +695,11 @@ impl StdioPipe {
         let mut buffer = buffer_ref.lock();
 
         while buffer.can_read() {
+            // A departing reader may have drained the pipe before it closed.
+            // Otherwise leave the unread tail available to the writer.
+            if buffer.error_code != moto_rt::E_OK {
+                return Err(buffer.write_error(buffer.error_code));
+            }
             if let Err(err) = SysCpu::wait(
                 &mut [buffer.ipc_handle],
                 buffer.ipc_handle,
@@ -688,31 +707,64 @@ impl StdioPipe {
                 None,
             ) {
                 buffer.error_code = err;
-                let _ = buffer.unwrite();
-                if !buffer.can_read() {
-                    return Ok(());
-                } else {
-                    return Err(err);
-                }
             }
         }
 
         Ok(())
     }
 
-    pub fn write_timeout(
-        &self,
-        buf: &[u8],
-        timeout: Option<moto_rt::time::Instant>,
-    ) -> Result<usize, ErrorCode> {
+    pub fn write(&self, buf: &[u8]) -> Result<usize, ErrorCode> {
         if self.is_reader {
             return Err(moto_rt::E_INVALID_ARGUMENT);
         }
+        let Some(buffer) = self.buffer.as_ref() else {
+            return Ok(buf.len());
+        };
+        let mut buffer = buffer.lock();
+        let err = buffer.write_error(buffer.error_code);
+        if err != moto_rt::E_OK {
+            return Err(err);
+        }
+        buffer.assert_invariants();
+        if buf.is_empty() {
+            return Err(moto_rt::E_INVALID_ARGUMENT);
+        }
 
-        if let Some(buffer) = self.buffer.as_ref() {
-            Self::write_timeout_impl(&mut buffer.lock(), buf, timeout)
-        } else {
-            Ok(buf.len())
+        let mut written = 0_usize;
+
+        loop {
+            while !buffer.can_write() {
+                // Do not unwrite here: the reader is still draining, so bytes
+                // already in the ring are still on their way to it, and
+                // rewinding the write counter under a live reader would race
+                // with the counter it is advancing.
+                if buffer.reader_closing() {
+                    if written > 0 {
+                        return Ok(written);
+                    }
+                    return Err(moto_rt::E_NOT_CONNECTED);
+                }
+                if let Err(err) =
+                    SysCpu::wait(&mut [self.handle], self.handle, SysHandle::NONE, None)
+                {
+                    return buffer.failed_write(err, written);
+                }
+            }
+
+            let published = written;
+            written += buffer.write(&buf[written..]);
+            if buffer.reader_closing() {
+                if published > 0 {
+                    return Ok(published);
+                }
+                return Err(moto_rt::E_NOT_CONNECTED);
+            }
+            if written == buf.len() {
+                if let Err(err) = SysCpu::wake(buffer.ipc_handle) {
+                    return buffer.failed_write(err, written);
+                }
+                return Ok(written);
+            }
         }
     }
 
@@ -734,11 +786,9 @@ impl StdioPipe {
         };
 
         let mut buffer = buffer.lock();
-        if buffer.error_code != moto_rt::E_OK {
-            return (0, Err(buffer.error_code));
-        }
-        if buffer.reader_closing() {
-            return (0, Err(moto_rt::E_NOT_CONNECTED));
+        let err = buffer.write_error(buffer.error_code);
+        if err != moto_rt::E_OK {
+            return (0, Err(err));
         }
 
         let published = buffer.write(buf);
@@ -752,7 +802,7 @@ impl StdioPipe {
         if let Err(e) = SysCpu::wake(self.handle) {
             // Cache the error.
             buffer.error_code = e;
-            return (published, Err(e));
+            return (published, Err(buffer.write_error(e)));
         }
 
         (published, Ok(()))
@@ -892,141 +942,6 @@ impl StdioPipe {
         let _ = SysCpu::wake(self.handle);
         Ok(())
     }
-
-    fn read_timeout_impl(
-        buffer: &mut PipeBuffer,
-        buf: &mut [u8],
-        timeout: Option<moto_rt::time::Instant>,
-    ) -> Result<usize, ErrorCode> {
-        buffer.assert_invariants();
-        if buf.is_empty() {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
-        }
-
-        // Even if the remote end is gone (self.buffer.error_code.is_err()),
-        // we should complete reading bytes left in the buffer.
-        'outer: loop {
-            while !buffer.can_read() {
-                if let Some(read) = buffer.read_after_close(buf) {
-                    return Ok(read);
-                }
-                if buffer.error_code != moto_rt::E_OK {
-                    break 'outer;
-                }
-                if let Err(e) = SysCpu::wait(
-                    &mut [buffer.ipc_handle],
-                    buffer.ipc_handle,
-                    SysHandle::NONE,
-                    timeout,
-                ) {
-                    buffer.error_code = e;
-                    break 'outer;
-                }
-            }
-            let read = buffer.read(buf);
-            if read > 0 {
-                if buffer.error_code != moto_rt::E_OK {
-                    return Ok(read);
-                }
-                if let Err(e) = SysCpu::wake(buffer.ipc_handle) {
-                    // Cache the error.
-                    buffer.error_code = e;
-                }
-                return Ok(read);
-            }
-        }
-
-        // One last read: if the remote process wrote something
-        // and then exited, we don't want to lose that.
-        let read = buffer.read(buf);
-        if read > 0 {
-            if buffer.error_code == moto_rt::E_TIMED_OUT {
-                buffer.error_code = moto_rt::E_OK;
-            }
-            return Ok(read);
-        }
-
-        if let Some(read) = buffer.read_after_close(buf) {
-            return Ok(read);
-        }
-
-        if buffer.error_code == moto_rt::E_TIMED_OUT {
-            buffer.error_code = moto_rt::E_OK;
-            Err(moto_rt::E_TIMED_OUT)
-        } else {
-            Err(buffer.error_code)
-        }
-    }
-
-    fn write_timeout_impl(
-        buffer: &mut PipeBuffer,
-        buf: &[u8],
-        timeout: Option<moto_rt::time::Instant>,
-    ) -> Result<usize, ErrorCode> {
-        if buffer.error_code != moto_rt::E_OK {
-            return Err(buffer.error_code);
-        }
-        if buffer.reader_closing() {
-            return Err(moto_rt::E_NOT_CONNECTED);
-        }
-        buffer.assert_invariants();
-        if buf.is_empty() {
-            return Err(moto_rt::E_INVALID_ARGUMENT);
-        }
-
-        let mut written = 0_usize;
-
-        loop {
-            while !buffer.can_write() {
-                // Do not unwrite here: the reader is still draining, so bytes
-                // already in the ring are still on their way to it, and
-                // rewinding the write counter under a live reader would race
-                // with the counter it is advancing.
-                if buffer.reader_closing() {
-                    if written > 0 {
-                        return Ok(written);
-                    }
-                    return Err(moto_rt::E_NOT_CONNECTED);
-                }
-                if let Err(err) = SysCpu::wait(
-                    &mut [buffer.ipc_handle],
-                    buffer.ipc_handle,
-                    SysHandle::NONE,
-                    timeout,
-                ) {
-                    buffer.error_code = err;
-                    written = written.saturating_sub(buffer.unwrite());
-                    if written > 0 {
-                        return Ok(written);
-                    } else {
-                        return Err(err);
-                    }
-                }
-            }
-
-            let published = written;
-            written += buffer.write(&buf[written..]);
-            if buffer.reader_closing() {
-                if published > 0 {
-                    return Ok(published);
-                }
-                return Err(moto_rt::E_NOT_CONNECTED);
-            }
-            if written == buf.len() {
-                if let Err(err) = SysCpu::wake(buffer.ipc_handle) {
-                    // Cache the error.
-                    buffer.error_code = err;
-                    written = written.saturating_sub(buffer.unwrite());
-                    if written > 0 {
-                        return Ok(written);
-                    } else {
-                        return Err(err);
-                    }
-                }
-                return Ok(written);
-            }
-        }
-    }
 }
 
 #[repr(C)]
@@ -1158,6 +1073,68 @@ mod tests {
     fn ctrl_c_header(mapping: &TestMapping) -> CtrlCHeader {
         CtrlCHeader {
             buf_addr: mapping.0.as_ptr() as usize,
+        }
+    }
+
+    #[test]
+    fn writes_classify_a_cached_peer_error_using_the_close_flag() {
+        for (closing, expected) in [
+            (true, moto_rt::E_NOT_CONNECTED),
+            (false, moto_rt::E_BAD_HANDLE),
+        ] {
+            let (rx, tx) = make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
+            let reader = unsafe { StdioPipe::new_reader(rx) };
+            let writer = unsafe { StdioPipe::new_writer(tx) };
+            assert_eq!(writer.write(b"a"), Ok(1));
+            if closing {
+                reader.close_reader().unwrap();
+            }
+            drop(reader);
+            // Flushing the outstanding byte observes and caches the failed wake.
+            assert_eq!(writer.flush_nonblocking(), Err(expected));
+            assert_eq!(writer.write(b"b"), Err(expected));
+            assert_eq!(writer.nonblocking_write_progress(b"c"), (0, Err(expected)));
+            assert_eq!(writer.total_written(), 1);
+        }
+    }
+
+    #[test]
+    fn flush_reports_reader_loss_and_preserves_the_unread_tail() {
+        for (closing, expected) in [
+            (false, moto_rt::E_BAD_HANDLE),
+            (true, moto_rt::E_NOT_CONNECTED),
+        ] {
+            let (rx, tx) = make_pair(SysHandle::SELF, SysHandle::SELF).unwrap();
+            let reader = unsafe { StdioPipe::new_reader(rx) };
+            let writer = unsafe { StdioPipe::new_writer(tx) };
+            assert_eq!(writer.write(b"abcd"), Ok(4));
+            assert_eq!(reader.nonblocking_read(&mut [0; 2]), Ok(2));
+            if closing {
+                reader.close_reader().unwrap();
+            }
+            drop(reader);
+            assert_eq!(writer.flush(), Err(expected));
+            assert_eq!(writer.flush_nonblocking(), Err(expected));
+            assert_eq!(writer.take_unread().unwrap(), b"cd");
+            assert_eq!(writer.flush(), Ok(()));
+            assert_eq!(writer.flush_nonblocking(), Ok(()));
+        }
+    }
+
+    #[test]
+    fn failed_write_reports_only_the_prefix_taken_by_the_reader() {
+        for consumed in [0, 2, 4] {
+            let (mapping, mut buffer) = test_buffer();
+            assert_eq!(buffer.write(b"abcd"), 4);
+            assert_eq!(buffer.read(&mut [0; 4][..consumed]), consumed);
+            PipeBuffer::reader_closing_at(mapping.0.as_ptr() as usize).store(1, Ordering::SeqCst);
+            let expected = if consumed == 0 {
+                Err(moto_rt::E_NOT_CONNECTED)
+            } else {
+                Ok(consumed)
+            };
+            assert_eq!(buffer.failed_write(moto_rt::E_BAD_HANDLE, 4), expected);
+            assert!(!buffer.can_read());
         }
     }
 
