@@ -581,6 +581,13 @@ client, and <code>ssh-copy-id -t</code> needs version 9.4 or newer. No test runs
 <code>sshd</code>. <code>cross-test.sh --benchmark physical|plain|wireguard</code> retains
 the networking benchmarks. <code>stress-soak.sh</code> remains a separate repository
 script, outside the full gate.</p>
+<p>When running <code>full-native-test.sh</code> directly on a debug image, set
+<code>MOTOR_TEST_IMAGE_PROFILE=debug</code> so the exact Wasm stderr checks
+recognize the debug runtime's file-client and process-spawn records.</p>
+<p>A debug sys-io runs isolated tests at boot. On a disposable writable debug image,
+the System console runs <code>systest live-filesystem-tests</code> to check executable
+locks and pager fills on both motor-fs and memfs. This requires
+<code>CAP_SYS</code> and <code>CAP_FS_WRITE</code>.</p>
 <pre><code>src/tests/core-test.sh              # debug
 src/tests/core-test.sh --release</code></pre>
 <p><code>core-test.sh</code> is a fast gate for core OS changes. It runs the

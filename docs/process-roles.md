@@ -454,11 +454,11 @@ The role is enforced server-side (kernel, sys-io) and assigned via the existing
 env-var spawn mechanism, so `std` needs no new API, no new error code
 (`E_NOT_ALLOWED` exists), and no vtable slot. The diagnostic change reuses the
 existing vtable operations; only the `log_backtrace` documentation changes.
-There is therefore **no `RT_VERSION` bump and no toolchain-lag staging** (the
-published-crate problem documented in
-`docs/plans/networking-remaining-steps.md:41–52`). A program that wants its own
-role reads `ProcessStaticPage` via moto-sys. If a `moto_rt::process::role()`
-getter is ever wanted, it is a compatible append-at-end vtable addition.
+There is therefore **no `RT_VERSION` bump and no toolchain-lag staging**.
+A program that wants its own role reads `ProcessStaticPage` via moto-sys.
+If a `moto_rt::process::role()` getter is ever wanted, it is a compatible
+append-at-end vtable addition. For coordinated crate releases, see
+[Versions and publishing](crates.md#versions-and-publishing).
 
 ---
 

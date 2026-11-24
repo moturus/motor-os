@@ -512,7 +512,9 @@ Lines of this kind are therefore trace-level, in sys-io
 in `runtime/net.rs`, file and directory creation in `runtime/fs.rs`),
 motor-fs (creating, moving and deleting an entry) and moto-sdk (the task poll in
 `async_runtime/local_runtime.rs`, the network client's incoming-message
-lines in `io/net/channel.rs` and `io/net/tcp.rs`). Lines that run once per
+lines in `io/net/channel.rs` and `io/net/tcp.rs`). rt.vdso's two lines per
+file open (`rt_fs.rs`) are trace-level too: they go to the process's standard
+error, not to the kernel log, but an SSH session carries them. Lines that run once per
 connection, per mount or per error stay at DEBUG. To see where a debug
 build's records come from, count `/system/logs/kernel.log` by source
 location.

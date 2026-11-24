@@ -1,8 +1,8 @@
 # QuickJS on Motor OS
 
 The toolchain archive includes QuickJS-NG 0.18.0, built natively for Motor OS.
-The JavaScript engine is upstream code. Only its platform layer,
-`quickjs-libc.c`, and one helper in `cutils.h` carry Motor changes.
+The JavaScript engine is upstream code. The Motor patch covers the platform
+layer in `quickjs-libc.c`, a helper in `cutils.h`, and EOF handling in the REPL.
 `os.platform` reports `motor`.
 
 ## Installed files
@@ -58,6 +58,9 @@ Processes use mlibc's native spawn, because Motor OS has no `fork`.
 - Workers use pthreads. They wait through the runtime's poll and wake calls
   instead of pipes.
 - `os.exePath()` returns an absolute path, also after a `chdir`.
+- On EOF the REPL removes its stdin handler and saves history, as it does
+  on Ctrl-D. A script's `os.setReadHandler` stays registered until the
+  script removes it, including across an EOF read and a seek.
 
 Not available:
 
@@ -68,8 +71,9 @@ Not available:
 - `os.ttySetRaw` and `os.ttyGetWinSize` are missing. The REPL assumes 80
   columns.
 - `os.cputime` reports zero, and `os.utimes` is not implemented.
-- In the REPL, end of input and pasted multiline text are unreliable. Use a
-  script file or `qjs -e` for bulk input.
+- The REPL takes one line at a time. Several lines pasted at once are run
+  together and fail, as they do on Linux. Use a script file or `qjs -e` for
+  bulk input.
 
 Large regular expressions over wide Unicode ranges are much slower than on
 Linux. The cause is mlibc's handling of allocations above 32 KiB; see
@@ -86,8 +90,9 @@ Linux. The cause is mlibc's handling of allocations above 32 KiB; see
 2. `build_quickjs` copies that source to `build/assembly/build/quickjs/src` and
    applies `src/build-scripts/quickjs-0.18.0-motor.patch` with
    `git apply --check` and `git apply`.
-3. It compiles with `-O2`, whatever the OS build profile. Upstream checks in
-   its generated sources, so no host QuickJS or CMake is needed.
+3. It builds and caches a host `qjsc` from the pinned revision, uses it to
+   regenerate `gen/repl.c` from the patched `repl.js`, and compiles the
+   Motor binaries with `-O2` in both profiles.
 4. It stages the overlay at `build/assembly/images/quickjs`, which
    `make toolchain-archive` includes in the native archive.
 

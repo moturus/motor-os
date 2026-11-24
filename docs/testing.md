@@ -62,10 +62,26 @@ including their `debug_assertions` and integer overflow checks. Use it by
 hand when a change needs those checks. Automated and CI runs must not use
 it.
 
+A debug sys-io runs its isolated unit tests at every boot
+(`src/sys/sys-io/src/self_test.rs`). It logs `sys-io self-test: N run, 0
+failed` to the kernel log, and stops the VM if a test fails. The tests take
+about 0.1 s on sys-io's main thread, which otherwise only waits, so the
+services start meanwhile. Some tests drive error paths, so the kernel log of
+a debug boot has warnings and errors between the start line and that summary.
+The panic that stops the VM names the failed tests.
+
+On a disposable writable debug image, the System console runs
+`systest live-filesystem-tests`. It checks queued executable mutations and
+overlapping pager fills, including mapping retirement, on both motor-fs at
+`/` and memfs at `/none/tmp`. The request requires System and
+`CAP_FS_WRITE`. The read-only boot fixture separately uses a 16 KiB
+`/none/tmp`, smaller than the pager test file.
+
 It is slower. With 4 vCPUs and 4 GiB, the toolchain installation check takes
 about 13 minutes on the debug image and the upload of the native test inputs
-about 7; on the release image they take 67 and 33 seconds. It also does not
-pass at present: see "`full-test.sh --all-debug` does not pass" in
+about 7; on the release image they take 67 and 33 seconds. One pass of the
+native tests in the guest takes 3 hours 47 minutes there, with 8 vCPUs. It
+has also not passed yet: see "`full-test.sh --all-debug` has not passed" in
 [plans/future-work.md](plans/future-work.md).
 
 ## `core-test.sh`
@@ -84,7 +100,9 @@ It uses the release image and Cloud Hypervisor, like the default
   `mio-test` and `tokio-tests`, all as Interactive. `mio-test` and
   `tokio-tests` are built on the host in the native-test profile;
 - runs `lorry test` inside Motor OS for the `src/sys` crates, as Interactive
-  only;
+  only. The netstack tests run there in a debug run only: their release
+  build takes 3.5 minutes in the guest, and Linux runs them in both
+  profiles;
 - runs the System console and System OOM abort checks.
 
 It leaves out `src/bin`, the toolchain and wasm tests, WireGuard, the other
@@ -105,7 +123,9 @@ src/tests/full-native-test.sh [--release] [--full | --core] [--list]
 | `--list` | Prints the crates and arguments it would test, without running anything. |
 
 `full-test.sh` runs it on Linux and inside Motor OS with the profile selected
-above.
+above. When invoking it directly on a debug image, set
+`MOTOR_TEST_IMAGE_PROFILE=debug` so the exact Wasm stderr checks recognize
+the debug runtime's file-client and process-spawn records.
 
 ## `cross-test.sh`
 

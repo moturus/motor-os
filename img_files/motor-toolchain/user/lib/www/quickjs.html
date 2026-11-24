@@ -399,9 +399,9 @@ a.card h3 { color: var(--accent); }
 <h1>QuickJS on Motor OS</h1>
 <p class="lead">The development environment includes QuickJS-NG 0.18.0, a small JavaScript
 engine, built natively for Motor OS. It runs scripts, has a REPL, and compiles
-scripts into native programs. The engine is upstream code. Only its platform layer,
-<code>quickjs-libc.c</code>, and one helper in <code>cutils.h</code> carry Motor OS
-changes. <code>os.platform</code> reports <code>motor</code>.</p>
+scripts into native programs. The engine is upstream code. The Motor patch covers the
+platform layer in <code>quickjs-libc.c</code>, a helper in <code>cutils.h</code>, and
+EOF handling in the REPL. <code>os.platform</code> reports <code>motor</code>.</p>
 <p>QuickJS also runs inside WebAssembly: <a href="wasm.html">Javy</a> compiles
 JavaScript into a WebAssembly module that contains it. This page is about the
 native engine.</p>
@@ -463,6 +463,9 @@ toolchain supplies mlibc and the rest, as described under
   of pipes.</li>
   <li><code>os.exePath()</code> returns an absolute path, also after a
   <code>chdir</code>.</li>
+  <li>On EOF the REPL removes its stdin handler and saves history, as it does on Ctrl-D.
+  A script's <code>os.setReadHandler</code> stays registered until the script removes it,
+  including across an EOF read and a seek.</li>
 </ul>
 
 <h3>Not available</h3>
@@ -477,7 +480,8 @@ toolchain supplies mlibc and the rest, as described under
   assumes 80 columns.</li>
   <li><code>os.cputime</code> reports zero, and <code>os.utimes</code> is not
   implemented.</li>
-  <li>In the REPL, end of input and pasted multiline text are unreliable.</li>
+  <li>The REPL takes one line at a time. Several lines pasted at once are run together
+  and fail, as they do on Linux.</li>
 </ul>
 
 <h2>Performance</h2>
@@ -489,7 +493,8 @@ host.</p>
 <h2>How it is built and tested</h2>
 <p>There is no QuickJS fork. The Motor OS build fetches the upstream
 <code>v0.18.0</code> tag, applies a small patch from the repository, and compiles it
-with the Motor OS Clang and mlibc. No host QuickJS or CMake is needed.</p>
+with the Motor OS Clang and mlibc. It builds and caches a host <code>qjsc</code>
+from the pinned revision to regenerate the patched REPL bytecode.</p>
 <ul>
   <li>The native Cargo harness in <code>src/sys/tests/toolchain</code> runs through
   <code>full-native-test.sh</code>. It covers the language and modules, <code>qjsc</code> and standalone builds,
