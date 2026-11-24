@@ -1585,6 +1585,7 @@ fn create_stdio_pipes(
 
 struct ChildStdio {
     inner: StdioPipe,
+    descriptors: AtomicU32,
     scan_ctrl_c: bool,
     child_process: moto_sys::syscalls::RaiiHandle,
     nonblocking: AtomicBool,
@@ -1610,6 +1611,7 @@ impl ChildStdio {
 
         Ok(Arc::new_cyclic(|me| Self {
             inner,
+            descriptors: AtomicU32::new(0),
             scan_ctrl_c,
             child_process,
             nonblocking: AtomicBool::new(false),
@@ -1736,8 +1738,8 @@ impl PosixFile for ChildStdio {
         Ok(())
     }
 
-    fn wants_last_close(&self) -> bool {
-        !self.inner.is_reader()
+    fn descriptor_count(&self) -> Option<&AtomicU32> {
+        (!self.inner.is_reader()).then_some(&self.descriptors)
     }
 
     /// Closing the child's stdin is the end of its input. Without the mark the

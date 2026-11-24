@@ -3,6 +3,7 @@ use std::os::fd::AsRawFd;
 
 const NULL_CHILD: &str = "descriptor-attr-null-child";
 const PIPE_CHILD: &str = "descriptor-attr-pipe-child";
+pub const EXIT_CHILD: &str = "descriptor-exit-child";
 
 fn attr(fd: i32) -> moto_rt::fs::FileAttr {
     moto_rt::fs::get_file_attr(fd).unwrap()
@@ -172,6 +173,51 @@ fn test_invalid_descriptors() {
     ));
 }
 
+fn test_concurrent_closedir() {
+    for _ in 0..32 {
+        let dir = moto_rt::fs::opendir("/").unwrap();
+        let start = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let other = scope.spawn(|| {
+                start.wait();
+                moto_rt::fs::closedir(dir)
+            });
+            start.wait();
+            let first = moto_rt::fs::closedir(dir);
+            let replacement = moto_rt::poll::new().unwrap();
+            let second = other.join().unwrap();
+            assert!(matches!(
+                (first, second),
+                (Ok(()), Err(moto_rt::Error::BadHandle)) | (Err(moto_rt::Error::BadHandle), Ok(()))
+            ));
+            moto_rt::poll::wake(replacement).unwrap();
+            moto_rt::fs::close(replacement).unwrap();
+        });
+    }
+}
+
+pub fn exit_with_concurrent_open() -> ! {
+    let marker = moto_rt::poll::new().unwrap();
+    let aliases: Vec<_> = (0..4096)
+        .map(|_| moto_rt::fs::duplicate(marker).unwrap())
+        .collect();
+    for &fd in aliases.iter().step_by(2) {
+        moto_rt::fs::close(fd).unwrap();
+    }
+    let ready = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let started = ready.clone();
+    std::thread::spawn(move || {
+        started.wait();
+        // Wait for exit to remove the marker, then reuse one of the free slots.
+        while moto_rt::fs::get_file_attr(marker).is_ok() {
+            std::hint::spin_loop();
+        }
+        moto_rt::fs::close(moto_rt::poll::new().unwrap()).unwrap();
+    });
+    ready.wait();
+    std::process::exit(29);
+}
+
 pub fn run_all_tests() {
     test_self_stdio();
     test_child_stdio();
@@ -179,5 +225,15 @@ pub fn run_all_tests() {
     test_filesystem_attrs();
     test_sockets_and_registry_identity();
     test_invalid_descriptors();
+    test_concurrent_closedir();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg(EXIT_CHILD)
+        .status()
+        .unwrap();
+    assert_eq!(
+        status.code(),
+        Some(29),
+        "descriptor use during process exit"
+    );
     println!("descriptor_attr PASS");
 }

@@ -1943,6 +1943,9 @@ pub fn run() {
     if command_output::is_child(&args) {
         command_output::run_child(&args);
     }
+    if args.get(1).map(String::as_str) == Some(descriptor_attr::EXIT_CHILD) {
+        descriptor_attr::exit_with_concurrent_open();
+    }
     if descriptor_attr::is_null_child(&args) {
         descriptor_attr::run_null_child(&args);
     }

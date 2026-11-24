@@ -1519,17 +1519,6 @@ pub extern "C" fn opendir(path_ptr: *const u8, path_size: usize) -> i32 {
     crate::posix::push_file(alloc::sync::Arc::new(rdr))
 }
 
-pub extern "C" fn closedir(rt_fd: i32) -> moto_rt::ErrorCode {
-    let Some(posix_file) = crate::posix::get_file(rt_fd) else {
-        return moto_rt::E_BAD_HANDLE;
-    };
-    let Some(dir) = (posix_file.as_ref() as &dyn Any).downcast_ref::<ReadDir>() else {
-        return moto_rt::E_BAD_HANDLE;
-    };
-    let _ = crate::posix::pop_file(rt_fd);
-    moto_rt::E_OK
-}
-
 pub extern "C" fn readdir(rt_fd: i32, dentry: *mut moto_rt::fs::DirEntry) -> moto_rt::ErrorCode {
     let Some(posix_file) = crate::posix::get_file(rt_fd) else {
         return moto_rt::E_BAD_HANDLE;

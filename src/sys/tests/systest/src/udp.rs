@@ -290,14 +290,53 @@ fn test_udp_large_packets() {
 }
 
 fn test_udp_double_bind() {
+    use std::os::fd::AsRawFd;
+
     let addr = std::net::SocketAddr::parse_ascii(b"127.0.0.1:1234").unwrap();
     let sock = std::net::UdpSocket::bind(addr).unwrap();
     assert!(std::net::UdpSocket::bind(addr).is_err()); // Can't bind again to the same address.
+    let alias = moto_rt::fs::duplicate(sock.as_raw_fd()).unwrap();
     drop(sock);
+    assert!(std::net::UdpSocket::bind(addr).is_err());
+    moto_rt::fs::close(alias).unwrap();
     // Closing the socket releases its address before drop() returns, so the
     // rebind needs no wait; see udp_rebind_after_close_test.
     let _ = std::net::UdpSocket::bind(addr).unwrap();
     println!("-- test_udp_double_bind() PASS");
+}
+
+fn test_udp_duplicate_during_close() {
+    use std::net::UdpSocket;
+    use std::os::fd::AsRawFd;
+    use std::sync::Barrier;
+
+    for _ in 0..32 {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = socket.local_addr().unwrap();
+        let fd = socket.as_raw_fd();
+        let start = Barrier::new(2);
+        let duplicate = std::thread::scope(|scope| {
+            let dup = scope.spawn(|| {
+                start.wait();
+                moto_rt::fs::duplicate(fd)
+            });
+            start.wait();
+            drop(socket);
+            dup.join().unwrap()
+        });
+        match duplicate {
+            Ok(alias) => {
+                assert!(
+                    UdpSocket::bind(addr).is_err(),
+                    "a live duplicate lost its port"
+                );
+                moto_rt::fs::close(alias).unwrap();
+            }
+            Err(moto_rt::Error::BadHandle) => {}
+            Err(err) => panic!("UDP duplicate failed: {err:?}"),
+        }
+        UdpSocket::bind(addr).unwrap();
+    }
 }
 
 fn test_udp_connect() {
@@ -1054,6 +1093,7 @@ pub fn run_all_tests() {
     test_unsupported_udp_options_return_errors();
     test_udp_large_packets();
     test_udp_double_bind();
+    test_udp_duplicate_during_close();
     test_udp_connect();
     test_udp_timeouts();
     test_udp_dup_shares_posix_flags();

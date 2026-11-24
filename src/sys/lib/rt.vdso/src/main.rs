@@ -282,7 +282,7 @@ pub extern "C" fn motor_start(version: u64) {
         Ordering::Relaxed,
     );
     vtable.fs_closedir.store(
-        rt_fs::closedir as *const () as usize as u64,
+        posix::closedir as *const () as usize as u64,
         Ordering::Relaxed,
     );
     vtable.fs_readdir.store(

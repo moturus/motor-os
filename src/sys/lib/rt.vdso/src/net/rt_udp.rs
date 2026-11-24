@@ -13,7 +13,7 @@ use crate::posix::PosixFile;
 use crate::posix::PosixKind;
 use crate::runtime::EventSourceManaged;
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use moto_rt::poll::Interests;
 use moto_rt::poll::Token;
 use moto_rt::{ErrorCode, RtFd};
@@ -26,6 +26,7 @@ use moto_sdk::io::net::udp::UdpSocket;
 pub struct RtUdpSocket {
     inner: Arc<UdpSocket>,
     events: Arc<EventSourceManaged>,
+    descriptors: AtomicU32,
     nonblocking: AtomicBool,
     read_timeout_ns: AtomicU64,
     write_timeout_ns: AtomicU64,
@@ -39,6 +40,7 @@ impl RtUdpSocket {
         Arc::new(Self {
             inner,
             events,
+            descriptors: AtomicU32::new(0),
             nonblocking: AtomicBool::new(false),
             read_timeout_ns: AtomicU64::new(u64::MAX),
             write_timeout_ns: AtomicU64::new(u64::MAX),
@@ -180,8 +182,8 @@ impl PosixFile for RtUdpSocket {
         Ok(())
     }
 
-    fn wants_last_close(&self) -> bool {
-        true
+    fn descriptor_count(&self) -> Option<&AtomicU32> {
+        Some(&self.descriptors)
     }
 
     /// A UDP socket holds a bound address in sys-io, and sys-io releases it

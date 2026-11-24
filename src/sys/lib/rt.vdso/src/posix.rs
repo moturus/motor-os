@@ -7,9 +7,8 @@
 
 use core::any::Any;
 use core::num::NonZeroU64;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
-use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use moto_rt::E_BAD_HANDLE;
@@ -91,10 +90,10 @@ pub trait PosixFile: Any + Send + Sync {
         false
     }
 
-    /// Whether this file needs [`Self::on_last_close`]. Opting in costs a scan
-    /// of the descriptor table per close, so it defaults to off.
-    fn wants_last_close(&self) -> bool {
-        false
+    /// Files that need [`Self::on_last_close`] count their installed descriptors.
+    /// A reference held by a read, write or poll operation does not count.
+    fn descriptor_count(&self) -> Option<&AtomicU32> {
+        None
     }
 
     /// Called when the descriptor being closed was the last one referring to
@@ -218,12 +217,11 @@ pub extern "C" fn posix_file_lock(rt_fd: RtFd, operation: u8) -> ErrorCode {
 }
 
 pub extern "C" fn posix_close(rt_fd: i32) -> ErrorCode {
-    let Some(entry) = DESCRIPTORS.take(rt_fd) else {
+    let Some((posix_file, last)) = DESCRIPTORS.lock().take_for_close(rt_fd) else {
         return E_BAD_HANDLE;
     };
-    let posix_file = entry.object;
 
-    if posix_file.wants_last_close() && !DESCRIPTORS.is_referenced(&posix_file) {
+    if last {
         posix_file.on_last_close();
     }
 
@@ -231,16 +229,16 @@ pub extern "C" fn posix_close(rt_fd: i32) -> ErrorCode {
         Ok(()) => E_OK,
         Err(err) => err,
     };
-    DESCRIPTORS.release_fd(rt_fd);
+    DESCRIPTORS.lock().freelist.push(rt_fd);
     result
 }
 
 pub extern "C" fn posix_duplicate(rt_fd: RtFd) -> RtFd {
-    let Some(entry) = get_entry(rt_fd) else {
+    let mut table = DESCRIPTORS.lock();
+    let Some(entry) = table.entries.get(rt_fd as usize).and_then(Clone::clone) else {
         return -(E_BAD_HANDLE as RtFd);
     };
-
-    DESCRIPTORS.insert_entry(entry)
+    table.insert(entry)
 }
 
 #[derive(Clone)]
@@ -249,134 +247,65 @@ pub(crate) struct DescriptorEntry {
     pub(crate) object_id: NonZeroU64,
 }
 
-/// Exposes a way to map RtFd to Arc<T>. The implementation
-/// can probably be made faster using unsafe stuff, but that
-/// would be premature optimization at the moment.
+impl DescriptorEntry {
+    fn release_descriptor(&self) -> bool {
+        self.object.descriptor_count().is_some_and(|count| {
+            let previous = count.fetch_sub(1, Ordering::Relaxed);
+            debug_assert!(previous > 0);
+            previous == 1
+        })
+    }
+}
+
 struct Descriptors {
-    descriptors: SpinLock<Vec<Option<DescriptorEntry>>>,
-    freelist: SpinLock<Vec<RtFd>>,
-    next_object_id: AtomicU64,
+    entries: Vec<Option<DescriptorEntry>>,
+    freelist: Vec<RtFd>,
+    // Exit detaches the entries while other threads can still allocate fds.
+    next_fd: RtFd,
+    next_object_id: NonZeroU64,
 }
 
 impl Descriptors {
-    const fn new() -> Self {
-        Self {
-            descriptors: SpinLock::new(Vec::new()),
-            freelist: SpinLock::new(Vec::new()),
-            next_object_id: AtomicU64::new(1),
+    fn insert(&mut self, entry: DescriptorEntry) -> RtFd {
+        let fd = self.freelist.pop().unwrap_or_else(|| {
+            let fd = self.next_fd;
+            self.next_fd = fd.checked_add(1).expect("descriptor number exhausted");
+            fd
+        });
+        if fd as usize >= self.entries.len() {
+            self.entries.resize_with(fd as usize + 1, || None);
         }
-    }
-
-    fn get(&self, fd: RtFd) -> Option<DescriptorEntry> {
-        self.descriptors
-            .lock()
-            .get(fd as usize)
-            .and_then(Clone::clone)
-    }
-
-    fn take(&self, fd: RtFd) -> Option<DescriptorEntry> {
-        self.descriptors.lock().get_mut(fd as usize)?.take()
-    }
-
-    fn release_fd(&self, fd: RtFd) {
-        self.freelist.lock().push(fd);
-    }
-
-    fn pop(&self, fd: RtFd) -> Option<DescriptorEntry> {
-        let val = self.take(fd);
-        if val.is_some() {
-            self.release_fd(fd);
+        if let Some(count) = entry.object.descriptor_count() {
+            count.fetch_add(1, Ordering::Relaxed);
         }
-        val
-    }
-
-    /// Whether any descriptor still refers to `file`. Used only by files that
-    /// opt into [`PosixFile::on_last_close`], so the scan is not on the path
-    /// of an ordinary close.
-    fn is_referenced(&self, file: &Arc<dyn PosixFile>) -> bool {
-        self.descriptors
-            .lock()
-            .iter()
-            .flatten()
-            .any(|entry| Arc::ptr_eq(&entry.object, file))
-    }
-
-    /// Notify each open description once before the process destroys its fd
-    /// table. Normal exit closes every descriptor even though it does not call
-    /// [`posix_close`] for them one by one.
-    fn notify_process_exit(&self) {
-        let descriptors = core::mem::take(&mut *self.descriptors.lock());
-        for (idx, entry) in descriptors.iter().enumerate() {
-            let Some(entry) = entry else {
-                continue;
-            };
-            if entry.object.wants_last_close()
-                && !descriptors[..idx]
-                    .iter()
-                    .flatten()
-                    .any(|other| Arc::ptr_eq(&other.object, &entry.object))
-            {
-                entry.object.on_last_close();
-            }
-        }
-    }
-
-    fn get_free_fd(&self) -> RtFd {
-        if let Some(fd) = self.freelist.lock().pop() {
-            return fd;
-        }
-
-        let res = {
-            let mut descriptors = self.descriptors.lock();
-            descriptors.push(None);
-            descriptors.len() - 1
-        };
-        assert!(res < (RtFd::MAX as usize));
-        res as RtFd
-    }
-
-    fn new_object_id(&self) -> NonZeroU64 {
-        NonZeroU64::new(self.next_object_id.fetch_add(1, Ordering::Relaxed))
-            .expect("descriptor object ID exhausted")
-    }
-
-    fn install(&self, entry: DescriptorEntry) -> RtFd {
-        let fd = self.get_free_fd();
-        let old = self.descriptors.lock()[fd as usize].replace(entry);
+        let old = self.entries[fd as usize].replace(entry);
         debug_assert!(old.is_none());
         fd
     }
 
-    fn insert<F>(&self, func: F) -> RtFd
-    where
-        F: FnOnce(RtFd) -> Arc<dyn PosixFile>,
-    {
-        let fd = self.get_free_fd();
-        let entry = DescriptorEntry {
-            object: func(fd),
-            object_id: self.new_object_id(),
-        };
-        let old = self.descriptors.lock()[fd as usize].replace(entry);
-        debug_assert!(old.is_none());
-        fd
-    }
-
-    fn insert_entry(&self, entry: DescriptorEntry) -> RtFd {
-        self.install(entry)
+    // Keep removal and the last-descriptor decision atomic with duplicate.
+    // The notification itself can perform I/O and runs outside this lock.
+    fn take_for_close(&mut self, fd: RtFd) -> Option<(Arc<dyn PosixFile>, bool)> {
+        let entry = self.entries.get_mut(fd as usize)?.take()?;
+        let last = entry.release_descriptor();
+        Some((entry.object, last))
     }
 }
 
-static DESCRIPTORS: Descriptors = Descriptors::new();
+static DESCRIPTORS: SpinLock<Descriptors> = SpinLock::new(Descriptors {
+    entries: Vec::new(),
+    freelist: Vec::new(),
+    next_fd: 0,
+    next_object_id: NonZeroU64::MIN,
+});
 
-pub fn new_file<Constructor>(constructor: Constructor) -> RtFd
-where
-    Constructor: FnOnce(RtFd) -> Arc<dyn PosixFile>,
-{
-    DESCRIPTORS.insert(constructor)
-}
-
-pub fn push_file(val: Arc<dyn PosixFile>) -> RtFd {
-    new_file(|_| val)
+pub fn push_file(object: Arc<dyn PosixFile>) -> RtFd {
+    let mut table = DESCRIPTORS.lock();
+    let object_id = table.next_object_id;
+    table.next_object_id = object_id
+        .checked_add(1)
+        .expect("descriptor object ID exhausted");
+    table.insert(DescriptorEntry { object, object_id })
 }
 
 pub fn get_file(fd: RtFd) -> Option<Arc<dyn PosixFile>> {
@@ -384,13 +313,30 @@ pub fn get_file(fd: RtFd) -> Option<Arc<dyn PosixFile>> {
 }
 
 pub(crate) fn get_entry(fd: RtFd) -> Option<DescriptorEntry> {
-    DESCRIPTORS.get(fd)
+    DESCRIPTORS.lock().entries.get(fd as usize)?.clone()
 }
 
-pub fn pop_file(fd: RtFd) -> Option<Arc<dyn PosixFile>> {
-    DESCRIPTORS.pop(fd).map(|entry| entry.object)
+pub(crate) extern "C" fn closedir(fd: RtFd) -> ErrorCode {
+    let mut table = DESCRIPTORS.lock();
+    let Some(entry) = table
+        .entries
+        .get_mut(fd as usize)
+        .and_then(|slot| slot.take_if(|entry| matches!(entry.object.kind(), PosixKind::ReadDir)))
+    else {
+        return E_BAD_HANDLE;
+    };
+    table.freelist.push(fd);
+    drop(table);
+    drop(entry);
+    E_OK
 }
 
+/// Keep all detached objects alive until the last-close notifications finish.
 pub(crate) fn notify_process_exit() {
-    DESCRIPTORS.notify_process_exit();
+    let entries = core::mem::take(&mut DESCRIPTORS.lock().entries);
+    for entry in entries.iter().flatten() {
+        if entry.release_descriptor() {
+            entry.object.on_last_close();
+        }
+    }
 }
