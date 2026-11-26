@@ -3381,6 +3381,111 @@ dev = ["dep:leaf"]
     }
 
     #[test]
+    fn late_version_conflict_skips_unrelated_choices() {
+        const BRANCHES: usize = 8;
+        let (_dir, root) = manifest("shared = \"0.4\"\nsdk = \"1\"", "", "2");
+        let mut catalog = Catalog::default();
+        let old = record("shared", "0.4.27", "[]", "{}", "");
+        let locked = [LockedPreference {
+            name: old.name.clone(),
+            version: old.version.clone(),
+            checksum: Some(old.checksum),
+        }];
+        catalog.insert(old).unwrap();
+        catalog
+            .insert(record("leaf", "1.0.0", "[]", "{}", ""))
+            .unwrap();
+
+        // The shared edge has more candidates than each unrelated edge, so
+        // it is reached after the choices made for those edges.
+        let mut dependencies = vec![dependency("shared", "^0.4.28")];
+        let leaf = format!("[{}]", dependency("leaf", "1"));
+        for index in 0..BRANCHES {
+            let name = format!("unrelated-{index}");
+            dependencies.push(dependency(&name, "*"));
+            for version in ["1.0.0", "2.0.0"] {
+                catalog
+                    .insert(record(&name, version, &leaf, "{}", ""))
+                    .unwrap();
+            }
+        }
+        let dependencies = format!("[{}]", dependencies.join(","));
+        catalog
+            .insert(record("sdk", "1.0.0", &dependencies, "{}", ""))
+            .unwrap();
+
+        let mut leaf_queries = 0;
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &locked,
+            &mut |name, requirement, catalog| {
+                if name == "leaf" {
+                    leaf_queries += 1;
+                }
+                if name == "shared" && !catalog.contains_crates_io_candidate(name, requirement) {
+                    for version in ["0.4.28", "0.4.29", "0.4.30"] {
+                        catalog.insert(record(name, version, "[]", "{}", ""))?;
+                    }
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(selected(&resolution, "shared"), [&Version::new(0, 4, 30)]);
+        assert!(
+            leaf_queries <= 2 * BRANCHES,
+            "queried leaf {leaf_queries} times"
+        );
+    }
+
+    #[test]
+    fn broad_requirement_can_discover_another_compatibility_class() {
+        let (_dir, root) = manifest("shared = \"=0.4.27\"\nsdk = \"1\"", "", "2");
+        let mut catalog = Catalog::default();
+        for version in ["0.4.27", "0.4.28", "0.4.29"] {
+            catalog
+                .insert(record("shared", version, "[]", "{}", ""))
+                .unwrap();
+        }
+        catalog
+            .insert(record("choice", "2.0.0", "[]", "{}", ""))
+            .unwrap();
+        let alternate = format!("[{}]", dependency("shared", "0.5"));
+        catalog
+            .insert(record("choice", "1.0.0", &alternate, "{}", ""))
+            .unwrap();
+        let dependencies = format!(
+            "[{},{}]",
+            dependency("choice", "*"),
+            dependency("shared", ">=0.4.28"),
+        );
+        catalog
+            .insert(record("sdk", "1.0.0", &dependencies, "{}", ""))
+            .unwrap();
+        let alternate_requirement = VersionReq::parse("0.5").unwrap();
+        let resolution = resolve_member(
+            &root,
+            &mut catalog,
+            &options(ResolverVersion::V2),
+            &[],
+            &mut |name, requirement, catalog| {
+                if name == "shared" && *requirement == alternate_requirement {
+                    catalog.insert(record(name, "0.5.0", "[]", "{}", ""))?;
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            selected(&resolution, "shared"),
+            [&Version::new(0, 4, 27), &Version::new(0, 5, 0)],
+        );
+    }
+
+    #[test]
     fn dynamically_loads_only_names_reached_by_resolution() {
         let (_dir, root) = manifest("a = \"1\"", "", "2");
         let mut catalog = Catalog::default();

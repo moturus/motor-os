@@ -1,3 +1,5 @@
+use semver::{Comparator, Op};
+
 use super::*;
 
 enum Choice {
@@ -64,13 +66,13 @@ impl Pending {
         Ok(())
     }
 
-    fn pop(&mut self) -> Option<Event> {
+    fn pop(&mut self) -> Option<(u64, Event)> {
         let ((_, time), mut group) = self.groups.pop_first()?;
         let (_, event) = group.pop_front().unwrap();
         if let Some((count, _)) = group.front() {
             self.groups.insert((*count, time), group);
         }
-        Some(event)
+        Some((time, event))
     }
 }
 
@@ -140,6 +142,7 @@ struct Frame {
     state: State,
     pending: Pending,
     event: Option<Event>,
+    event_group: u64,
     filter: Option<Filter>,
     // Untried candidates in Cargo's order, including selected packages.
     choices: VecDeque<Choice>,
@@ -155,6 +158,7 @@ impl Frame {
             state,
             pending,
             event: None,
+            event_group: 0,
             filter: None,
             choices: VecDeque::new(),
             tried: BTreeSet::new(),
@@ -173,7 +177,7 @@ impl Frame {
     ) -> std::result::Result<Option<(State, Pending)>, Failure> {
         if self.event.is_none() {
             self.pending.count(catalog, locked, scope, loader)?;
-            let Some(event) = self.pending.pop() else {
+            let Some((group, event)) = self.pending.pop() else {
                 return Ok(None);
             };
             if let Some(limit) = options.max_depth
@@ -186,6 +190,7 @@ impl Frame {
             }
             self.filter = Some(Filter::new(scope, locked, &event)?);
             self.event = Some(event);
+            self.event_group = group;
         }
         loop {
             let known = catalog
@@ -341,6 +346,34 @@ impl Frame {
         })
     }
 
+    /// Proves a version conflict even if a later index query adds candidates.
+    fn version_conflict(&self, catalog: &Catalog) -> Option<(u64, &PackageKey)> {
+        let dependency = &self.event.as_ref()?.dependency;
+        if dependency.source != RequirementSource::CratesIo
+            || dependency.any_version
+            || catalog
+                .records(&dependency.package)
+                .iter()
+                .any(|candidate| {
+                    // A patch can be selected independently by a path or Git edge.
+                    !matches!(candidate.source, ResolvedSource::CratesIo { .. })
+                        && source_matches(&candidate.source, &dependency.source)
+                })
+        {
+            return None;
+        }
+        let blocker =
+            self.state.nodes.keys().find(|key| {
+                key.name == dependency.package
+                    && key.source == PackageSourceKey::CratesIo
+                    && !dependency.matches_version(&key.version)
+                    && dependency.requirement.comparators.iter().any(|comparator| {
+                        restricts_to_compatible_versions(comparator, &key.version)
+                    })
+            })?;
+        Some((self.event_group, blocker))
+    }
+
     fn can_retry(&self) -> bool {
         // The loader may still add versions of a crates.io package.
         if self.filter.as_ref().unwrap().locked_package.is_none()
@@ -353,6 +386,26 @@ impl Frame {
             Choice::Selected(_) => true,
             Choice::New(_, record) => !self.conflicts(record),
         })
+    }
+}
+
+fn restricts_to_compatible_versions(comparator: &Comparator, selected: &Version) -> bool {
+    if comparator.major != selected.major
+        || !matches!(
+            comparator.op,
+            Op::Exact | Op::Tilde | Op::Caret | Op::Wildcard
+        )
+    {
+        return false;
+    }
+    match (selected.major, selected.minor) {
+        (0, 0) => {
+            matches!(comparator.op, Op::Exact | Op::Caret)
+                && comparator.minor == Some(0)
+                && comparator.patch == Some(selected.patch)
+        }
+        (0, minor) => comparator.minor == Some(minor),
+        _ => true,
     }
 }
 
@@ -382,7 +435,22 @@ pub(super) fn solve(
             }
             Err(failure) if failure.fatal => return Err(failure),
             Err(failure) => {
-                frames.pop();
+                let mut keep = frames.len() - 1;
+                if matches!(scope, Scope::Complete { exact: false, .. })
+                    && let Some((group, blocker)) = frames[keep].version_conflict(catalog)
+                {
+                    // Revisit the newest choice that can change either the
+                    // selected version or the already queued dependency.
+                    while keep > 0 {
+                        let parent = &frames[keep - 1];
+                        if parent.pending.time <= group || !parent.state.nodes.contains_key(blocker)
+                        {
+                            break;
+                        }
+                        keep -= 1;
+                    }
+                }
+                frames.truncate(keep);
                 let Some(parent) = frames.last_mut() else {
                     return Err(failure);
                 };
