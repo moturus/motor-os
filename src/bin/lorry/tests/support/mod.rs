@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct Project {
@@ -15,16 +16,22 @@ impl Project {
         &self.rustc
     }
     pub fn new() -> Self {
+        static NEXT_PROJECT: AtomicU64 = AtomicU64::new(0);
         let scratch = if cfg!(target_os = "motor") {
             PathBuf::from("/none/tmp")
         } else {
             std::env::temp_dir()
         };
-        let unique = SystemTime::now()
+        let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = scratch.join(format!("lorry-test-{}-{unique}", std::process::id()));
+        // Parallel tests can read the same wall-clock time.
+        let sequence = NEXT_PROJECT.fetch_add(1, Ordering::Relaxed);
+        let root = scratch.join(format!(
+            "lorry-test-{}-{timestamp}-{sequence}",
+            std::process::id()
+        ));
         fs::create_dir(&root).unwrap();
         share(&root, true);
         let output = Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
