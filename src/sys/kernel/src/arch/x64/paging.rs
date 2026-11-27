@@ -986,27 +986,24 @@ impl PageTable {
         }
     }
 
-    /// Unmap without flushing the TLB. The caller must call `flush_pages`
-    /// before the unmapped physical frame is freed/reused, otherwise another
-    /// CPU may keep accessing the frame through a stale translation. That
-    /// flush also frees the page-table pages the unmaps emptied.
-    pub fn unmap_page_no_flush(&self, phys_addr: u64, virt_addr: u64, kind: PageType) {
-        unsafe {
-            self.inst
-                .get()
-                .lock(line!())
-                .unmap_page(phys_addr, virt_addr, kind, false);
+    /// Unmap the leaves and flush their covering range before any backing
+    /// frame or retired page-table page can be reused. Find the first mapped
+    /// page before locking so an unbacked reservation needs no page-table
+    /// lock. The rest of the iterator runs under that lock and must not map
+    /// or allocate.
+    pub fn unmap_pages(&self, pages: impl Iterator<Item = (u64, u64, PageType)>) {
+        let mut pages = pages.peekable();
+        let Some(&(_, mut first, _)) = pages.peek() else {
+            return;
+        };
+        let mut end = first;
+        let mut table = unsafe { self.inst.get() }.lock(line!());
+        for (phys, virt, kind) in pages {
+            table.unmap_page(phys, virt, kind, false);
+            first = first.min(virt);
+            end = end.max(virt + kind.page_size());
         }
-    }
-
-    /// One TLB shootdown covering `num_pages` small pages from `first_page_vaddr`.
-    pub fn flush_pages(&self, first_page_vaddr: u64, num_pages: u64) {
-        unsafe {
-            self.inst
-                .get()
-                .lock(line!())
-                .flush_pages(first_page_vaddr, num_pages)
-        }
+        table.flush_pages(first, (end - first) >> PAGE_SIZE_SMALL_LOG2);
     }
 
     pub fn is_readable(&self, virt_addr: u64) -> bool {
@@ -1131,13 +1128,15 @@ pub fn retired_tables_self_test() {
         assert_eq!(available_small_pages(), free_before - 4);
     };
 
-    // The batched path: nothing is freed until the caller's flush.
+    // The batched path: nothing is freed until the flush that ends the
+    // batch. The iterator runs before each unmap and after the last one.
     map_both();
-    for (vaddr, phys) in vaddrs.into_iter().zip(frames) {
-        table.unmap_page_no_flush(phys, vaddr, PageType::SmallPage);
-    }
-    assert_eq!(available_small_pages(), free_before - 4);
-    table.flush_pages(vaddrs[0], (vaddrs[1] - vaddrs[0]) / PAGE_SIZE_SMALL + 1);
+    let mut pages = vaddrs.into_iter().zip(frames);
+    table.unmap_pages(core::iter::from_fn(|| {
+        assert_eq!(available_small_pages(), free_before - 4);
+        let (vaddr, phys) = pages.next()?;
+        Some((phys, vaddr, PageType::SmallPage))
+    }));
     assert_eq!(available_small_pages(), free_before);
 
     // The single-page path flushes, and so frees, by itself.

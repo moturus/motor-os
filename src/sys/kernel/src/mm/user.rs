@@ -153,10 +153,16 @@ impl UserAddressSpace {
             page_table.mark_dead();
         }
 
-        // Drained by hand rather than by drop, so that self.inner is still
-        // available and the usage statistics are validated.
-        while let Some(segment) = self.kernel_stacks.pop_any_final() {
-            self.do_drop_kernel_stack(segment);
+        let mut pages = 0;
+        let mut stack_count = 0;
+        KERNEL_ADDRESS_SPACE.free_cached_stacks(core::iter::from_fn(|| {
+            let stack = self.kernel_stacks.pop_any_final()?;
+            pages += stack.size >> PAGE_SIZE_SMALL_LOG2;
+            stack_count += 1;
+            Some(stack.start)
+        }));
+        if stack_count != 0 {
+            self.uncharge_kernel_stacks(pages, stack_count);
         }
         self.kernel_stacks.release_storage();
         self.inner.release_user_memory();
@@ -395,12 +401,15 @@ impl UserAddressSpace {
     }
 
     fn do_drop_kernel_stack(&self, kernel_stack: super::MemorySegment) {
-        self.stats_kernel_sub(kernel_stack.size >> PAGE_SIZE_SMALL_LOG2);
-
         super::virt::KERNEL_ADDRESS_SPACE
             .free(kernel_stack.start, super::virt::VmemKind::KernelStack);
-        self.kernel_mem_stats
-            .sub_resident((kernel_stack.size >> PAGE_SIZE_SMALL_LOG2) - 2);
+        self.uncharge_kernel_stacks(kernel_stack.size >> PAGE_SIZE_SMALL_LOG2, 1);
+    }
+
+    fn uncharge_kernel_stacks(&self, pages: u64, stack_count: u64) {
+        self.stats_kernel_sub(pages);
+        // Each stack has two unbacked guard pages.
+        self.kernel_mem_stats.sub_resident(pages - 2 * stack_count);
     }
 
     pub fn drop_stacks(&self, user_stack: &UserStack, kernel_stack: &Option<super::MemorySegment>) {

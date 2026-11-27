@@ -80,11 +80,13 @@ pub fn test_thread_creation_exit_rollback() {
             0,
             "thread leaked in exit-race episode {episode}"
         );
-        assert_eq!(
-            crate::kernel_metric("pages_user", child.pid as u64),
-            0,
-            "memory retained in exit-race episode {episode}"
-        );
+        for metric in ["pages_user", "pages_kernel", "memory_resident"] {
+            assert_eq!(
+                crate::kernel_metric(metric, child.pid as u64),
+                0,
+                "{metric} retained in exit-race episode {episode}"
+            );
+        }
         moto_rt::alloc::release_handle(child.handle).unwrap();
     }
     println!("test_thread_creation_exit_rollback PASS");

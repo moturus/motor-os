@@ -415,9 +415,10 @@ unmapped, zero-page, MMIO, private or shared for a user address; copy-in,
 copy-out, pinning and sharing refuse MMIO and frame-less pages.
 
 `PageTable::map_page` zeroes the entire frame before publishing its PTE.
-Clearing a segment unmaps each page by its actual kind, flushes the whole
-segment before dropping frames, and subtracts the segment size, which is
-what was accounted when it was reserved, from region and process statistics.
+Clearing a segment unmaps each page by its actual kind in one hold of the
+page-table lock, flushes the range from its first to its last mapped page
+before dropping frames, and subtracts the segment size, which is what was
+accounted when it was reserved, from region and process statistics.
 The region lock is held continuously from reservation through mapping or
 rollback for MMIO and contiguous allocation, for a shared allocation (both
 regions, in one fixed order) and for a fixed-address fill from another
@@ -439,7 +440,11 @@ the normal and custom regions free their segments (private frames go back,
 shared frames live on in their other mappings), and the page descriptors,
 the process static page and the cached kernel stacks, with the cache's own
 pages, are released, leaving the process's user and kernel memory
-statistics at zero. The regions are
+statistics at zero. The cached kernel stacks are mapped in the kernel's
+table, which every CPU uses, so they are unmapped together and their frames
+are dropped after a single broadcast shootdown, whatever their number; a
+stack that did not fit in the cache was freed on its own when its thread
+exited. The regions are
 closed under their locks, so a handle that outlives the process cannot map
 or share new pages into the dead space, and the pager cannot fill it: the
 region answers `E_BAD_HANDLE`, which `SysMem::map` still reports as

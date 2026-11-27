@@ -2,7 +2,7 @@
 // utilize intrusive collections: using normal vectors/maps is not right, as
 // they involve heap allocations, and we don't want to do heap allocations
 // while allocating virtual memory, as it results in nasty recursion.
-use core::mem::MaybeUninit;
+use core::{cell::Cell, mem::MaybeUninit};
 
 use super::{AllocationClass, AllocationFailure};
 use intrusive_collections::{intrusive_adapter, Bound, UnsafeRef};
@@ -382,38 +382,30 @@ impl VmemSegment {
         debug_assert_ne!(self.segment.size, 0);
         debug_assert!(!self.owner.is_null());
 
-        // Unmap all mapped pages first, then do a single ranged TLB
-        // shootdown: a shootdown IPIs all CPUs and spins for their acks,
-        // so doing it per page makes large frees pathologically slow.
-        let mut mapped_pages = 0_u64;
-        let mut resident_pages = 0_u64;
-        for page in self.pages.iter() {
-            if let Some(frame) = page.frame.get() {
-                self.address_space().page_table.unmap_page_no_flush(
-                    frame.start(),
-                    page.start,
-                    frame.kind(),
-                );
-                mapped_pages += 1;
-                if !frame.is_mmio() {
-                    resident_pages += frame.kind().page_size() >> PAGE_SIZE_SMALL_LOG2;
-                }
-            }
-        }
-        if mapped_pages > 0 {
-            self.address_space().page_table.flush_pages(
-                self.segment.start,
-                self.segment.size >> PAGE_SIZE_SMALL_LOG2,
-            );
-        }
+        self.address_space()
+            .page_table
+            .unmap_pages(self.mapped_pages());
+        self.release_pages()
+    }
 
+    fn mapped_pages(&self) -> impl Iterator<Item = (u64, u64, PageType)> + '_ {
+        self.pages.iter().filter_map(|page| {
+            let frame = page.frame.get()?;
+            Some((frame.start(), page.start, frame.kind()))
+        })
+    }
+
+    // All mappings have been cleared and their shootdown acknowledged.
+    fn release_pages(&mut self) -> u64 {
+        let mut resident_pages = 0;
         let mut pages = self.pages.take();
         let mut cursor = pages.front_mut();
         while let Some(page) = cursor.remove() {
             let page_ptr = UnsafeRef::into_raw(page);
             let page_mut = unsafe { page_ptr.as_mut().unwrap() };
-            // The frame is freed here, after the TLB flush above: no CPU can
-            // reach a reused frame through a stale translation.
+            if let Some(frame) = page_mut.frame.get().filter(|frame| !frame.is_mmio()) {
+                resident_pages += frame.kind().page_size() >> PAGE_SIZE_SMALL_LOG2;
+            }
             page_mut.frame.take();
             page_mut.clear();
             self.address_space().page_allocator.free_page(page_ptr);
@@ -948,23 +940,20 @@ impl VmemSegment {
 pub(super) struct SegmentNode {
     free_list_link: SinglyLinkedListLink,
     tree_link: RBTreeLink,
-    vmem_segment: VmemSegment,
+    // The tree holds shared pointers to its nodes. Only an exclusive borrow
+    // of the region's SegmentMap can mutate a linked node's payload.
+    vmem_segment: Cell<VmemSegment>,
 }
 
 impl SegmentNode {
     pub(super) fn vmem_segment(&self) -> &VmemSegment {
-        &self.vmem_segment
-    }
-
-    unsafe fn vmem_segment_mut<'a>(&self) -> &'a mut VmemSegment {
-        let ptr = &self.vmem_segment as *const VmemSegment as usize as *mut VmemSegment;
-        unsafe { ptr.as_mut().unwrap() }
+        unsafe { &*self.vmem_segment.as_ptr() }
     }
 
     fn is_empty(&self) -> bool {
         !self.free_list_link.is_linked()
             && !self.tree_link.is_linked()
-            && self.vmem_segment.is_empty()
+            && self.vmem_segment().is_empty()
     }
 }
 
@@ -982,7 +971,7 @@ impl<'a> KeyAdapter<'a> for SegmentTreeAdapter {
     type Key = u64;
 
     fn get_key(&self, node: &'a SegmentNode) -> u64 {
-        node.vmem_segment.segment.start
+        node.vmem_segment().segment.start
     }
 }
 
@@ -1031,44 +1020,28 @@ impl SegmentMap {
             && self.slab_list.is_empty()
     }
 
+    fn find_node(&self, addr: u64) -> Option<&SegmentNode> {
+        if let Some(node) = self.segments.find(&addr).get() {
+            return Some(node);
+        }
+        let node = self.segments.upper_bound(Bound::Included(&addr)).get()?;
+        node.vmem_segment().segment.contains(addr).then_some(node)
+    }
+
     pub(super) fn find(&self, addr: u64) -> Option<&VmemSegment> {
-        if let Some(seg) = self.segments.find(&addr).get() {
-            return Some(&seg.vmem_segment);
-        }
-
-        let cursor = self
-            .segments
-            .upper_bound(intrusive_collections::Bound::Included(&addr));
-
-        if let Some(seg) = cursor.get() {
-            if seg.vmem_segment.segment.contains(addr) {
-                return Some(&seg.vmem_segment);
-            }
-        }
-
-        None
+        self.find_node(addr).map(SegmentNode::vmem_segment)
     }
 
     pub(super) fn get(&self, addr: &u64) -> Option<&VmemSegment> {
-        self.segments.find(addr).get().map(|seg| &seg.vmem_segment)
+        self.segments
+            .find(addr)
+            .get()
+            .map(SegmentNode::vmem_segment)
     }
 
     pub(super) fn find_mut(&mut self, addr: u64) -> Option<&mut VmemSegment> {
-        if let Some(seg) = self.segments.find_mut(&addr).get() {
-            return Some(unsafe { seg.vmem_segment_mut() });
-        }
-
-        let cursor = self
-            .segments
-            .upper_bound_mut(intrusive_collections::Bound::Included(&addr));
-
-        if let Some(seg) = cursor.get() {
-            if seg.vmem_segment.segment.contains(addr) {
-                return Some(unsafe { seg.vmem_segment_mut() });
-            }
-        }
-
-        None
+        let node = self.find_node(addr)?;
+        Some(unsafe { &mut *node.vmem_segment.as_ptr() })
     }
 
     pub(super) fn intersects(&self, segment: &MemorySegment) -> bool {
@@ -1077,14 +1050,12 @@ impl SegmentMap {
         self.segments
             .upper_bound(Bound::Excluded(&segment.end()))
             .get()
-            .is_some_and(|seg| seg.vmem_segment.segment.end() > segment.start)
+            .is_some_and(|seg| seg.vmem_segment().segment.end() > segment.start)
     }
 
     pub(super) fn get_mut(&mut self, addr: &u64) -> Option<&mut VmemSegment> {
-        self.segments
-            .find_mut(addr)
-            .get()
-            .map(|seg| unsafe { seg.vmem_segment_mut() })
+        let node = self.segments.find(addr).get()?;
+        Some(unsafe { &mut *node.vmem_segment.as_ptr() })
     }
 
     /// Two distinct segments by start address, both mutable.
@@ -1094,54 +1065,62 @@ impl SegmentMap {
         second: u64,
     ) -> Option<(&mut VmemSegment, &mut VmemSegment)> {
         assert_ne!(first, second);
-        let first = self.get_mut(&first)? as *mut VmemSegment;
-        let second = self.get_mut(&second)? as *mut VmemSegment;
-        // Distinct nodes of the map, so the two references never alias.
-        Some(unsafe { (&mut *first, &mut *second) })
+        let first = self.segments.find(&first).get()?;
+        let second = self.segments.find(&second).get()?;
+        // Both tree searches finish before either distinct payload is borrowed.
+        Some(unsafe {
+            (
+                &mut *first.vmem_segment.as_ptr(),
+                &mut *second.vmem_segment.as_ptr(),
+            )
+        })
     }
 
     pub(super) fn last_segment(&self) -> Option<&VmemSegment> {
-        if let Some(seg) = self.segments.back().get() {
-            return Some(&seg.vmem_segment);
-        }
-
-        None
+        self.segments.back().get().map(SegmentNode::vmem_segment)
     }
 
     pub(super) fn remove(&mut self, addr: u64) -> Option<VmemSegment> {
-        if let Some(seg_ref) = self.segments.find_mut(&addr).remove() {
-            let seg_ptr = UnsafeRef::into_raw(seg_ref);
-            let seg = unsafe { seg_ptr.as_mut().unwrap() };
-            let mut result = VmemSegment::default();
-            core::mem::swap(&mut result, &mut seg.vmem_segment);
-
-            self.free_list
-                .push_front(unsafe { UnsafeRef::from_raw(seg_ptr) });
-            self.free_segment_count += 1;
-            self.used_segment_count -= 1;
-
-            Some(result)
-        } else {
-            None
-        }
+        let node = self.segments.find_mut(&addr).remove()?;
+        Some(self.take_segment(node))
     }
 
     pub(super) fn pop_first(&mut self) -> Option<VmemSegment> {
-        if let Some(seg_ref) = self.segments.front_mut().remove() {
-            let seg_ptr = UnsafeRef::into_raw(seg_ref);
-            let seg = unsafe { seg_ptr.as_mut().unwrap() };
-            let mut result = VmemSegment::default();
-            core::mem::swap(&mut result, &mut seg.vmem_segment);
+        let node = self.segments.front_mut().remove()?;
+        Some(self.take_segment(node))
+    }
 
-            self.free_list
-                .push_front(unsafe { UnsafeRef::from_raw(seg_ptr) });
-            self.free_segment_count += 1;
-            self.used_segment_count -= 1;
+    fn take_segment(&mut self, node: UnsafeRef<SegmentNode>) -> VmemSegment {
+        let segment = node.vmem_segment.take();
+        self.free_list.push_front(node);
+        self.free_segment_count += 1;
+        self.used_segment_count -= 1;
+        segment
+    }
 
-            Some(result)
-        } else {
-            None
+    /// Removes and unmaps the segments starting at `starts`, which must all
+    /// exist, with one TLB flush for all of them; returns their total size.
+    pub(super) fn unmap_segments(&mut self, starts: impl Iterator<Item = u64>) -> u64 {
+        // Reuse the detached nodes to hold all frames through one shootdown.
+        // The caller holds the region lock until the addresses are free.
+        let mut removed = SinglyLinkedList::new(SegmentListAdapter::new());
+        for start in starts {
+            removed.push_front(self.segments.find_mut(&start).remove().unwrap());
         }
+        let Some(first) = removed.front().get() else {
+            return 0;
+        };
+        // The segments of one map belong to one address space.
+        first.vmem_segment().address_space().page_table.unmap_pages(
+            removed
+                .iter()
+                .flat_map(|node| node.vmem_segment().mapped_pages()),
+        );
+        let mut bytes = 0;
+        while let Some(node) = removed.pop_front() {
+            bytes += self.take_segment(node).release_pages();
+        }
+        bytes
     }
 
     pub(super) fn iter(&self) -> intrusive_collections::rbtree::Iter<'_, SegmentTreeAdapter> {
@@ -1229,16 +1208,11 @@ impl SegmentMap {
         seg
     }
 
-    pub(super) fn insert(&mut self, mut seg: VmemSegment) {
+    pub(super) fn insert(&mut self, seg: VmemSegment) {
         let entry = self.get_free_segment();
-        debug_assert!(entry.vmem_segment.pages.is_empty());
-
-        unsafe {
-            let entry_ptr = UnsafeRef::into_raw(entry);
-            let entry_ref = entry_ptr.as_mut().unwrap();
-            core::mem::swap(&mut entry_ref.vmem_segment, &mut seg);
-            self.segments.insert(UnsafeRef::from_raw(entry_ptr));
-        }
+        debug_assert!(entry.vmem_segment().is_empty());
+        entry.vmem_segment.set(seg);
+        self.segments.insert(entry);
     }
 
     pub(super) fn clear(&mut self) {

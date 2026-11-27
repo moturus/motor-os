@@ -152,10 +152,30 @@
   the pinned sys-io thread waits for CPU 0. Evaluate local-queue priority,
   wake preemption and fairness together. Unconditional wake preemption
   hurts bulk TCP throughput, and zero-timeout pollers can starve other work.
-- **Kernel stacks at exit.** `UserAddressSpace::release_user_memory` frees
-  cached kernel stacks one at a time. Each free broadcasts a TLB
-  shootdown. Batch unmapping and invalidate once after all mappings have
-  been cleared.
+- **Broadcasts at process exit.** `UserAddressSpace::release_user_memory`
+  interrupts every CPU twice in a row: once to move the CPUs off the dying
+  page table, and once to invalidate the cached kernel stacks it unmapped.
+  Clear the stack mappings first and send one message that does both. The
+  message has to carry an eviction and a kernel range together. A process
+  with one thread, which gained nothing from batching its stacks, would
+  benefit too.
+- **Unmap order.** After clearing an entry, `unmap_page` scans the table
+  from entry 0 to see whether it is empty. A dense segment is cleared in
+  ascending order, so each scan reads every entry already cleared: about
+  256 reads per page for a full table. In descending order the first read
+  finds a live entry. This applies to every dense unmap, including the
+  release of a whole address space at exit. Measure a large small-page
+  unmap and a process exit before changing the order.
+- **User stacks at process exit.** Each thread's cleanup unmaps its user
+  stack while the page table is still live, with a TLB shootdown to the
+  CPUs on that table. When the process is exiting, leave the stack to
+  `release_user_memory`, which frees it on the dead table without one. A
+  thread that exits in a live process must still unmap its stack.
+- **Kernel stack reuse.** A kernel stack is mapped when a thread starts
+  and unmapped, with a broadcast, when its process exits. A system-wide
+  pool of stacks would save both. Decide who is charged for a pooled
+  stack, how many are kept, and how the pool is emptied under memory
+  pressure.
 - **Heap allocations.** Rust's frusa heap maps and unmaps individual
   allocations above 4 KiB, and mlibc's frigg allocator does so above
   32 KiB. Consider larger frusa classes with the required alignment,

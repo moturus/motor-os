@@ -150,12 +150,8 @@ pub(super) fn map_slab_pages(
     let options = MappingOptions::READABLE | MappingOptions::WRITABLE;
     for (idx, phys) in pages[..num_pages].iter().enumerate() {
         if let Err(err) = table.map_page(*phys, vaddr(idx), PageType::SmallPage, options, class) {
-            for (done, phys) in pages[..idx].iter().enumerate() {
-                table.unmap_page_no_flush(*phys, vaddr(done), PageType::SmallPage);
-            }
-            if idx > 0 {
-                table.flush_pages(start, idx as u64);
-            }
+            let mapped = pages[..idx].iter().enumerate();
+            table.unmap_pages(mapped.map(|(done, phys)| (*phys, vaddr(done), PageType::SmallPage)));
             free_slab_pages(&pages[..num_pages]);
             return Err(err);
         }
@@ -378,18 +374,31 @@ impl VmemRegion {
     ) -> Result<u64, moto_sys::ErrorCode> {
         if let Some(deleted) = segments.remove(addr) {
             let sz = VmemSegment::unmap(deleted); // Consumes deleted.
-
-            self.bytes_used.fetch_sub(sz, Ordering::Relaxed);
-            {
-                unsafe { self.address_space.get() }
-                    .mem_stats
-                    .sub(sz >> PAGE_SIZE_SMALL_LOG2);
-            }
-
+            self.stats_sub(sz);
             Ok(sz)
         } else {
             Err(moto_rt::E_INVALID_ARGUMENT)
         }
+    }
+
+    /// Frees the segments starting at `starts`, which must all exist, with
+    /// one TLB flush for all of them. `starts` is drained under the region
+    /// lock, except for its first item.
+    fn free_segments(&self, starts: impl Iterator<Item = u64>) {
+        let mut starts = starts.peekable();
+        if starts.peek().is_none() {
+            return; // Nothing to free: the region lock is not needed.
+        }
+        let mut segments = self.used_segments.lock(line!());
+        self.stats_sub(segments.unmap_segments(starts));
+    }
+
+    // Takes freed segments' bytes off the region and its address space.
+    fn stats_sub(&self, bytes: u64) {
+        self.bytes_used.fetch_sub(bytes, Ordering::Relaxed);
+        unsafe { self.address_space.get() }
+            .mem_stats
+            .sub(bytes >> PAGE_SIZE_SMALL_LOG2);
     }
 
     #[cfg(debug_assertions)]
@@ -403,14 +412,7 @@ impl VmemRegion {
         let mut segments = self.used_segments.lock(line!());
 
         while let Some(deleted) = segments.pop_first() {
-            let sz = VmemSegment::unmap(deleted); // Consumes deleted.
-
-            self.bytes_used.fetch_sub(sz, Ordering::Relaxed);
-            {
-                unsafe { self.address_space.get() }
-                    .mem_stats
-                    .sub(sz >> PAGE_SIZE_SMALL_LOG2);
-            }
+            self.stats_sub(VmemSegment::unmap(deleted)); // Consumes deleted.
         }
 
         segments.clear();
@@ -911,6 +913,11 @@ impl KernelAddressSpace {
             VmemKind::KernelMMIO => self.kernel_mmio.free(addr).unwrap(),
             _ => panic!(),
         }
+    }
+
+    /// Frees the kernel stacks starting at `starts` with one TLB shootdown.
+    pub(super) fn free_cached_stacks(&self, starts: impl Iterator<Item = u64>) {
+        self.kernel_stacks.free_segments(starts)
     }
 
     // pub(super) fn ___free_segment(&self, addr: u64, size: u64) {
