@@ -8,6 +8,8 @@ use std::io;
 
 use gix::bstr::{BStr, BString, ByteSlice, ByteVec};
 
+use crate::patch_binary;
+
 /// One change to one file, as a patch describes it.
 #[derive(Debug, Default)]
 pub struct Patch<'a> {
@@ -22,6 +24,8 @@ pub struct Patch<'a> {
     pub is_delete: Option<bool>,
     pub is_rename: bool,
     pub is_copy: bool,
+    /// Forward and reverse binary hunks. A binary summary has neither.
+    pub binary: Option<[Option<patch_binary::Hunk>; 2]>,
     /// The object names of the `index` line, as written.
     pub old_id: &'a [u8],
     pub new_id: &'a [u8],
@@ -82,6 +86,9 @@ impl Patch<'_> {
         }
         std::mem::swap(&mut self.is_new, &mut self.is_delete);
         std::mem::swap(&mut self.old_id, &mut self.new_id);
+        if let Some(hunks) = &mut self.binary {
+            hunks.swap(0, 1);
+        }
         for hunk in &mut self.hunks {
             std::mem::swap(&mut hunk.old_start, &mut hunk.new_start);
             std::mem::swap(&mut hunk.old_lines, &mut hunk.new_lines);
@@ -152,7 +159,7 @@ impl<'p> Parser<'p> {
         while let Some(mut patch) = self.find_header(&mut cursor)? {
             parse_hunks(&mut cursor, &mut patch)?;
             if patch.hunks.is_empty() {
-                check_hunkless_patch(&cursor, &patch)?;
+                parse_binary(&mut cursor, &mut patch)?;
             }
             // Git removes the old file and writes the new one whenever the names differ.
             // That is found out only here, after the check for a patch without a change:
@@ -548,25 +555,75 @@ fn strip_newline(hunk: &mut Hunk<'_>) {
     }
 }
 
-/// A text patch without hunks must change the name or mode, create a file, or delete it.
-fn check_hunkless_patch(cursor: &Cursor<'_>, patch: &Patch<'_>) -> crate::Result {
+/// Read what follows the header of a patch without hunks: the mark of a binary file, or
+/// its contents.
+fn parse_binary<'a>(cursor: &mut Cursor<'a>, patch: &mut Patch<'a>) -> crate::Result {
     let line = cursor.peek().unwrap_or_default();
-    if line == b"GIT binary patch\n"
-        || line.ends_with(b" differ\n")
-            && (line.starts_with(b"Binary files ") || line.starts_with(b"Files "))
+    if line == b"GIT binary patch\n" {
+        cursor.advance();
+        let Some(forward) = binary_hunk(cursor)? else {
+            return Err(invalid(format!(
+                "unrecognized binary patch at line {}",
+                cursor.line - 1
+            )));
+        };
+        patch.binary = Some([Some(forward), binary_hunk(cursor)?]);
+    } else if line.ends_with(b" differ\n")
+        && (line.starts_with(b"Binary files ") || line.starts_with(b"Files "))
     {
-        return Err(invalid(format!(
-            "binary patch at line {} is unsupported",
-            cursor.line
-        )));
-    }
-    if !patch.changes_metadata() {
+        patch.binary = Some([None, None]);
+        cursor.advance();
+    } else if !patch.changes_metadata() {
         return Err(invalid(format!(
             "patch with only garbage at line {}",
             cursor.line
         )));
     }
     Ok(())
+}
+
+/// Read one hunk of a binary patch: `literal LENGTH` or `delta LENGTH`, lines of data, and
+/// an empty line. `None` if there is no hunk here.
+fn binary_hunk(cursor: &mut Cursor<'_>) -> crate::Result<Option<patch_binary::Hunk>> {
+    let line = cursor.peek().unwrap_or_default();
+    let (kind, len) = if let Some(len) = line.strip_prefix(b"delta ") {
+        (patch_binary::Kind::Delta, len)
+    } else if let Some(len) = line.strip_prefix(b"literal ") {
+        (patch_binary::Kind::Literal, len)
+    } else {
+        return Ok(None);
+    };
+    let start = cursor.line;
+    let Some((len, b"\n")) = number(len).filter(|(len, _)| *len <= patch_binary::MAX_BYTES) else {
+        return Err(invalid(format!("invalid binary hunk size at line {start}")));
+    };
+    cursor.advance();
+    let mut compressed = Vec::new();
+    loop {
+        let line = cursor.peek().unwrap_or_default();
+        if line == b"\n" {
+            cursor.advance();
+            return Ok(Some(patch_binary::Hunk {
+                kind,
+                len,
+                compressed,
+                line: start,
+            }));
+        }
+        compressed.try_reserve(patch_binary::LINE_BYTES)?;
+        if line
+            .strip_suffix(b"\n")
+            .and_then(|line| patch_binary::decode_line(line, &mut compressed))
+            .is_none()
+        {
+            return Err(invalid(format!(
+                "corrupt binary patch at line {}: {}",
+                cursor.line,
+                line.trim_end().to_str_lossy().escape_debug()
+            )));
+        }
+        cursor.advance();
+    }
 }
 
 /// Read `index OLD..NEW[ MODE]`. A line of another form is ignored, as in Git.
@@ -1067,9 +1124,11 @@ mod tests {
             "--- a/old name\t\n+++ b/new name\t\n@@ -3,2 +3,3 @@\n context\n+added\n \n",
             "diff --git a/from b/to\ncopy from from\ncopy to to\n",
             "diff --git a/mode b/mode\nold mode 100644\nnew mode 100755\n",
+            "diff --git a/bin b/bin\nindex 1111111..2222222 100644\n",
+            "Binary files a/bin and b/bin differ\n",
             "-- \n2.43.0\n",
         ))?;
-        let [modify, create, delete, rename, copy, mode] = &patches[..] else {
+        let [modify, create, delete, rename, copy, mode, binary] = &patches[..] else {
             panic!("{patches:?}");
         };
         assert_eq!(names(modify), (Some("dir/file"), Some("dir/file")));
@@ -1095,6 +1154,8 @@ mod tests {
         assert_eq!(names(copy), (Some("from"), Some("to")));
         assert!(copy.is_copy);
         assert_eq!((mode.old_mode, mode.new_mode), (0o100644, 0o100755));
+        assert_eq!(names(binary), (Some("bin"), Some("bin")));
+        assert!(matches!(binary.binary, Some([None, None])));
 
         // `-p` removes that many leading directories.
         let stripped = Parser::new(Some(2), b"").parse(
@@ -1211,8 +1272,6 @@ mod tests {
 
     #[test]
     fn damaged_patches_are_refused() {
-        let binary = "diff --git a/bin b/bin\nnew file mode 100644\nGIT binary patch\n";
-        assert_eq!(error(binary), "binary patch at line 3 is unsupported");
         let header = "diff --git a/f b/f\n--- a/f\n+++ b/f\n";
         for (patch, expected) in [
             (

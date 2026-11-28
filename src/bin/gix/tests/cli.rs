@@ -1435,6 +1435,10 @@ fn diff_writes_what_git_writes_and_apply_reads_it() -> Result {
             "diff --git a/.git/config b/.git/config\n--- a/.git/config\n+++ b/.git/config\n@@ -1 +1 @@\n-a\n+b\n",
             "invalid path '.git/config'",
         ),
+        (
+            "diff --git a/text b/text\nindex 1111111..2222222 100644\nBinary files a/text and b/text differ\n",
+            "cannot apply binary patch to 'text' without full index line",
+        ),
     ] {
         fs::write(client.0.join("bad.diff"), input)?;
         let bad = client.0.join("bad.diff");
@@ -1695,6 +1699,27 @@ fn apply_changes_the_index_and_reads_other_patches() -> Result {
         is_base();
     }
 
+    // A patch from `git diff --binary` has the contents of a binary file, in both
+    // directions.
+    let binary = write(
+        "binary.diff",
+        concat!(
+            "diff --git a/created b/created\n",
+            "new file mode 100644\n",
+            "index 0000000000000000000000000000000000000000..25753d037454cf6bd3f3a0c765cda5fcf1596ce0\n",
+            "GIT binary patch\n",
+            "literal 9\n",
+            "Qcmc~xEoVr}%t_?}01yfS^#A|>\n",
+            "\n",
+            "literal 0\n",
+            "HcmV?d00001\n",
+            "\n",
+        ),
+    );
+    client.ok(&root, &["apply", &binary]);
+    assert_eq!(fs::read(root.join("created"))?, b"new\0file\n");
+    client.ok(&root, &["apply", "-R", &binary]);
+    is_base();
     Ok(())
 }
 

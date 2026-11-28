@@ -139,10 +139,18 @@ pub fn run(
         }
         // Started in a subdirectory, apply leaves out the patches for files outside of it,
         // as Git does. A rename is selected by its destination in the requested direction.
-        list.retain(|patch| {
+        // Git has read the binary data of a patch before it leaves the patch out, so
+        // damage there is an error here too.
+        for skipped in list.extract_if(.., |patch| {
             let name = patch.new_name.as_ref().or(patch.old_name.as_ref());
-            name.is_some_and(|name| name.len() > prefix.len() && name.starts_with(&prefix))
-        });
+            !name.is_some_and(|name| name.len() > prefix.len() && name.starts_with(&prefix))
+        }) {
+            if let Some(hunks) = skipped.binary {
+                for hunk in hunks.iter().flatten() {
+                    hunk.validate()?;
+                }
+            }
+        }
         if list.is_empty() {
             continue;
         }
@@ -713,7 +721,9 @@ impl<'a> Session<'a> {
             }
         }
 
-        let result = if patch.hunks.is_empty() {
+        let result = if let Some(hunks) = &patch.binary {
+            self.binary_result(patch, hunks, &image)?
+        } else if patch.hunks.is_empty() {
             image
         } else {
             let mut lines = Image::new(&image)?;
@@ -921,6 +931,82 @@ impl<'a> Session<'a> {
             }
         }
         Ok(())
+    }
+
+    /// What a patch for a binary file makes of `image`. The patch names the old and the
+    /// new blob. The new one is taken from the repository, or made from what the patch
+    /// has of it.
+    fn binary_result(
+        &self,
+        patch: &Patch<'_>,
+        hunks: &[Option<crate::patch_binary::Hunk>; 2],
+        image: &[u8],
+    ) -> crate::Result<Vec<u8>> {
+        let name = show(patch.name());
+        let repo = &self.opened.repo;
+        let hash = |data: &[u8]| gix::objs::compute_hash(repo.object_hash(), Kind::Blob, data);
+        let (Ok(old), Ok(new)) = (
+            gix::ObjectId::from_hex(patch.old_id),
+            gix::ObjectId::from_hex(patch.new_id),
+        ) else {
+            let reason = format!("cannot apply binary patch to '{name}' without full index line");
+            return Err(does_not_apply(&name, vec![reason]));
+        };
+        if patch.old_name.is_some() {
+            let current = hash(image)?;
+            if current != old {
+                let reason = format!(
+                    "the patch applies to '{name}' ({current}), which does not match the \
+                     current contents."
+                );
+                return Err(does_not_apply(&name, vec![reason]));
+            }
+        } else if !image.is_empty() {
+            let reason = format!("the patch applies to an empty '{name}' but it is not empty");
+            return Err(does_not_apply(&name, vec![reason]));
+        }
+        if let Some(reverse) = &hunks[1] {
+            reverse.validate()?;
+        }
+        let available = if new.is_null() {
+            Some(Vec::new())
+        } else {
+            repo.try_find_object(new)?
+                .filter(|obj| obj.kind == Kind::Blob)
+                .map(|obj| obj.detach().data)
+        };
+        if let Some(contents) = available {
+            if let Some(forward) = &hunks[0] {
+                forward.validate()?;
+            }
+            return Ok(contents);
+        }
+        let no_result = format!("binary patch does not apply to '{name}'");
+        let result = match hunks {
+            [None, None] => {
+                let missing = format!("missing binary patch data for '{name}'");
+                return Err(does_not_apply(&name, vec![missing, no_result]));
+            }
+            // A reversed patch needs the hunk that makes the old file again.
+            [None, Some(_)] => {
+                let irreversible = format!(
+                    "cannot reverse-apply a binary patch without the reverse hunk to '{name}'"
+                );
+                return Err(does_not_apply(&name, vec![irreversible, no_result]));
+            }
+            [Some(hunk), _] => match hunk.apply(image)? {
+                Some(result) => result,
+                None => return Err(does_not_apply(&name, vec![no_result])),
+            },
+        };
+        let made = hash(&result)?;
+        if made != new {
+            let reason = format!(
+                "binary patch to '{name}' creates incorrect result (expecting {new}, got {made})"
+            );
+            return Err(does_not_apply(&name, vec![reason]));
+        }
+        Ok(result)
     }
 }
 

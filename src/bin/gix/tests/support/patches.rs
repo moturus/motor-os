@@ -376,6 +376,48 @@ fn deleted_attributes_and_missing_worktree_attributes_use_the_resulting_rules() 
 }
 
 #[test]
+fn binary_hunks_span_multiple_buffers_and_validate_unused_directions() -> Result {
+    // Git's binary patch for a new file of 16 KiB of zero bytes.
+    const PATCH: &str = concat!(
+        "diff --git a/block b/block\nnew file mode 100644\n",
+        "index 0000000000000000000000000000000000000000..294f4016d05bdd696670c4840f1f36a71f9239de\n",
+        "GIT binary patch\nliteral 16384\n",
+        "zcmeIuF#!Mo0K%a4Pi+hzh(KY$fB^#r3>YwAz<>b*1`HT5V8DO@0|pEjFkrxd0RsjM\n",
+        "q7%*VKfB^#r3>YwAz<>b*1`HT5V8DO@0|pEjFkrxd0RsjMyaxtA00031\n\n",
+        "literal 0\nHcmV?d00001\n\n",
+    );
+    let (client, root) = repository();
+    let patch = client.0.join("block.patch");
+    let block = root.join("block");
+    fs::write(&patch, PATCH)?;
+    client.ok(&root, &["apply", "--index", "--check", "../block.patch"]);
+    assert!(!block.exists());
+    client.ok(&root, &["apply", "--index", "../block.patch"]);
+    assert_eq!(fs::read(&block)?, vec![0; 16384]);
+    client.ok(&root, &["apply", "--index", "-R", "../block.patch"]);
+    assert!(!block.exists());
+
+    let sub = root.join("sub");
+    fs::create_dir(&sub)?;
+    for (header, wrong) in [
+        ("literal 16384", "literal 16383"),
+        ("literal 0", "literal 1"),
+    ] {
+        fs::write(&patch, PATCH.replace(header, wrong))?;
+        // The result is already in the object database. From sub/ the whole file is skipped.
+        for dir in [&root, &sub] {
+            client.error(
+                dir,
+                &["apply", "--check", patch.to_str().unwrap()],
+                "corrupt binary patch",
+            );
+        }
+        assert!(!block.exists());
+    }
+    Ok(())
+}
+
+#[test]
 fn the_index_is_written_once_after_the_last_patch_file() -> Result {
     let (client, root) = repository();
     fs::write(root.join("one"), "first\n")?;

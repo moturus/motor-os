@@ -98,7 +98,7 @@ A few things work differently from Git:
 ### Patches
 
 `gix diff` writes a patch as `git diff` writes it, and `gix apply` applies a
-text patch as `git apply` does. A patch from one program is input for the other:
+patch as `git apply` does. A patch from one program is input for the other:
 
 ```sh
 gix diff > change.diff     # your unstaged changes, as a patch
@@ -162,6 +162,11 @@ The rules are those of Git:
 - Patches from `git diff`, `git show` and `git format-patch` are read, also
   with renames and copies, and so are patches from `diff -u`, whose file
   names are relative to the directory that `apply` is started in.
+- A patch for a binary file applies if it has the contents of the file, as
+  patches from `git diff --binary` and `git format-patch` have. Without
+  them it applies only if it has the full object IDs (`git diff
+  --full-index`) and the repository has the new contents. By default,
+  `gix diff` abbreviates those IDs and writes a binary summary.
 
 What `apply` does differently:
 

@@ -481,7 +481,7 @@ Put <code>--</code> in front of a name that starts with a dash.
 
 <h3 id="patches">Patches</h3>
 <p><code>gix diff</code> writes a patch as <code>git diff</code> writes it, and
-<code>gix apply</code> applies a text patch as <code>git apply</code> does. A patch from one
+<code>gix apply</code> applies a patch as <code>git apply</code> does. A patch from one
 program is input for the other:</p>
 <pre><code>gix diff &gt; change.diff     # your unstaged changes, as a patch
 gix restore .              # take them out of your files
@@ -537,6 +537,11 @@ then leave it as it was.</p>
   <code>git format-patch</code> are read, also with renames and copies, and so are patches
   from <code>diff -u</code>, whose file names are relative to the directory that
   <code>apply</code> is started in.</li>
+  <li>A patch for a binary file applies if it has the contents of the file, as patches
+  from <code>git diff --binary</code> and <code>git format-patch</code> have. Without them
+  it applies only if it has the full object IDs (<code>git diff --full-index</code>) and
+  the repository has the new contents. By default, <code>gix diff</code> abbreviates
+  those IDs and writes a binary summary.</li>
 </ul>
 <p>What <code>apply</code> does differently:</p>
 <ul>
