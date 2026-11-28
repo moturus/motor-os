@@ -1,4 +1,5 @@
 pub mod add;
+pub mod apply;
 pub mod branch_checkout;
 pub mod branches;
 pub mod cancellation;

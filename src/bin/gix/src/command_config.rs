@@ -10,6 +10,12 @@ pub struct Policy {
     pub default_merge_driver: Option<BString>,
 }
 
+impl Policy {
+    pub(crate) fn has_unsupported_filters(&self) -> bool {
+        !self.external_filters.is_empty() || !self.required_filters.is_empty()
+    }
+}
+
 pub fn sanitize(repo: &mut gix::Repository) -> crate::Result<Policy> {
     let policy = inspect(repo)?;
     let mut config = repo.config_snapshot_mut();

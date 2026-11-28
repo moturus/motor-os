@@ -49,6 +49,14 @@ pub struct Hunk<'a> {
 }
 
 impl Patch<'_> {
+    /// A CRLF in context or in a removed line makes Git preserve worktree line endings.
+    pub(crate) fn crlf_in_preimage(&self) -> bool {
+        self.hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .any(|(kind, text)| *kind != Line::Add && text.ends_with(b"\r\n"))
+    }
+
     /// The name that messages about this patch use.
     pub fn name(&self) -> &BStr {
         self.old_name

@@ -9,9 +9,9 @@ use clap::{Arg, ArgAction, ArgGroup, ArgMatches, Command, value_parser};
 mod log;
 
 use motor_gix::{
-    Result, add, branch_checkout, branches, cancellation, clone, commit, diff, fetch, init, merge,
-    network, pull, push, rebase, recover, refs, remotes, repository, restore, status, switch,
-    unstage,
+    Result, add, apply, branch_checkout, branches, cancellation, clone, commit, diff, fetch, init,
+    merge, network, pull, push, rebase, recover, refs, remotes, repository, restore, status,
+    switch, unstage,
 };
 
 fn main() -> ExitCode {
@@ -81,6 +81,51 @@ fn run() -> Result {
                         .action(ArgAction::Append)
                         .num_args(1..)
                         .required_unless_present("all"),
+                ),
+        )
+        .subcommand(
+            Command::new("apply")
+                .about("Check whether a text patch applies")
+                .arg(
+                    Arg::new("check")
+                        .long("check")
+                        .required(true)
+                        .action(ArgAction::SetTrue)
+                        .help("Check whether the patch applies"),
+                )
+                .arg(
+                    Arg::new("reverse")
+                        .short('R')
+                        .long("reverse")
+                        .action(ArgAction::SetTrue)
+                        .help("Check the patch backwards"),
+                )
+                .arg(
+                    Arg::new("index")
+                        .long("index")
+                        .action(ArgAction::SetTrue)
+                        .help("Check the index and require matching worktree files"),
+                )
+                .arg(
+                    Arg::new("cached")
+                        .long("cached")
+                        .action(ArgAction::SetTrue)
+                        .help("Check the index alone"),
+                )
+                .arg(
+                    Arg::new("strip")
+                        .short('p')
+                        .value_name("N")
+                        .value_parser(value_parser!(usize))
+                        .help("Remove N leading directories from the file names [default: 1]"),
+                )
+                .arg(
+                    Arg::new("patches")
+                        .value_name("PATCH")
+                        .action(ArgAction::Append)
+                        .num_args(1..)
+                        .value_parser(value_parser!(PathBuf))
+                        .help("Patch files; - is standard input [default: standard input]"),
                 ),
         )
         .subcommand(
@@ -356,6 +401,22 @@ fn run() -> Result {
                 .cloned()
                 .collect::<Vec<_>>();
             add::run(&opened, command.get_flag("all"), &paths, &cancellation)
+        }
+        Some("apply") => {
+            let command = matches.subcommand_matches("apply").expect("matched apply");
+            let patches = command
+                .get_many::<PathBuf>("patches")
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect::<Vec<_>>();
+            let options = apply::Options {
+                reverse: command.get_flag("reverse"),
+                index: command.get_flag("index"),
+                cached: command.get_flag("cached"),
+                strip: command.get_one::<usize>("strip").copied(),
+            };
+            apply::run(&opened, options, &patches, io::stdin(), &cancellation)
         }
         Some("branch") => {
             let command = matches

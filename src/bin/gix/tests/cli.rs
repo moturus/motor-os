@@ -1188,7 +1188,7 @@ fn switch_and_merge_keep_the_directory_they_are_started_in() -> Result {
     Ok(())
 }
 
-/// What `git diff` writes for the changes that `diff_writes_what_git_writes`
+/// What `git diff` writes for the changes that `diff_writes_what_git_writes_and_apply_checks_it`
 /// makes. It was written by Git 2.43, so the test needs no Git.
 const WORKTREE_PATCH: &str = concat!(
     "diff --git \"a/caf\\303\\251\" \"b/caf\\303\\251\"\n",
@@ -1251,7 +1251,7 @@ const WORKTREE_PATCH: &str = concat!(
 );
 
 #[test]
-fn diff_writes_what_git_writes() -> Result {
+fn diff_writes_what_git_writes_and_apply_checks_it() -> Result {
     let client = Client::new();
     let root = client.0.join("repository");
     client.ok(&client.0, &["init", root.to_str().unwrap()]);
@@ -1307,7 +1307,25 @@ fn diff_writes_what_git_writes() -> Result {
         fs::remove_file(root.join("gone-empty"))?;
         Ok(())
     };
+    let is_base = || {
+        assert_eq!(client.ok(&root, &["status"]), "");
+        for (path, contents) in &base {
+            assert_eq!(&fs::read_to_string(root.join(path)).unwrap(), contents);
+        }
+    };
     change()?;
     assert_eq!(client.ok(&root, &["diff"]), WORKTREE_PATCH);
+    let patch = client.0.join("worktree.diff");
+    fs::write(&patch, WORKTREE_PATCH)?;
+    let patch = patch.to_str().unwrap();
+    let index = fs::read(root.join(".git/index"))?;
+
+    // The changed files do not match the preimage. Restoring them makes the patch applicable.
+    client.error(&root, &["apply", "--check", patch], "patch failed: text:1");
+    client.ok(&root, &["restore", "."]);
+    is_base();
+    assert_eq!(client.ok(&root, &["apply", "--check", patch]), "");
+    is_base();
+    assert_eq!(fs::read(root.join(".git/index"))?, index);
     Ok(())
 }

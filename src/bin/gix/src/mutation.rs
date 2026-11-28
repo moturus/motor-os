@@ -123,7 +123,7 @@ impl Guard {
             (Admission::Ordinary | Admission::Rebase, Some(record)) => {
                 return unsupported(unfinished(record));
             }
-            (Admission::Ordinary, None) | (Admission::ReadyMutation, None) => false,
+            (Admission::Ordinary | Admission::ReadyMutation, None) => false,
             (Admission::ReadyMutation, Some(record)) if record.state == State::Ready => {
                 record.kind == Kind::Merge
             }
@@ -158,7 +158,7 @@ impl Guard {
             ),
             Err(error) => return Err(error.into()),
         };
-        validate_index(&index)?;
+        validate_index(&index, false)?;
         Ok((
             Guard {
                 index_lock: Some(index_lock),
@@ -293,7 +293,7 @@ impl Guard {
         state: gix::index::State,
     ) -> crate::Result<gix::hash::ObjectId> {
         let index = gix::index::File::from_state(state, std::path::PathBuf::new());
-        validate_index(&index)?;
+        validate_index(&index, false)?;
         let lock = self.take_index_lock()?;
         publish_index(lock, &index)
     }
@@ -310,7 +310,7 @@ impl Guard {
         let old_timestamp = self.index.timestamp();
         edit(&mut self.index)?;
         self.index.sort_entries();
-        validate_index(&self.index)?;
+        validate_index(&self.index, false)?;
 
         let stat_options = gix::index::entry::stat::Options {
             trust_ctime: false,
@@ -384,7 +384,7 @@ fn write_operation(mut lock: gix::lock::File, record: &Record) -> crate::Result 
 
 pub(crate) fn preflight_index(state: gix::index::State) -> crate::Result {
     let index = gix::index::File::from_state(state, PathBuf::new());
-    validate_index(&index)?;
+    validate_index(&index, false)?;
     let mut writer = LimitedWriter {
         inner: io::sink(),
         remaining: INDEX_BYTES_LIMIT,
@@ -468,7 +468,7 @@ fn validate_repository(repo: &gix::Repository) -> crate::Result {
     Ok(())
 }
 
-fn validate_index(index: &gix::index::File) -> crate::Result {
+pub(crate) fn validate_index(index: &gix::index::File, allow_intent_to_add: bool) -> crate::Result {
     index.verify_entries()?;
     if index.is_sparse() {
         return unsupported("sparse indexes are unsupported for mutation");
@@ -478,6 +478,9 @@ fn validate_index(index: &gix::index::File) -> crate::Result {
         (gix::index::entry::Flags::SKIP_WORKTREE, "skip-worktree"),
         (gix::index::entry::Flags::ASSUME_VALID, "assume-valid"),
     ] {
+        if allow_intent_to_add && flag == gix::index::entry::Flags::INTENT_TO_ADD {
+            continue;
+        }
         if let Some(entry) = index
             .entries()
             .iter()

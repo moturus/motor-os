@@ -2,7 +2,7 @@ use std::io;
 
 use gix::{bstr::ByteSlice, index::entry::Mode, worktree::stack::state::attributes::Source};
 
-use crate::{cancellation::Cancellation, repository::OpenedRepository};
+use crate::{cancellation::Cancellation, command_config::Policy, repository::OpenedRepository};
 
 pub(crate) fn reject_unsupported(
     opened: &OpenedRepository,
@@ -30,11 +30,19 @@ pub(crate) fn reject_unsupported_selected<'a>(
     cancellation: &Cancellation,
 ) -> crate::Result {
     let policy = &opened.command_policy;
-    if policy.external_filters.is_empty() && policy.required_filters.is_empty() {
+    if !policy.has_unsupported_filters() {
         return Ok(());
     }
+    let attributes = opened.repo.attributes_only(index, source)?;
+    check_attributes(policy, attributes, selected, cancellation)
+}
 
-    let mut attributes = opened.repo.attributes_only(index, source)?;
+pub(crate) fn check_attributes<'a>(
+    policy: &Policy,
+    mut attributes: gix::AttributeStack<'_>,
+    selected: impl IntoIterator<Item = (&'a gix::bstr::BStr, Mode)>,
+    cancellation: &Cancellation,
+) -> crate::Result {
     let mut matches = attributes.selected_attribute_matches(["filter"]);
     for (path, mode) in selected {
         cancellation.check()?;

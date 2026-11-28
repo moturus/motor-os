@@ -26,6 +26,8 @@ pub struct Converter<'repo, 'index> {
     repo: &'repo gix::Repository,
     index: &'index gix::index::State,
     pipeline: gix::filter::Pipeline<'repo>,
+    // Only worktree patches with CRLF context need a second filter pipeline.
+    crlf_pipeline: Option<Box<(gix::filter::plumbing::Pipeline, gix::worktree::Stack)>>,
 }
 
 impl<'repo, 'index> Converter<'repo, 'index> {
@@ -33,14 +35,11 @@ impl<'repo, 'index> Converter<'repo, 'index> {
         repo: &'repo gix::Repository,
         index: &'index gix::index::State,
     ) -> crate::Result<Self> {
-        let attributes = repo.attributes_only(
-            index,
-            gix::worktree::stack::state::attributes::Source::WorktreeThenIdMapping,
-        )?;
         Ok(Self {
             repo,
             index,
-            pipeline: gix::filter::Pipeline::new(repo, attributes.detach())?,
+            pipeline: git_pipeline(repo, index)?,
+            crlf_pipeline: None,
         })
     }
 
@@ -65,6 +64,18 @@ impl<'repo, 'index> Converter<'repo, 'index> {
         path: &BStr,
         prior_mode: Option<Mode>,
         cancellation: &Cancellation,
+        consume: impl FnOnce(&[u8]) -> crate::Result<T>,
+    ) -> crate::Result<Option<(T, Mode, Stat)>> {
+        self.consume_content(action, path, prior_mode, cancellation, false, consume)
+    }
+
+    pub(crate) fn consume_content<T>(
+        &mut self,
+        action: &str,
+        path: &BStr,
+        prior_mode: Option<Mode>,
+        cancellation: &Cancellation,
+        keep_crlf: bool,
         consume: impl FnOnce(&[u8]) -> crate::Result<T>,
     ) -> crate::Result<Option<(T, Mode, Stat)>> {
         cancellation.check()?;
@@ -163,25 +174,78 @@ impl<'repo, 'index> Converter<'repo, 'index> {
         };
 
         let converted = if mode == Mode::SYMLINK {
-            bytes.as_slice()
+            ToGitOutcome::Unchanged(bytes.as_slice())
+        } else if keep_crlf {
+            self.convert_with_crlf(path, &bytes)?
         } else {
-            let converted =
-                self.pipeline
-                    .convert_to_git(bytes.as_slice(), relative.as_ref(), self.index)?;
-            match converted {
-                ToGitOutcome::Unchanged(bytes) | ToGitOutcome::Buffer(bytes) => bytes,
-                ToGitOutcome::Process(_) => {
-                    return Err(
-                        unsupported(action, path, "external filters are not supported").into(),
-                    );
-                }
+            self.pipeline
+                .convert_to_git(bytes.as_slice(), relative.as_ref(), self.index)?
+        };
+        let content = match converted {
+            ToGitOutcome::Unchanged(bytes) | ToGitOutcome::Buffer(bytes) => bytes,
+            ToGitOutcome::Process(_) => {
+                return Err(unsupported(action, path, "external filters are not supported").into());
             }
         };
         cancellation.check()?;
-        let value = consume(converted)?;
+        let value = consume(content)?;
         cancellation.check()?;
         Ok(Some((value, mode, stat)))
     }
+
+    /// Keep the old side of a CRLF worktree patch in its original line endings.
+    /// The other filters still run, including decoding and ident contraction.
+    fn convert_with_crlf<'a, 'src>(
+        &'a mut self,
+        path: &BStr,
+        bytes: &'src [u8],
+    ) -> crate::Result<ToGitOutcome<'a, &'src [u8]>> {
+        let initialize = self.crlf_pipeline.is_none();
+        let (filter, attributes) = match &mut self.crlf_pipeline {
+            Some(parts) => parts,
+            None => {
+                let (mut filter, attributes) = git_pipeline(self.repo, self.index)?.into_parts();
+                filter.options_mut().eol_config.auto_crlf = Default::default();
+                self.crlf_pipeline.insert(Box::new((filter, attributes)))
+            }
+        }
+        .as_mut();
+        let entry = attributes.at_entry(path, None, &self.repo.objects)?;
+        Ok(filter.convert_to_git(
+            bytes,
+            gix::path::from_bstr(path).as_ref(),
+            &mut |_, attrs| {
+                if initialize {
+                    // An empty attribute name cannot match. Mask just the EOL attributes
+                    // in this pipeline's selection, keeping the order expected by Gitoxide.
+                    let mut selected = gix::attrs::search::Outcome::default();
+                    selected.initialize_with_selection(
+                        &Default::default(),
+                        attrs
+                            .iter_selected()
+                            .map(|m| match m.assignment.name.as_str() {
+                                "crlf" | "eol" | "text" => String::new(),
+                                name => name.to_owned(),
+                            }),
+                    );
+                    *attrs = selected;
+                }
+                entry.matching_attributes(attrs);
+            },
+            &mut |_| Ok(None),
+        )?)
+    }
+}
+
+fn git_pipeline<'repo>(
+    repo: &'repo gix::Repository,
+    index: &gix::index::State,
+) -> crate::Result<gix::filter::Pipeline<'repo>> {
+    let attributes = repo.attributes_only(
+        index,
+        gix::worktree::stack::state::attributes::Source::WorktreeThenIdMapping,
+    )?;
+    Ok(gix::filter::Pipeline::new(repo, attributes.detach())?)
 }
 
 fn unsupported(action: &str, path: &BStr, message: &str) -> io::Error {

@@ -444,6 +444,7 @@ Put <code>--</code> in front of a name that starts with a dash.
   <tr><td><code>status</code></td><td>Show what has changed, and whether a merge or another operation is unfinished.</td></tr>
   <tr><td><code>log</code></td><td>Show the history of the current branch.</td></tr>
   <tr><td><code>diff [--staged] [PATH…]</code></td><td>Show your unstaged changes, or with <code>--staged</code> what the next commit will contain, as a patch in the format of <code>git diff</code>.</td></tr>
+  <tr><td><code>apply --check [OPTIONS] [PATCH…]</code></td><td>Check whether a text patch applies to your files or the index.</td></tr>
   <tr><td><code>add PATH…</code>, <code>add -A</code></td><td>Stage the named files, or with <code>-A</code> every new, changed and deleted file. <code>-A</code> skips new files that match an ignore rule; naming such a file yourself is an error.</td></tr>
   <tr><td><code>unstage PATH…</code></td><td>Take files out of the next commit without touching the files themselves.</td></tr>
   <tr><td><code>restore PATH…</code></td><td>Throw away your unstaged changes to the named files.</td></tr>
@@ -491,6 +492,14 @@ shortened object IDs in the <code>index</code> line and Git's quoting for file n
   <li>A file with an unresolved conflict stops <code>diff</code>. The contents of a binary
   file are not shown, as in Git.</li>
 </ul>
+
+<p><code>gix apply --check</code> checks a text patch against your files. Use
+<code>--cached</code> to check the index or <code>--index</code> to also require
+matching worktree files. Pass one or more patch files, or use <code>-</code> or
+no file name for standard input. <code>-R</code> checks the patch in reverse.
+<code>-p N</code> removes N leading directories from the file names in the patch.</p>
+<p>A worktree patch can match literal CRLF line endings. Index checks use the
+line endings stored in the index.</p>
 
 <h3 id="branches">Branches</h3>
 <p><code>gix branch</code> prints the same list as <code>git branch</code>, with a
@@ -670,6 +679,7 @@ resolve conflicts is not a job for <code>recover</code>; commit it or abort it.<
   <tr><th>What</th><th>Limit</th></tr>
   <tr><td>Index file</td><td>16 MiB</td></tr>
   <tr><td>Text diff</td><td>262,144 lines on each side</td></tr>
+  <tr><td>A patch file for <code>apply</code>, or its standard input</td><td>128 MiB</td></tr>
   <tr><td>A loose reference file</td><td>8 MiB</td></tr>
   <tr><td>One HTTPS response, all the data of one SSH session, or one outgoing push pack</td><td>128 MiB each</td></tr>
   <tr><td>SSH session</td><td>8 MiB for the list of references, 64 KiB of error output, 30 seconds to connect, 300 seconds in total</td></tr>

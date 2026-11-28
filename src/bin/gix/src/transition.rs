@@ -467,7 +467,7 @@ fn current_group_end(index: &gix::index::State, start: usize) -> usize {
     end
 }
 
-fn has_gitlink_ancestor(index: &gix::index::State, path: &BStr) -> bool {
+pub(crate) fn has_gitlink_ancestor(index: &gix::index::State, path: &BStr) -> bool {
     path.iter()
         .enumerate()
         .filter(|(_, byte)| **byte == b'/')

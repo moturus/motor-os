@@ -61,6 +61,7 @@ directory. Put `--` in front of a name that starts with a dash.
 | `status` | Show what has changed, and whether a merge or another operation is unfinished. |
 | `log` | Show the history of the current branch. |
 | `diff [--staged] [PATH…]` | Show your unstaged changes, or with `--staged` what the next commit will contain, as a patch in the format of `git diff`. |
+| `apply --check [OPTIONS] [PATCH…]` | Check whether a text patch applies to your files or the index. |
 | `add PATH…`, `add -A` | Stage the named files, or with `-A` every new, changed and deleted file. `-A` skips new files that match an ignore rule; naming such a file yourself is an error. |
 | `unstage PATH…` | Take files out of the next commit without touching the files themselves. |
 | `restore PATH…` | Throw away your unstaged changes to the named files. |
@@ -107,6 +108,15 @@ object IDs in the `index` line and Git's quoting for file names. `core.abbrev`,
 - A hunk can group changed lines differently from Git.
 - A file with an unresolved conflict stops `diff`. The contents of a binary
   file are not shown, as in Git.
+
+`gix apply --check` checks a text patch against your files. Use `--cached`
+to check the index or `--index` to also require matching worktree files.
+Pass one or more patch files, or use `-` or no file name for standard input.
+`-R` checks the patch in reverse. `-p N` removes N leading directories
+from the file names in the patch.
+
+A worktree patch can match literal CRLF line endings. Index checks use the
+line endings stored in the index.
 
 ### Branches
 
@@ -470,6 +480,7 @@ A few more things to know:
 | --- | --- |
 | Index file | 16 MiB |
 | Text diff | 262,144 lines on each side |
+| A patch file for `apply`, or its standard input | 128 MiB |
 | A loose reference file | 8 MiB |
 | One HTTPS response, all the data of one SSH session, or one outgoing push pack | 128 MiB each |
 | SSH session | 8 MiB for the list of references, 64 KiB of error output, 30 seconds to connect, 300 seconds in total |
