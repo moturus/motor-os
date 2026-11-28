@@ -1,9 +1,10 @@
-use std::io;
+use std::{fs, io, path::Path};
 
-use gix::bstr::ByteSlice;
+use gix::bstr::{BStr, BString, ByteSlice};
 
 use crate::{
-    cancellation::Cancellation, repository::OpenedRepository, tracked_filters, tree_index,
+    cancellation::Cancellation, repository::OpenedRepository, selection, tracked_filters,
+    tree_index,
 };
 
 /// Check out HEAD into a new, empty worktree and return its fresh in-memory index.
@@ -56,6 +57,51 @@ pub fn initial(
     check_outcome(&outcome).map_err(|error| cancellation.normalize_error(error))?;
     cancellation.check()?;
     Ok(index)
+}
+
+/// The directory that the command was started in, as the prefix of the paths in it, if
+/// it is a directory of the worktree below its top.
+///
+/// As Git, gix does not remove it when it becomes empty: the shell that ran the command
+/// is still in it. `-r` does not change which directory that is.
+pub(crate) fn start_directory(workdir: &Path) -> Option<BString> {
+    let current = fs::canonicalize(".").ok()?;
+    let relative = current.strip_prefix(fs::canonicalize(workdir).ok()?).ok()?;
+    let mut prefix = gix::path::into_bstr(relative).into_owned();
+    if prefix.is_empty() {
+        return None;
+    }
+    prefix.push(b'/');
+    Some(prefix)
+}
+
+/// Prune empty parents of a removed file. `keep` receives each directory's
+/// index prefix, including its trailing slash.
+pub(crate) fn prune_empty_parents(
+    workdir: &Path,
+    path: &BStr,
+    mut keep: impl FnMut(&BStr) -> crate::Result<bool>,
+) -> crate::Result {
+    for slash in path.rfind_iter(b"/") {
+        let parent = path[..slash].as_bstr();
+        if keep(path[..=slash].as_bstr())?
+            || !selection::checked_symlink_metadata(workdir, parent)?.is_some_and(|m| m.is_dir())
+        {
+            break;
+        }
+        match fs::remove_dir(workdir.join(gix::path::from_bstr(parent).as_ref())) {
+            Ok(()) => {}
+            // Motor OS reports nonempty directories as FileTooLarge.
+            Err(error)
+                if error.kind() == io::ErrorKind::DirectoryNotEmpty
+                    || cfg!(target_os = "motor") && error.kind() == io::ErrorKind::FileTooLarge =>
+            {
+                break;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn check_outcome(outcome: &gix::worktree::state::checkout::Outcome) -> crate::Result {

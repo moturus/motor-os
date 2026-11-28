@@ -3,6 +3,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use gix::bstr::ByteSlice;
@@ -20,14 +21,19 @@ impl Client {
         } else {
             std::env::temp_dir()
         };
+        // The tests run at once in one process, and two of them can read the same time.
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
         let root = base.join(format!(
-            "gix-cli-{}-{}",
+            "gix-cli-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
+        // Two tests in one directory would fail in ways that are hard to read.
+        fs::create_dir(&root).unwrap();
         for directory in ["home", "xdg/git", "bin"] {
             fs::create_dir_all(root.join(directory)).unwrap();
         }
@@ -1115,5 +1121,67 @@ fn user_configuration_paths_are_reported_without_running_git() -> Result {
         )
     );
     assert!(!client.0.join("git-invoked").exists());
+    Ok(())
+}
+
+#[test]
+fn switch_and_merge_keep_the_directory_they_are_started_in() -> Result {
+    let client = Client::new();
+    let root = client.0.join("repository");
+    client.ok(&client.0, &["init", root.to_str().unwrap()]);
+    let commit = |message: &str| {
+        client.ok(&root, &["add", "-A"]);
+        let identity = [
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+        ];
+        client.ok(&root, &[&identity[..], &["commit", "-m", message]].concat());
+    };
+    // `main` has the directory `d`, `gone` has nothing there, and `file` has a file.
+    fs::create_dir_all(root.join("d/e"))?;
+    for path in ["top", "d/f", "d/e/g"] {
+        fs::write(root.join(path), "contents\n")?;
+    }
+    commit("a directory");
+    client.ok(&root, &["checkout", "-b", "gone"]);
+    fs::remove_dir_all(root.join("d"))?;
+    commit("no directory");
+    client.ok(&root, &["checkout", "-b", "file"]);
+    fs::write(root.join("d"), "a file\n")?;
+    commit("a file");
+    client.ok(&root, &["switch", "main"]);
+
+    // As Git: the directory that the command is started in stays when the switch
+    // empties it. The directories below it go, and so does one that it is not in.
+    client.ok(&root.join("d"), &["switch", "gone"]);
+    assert!(!root.join("d/e").exists());
+    fs::remove_dir(root.join("d"))?;
+    client.ok(&root, &["switch", "main"]);
+    client.ok(&root.join("d/e"), &["checkout", "gone"]);
+    fs::remove_dir(root.join("d/e"))?;
+    fs::remove_dir(root.join("d"))?;
+    client.ok(&root, &["switch", "main"]);
+    client.ok(&root, &["switch", "gone"]);
+    assert!(!root.join("d").exists());
+    client.ok(&root, &["switch", "main"]);
+
+    // A file does not take its place: Git refuses that, and so does gix.
+    let refusal = "worktree path 'd' is the current working directory and would be removed";
+    client.error(&root.join("d"), &["switch", "file"], refusal);
+    client.error(&root.join("d"), &["merge", "file"], refusal);
+    assert_eq!(client.ok(&root, &["status"]), "");
+    assert_eq!(fs::read(root.join(".git/HEAD"))?, b"ref: refs/heads/main\n");
+    assert_eq!(fs::read_to_string(root.join("d/e/g"))?, "contents\n");
+    // Started in a directory below it, the directory makes way for the file, as in Git.
+    client.ok(&root.join("d/e"), &["switch", "file"]);
+    assert_eq!(fs::read_to_string(root.join("d"))?, "a file\n");
+    client.ok(&root, &["switch", "main"]);
+
+    // A merge treats the start directory as a switch does.
+    client.ok(&root.join("d"), &["merge", "gone"]);
+    fs::remove_dir(root.join("d"))?;
+    assert_eq!(client.ok(&root, &["status"]), "");
     Ok(())
 }

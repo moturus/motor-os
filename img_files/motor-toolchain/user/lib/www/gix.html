@@ -428,12 +428,11 @@ The directory must not exist yet. The remote is recorded as <code>origin</code>.
 DIR are left alone. The first branch is called <code>main</code>, or whatever
 <code>init.defaultBranch</code> says. Gix will not initialize a directory that is already
 a repository.</p>
-<p>Gix works on the repository in the current directory, which has to be the top directory
-of the worktree: gix does not search the parent directories. Use <code>-r PATH</code> to
-work on a repository somewhere else. File names you pass to a command are taken literally
-(no wildcards) and are relative to that top directory. Put <code>--</code> in front of a
-name that starts with a dash. <code>gix COMMAND --help</code> shows the exact syntax of a
-command.</p>
+<p>Gix searches for a repository starting in the current directory, or in <code>PATH</code>
+with <code>-r PATH</code>. You can run commands from a worktree subdirectory. Worktree
+paths on the command line are literal and relative to that starting directory.
+Put <code>--</code> in front of a name that starts with a dash.
+<code>gix COMMAND --help</code> shows the exact syntax of a command.</p>
 
 <h2 id="commands">Commands</h2>
 <div class="table-wrap">
@@ -495,6 +494,10 @@ you to a local branch that already exists. Both need a clean repository, meaning
 staged and no changes to tracked files. <code>checkout</code> also prints what Git prints,
 for example <code>Your branch is behind 'origin/main' by 1 commit, and can be
 fast-forwarded.</code></p>
+<p>As in Git, a switch does not remove the directory you are in. If the other branch has
+nothing in that directory, it stays behind empty. If the other branch has a file of that
+name, gix refuses to switch. <code>merge</code> and <code>pull</code> follow the same
+rule.</p>
 <p><code>checkout -b NEW [START]</code> creates the branch NEW and moves you to it. START
 is where the branch begins; it defaults to HEAD.</p>
 <ul>
