@@ -1188,7 +1188,7 @@ fn switch_and_merge_keep_the_directory_they_are_started_in() -> Result {
     Ok(())
 }
 
-/// What `git diff` writes for the changes that `diff_writes_what_git_writes_and_apply_checks_it`
+/// What `git diff` writes for the changes that `diff_writes_what_git_writes_and_apply_reads_it`
 /// makes. It was written by Git 2.43, so the test needs no Git.
 const WORKTREE_PATCH: &str = concat!(
     "diff --git \"a/caf\\303\\251\" \"b/caf\\303\\251\"\n",
@@ -1251,7 +1251,7 @@ const WORKTREE_PATCH: &str = concat!(
 );
 
 #[test]
-fn diff_writes_what_git_writes_and_apply_checks_it() -> Result {
+fn diff_writes_what_git_writes_and_apply_reads_it() -> Result {
     let client = Client::new();
     let root = client.0.join("repository");
     client.ok(&client.0, &["init", root.to_str().unwrap()]);
@@ -1320,12 +1320,450 @@ fn diff_writes_what_git_writes_and_apply_checks_it() -> Result {
     let patch = patch.to_str().unwrap();
     let index = fs::read(root.join(".git/index"))?;
 
-    // The changed files do not match the preimage. Restoring them makes the patch applicable.
-    client.error(&root, &["apply", "--check", patch], "patch failed: text:1");
+    // Applying the patch to the files as they were makes the same changes again.
     client.ok(&root, &["restore", "."]);
     is_base();
     assert_eq!(client.ok(&root, &["apply", "--check", patch]), "");
     is_base();
+    assert_eq!(client.ok(&root, &["apply", patch]), "");
+    assert_eq!(client.ok(&root, &["diff"]), WORKTREE_PATCH);
+    assert!(!root.join("d").exists(), "an emptied directory stayed");
     assert_eq!(fs::read(root.join(".git/index"))?, index);
+    assert!(!root.join(".git/index.lock").exists());
+    // It does not apply twice, and it applies backwards.
+    client.error(&root, &["apply", "--check", patch], "patch failed: text:1");
+    assert_eq!(client.ok(&root, &["apply", "-R", "--check", patch]), "");
+    assert_eq!(client.ok(&root, &["apply", "-R", patch]), "");
+    is_base();
+
+    // The patch comes from standard input if no file is named, or if `-` is.
+    for args in [&["apply"][..], &["apply", "-"]] {
+        let mut child = client
+            .command(&root)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(WORKTREE_PATCH.as_bytes())?;
+        let output = child.wait_with_output()?;
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(client.ok(&root, &["diff"]), WORKTREE_PATCH);
+        client.ok(&root, &["restore", "."]);
+    }
+
+    // Started in a subdirectory, apply leaves out the files outside of it. As Git, it
+    // does not remove the directory that it was started in, also when that is empty now.
+    assert_eq!(client.ok(&root.join("d/e"), &["apply", patch]), "");
+    assert_eq!(client.ok(&root, &["status"]), " D d/e/deep\n");
+    assert!(root.join("d/e").is_dir(), "the start directory is gone");
+    client.ok(&root, &["restore", "."]);
+    assert_eq!(client.ok(&root.join("d"), &["apply", patch]), "");
+    assert!(root.join("d").is_dir() && !root.join("d/e").exists());
+    client.ok(&root, &["restore", "."]);
+
+    // One hunk that does not match, and nothing is changed. Every file that does not
+    // apply is named, in the words of Git.
+    fs::write(
+        root.join("text"),
+        text(|n| (n == 3).then_some("line three")),
+    )?;
+    fs::write(root.join("with space"), "other\n")?;
+    let output = client.command(&root).args(["apply", patch]).output()?;
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(output.stderr)?,
+        "gix: patch failed: text:1\ngix: text: patch does not apply\n\
+         gix: patch failed: with space:1\ngix: with space: patch does not apply\n"
+    );
+    assert_eq!(client.ok(&root, &["status"]), " M text\n M with space\n");
+    assert_eq!(fs::read_to_string(root.join("it's"))?, "q\n");
+    assert!(root.join("d/e/deep").is_file());
+    // A hunk is found a few lines away from where the patch has it.
+    fs::write(root.join("with space"), "sp\n")?;
+    fs::write(
+        root.join("text"),
+        text(|n| (n == 6).then_some("line 6\n0\n0\n0")),
+    )?;
+    client.ok(&root, &["apply", patch]);
+    let moved = text(|n| match n {
+        2 => Some("line two"),
+        6 => Some("line 6\n0\n0\n0"),
+        11 => Some("line eleven"),
+        _ => None,
+    });
+    assert_eq!(fs::read_to_string(root.join("text"))?, moved);
+    client.ok(&root, &["restore", "."]);
+
+    // A mode is applied and shown as Git shows it.
+    let mode = "diff --git a/exec b/exec\nold mode 100644\nnew mode 100755\n";
+    fs::write(client.0.join("mode.diff"), mode)?;
+    let mode_patch = client.0.join("mode.diff");
+    client.ok(&root, &["apply", mode_patch.to_str().unwrap()]);
+    assert_eq!(client.ok(&root, &["diff"]), mode);
+    client.ok(&root, &["apply", "-R", mode_patch.to_str().unwrap()]);
+    is_base();
+
+    // A patch file that cannot be read stops the run. The file that the patch file before
+    // it changed stays changed.
+    client.error(
+        &root,
+        &["apply", mode_patch.to_str().unwrap(), "missing.diff"],
+        "can't open patch 'missing.diff'",
+    );
+    assert_eq!(client.ok(&root, &["status"]), " M exec\n");
+    for (input, message) in [
+        ("", "No valid patches in input"),
+        (
+            "@@ -1 +1 @@\n-a\n+b\n",
+            "patch fragment without header at line 1",
+        ),
+        (
+            &WORKTREE_PATCH[..WORKTREE_PATCH.len() - 1],
+            "corrupt patch at line 57",
+        ),
+        // The newline after a name was lost. That is no rename to the name that is left.
+        (
+            "diff --git a/text b/text\n--- a/text\n+++ b/text@@ -1 +1 @@\n-a\n+b\n",
+            "patch with only garbage at line 4",
+        ),
+        (
+            "diff --git a/.git/config b/.git/config\n--- a/.git/config\n+++ b/.git/config\n@@ -1 +1 @@\n-a\n+b\n",
+            "invalid path '.git/config'",
+        ),
+    ] {
+        fs::write(client.0.join("bad.diff"), input)?;
+        let bad = client.0.join("bad.diff");
+        client.error(&root, &["apply", bad.to_str().unwrap()], message);
+    }
+    assert_eq!(client.ok(&root, &["status"]), " M exec\n");
+    Ok(())
+}
+
+/// A patch that Git 2.43 wrote with `git diff --cached -M`: a new executable file, a
+/// deleted file, a changed file, a renamed file with a change, and a new empty file.
+const STAGED_PATCH: &str = concat!(
+    "diff --git a/bin/tool b/bin/tool\n",
+    "new file mode 100755\n",
+    "index 0000000..0f5f08a\n",
+    "--- /dev/null\n",
+    "+++ b/bin/tool\n",
+    "@@ -0,0 +1,2 @@\n",
+    "+#!/bin/rush\n",
+    "+echo tool\n",
+    "diff --git a/gone b/gone\n",
+    "deleted file mode 100644\n",
+    "index 9e257a5..0000000\n",
+    "--- a/gone\n",
+    "+++ /dev/null\n",
+    "@@ -1 +0,0 @@\n",
+    "-going\n",
+    "diff --git a/keep b/keep\n",
+    "index 8d58cef..a965d72 100644\n",
+    "--- a/keep\n",
+    "+++ b/keep\n",
+    "@@ -1,7 +1,7 @@\n",
+    " k1\n",
+    " k2\n",
+    " k3\n",
+    "-k4\n",
+    "+k four\n",
+    " k5\n",
+    " k6\n",
+    " k7\n",
+    "diff --git a/old name b/new name\n",
+    "similarity index 73%\n",
+    "rename from old name\n",
+    "rename to new name\n",
+    "index cf59613..761bbd6 100644\n",
+    "--- a/old name\t\n",
+    "+++ b/new name\t\n",
+    "@@ -1,4 +1,4 @@\n",
+    " first\n",
+    "-second\n",
+    "+SECOND\n",
+    " third\n",
+    " fourth\n",
+    "diff --git a/newempty b/newempty\n",
+    "new file mode 100644\n",
+    "index 0000000..e69de29\n",
+);
+
+#[test]
+fn apply_changes_the_index_and_reads_other_patches() -> Result {
+    let client = Client::new();
+    let root = client.0.join("repository");
+    client.ok(&client.0, &["init", root.to_str().unwrap()]);
+    let keep = "k1\nk2\nk3\nk4\nk5\nk6\nk7\nk8\n";
+    let base = [
+        ("old name", "first\nsecond\nthird\nfourth\n"),
+        ("gone", "going\n"),
+        ("keep", keep),
+    ];
+    for (path, contents) in base {
+        fs::write(root.join(path), contents)?;
+    }
+    client.ok(&root, &["add", "-A"]);
+    client.ok(
+        &root,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "base",
+        ],
+    );
+    let write = |name: &str, patch: &str| {
+        let path = client.0.join(name);
+        fs::write(&path, patch).unwrap();
+        path.to_str().unwrap().to_owned()
+    };
+    let staged = write("staged.diff", STAGED_PATCH);
+    // The paths and modes of the index.
+    let index = || {
+        let index = gix::open(&root).unwrap().index_or_empty().unwrap();
+        let entry =
+            |entry: &gix::index::Entry| format!("{:o} {}", entry.mode.bits(), entry.path(&index));
+        index.entries().iter().map(entry).collect::<Vec<_>>()
+    };
+    let is_base = || {
+        assert_eq!(client.ok(&root, &["status"]), "");
+        for (path, contents) in base {
+            assert_eq!(fs::read_to_string(root.join(path)).unwrap(), contents);
+        }
+        assert!(!root.join("bin").exists() && !root.join("newempty").exists());
+    };
+    let after = [
+        "100755 bin/tool",
+        "100644 keep",
+        "100644 new name",
+        "100644 newempty",
+    ];
+    let is_executable = |path: &str| {
+        let file = fs::File::open(root.join(path)).unwrap();
+        let metadata = gix::index::fs::Metadata::from_file(&file).unwrap();
+        metadata.is_executable()
+    };
+
+    // Without an option the files change and the index does not.
+    client.ok(&root, &["apply", &staged]);
+    assert_eq!(
+        client.ok(&root, &["status"]),
+        "?? bin/tool\n D gone\n M keep\n?? new name\n?? newempty\n D old name\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("new name"))?,
+        "first\nSECOND\nthird\nfourth\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("keep"))?,
+        keep.replace("k4", "k four")
+    );
+    assert_eq!(fs::read(root.join("newempty"))?, b"");
+    assert!(is_executable("bin/tool") && !is_executable("keep"));
+    client.ok(&root, &["apply", "-R", &staged]);
+    is_base();
+
+    // `--index` changes both, and the next commit has the patch.
+    client.ok(&root, &["apply", "--index", &staged]);
+    assert_eq!(index(), after);
+    assert_eq!(
+        client.ok(&root, &["status"]),
+        "A  bin/tool\nD  gone\nM  keep\nA  new name\nA  newempty\nD  old name\n"
+    );
+    assert!(is_executable("bin/tool") && !root.join("gone").exists());
+    client.error(
+        &root,
+        &["apply", "--index", &staged],
+        "gone: does not exist in index",
+    );
+    client.ok(&root, &["apply", "--index", "-R", &staged]);
+    is_base();
+
+    // `--cached` changes the index only.
+    client.ok(&root, &["apply", "--cached", &staged]);
+    assert_eq!(index(), after);
+    for (path, contents) in base {
+        assert_eq!(fs::read_to_string(root.join(path))?, contents);
+    }
+    assert!(!root.join("bin").exists());
+    client.ok(&root, &["apply", "--cached", "-R", &staged]);
+    is_base();
+    assert!(!root.join(".git/index.lock").exists());
+
+    // With `--index` a file has to be as the index has it. `--cached` does not look at it.
+    fs::write(root.join("keep"), "local\n")?;
+    client.error(
+        &root,
+        &["apply", "--index", &staged],
+        "keep: does not match index",
+    );
+    client.error(&root, &["apply", &staged], "patch failed: keep:1");
+    assert_eq!(client.ok(&root, &["status"]), " M keep\n");
+    client.ok(&root, &["apply", "--cached", "--check", &staged]);
+    client.ok(&root, &["restore", "keep"]);
+    // A file that is in the way is not overwritten.
+    fs::write(root.join("newempty"), "mine\n")?;
+    client.error(
+        &root,
+        &["apply", &staged],
+        "newempty: already exists in working directory",
+    );
+    fs::remove_file(root.join("newempty"))?;
+    is_base();
+
+    // A patch as `diff -u` writes it: no header from Git, times after the names, and
+    // names that are relative to the directory that apply is started in.
+    let traditional = write(
+        "traditional.diff",
+        concat!(
+            "--- keep.orig\t2026-11-27 07:55:07.806905537 +0000\n",
+            "+++ keep.new\t2026-11-27 07:55:07.807479594 +0000\n",
+            "@@ -5,4 +5,4 @@\n k5\n k6\n k7\n-k8\n+k eight\n",
+        ),
+    );
+    client.error(
+        &root,
+        &["apply", &traditional],
+        "keep.new: No such file or directory",
+    );
+    fs::rename(root.join("keep"), root.join("keep.new"))?;
+    client.ok(&root, &["apply", &traditional]);
+    assert_eq!(
+        fs::read_to_string(root.join("keep.new"))?,
+        keep.replace("k8", "k eight")
+    );
+    fs::remove_file(root.join("keep.new"))?;
+    client.ok(&root, &["restore", "keep"]);
+    let created = write(
+        "created.diff",
+        concat!(
+            "--- /dev/null\t1970-01-01 00:00:00.000000000 +0000\n",
+            "+++ new/sub/made\t2026-11-27 07:55:07.807479594 +0000\n",
+            "@@ -0,0 +1 @@\n+made\n",
+        ),
+    );
+    fs::create_dir(root.join("sub"))?;
+    client.ok(&root.join("sub"), &["apply", "-p2", &created]);
+    assert_eq!(fs::read_to_string(root.join("sub/made"))?, "made\n");
+    client.ok(&root.join("sub"), &["apply", "-R", "-p2", &created]);
+    // The file is gone. Its directory is the one that apply was started in, so it stays.
+    fs::remove_dir(root.join("sub"))?;
+    is_base();
+
+    // Two changes to one file apply one after the other, as in a series of commits.
+    let one =
+        "diff --git a/keep b/keep\n--- a/keep\n+++ b/keep\n@@ -1,3 +1,3 @@\n-k1\n+K1\n k2\n k3\n";
+    let two =
+        "diff --git a/keep b/keep\n--- a/keep\n+++ b/keep\n@@ -1,3 +1,3 @@\n K1\n-k2\n+K2\n k3\n";
+    let series = write("series.diff", &format!("{one}{two}"));
+    client.ok(&root, &["apply", "--index", &series]);
+    assert_eq!(
+        fs::read_to_string(root.join("keep"))?,
+        keep.replace("k1\nk2", "K1\nK2")
+    );
+    assert_eq!(client.ok(&root, &["status"]), "M  keep\n");
+    client.ok(&root, &["apply", "--index", "-R", &series]);
+    is_base();
+
+    // A file takes the place of a directory whose only file the patch deletes, and back.
+    for leaf in ["gone/below", "gone/inner/below"] {
+        let exchange = write(
+            "exchange.diff",
+            &format!(
+                "diff --git a/gone b/gone\ndeleted file mode 100644\n--- a/gone\n+++ /dev/null\n\
+                 @@ -1 +0,0 @@\n-going\n\
+                 diff --git a/{leaf} b/{leaf}\nnew file mode 100644\n--- /dev/null\n\
+                 +++ b/{leaf}\n@@ -0,0 +1 @@\n+below\n"
+            ),
+        );
+        client.ok(&root, &["apply", "--index", &exchange]);
+        assert_eq!(fs::read_to_string(root.join(leaf))?, "below\n");
+        assert_eq!(
+            client.ok(&root, &["status"]),
+            format!("D  gone\nA  {leaf}\n")
+        );
+        client.ok(&root, &["apply", "--index", "-R", "--check", &exchange]);
+        client.ok(&root, &["apply", "--index", "-R", &exchange]);
+        is_base();
+    }
+
+    Ok(())
+}
+
+#[test]
+fn apply_handles_links_and_refuses_submodules() -> Result {
+    let client = Client::new();
+    let root = client.0.join("repository");
+    repository::create(&root)?;
+    let opened = motor_gix::repository::open(&root, &[], false)?;
+    motor_gix::checkout::initial(&opened, &motor_gix::cancellation::Cancellation::new())?;
+    drop(opened);
+    assert_eq!(client.ok(&root, &["status"]), "");
+    let write = |name: &str, patch: &str| {
+        let path = client.0.join(name);
+        fs::write(&path, patch).unwrap();
+        path.to_str().unwrap().to_owned()
+    };
+    // Motor OS has no symbolic links: a link is a file with the target, which the index
+    // knows to be a link. Its patch is the one that Git writes for a link.
+    let link = concat!(
+        "diff --git a/link b/link\n",
+        "index a462b3d..f98eb10 120000\n",
+        "--- a/link\n",
+        "+++ b/link\n",
+        "@@ -1 +1 @@\n",
+        "-editable\n",
+        "\\ No newline at end of file\n",
+        "+elsewhere\n",
+        "\\ No newline at end of file\n",
+    );
+    let link_patch = write("link.diff", link);
+    client.ok(&root, &["apply", &link_patch]);
+    assert_eq!(fs::read(root.join("link"))?, b"elsewhere");
+    assert_eq!(client.ok(&root, &["diff"]), link);
+    client.ok(&root, &["apply", "-R", &link_patch]);
+    assert_eq!(client.ok(&root, &["status"]), "");
+    // In the index it stays a link.
+    client.ok(&root, &["apply", "--index", &link_patch]);
+    assert_eq!(client.ok(&root, &["status"]), "M  link\n");
+    assert_eq!(client.ok(&root, &["diff", "--staged"]), link);
+    client.ok(&root, &["apply", "--index", "-R", &link_patch]);
+    assert_eq!(client.ok(&root, &["status"]), "");
+    // A file that is no link is not patched as one.
+    client.error(
+        &root,
+        &[
+            "apply",
+            &write("type.diff", &link.replace("link", "editable")),
+        ],
+        "editable: wrong type",
+    );
+
+    let inside = "diff --git a/nested/file b/nested/file\nnew file mode 100644\n--- /dev/null\n+++ b/nested/file\n@@ -0,0 +1 @@\n+a\n";
+    let commit = concat!(
+        "diff --git a/nested b/nested\n",
+        "index 1111111..2222222 160000\n",
+        "--- a/nested\n",
+        "+++ b/nested\n",
+        "@@ -1 +1 @@\n",
+        "-Subproject commit 1111111111111111111111111111111111111111\n",
+        "+Subproject commit 2222222222222222222222222222222222222222\n",
+    );
+    for patch in [inside, commit] {
+        client.error(
+            &root,
+            &["apply", "--cached", &write("submodule.diff", patch)],
+            "changes to submodules are not supported",
+        );
+    }
+    assert_eq!(client.ok(&root, &["status"]), "");
     Ok(())
 }

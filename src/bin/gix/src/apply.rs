@@ -1,11 +1,18 @@
-//! Check whether text patches apply to the worktree, the index, or both.
+//! `gix apply`: apply patches to the files of the worktree, to the index, or to both.
+//!
+//! The steps are those of `apply.c` in Git. Every patch of a patch file is checked first,
+//! against the files as the patches before it leave them. Only if all of them apply is
+//! anything written, so a patch file that does not apply changes nothing. Patch files are
+//! applied one after the other, and the index is written once, after the last of them: a
+//! patch file that does not apply leaves the index as it was, also when the patch files
+//! before it have changed files of the worktree.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt, fs,
     io::{self, Read},
     path::{Path, PathBuf},
-    sync::mpsc,
+    sync::{atomic::AtomicBool, mpsc},
     thread,
     time::Duration,
 };
@@ -13,13 +20,14 @@ use std::{
 use gix::{
     bstr::{BStr, BString, ByteSlice},
     index::entry::{Flags, Mode, Stage, Stat},
-    objs::Kind,
+    objs::{Kind, Write as _},
     worktree::stack::state::attributes::Source,
 };
 
 use crate::{
     cancellation::Cancellation,
-    mutation,
+    checkout,
+    mutation::{self, Guard},
     patch::{Image, Parser, Patch, kind},
     repository::OpenedRepository,
     selection,
@@ -35,18 +43,20 @@ const STDIN_POLL: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Options {
-    /// Check the patch backwards.
+    /// Only say whether the patches apply.
+    pub check: bool,
+    /// Apply the patches backwards.
     pub reverse: bool,
-    /// Check the indexed contents and require matching worktree files.
+    /// Change the index too. The files have to be as the index has them.
     pub index: bool,
-    /// Read the preimage from the index alone.
+    /// Change the index only, and read the files from it.
     pub cached: bool,
     /// How many leading directories to remove from the names in a patch.
     pub strip: Option<usize>,
 }
 
 impl Options {
-    /// Whether the patch must match the indexed contents.
+    /// Whether the patches change the index, and so read what they change from it.
     fn uses_index(self) -> bool {
         self.index || self.cached
     }
@@ -85,7 +95,7 @@ impl fmt::Display for Rejected {
 
 impl std::error::Error for Rejected {}
 
-/// Check each patch file or read the patch from standard input.
+/// Apply the patch files `patches`, or the patch on `stdin` if there are none.
 pub fn run(
     opened: &OpenedRepository,
     options: Options,
@@ -99,6 +109,7 @@ pub fn run(
     }
     let mut parser = Parser::new(options.strip, &prefix);
     let mut stdin = Some(stdin);
+    let mut target = None;
     let stdin_only = [PathBuf::from("-")];
     for path in if patches.is_empty() {
         &stdin_only
@@ -135,9 +146,22 @@ pub fn run(
         if list.is_empty() {
             continue;
         }
-        let index = opened.repo.index_or_empty()?;
-        mutation::validate_index(&index, !options.uses_index())?;
-        Session::new(opened, &index, options, cancellation)?.check_patches(list)?;
+        if options.check {
+            // A check changes nothing: it needs no lock, and every patch file is checked
+            // against the same files.
+            let index = opened.repo.index_or_empty()?;
+            mutation::validate_index(&index, !options.uses_index())?;
+            Session::new(opened, &index, options, cancellation)?.check_patches(list)?;
+            continue;
+        }
+        let target = match &mut target {
+            Some(target) => target,
+            None => target.insert(Target::acquire(opened, options, cancellation)?),
+        };
+        target.apply(list)?;
+    }
+    if let Some(target) = target {
+        target.publish()?;
     }
     cancellation.check()
 }
@@ -176,6 +200,239 @@ fn read_stdin(
     }
 }
 
+/// What the patch files of a run that changes something share: the locks, and the index
+/// as the patch files so far leave it.
+///
+/// As in Git, the index is written once, after the last patch file. A patch file that does
+/// not apply ends the run before that, and so leaves the index as it was.
+struct Target<'a> {
+    opened: &'a OpenedRepository,
+    options: Options,
+    cancellation: &'a Cancellation,
+    guard: Guard,
+    index: gix::index::State,
+    /// The paths whose entries in `index` are not those of the locked index.
+    paths: BTreeSet<BString>,
+    /// The directory that the command was started in. It stays when it becomes empty.
+    stay: Option<BString>,
+}
+
+impl<'a> Target<'a> {
+    fn acquire(
+        opened: &'a OpenedRepository,
+        options: Options,
+        cancellation: &'a Cancellation,
+    ) -> crate::Result<Self> {
+        let guard = if options.uses_index() {
+            Guard::acquire(&opened.repo)?
+        } else {
+            Guard::acquire_for_worktree(&opened.repo)?
+        };
+        Ok(Target {
+            opened,
+            options,
+            cancellation,
+            index: (**guard.index()).clone(),
+            guard,
+            paths: BTreeSet::new(),
+            stay: checkout::start_directory(workdir(&opened.repo)?),
+        })
+    }
+
+    /// Apply the patches of one patch file: all of them, or none. The files of the
+    /// worktree change at once, the index of this run takes the changes for `publish()`.
+    fn apply(&mut self, patches: Vec<Patch<'_>>) -> crate::Result {
+        let mut session = Session::new(self.opened, &self.index, self.options, self.cancellation)?;
+        let files = session.check_patches(patches)?;
+        let Session { observed, .. } = session;
+
+        // The index needs the new blobs in the repository. The worktree alone does not, so
+        // that a plain `apply` adds nothing to it.
+        let mut objects = self.opened.repo.objects.clone();
+        if !self.options.uses_index() {
+            objects.enable_object_memory();
+        }
+        // The index as the patches leave it. Without `--index` it only tells checkout what
+        // to write and where the attributes are.
+        let mut staged = self.index.clone();
+        staged.remove_entries(|_, path, _| files.contains_key(path));
+        let mut written = BTreeSet::new();
+        let mut removed = BTreeSet::new();
+        for (path, file) in files {
+            self.cancellation.check()?;
+            if let Some(file) = file {
+                let id = objects.write_buf(Kind::Blob, &file.data)?;
+                let stat = Stat::default();
+                staged.dangerously_push_entry(stat, id, Flags::empty(), file.mode, path.as_bstr());
+                written.insert(path);
+            } else {
+                removed.insert(path);
+            }
+        }
+        staged.sort_entries();
+        if self.options.uses_index() {
+            for path in &written {
+                let mut below = path.clone();
+                below.push(b'/');
+                let above = path
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, byte)| **byte == b'/')
+                    .any(|(slash, _)| staged.entry_range(path[..slash].as_bstr()).is_some());
+                if above || staged.prefixed_entries_range(below.as_bstr()).is_some() {
+                    return Err(invalid(format!(
+                        "'{}' appears as both a file and as a directory",
+                        show(path.as_bstr())
+                    )));
+                }
+            }
+            mutation::preflight_index(staged.clone())?;
+        }
+
+        if !self.options.cached {
+            staged = self.write_worktree(staged, objects, &written, &removed, &observed)?;
+        }
+        if self.options.uses_index() {
+            self.index = staged;
+            self.paths.append(&mut written);
+            self.paths.append(&mut removed);
+        }
+        Ok(())
+    }
+
+    /// Replace the files of the worktree that the patches change, and return `staged`
+    /// with the state of the files that were written.
+    ///
+    /// Until the first file is removed, an error leaves the worktree as it was. An error
+    /// after that is an `Incomplete` error.
+    fn write_worktree(
+        &self,
+        mut staged: gix::index::State,
+        objects: gix::OdbHandle,
+        written: &BTreeSet<BString>,
+        removed: &BTreeSet<BString>,
+        observed: &BTreeMap<BString, Stat>,
+    ) -> crate::Result<gix::index::State> {
+        let repo = &self.opened.repo;
+        let workdir = workdir(repo)?;
+        // Checkout writes the files of the patches and leaves every other file alone.
+        for (entry, path) in staged.entries_mut_with_paths() {
+            if !written.contains(path) {
+                entry.flags.insert(Flags::SKIP_WORKTREE);
+            }
+        }
+        let mut options = repo.checkout_options(Source::WorktreeThenIdMapping)?;
+        options.fs.symlink = false;
+        options.thread_limit = Some(1);
+        // The files that change are removed first, and every file is created anew.
+        options.destination_is_initially_empty = true;
+        options.overwrite_existing = false;
+        options.keep_going = false;
+        let mut objects = objects.into_arc()?;
+        objects.ignore_replacements = true;
+
+        // No file may have changed since it was read, and no file may have appeared.
+        let mut removals = Vec::new();
+        let mut directories = Vec::new();
+        for path in written.union(removed) {
+            self.cancellation.check()?;
+            let absolute = workdir.join(gix::path::from_bstr(path.as_bstr()).as_ref());
+            let metadata = selection::checked_symlink_metadata(workdir, path.as_bstr())?;
+            let unchanged = match (observed.get(path), metadata) {
+                (None, None) => true,
+                // A directory whose files the patches remove. It makes way for a file: the
+                // check has made sure that nothing is left in it.
+                (None, Some(metadata)) if metadata.is_dir() => {
+                    directories.push(absolute);
+                    true
+                }
+                (Some(stat), Some(metadata)) if metadata.is_file() => {
+                    removals.push(absolute.clone());
+                    let now = gix::index::fs::Metadata::from_path_no_follow(&absolute)?;
+                    Stat::from_fs(&now)? == *stat
+                }
+                _ => false,
+            };
+            if !unchanged {
+                return Err(invalid(format!(
+                    "worktree path '{}' changed while the patch was applied",
+                    show(path.as_bstr())
+                )));
+            }
+        }
+        self.cancellation.check()?;
+
+        // From here on the work is not interrupted: the new contents exist in memory only.
+        let install = || -> crate::Result {
+            for path in &removals {
+                fs::remove_file(path)?;
+            }
+            for directory in &directories {
+                remove_empty_tree(directory)?;
+            }
+            // Checkout must not be given an index without entries, so only call it with work.
+            if !written.is_empty() {
+                let discard = gix::features::progress::Discard;
+                let outcome = gix::worktree::state::checkout(
+                    &mut staged,
+                    workdir,
+                    objects,
+                    &discard,
+                    &discard,
+                    &AtomicBool::new(false),
+                    options,
+                )?;
+                checkout::check_outcome(&outcome)?;
+            }
+            // As Git: a directory that a deleted file leaves empty goes away with it, but
+            // not the one that the command was started in.
+            for path in removed {
+                checkout::prune_empty_parents(workdir, path.as_bstr(), |directory| {
+                    Ok(self.stay.as_ref().is_some_and(|stay| stay == directory))
+                })?;
+            }
+            Ok(())
+        };
+        install().map_err(|source| Incomplete { source })?;
+        // The mark was for checkout. The index of this run has every file.
+        for entry in staged.entries_mut() {
+            entry.flags.remove(Flags::SKIP_WORKTREE);
+        }
+        Ok(staged)
+    }
+
+    /// Write the index of this run, now that every patch file has applied.
+    fn publish(self) -> crate::Result {
+        if !self.options.uses_index() {
+            return Ok(());
+        }
+        let Target {
+            options,
+            mut guard,
+            index: staged,
+            paths,
+            ..
+        } = self;
+        guard
+            .publish_edited_index(|index| {
+                index.remove_entries(|_, path, _| paths.contains(path));
+                for entry in staged.entries() {
+                    let path = entry.path(&staged);
+                    if paths.contains(path) {
+                        let flags = Flags::empty();
+                        index.dangerously_push_entry(entry.stat, entry.id, flags, entry.mode, path);
+                    }
+                }
+                Ok(())
+            })
+            .map_err(|source| match options.cached {
+                true => source,
+                false => Incomplete { source }.into(),
+            })?;
+        Ok(())
+    }
+}
+
 fn workdir(repo: &gix::Repository) -> crate::Result<&Path> {
     repo.workdir()
         .ok_or_else(|| unsupported("apply requires a worktree".into()))
@@ -189,6 +446,8 @@ struct Session<'a> {
     options: Options,
     cancellation: &'a Cancellation,
     converter: Option<Converter<'a, 'a>>,
+    /// The state of every worktree file that was read, to see a later change of it.
+    observed: BTreeMap<BString, Stat>,
     /// Missing worktree sources read from the index by a copy.
     missing_copies: BTreeMap<BString, File>,
 }
@@ -208,12 +467,13 @@ impl<'a> Session<'a> {
             options,
             cancellation,
             converter: None,
+            observed: BTreeMap::new(),
             missing_copies: BTreeMap::new(),
         })
     }
 
-    /// Check the patches in order, including the resulting attribute rules.
-    fn check_patches(&mut self, patches: Vec<Patch<'_>>) -> crate::Result {
+    /// Check the patches in their order, and return what they leave.
+    fn check_patches(&mut self, patches: Vec<Patch<'_>>) -> crate::Result<Files> {
         for patch in &patches {
             self.validate(patch)?;
         }
@@ -265,7 +525,8 @@ impl<'a> Session<'a> {
         for (path, file) in std::mem::take(&mut self.missing_copies) {
             changed.entry(path).or_insert(Some(file));
         }
-        self.check_result_filters(&changed)
+        self.check_result_filters(&changed)?;
+        Ok(changed)
     }
 
     /// Check the attributes checkout will see after the old files are removed.
@@ -575,7 +836,10 @@ impl<'a> Session<'a> {
                 Ok(bytes)
             },
         )?;
-        Ok(loaded.map(|(data, mode, _)| File { data, mode }))
+        Ok(loaded.map(|(data, mode, stat)| {
+            self.observed.insert(path.to_owned(), stat);
+            File { data, mode }
+        }))
     }
 
     /// Look at a path of the worktree without following a symbolic link.
@@ -657,6 +921,37 @@ impl<'a> Session<'a> {
             }
         }
         Ok(())
+    }
+}
+
+/// Remove a directory in which only directories are left.
+fn remove_empty_tree(directory: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let path = entry?.path();
+        if !fs::symlink_metadata(&path)?.is_dir() {
+            let message = format!("'{}' is in the way", path.display());
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, message));
+        }
+        remove_empty_tree(&path)?;
+    }
+    fs::remove_dir(directory)
+}
+
+/// An error after the first file was changed. Nothing can undo the change.
+#[derive(Debug)]
+struct Incomplete {
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl fmt::Display for Incomplete {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("apply did not finish, and some files may have changed")
+    }
+}
+
+impl std::error::Error for Incomplete {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
     }
 }
 

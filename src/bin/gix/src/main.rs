@@ -85,32 +85,31 @@ fn run() -> Result {
         )
         .subcommand(
             Command::new("apply")
-                .about("Check whether a text patch applies")
+                .about("Apply a patch to files, to the index, or to both")
                 .arg(
                     Arg::new("check")
                         .long("check")
-                        .required(true)
                         .action(ArgAction::SetTrue)
-                        .help("Check whether the patch applies"),
+                        .help("Only say whether the patch applies; change nothing"),
                 )
                 .arg(
                     Arg::new("reverse")
                         .short('R')
                         .long("reverse")
                         .action(ArgAction::SetTrue)
-                        .help("Check the patch backwards"),
+                        .help("Apply the patch backwards"),
                 )
                 .arg(
                     Arg::new("index")
                         .long("index")
                         .action(ArgAction::SetTrue)
-                        .help("Check the index and require matching worktree files"),
+                        .help("Also apply the patch to the index, which the files have to match"),
                 )
                 .arg(
                     Arg::new("cached")
                         .long("cached")
                         .action(ArgAction::SetTrue)
-                        .help("Check the index alone"),
+                        .help("Apply the patch to the index only"),
                 )
                 .arg(
                     Arg::new("strip")
@@ -411,6 +410,7 @@ fn run() -> Result {
                 .cloned()
                 .collect::<Vec<_>>();
             let options = apply::Options {
+                check: command.get_flag("check"),
                 reverse: command.get_flag("reverse"),
                 index: command.get_flag("index"),
                 cached: command.get_flag("cached"),

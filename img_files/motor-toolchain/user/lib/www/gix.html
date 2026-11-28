@@ -444,7 +444,7 @@ Put <code>--</code> in front of a name that starts with a dash.
   <tr><td><code>status</code></td><td>Show what has changed, and whether a merge or another operation is unfinished.</td></tr>
   <tr><td><code>log</code></td><td>Show the history of the current branch.</td></tr>
   <tr><td><code>diff [--staged] [PATH…]</code></td><td>Show your unstaged changes, or with <code>--staged</code> what the next commit will contain, as a patch in the format of <code>git diff</code>.</td></tr>
-  <tr><td><code>apply --check [OPTIONS] [PATCH…]</code></td><td>Check whether a text patch applies to your files or the index.</td></tr>
+  <tr><td><code>apply [OPTIONS] [PATCH…]</code></td><td>Apply a patch to your files, to the index, or to both, as <code>git apply</code> does.</td></tr>
   <tr><td><code>add PATH…</code>, <code>add -A</code></td><td>Stage the named files, or with <code>-A</code> every new, changed and deleted file. <code>-A</code> skips new files that match an ignore rule; naming such a file yourself is an error.</td></tr>
   <tr><td><code>unstage PATH…</code></td><td>Take files out of the next commit without touching the files themselves.</td></tr>
   <tr><td><code>restore PATH…</code></td><td>Throw away your unstaged changes to the named files.</td></tr>
@@ -480,6 +480,12 @@ Put <code>--</code> in front of a name that starts with a dash.
 </ul>
 
 <h3 id="patches">Patches</h3>
+<p><code>gix diff</code> writes a patch as <code>git diff</code> writes it, and
+<code>gix apply</code> applies a text patch as <code>git apply</code> does. A patch from one
+program is input for the other:</p>
+<pre><code>gix diff &gt; change.diff     # your unstaged changes, as a patch
+gix restore .              # take them out of your files
+gix apply change.diff      # and put them back</code></pre>
 <p><code>diff</code> uses the patch format of <code>git diff --no-renames</code>, including
 shortened object IDs in the <code>index</code> line and Git's quoting for file names.
 <code>core.abbrev</code>, <code>core.quotePath</code> and <code>diff.algorithm</code> are honored.</p>
@@ -488,18 +494,65 @@ shortened object IDs in the <code>index</code> line and Git's quoting for file n
   <li>An absent file marked <code>skip-worktree</code> is omitted from an unstaged diff.</li>
   <li>Hunk headings use Git's default rule. A language-specific diff driver in
   Git may pick a different function or line for the heading.</li>
-  <li>A hunk can group changed lines differently from Git.</li>
+  <li>Once in a while the changed lines of a hunk are grouped in another way than Git
+  groups them. Both patches are correct, and both programs apply both.</li>
   <li>A file with an unresolved conflict stops <code>diff</code>. The contents of a binary
   file are not shown, as in Git.</li>
 </ul>
-
-<p><code>gix apply --check</code> checks a text patch against your files. Use
-<code>--cached</code> to check the index or <code>--index</code> to also require
-matching worktree files. Pass one or more patch files, or use <code>-</code> or
-no file name for standard input. <code>-R</code> checks the patch in reverse.
-<code>-p N</code> removes N leading directories from the file names in the patch.</p>
-<p>A worktree patch can match literal CRLF line endings. Index checks use the
-line endings stored in the index.</p>
+<p><code>apply</code> reads the named patch files one after the other. Without a file name,
+or for the name <code>-</code>, it reads standard input.</p>
+<div class="table-wrap">
+<table>
+  <tr><th>Option</th><th>What it does</th></tr>
+  <tr><td>(none)</td><td>Change your files and leave the index alone. A file that the patch creates is untracked afterwards.</td></tr>
+  <tr><td><code>--index</code></td><td>Change your files and the index. Existing files must match the index. A missing source is read from the index and restored if the patch keeps it.</td></tr>
+  <tr><td><code>--cached</code></td><td>Change only the index.</td></tr>
+  <tr><td><code>--check</code></td><td>Only say whether the patch applies.</td></tr>
+  <tr><td><code>-R</code>, <code>--reverse</code></td><td>Apply the patch backwards, which undoes it.</td></tr>
+  <tr><td><code>-p N</code></td><td>Remove N leading directories from the file names in the patch. The default is 1, for the <code>a/</code> and <code>b/</code> of Git.</td></tr>
+</table>
+</div>
+<p>A patch file is applied completely or not at all. If a part of it does not match your
+files, <code>apply</code> names every file that the patch does not apply to and changes
+nothing:</p>
+<pre><code>gix: patch failed: src/main.rs:120
+gix: src/main.rs: patch does not apply</code></pre>
+<p>With several patch files, <code>apply</code> stops at the first one that does not apply.
+As in Git, the files that the patch files before it changed stay changed. The index is
+written only after the last patch file, so <code>--index</code> and <code>--cached</code>
+then leave it as it was.</p>
+<p>The rules are those of Git:</p>
+<ul>
+  <li>The lines of a hunk have to be in the file exactly, but they may be a few lines above
+  or below the place that the patch names. A worktree-only patch can match literal
+  CRLF line endings. With <code>--index</code> or <code>--cached</code>, the hunk
+  must match the line endings stored in the index.</li>
+  <li>A file that the patch creates must not exist. A file that the patch deletes must have
+  the contents that the patch removes, and a directory that it leaves empty is removed,
+  unless it is the directory that you started <code>apply</code> in.</li>
+  <li>From a subdirectory, <code>apply</code> selects a change by its destination, or by
+  its source for a deletion. A selected rename moves both ends. With <code>-R</code>,
+  these rules use the reversed paths.</li>
+  <li>Patches from <code>git diff</code>, <code>git show</code> and
+  <code>git format-patch</code> are read, also with renames and copies, and so are patches
+  from <code>diff -u</code>, whose file names are relative to the directory that
+  <code>apply</code> is started in.</li>
+</ul>
+<p>What <code>apply</code> does differently:</p>
+<ul>
+  <li>It has no other options of <code>git apply</code>, such as <code>--3way</code>,
+  <code>--reject</code>, <code>--stat</code> and <code>--whitespace</code>, and it does not
+  warn about whitespace.</li>
+  <li>Changes to submodules are refused.</li>
+  <li>With an intent-to-add entry (<code>git add -N</code>), worktree-only patches work.
+  To use <code>--index</code> or <code>--cached</code>, use Git to stage or unstage the entry first.</li>
+  <li>A symbolic link is patched as the file that stands for it on Motor OS. In the index
+  it stays a symbolic link.</li>
+  <li>Like <code>restore</code>, it does not work while a merge or a rebase is in progress.
+  <code>apply --check</code> does.</li>
+  <li>If writing fails half-way, for example because the disk is full, some files are
+  changed and others are not. <code>apply</code> says so.</li>
+</ul>
 
 <h3 id="branches">Branches</h3>
 <p><code>gix branch</code> prints the same list as <code>git branch</code>, with a

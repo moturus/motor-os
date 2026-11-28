@@ -61,7 +61,7 @@ directory. Put `--` in front of a name that starts with a dash.
 | `status` | Show what has changed, and whether a merge or another operation is unfinished. |
 | `log` | Show the history of the current branch. |
 | `diff [--staged] [PATH…]` | Show your unstaged changes, or with `--staged` what the next commit will contain, as a patch in the format of `git diff`. |
-| `apply --check [OPTIONS] [PATCH…]` | Check whether a text patch applies to your files or the index. |
+| `apply [OPTIONS] [PATCH…]` | Apply a patch to your files, to the index, or to both, as `git apply` does. |
 | `add PATH…`, `add -A` | Stage the named files, or with `-A` every new, changed and deleted file. `-A` skips new files that match an ignore rule; naming such a file yourself is an error. |
 | `unstage PATH…` | Take files out of the next commit without touching the files themselves. |
 | `restore PATH…` | Throw away your unstaged changes to the named files. |
@@ -97,6 +97,15 @@ A few things work differently from Git:
 
 ### Patches
 
+`gix diff` writes a patch as `git diff` writes it, and `gix apply` applies a
+text patch as `git apply` does. A patch from one program is input for the other:
+
+```sh
+gix diff > change.diff     # your unstaged changes, as a patch
+gix restore .              # take them out of your files
+gix apply change.diff      # and put them back
+```
+
 `diff` uses the patch format of `git diff --no-renames`, including shortened
 object IDs in the `index` line and Git's quoting for file names. `core.abbrev`,
 `core.quotePath` and `diff.algorithm` are honored.
@@ -105,18 +114,68 @@ object IDs in the `index` line and Git's quoting for file names. `core.abbrev`,
 - An absent file marked `skip-worktree` is omitted from an unstaged diff.
 - Hunk headings use Git's default rule. A language-specific diff driver in
   Git may pick a different function or line for the heading.
-- A hunk can group changed lines differently from Git.
+- Once in a while the changed lines of a hunk are grouped in another way
+  than Git groups them. Both patches are correct, and both programs apply
+  both.
 - A file with an unresolved conflict stops `diff`. The contents of a binary
   file are not shown, as in Git.
 
-`gix apply --check` checks a text patch against your files. Use `--cached`
-to check the index or `--index` to also require matching worktree files.
-Pass one or more patch files, or use `-` or no file name for standard input.
-`-R` checks the patch in reverse. `-p N` removes N leading directories
-from the file names in the patch.
+`apply` reads the named patch files one after the other. Without a file
+name, or for the name `-`, it reads standard input.
 
-A worktree patch can match literal CRLF line endings. Index checks use the
-line endings stored in the index.
+| Option | What it does |
+| --- | --- |
+| (none) | Change your files and leave the index alone. A file that the patch creates is untracked afterwards. |
+| `--index` | Change your files and the index. Existing files must match the index. A missing source is read from the index and restored if the patch keeps it. |
+| `--cached` | Change only the index. |
+| `--check` | Only say whether the patch applies. |
+| `-R`, `--reverse` | Apply the patch backwards, which undoes it. |
+| `-p N` | Remove N leading directories from the file names in the patch. The default is 1, for the `a/` and `b/` of Git. |
+
+A patch file is applied completely or not at all. If a part of it does not
+match your files, `apply` names every file that the patch does not apply to
+and changes nothing:
+
+```text
+gix: patch failed: src/main.rs:120
+gix: src/main.rs: patch does not apply
+```
+
+With several patch files, `apply` stops at the first one that does not apply.
+As in Git, the files that the patch files before it changed stay changed.
+The index is written only after the last patch file, so `--index` and
+`--cached` then leave it as it was.
+
+The rules are those of Git:
+
+- The lines of a hunk have to be in the file exactly, but they may be a few
+  lines above or below the place that the patch names. A worktree-only
+  patch can match literal CRLF line endings. With `--index` or `--cached`,
+  the hunk must match the line endings stored in the index.
+- A file that the patch creates must not exist. A file that the patch
+  deletes must have the contents that the patch removes, and a directory
+  that it leaves empty is removed, unless it is the directory that you
+  started `apply` in.
+- From a subdirectory, `apply` selects a change by its destination, or by its
+  source for a deletion. A selected rename moves both ends. With `-R`, these
+  rules use the reversed paths.
+- Patches from `git diff`, `git show` and `git format-patch` are read, also
+  with renames and copies, and so are patches from `diff -u`, whose file
+  names are relative to the directory that `apply` is started in.
+
+What `apply` does differently:
+
+- It has no other options of `git apply`, such as `--3way`, `--reject`,
+  `--stat` and `--whitespace`, and it does not warn about whitespace.
+- Changes to submodules are refused.
+- With an intent-to-add entry (`git add -N`), worktree-only patches work.
+  To use `--index` or `--cached`, use Git to stage or unstage the entry first.
+- A symbolic link is patched as the file that stands for it on Motor OS. In
+  the index it stays a symbolic link.
+- Like `restore`, it does not work while a merge or a rebase is in progress.
+  `apply --check` does.
+- If writing fails half-way, for example because the disk is full, some
+  files are changed and others are not. `apply` says so.
 
 ### Branches
 

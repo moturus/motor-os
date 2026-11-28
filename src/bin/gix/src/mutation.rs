@@ -44,6 +44,12 @@ impl Guard {
         Ok(guard)
     }
 
+    /// Take the ordinary locks for a worktree edit that preserves the index.
+    pub(crate) fn acquire_for_worktree(repo: &gix::Repository) -> crate::Result<Self> {
+        let (guard, _) = Self::acquire_with(repo, Admission::WorktreeOnly)?;
+        Ok(guard)
+    }
+
     /// Acquire an ordinary index edit, admitting an installed ready merge when present.
     pub fn acquire_for_ready_mutation(
         repo: &gix::Repository,
@@ -120,10 +126,12 @@ impl Guard {
         let allow_merge_head = match (admission, record.as_ref()) {
             (Admission::Rebase, Some(record)) if is_rebase(record) => false,
             (Admission::Rebase, None) => return unsupported("no rebase is in progress"),
-            (Admission::Ordinary | Admission::Rebase, Some(record)) => {
+            (Admission::Ordinary | Admission::WorktreeOnly | Admission::Rebase, Some(record)) => {
                 return unsupported(unfinished(record));
             }
-            (Admission::Ordinary | Admission::ReadyMutation, None) => false,
+            (Admission::Ordinary | Admission::WorktreeOnly | Admission::ReadyMutation, None) => {
+                false
+            }
             (Admission::ReadyMutation, Some(record)) if record.state == State::Ready => {
                 record.kind == Kind::Merge
             }
@@ -158,7 +166,7 @@ impl Guard {
             ),
             Err(error) => return Err(error.into()),
         };
-        validate_index(&index, false)?;
+        validate_index(&index, matches!(admission, Admission::WorktreeOnly))?;
         Ok((
             Guard {
                 index_lock: Some(index_lock),
@@ -337,6 +345,7 @@ impl Guard {
 #[derive(Clone, Copy)]
 enum Admission {
     Ordinary,
+    WorktreeOnly,
     ReadyMutation,
     Recovery,
     /// `rebase --continue`, `--skip` and `--abort`: a rebase record in any state.
