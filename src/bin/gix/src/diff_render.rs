@@ -69,7 +69,7 @@ impl PreparedText<'_> {
         self.diff.count_removals() == 0 && self.diff.count_additions() == 0
     }
 
-    /// Stream this diff with already-escaped labels to buffered output.
+    /// Stream this diff with already-quoted labels to buffered output.
     pub fn write_to(
         self,
         labels: (&[u8], &[u8]),
@@ -80,21 +80,25 @@ impl PreparedText<'_> {
             return cancellation.check();
         }
 
-        let (before_label, after_label) = labels;
-        cancellation.check()?;
-        out.write_all(b"--- ")?;
-        out.write_all(before_label)?;
-        out.write_all(b"\n")?;
-        cancellation.check()?;
-        out.write_all(b"+++ ")?;
-        out.write_all(after_label)?;
-        out.write_all(b"\n")?;
+        for (marker, label) in [(b"--- ", labels.0), (b"+++ ", labels.1)] {
+            cancellation.check()?;
+            out.write_all(marker)?;
+            out.write_all(label)?;
+            // As Git: a tab ends a name with a space, so that `patch` does not stop at the space.
+            if label.contains(&b' ') {
+                out.write_all(b"\t")?;
+            }
+            out.write_all(b"\n")?;
+        }
         UnifiedDiff::new(
             &self.diff,
             &self.input,
             HunkWriter {
                 out: &mut *out,
                 cancellation,
+                input: &self.input,
+                searched: 0,
+                heading: b"",
             },
             ContextSize::symmetrical(3),
         )
@@ -119,9 +123,52 @@ fn exact_lines<'a>(path: &BStr, side: &str, bytes: &'a [u8]) -> io::Result<Exact
     })
 }
 
+/// Git's `xdl_emit_hunk_hdr()` builds a hunk header in a buffer of this size.
+const HEADER_BYTES: usize = 128;
+/// Git keeps this much of the line that it shows after the second `@@`.
+const HEADING_BYTES: usize = 80;
+
 struct HunkWriter<'a, W> {
     out: &'a mut W,
     cancellation: &'a Cancellation,
+    input: &'a InternedInput<&'a [u8]>,
+    /// How many of the old lines have been searched for a heading.
+    searched: usize,
+    /// The heading of the hunks so far, which a hunk keeps if it finds none of its own.
+    heading: &'a [u8],
+}
+
+impl<'a, W> HunkWriter<'a, W> {
+    /// Find the line that Git shows after the second `@@`: the nearest line before the
+    /// hunk that starts with a letter, `_` or `$`, as most function definitions do.
+    fn find_heading(&mut self, hunk_start: usize) {
+        for line in (self.searched..hunk_start).rev() {
+            let text = self.input.interner[self.input.before[line]];
+            if text
+                .first()
+                .is_some_and(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$'))
+            {
+                let text = &text[..text.len().min(HEADING_BYTES)];
+                let end = text
+                    .iter()
+                    .rposition(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
+                    .map_or(0, |last| last + 1);
+                self.heading = &text[..end];
+                break;
+            }
+        }
+        self.searched = self.searched.max(hunk_start);
+    }
+}
+
+/// Format one side of a hunk header as Git does: a side without lines names the line
+/// before it, and a count of one is left out.
+fn range(start: u32, lines: u32) -> String {
+    match lines {
+        0 => format!("{},0", start - 1),
+        1 => start.to_string(),
+        _ => format!("{start},{lines}"),
+    }
 }
 
 impl<W: Write> ConsumeHunk for HunkWriter<'_, W> {
@@ -133,7 +180,21 @@ impl<W: Write> ConsumeHunk for HunkWriter<'_, W> {
         lines: &[(DiffLineKind, &[u8])],
     ) -> io::Result<()> {
         check(self.cancellation)?;
-        writeln!(self.out, "{header}")?;
+        let ranges = format!(
+            "@@ -{} +{} @@",
+            range(header.before_hunk_start, header.before_hunk_len),
+            range(header.after_hunk_start, header.after_hunk_len)
+        );
+        self.out.write_all(ranges.as_bytes())?;
+        self.find_heading(header.before_hunk_start as usize - 1);
+        // The space, the heading and the newline have to fit into Git's buffer.
+        let room = HEADER_BYTES.saturating_sub(ranges.len() + 2);
+        let heading = &self.heading[..self.heading.len().min(room)];
+        if !heading.is_empty() {
+            self.out.write_all(b" ")?;
+            self.out.write_all(heading)?;
+        }
+        self.out.write_all(b"\n")?;
         for &(kind, line) in lines {
             check(self.cancellation)?;
             self.out.write_all(&[kind.to_prefix() as u8])?;

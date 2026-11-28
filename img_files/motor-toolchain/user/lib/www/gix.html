@@ -443,7 +443,7 @@ Put <code>--</code> in front of a name that starts with a dash.
   <tr><td><code>fetch [REMOTE]</code></td><td>Download new commits and tags from a remote, <code>origin</code> by default. Your current branch and your files do not change.</td></tr>
   <tr><td><code>status</code></td><td>Show what has changed, and whether a merge or another operation is unfinished.</td></tr>
   <tr><td><code>log</code></td><td>Show the history of the current branch.</td></tr>
-  <tr><td><code>diff [--staged] [PATH…]</code></td><td>Show your unstaged changes, or with <code>--staged</code> what the next commit will contain. Binary files and mode changes are summarized.</td></tr>
+  <tr><td><code>diff [--staged] [PATH…]</code></td><td>Show your unstaged changes, or with <code>--staged</code> what the next commit will contain, as a patch in the format of <code>git diff</code>.</td></tr>
   <tr><td><code>add PATH…</code>, <code>add -A</code></td><td>Stage the named files, or with <code>-A</code> every new, changed and deleted file. <code>-A</code> skips new files that match an ignore rule; naming such a file yourself is an error.</td></tr>
   <tr><td><code>unstage PATH…</code></td><td>Take files out of the next commit without touching the files themselves.</td></tr>
   <tr><td><code>restore PATH…</code></td><td>Throw away your unstaged changes to the named files.</td></tr>
@@ -476,6 +476,20 @@ Put <code>--</code> in front of a name that starts with a dash.
   <code>-c key=value</code> as many times as you need. The only thing gix writes to
   <code>.git/config</code> itself is the upstream of a branch made with
   <code>checkout -b</code>, and it leaves the rest of the file as it found it.</li>
+</ul>
+
+<h3 id="patches">Patches</h3>
+<p><code>diff</code> uses the patch format of <code>git diff --no-renames</code>, including
+shortened object IDs in the <code>index</code> line and Git's quoting for file names.
+<code>core.abbrev</code>, <code>core.quotePath</code> and <code>diff.algorithm</code> are honored.</p>
+<ul>
+  <li>A renamed file is shown as a deleted file and a new file.</li>
+  <li>An absent file marked <code>skip-worktree</code> is omitted from an unstaged diff.</li>
+  <li>Hunk headings use Git's default rule. A language-specific diff driver in
+  Git may pick a different function or line for the heading.</li>
+  <li>A hunk can group changed lines differently from Git.</li>
+  <li>A file with an unresolved conflict stops <code>diff</code>. The contents of a binary
+  file are not shown, as in Git.</li>
 </ul>
 
 <h3 id="branches">Branches</h3>
@@ -641,8 +655,9 @@ resolve conflicts is not a job for <code>recover</code>; commit it or abort it.<
   <li>Executable files stay writable.</li>
   <li>Submodule entries are kept as they are, but gix does not operate on submodules and
   refuses a switch or merge that would change one.</li>
-  <li>Text diffs use the Myers or Histogram algorithm. The <code>minimal</code> setting is
-  not supported.</li>
+  <li>Text diffs use the Myers algorithm, as in Git, or Histogram if
+  <code>diff.algorithm</code> asks for it. The <code>minimal</code> setting is not
+  supported.</li>
   <li>Gix sends whole objects when it pushes, without Git's delta compression, so the first
   push of a repository can be larger than Git's.</li>
   <li>Gix never repacks or garbage-collects a repository, so loose objects pile up over

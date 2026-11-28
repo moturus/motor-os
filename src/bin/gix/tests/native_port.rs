@@ -134,20 +134,20 @@ fn run(fixture: &Path, output: &Path) -> Result {
         assert!(url.same_origin_redirect(redirect).is_err(), "{redirect}");
     }
 
-    fs::create_dir(&output)?;
-    check_init(&output)?;
-    check_discovery(&output)?;
-    check_bounded_inputs(&output)?;
+    fs::create_dir(output)?;
+    check_init(output)?;
+    check_discovery(output)?;
+    check_bounded_inputs(output)?;
     #[cfg(target_os = "motor")]
-    check_loose_ref_limit(&output)?;
-    check_capture(&output)?;
-    check_mutation(&output)?;
+    check_loose_ref_limit(output)?;
+    check_capture(output)?;
+    check_mutation(output)?;
     let worktree = output.join("worktree");
     fs::create_dir(&worktree)?;
 
-    check_refs(&fixture)?;
-    check_head_ref(&output)?;
-    let opened = motor_gix::repository::open(&fixture, &[], false)?;
+    check_refs(fixture)?;
+    check_head_ref(output)?;
+    let opened = motor_gix::repository::open(fixture, &[], false)?;
     let repo = &opened.repo;
     let hash = gix::hash::Kind::Sha1;
     let input = File::at(repo.index_path(), hash, false, Default::default())?;
@@ -171,9 +171,9 @@ fn run(fixture: &Path, output: &Path) -> Result {
         .verify_integrity(|_| Ok::<_, std::io::Error>(()))
         .map_err(|err| err.into_error())?;
 
-    check_pack_validation(repo, &output)?;
-    check_push_objects(&output)?;
-    check_push_pack(&output)?;
+    check_pack_validation(repo, output)?;
+    check_push_objects(output)?;
+    check_push_pack(output)?;
 
     let capabilities = gix::fs::Capabilities::probe_dir(&worktree);
     assert!(
@@ -210,29 +210,29 @@ fn run(fixture: &Path, output: &Path) -> Result {
     assert_eq!(link.mode, Mode::SYMLINK);
     assert_eq!(link.stat.size, 8);
     assert_eq!(repo.find_blob(link.id)?.data, b"editable");
-    check_add(&output, &fixture.join("editable"), repo.head_id()?.detach())?;
-    check_diff_input(&output)?;
+    check_add(output, &fixture.join("editable"), repo.head_id()?.detach())?;
+    check_diff_input(output)?;
     check_diff_render()?;
-    check_diff_policy(&output)?;
-    check_diff_run(&output)?;
-    check_merge_policy(&output)?;
-    check_merge_prepare(&output)?;
+    check_diff_policy(output)?;
+    check_diff_run(output)?;
+    check_merge_policy(output)?;
+    check_merge_prepare(output)?;
     rebase::check_replay(output)?;
     rebase::check_rebase_record(output)?;
     #[cfg(feature = "native-test-support")]
     rebase::check_rebase_recovery(output)?;
     #[cfg(feature = "native-test-support")]
     rebase::check_rebase_resume(output)?;
-    check_restore(&output)?;
-    check_executable_attributes(&output)?;
-    check_unstage(&output)?;
-    check_commit(&output)?;
-    check_transition_delta(&output)?;
-    check_transition_prunes_emptied_directories(&output)?;
+    check_restore(output)?;
+    check_executable_attributes(output)?;
+    check_unstage(output)?;
+    check_commit(output)?;
+    check_transition_delta(output)?;
+    check_transition_prunes_emptied_directories(output)?;
     #[cfg(unix)]
-    check_transition_preserves_directory_permissions(&output)?;
-    check_merge_abort(&output)?;
-    check_switch(&output)?;
+    check_transition_preserves_directory_permissions(output)?;
+    check_merge_abort(output)?;
+    check_switch(output)?;
     let mut index = File::from_state(state, output.join("written.index"));
     let objects = repo.objects.clone().into_arc()?;
     let interrupt = AtomicBool::new(false);
@@ -336,7 +336,7 @@ fn run(fixture: &Path, output: &Path) -> Result {
         format!("credential.helper={command}"),
     ];
     let overrides = overrides.iter().map(String::as_str).collect::<Vec<_>>();
-    let opened = motor_gix::repository::open(&fixture, &overrides, false)?;
+    let opened = motor_gix::repository::open(fixture, &overrides, false)?;
     let cancellation = motor_gix::cancellation::Cancellation::new();
     cancellation.cancel();
     let cancelled = motor_gix::status::collect(&opened, &cancellation)
@@ -1041,7 +1041,8 @@ fn check_diff_render() -> Result {
 
     let before = b"zero\none\ntwo\nthree\nold";
     let after = b"zero\none\ntwo\nthree\nnew";
-    let expected = b"--- a/sample\n+++ b/sample\n@@ -2,4 +2,4 @@\n one\n two\n three\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n";
+    // What `git diff` writes, with the nearest line that starts a block after the `@@`.
+    let expected = b"--- a/sample\n+++ b/sample\n@@ -2,4 +2,4 @@ zero\n one\n two\n three\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n";
     for algorithm in [Algorithm::Myers, Algorithm::Histogram] {
         let cancellation = motor_gix::cancellation::Cancellation::new();
         let mut out = Vec::new();
@@ -1333,9 +1334,10 @@ fn check_diff_policy(output: &Path) -> Result {
         )?,
         b"diff --git a/executable b/executable\nold mode 100644\nnew mode 100755\n"
     );
+    // As in Git, a link that becomes a file is deleted and then created.
     assert_eq!(
-        render(
-            "executable",
+        String::from_utf8(render(
+            "modified",
             Pair {
                 old: Loaded::Blob {
                     mode: Mode::SYMLINK,
@@ -1347,8 +1349,23 @@ fn check_diff_policy(output: &Path) -> Result {
                 },
             },
             &mut resolver,
-        )?,
-        b"diff --git a/executable b/executable\nold mode 120000\nnew mode 100644\n--- a/executable\n+++ b/executable\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+        )?)?,
+        concat!(
+            "diff --git a/modified b/modified\n",
+            "deleted file mode 120000\n",
+            "index 3367afd..0000000\n",
+            "--- a/modified\n",
+            "+++ /dev/null\n",
+            "@@ -1 +0,0 @@\n",
+            "-old\n",
+            "diff --git a/modified b/modified\n",
+            "new file mode 100644\n",
+            "index 0000000..3e75765\n",
+            "--- /dev/null\n",
+            "+++ b/modified\n",
+            "@@ -0,0 +1 @@\n",
+            "+new\n",
+        )
     );
     assert_eq!(
         render(
@@ -1362,7 +1379,35 @@ fn check_diff_policy(output: &Path) -> Result {
             },
             &mut resolver,
         )?,
-        b"diff --git a/added b/added\nnew file mode 100644\nBinary files /dev/null and b/added differ\n"
+        b"diff --git a/added b/added\nnew file mode 100644\nindex 0000000..731e575\nBinary files /dev/null and b/added differ\n"
+    );
+    // Names are quoted as Git quotes them, and a name with a space ends with a tab.
+    assert_eq!(
+        String::from_utf8(render(
+            "caf\u{e9} it's",
+            Pair {
+                old: Loaded::Blob {
+                    mode: Mode::FILE,
+                    bytes: b"old\n".to_vec(),
+                },
+                new: Loaded::Blob {
+                    mode: Mode::FILE_EXECUTABLE,
+                    bytes: b"new\n".to_vec(),
+                },
+            },
+            &mut resolver,
+        )?)?,
+        concat!(
+            "diff --git \"a/caf\\303\\251 it's\" \"b/caf\\303\\251 it's\"\n",
+            "old mode 100644\n",
+            "new mode 100755\n",
+            "index 3367afd..3e75765\n",
+            "--- \"a/caf\\303\\251 it's\"\t\n",
+            "+++ \"b/caf\\303\\251 it's\"\t\n",
+            "@@ -1 +1 @@\n",
+            "-old\n",
+            "+new\n",
+        )
     );
 
     let first = gix::ObjectId::from_hex(b"1111111111111111111111111111111111111111")?;
@@ -1402,18 +1447,38 @@ fn check_diff_policy(output: &Path) -> Result {
             &mut gitlinks,
         )?;
     }
+    // As in Git, a submodule is one line of text that names its commit.
     assert_eq!(
         String::from_utf8(gitlinks)?,
         concat!(
             "diff --git a/changed-submodule b/changed-submodule\n",
-            "Gitlinks a/changed-submodule (1111111111111111111111111111111111111111) and b/changed-submodule (2222222222222222222222222222222222222222) differ\n",
+            "index 1111111..2222222 160000\n",
+            "--- a/changed-submodule\n",
+            "+++ b/changed-submodule\n",
+            "@@ -1 +1 @@\n",
+            "-Subproject commit 1111111111111111111111111111111111111111\n",
+            "+Subproject commit 2222222222222222222222222222222222222222\n",
             "diff --git a/new-submodule b/new-submodule\n",
             "new file mode 160000\n",
-            "Gitlinks /dev/null (absent) and b/new-submodule (1111111111111111111111111111111111111111) differ\n",
+            "index 0000000..1111111\n",
+            "--- /dev/null\n",
+            "+++ b/new-submodule\n",
+            "@@ -0,0 +1 @@\n",
+            "+Subproject commit 1111111111111111111111111111111111111111\n",
             "diff --git a/replaced-submodule b/replaced-submodule\n",
-            "old mode 160000\n",
-            "new mode 100644\n",
-            "Gitlinks a/replaced-submodule (1111111111111111111111111111111111111111) and b/replaced-submodule (non-gitlink) differ\n",
+            "deleted file mode 160000\n",
+            "index 1111111..0000000\n",
+            "--- a/replaced-submodule\n",
+            "+++ /dev/null\n",
+            "@@ -1 +0,0 @@\n",
+            "-Subproject commit 1111111111111111111111111111111111111111\n",
+            "diff --git a/replaced-submodule b/replaced-submodule\n",
+            "new file mode 100644\n",
+            "index 0000000..3de3610\n",
+            "--- /dev/null\n",
+            "+++ b/replaced-submodule\n",
+            "@@ -0,0 +1 @@\n",
+            "+ordinary\n",
         )
     );
 

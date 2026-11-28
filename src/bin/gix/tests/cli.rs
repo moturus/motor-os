@@ -9,6 +9,8 @@ use std::{
 use gix::bstr::ByteSlice;
 
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+#[path = "support/patches.rs"]
+mod patches;
 #[path = "support/repository.rs"]
 mod repository;
 
@@ -1183,5 +1185,129 @@ fn switch_and_merge_keep_the_directory_they_are_started_in() -> Result {
     client.ok(&root.join("d"), &["merge", "gone"]);
     fs::remove_dir(root.join("d"))?;
     assert_eq!(client.ok(&root, &["status"]), "");
+    Ok(())
+}
+
+/// What `git diff` writes for the changes that `diff_writes_what_git_writes`
+/// makes. It was written by Git 2.43, so the test needs no Git.
+const WORKTREE_PATCH: &str = concat!(
+    "diff --git \"a/caf\\303\\251\" \"b/caf\\303\\251\"\n",
+    "index 4ae8ef0..765140b 100644\n",
+    "--- \"a/caf\\303\\251\"\n",
+    "+++ \"b/caf\\303\\251\"\n",
+    "@@ -1 +1 @@\n",
+    "-u\n",
+    "+U\n",
+    "diff --git a/d/e/deep b/d/e/deep\n",
+    "deleted file mode 100644\n",
+    "index 4cdb226..0000000\n",
+    "--- a/d/e/deep\n",
+    "+++ /dev/null\n",
+    "@@ -1 +0,0 @@\n",
+    "-deep\n",
+    "diff --git a/gone-empty b/gone-empty\n",
+    "deleted file mode 100644\n",
+    "index e69de29..0000000\n",
+    "diff --git a/it's b/it's\n",
+    "index bca70f3..73c52c3 100644\n",
+    "--- a/it's\n",
+    "+++ b/it's\n",
+    "@@ -1 +1 @@\n",
+    "-q\n",
+    "+Q\n",
+    "diff --git a/noeol b/noeol\n",
+    "index eeed123..e84fa9b 100644\n",
+    "--- a/noeol\n",
+    "+++ b/noeol\n",
+    "@@ -1 +1 @@\n",
+    "-tail\n",
+    "\\ No newline at end of file\n",
+    "+tail\n",
+    "diff --git a/text b/text\n",
+    "index 624b469..2067ace 100644\n",
+    "--- a/text\n",
+    "+++ b/text\n",
+    "@@ -1,5 +1,5 @@\n",
+    " line 1\n",
+    "-line 2\n",
+    "+line two\n",
+    " line 3\n",
+    " line 4\n",
+    " line 5\n",
+    "@@ -8,5 +8,5 @@ line 7\n",
+    " line 8\n",
+    " line 9\n",
+    " line 10\n",
+    "-line 11\n",
+    "+line eleven\n",
+    " line 12\n",
+    "diff --git a/with space b/with space\n",
+    "index f05367e..9d8fed6 100644\n",
+    "--- a/with space\t\n",
+    "+++ b/with space\t\n",
+    "@@ -1 +1 @@\n",
+    "-sp\n",
+    "+SP\n",
+);
+
+#[test]
+fn diff_writes_what_git_writes() -> Result {
+    let client = Client::new();
+    let root = client.0.join("repository");
+    client.ok(&client.0, &["init", root.to_str().unwrap()]);
+    let text = |change: fn(usize) -> Option<&'static str>| {
+        let line = |n| change(n).map_or(format!("line {n}\n"), |line| format!("{line}\n"));
+        (1..=12).map(line).collect::<String>()
+    };
+    let base = [
+        ("text", text(|_| None)),
+        ("with space", "sp\n".into()),
+        ("it's", "q\n".into()),
+        ("caf\u{e9}", "u\n".into()),
+        ("noeol", "tail".into()),
+        ("d/e/deep", "deep\n".into()),
+        ("gone-empty", String::new()),
+        ("exec", "x\n".into()),
+    ];
+    fs::create_dir_all(root.join("d/e"))?;
+    for (path, contents) in &base {
+        fs::write(root.join(path), contents)?;
+    }
+    client.ok(&root, &["add", "-A"]);
+    client.ok(
+        &root,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "base",
+        ],
+    );
+    let change = || -> Result {
+        fs::write(
+            root.join("text"),
+            text(|n| match n {
+                2 => Some("line two"),
+                11 => Some("line eleven"),
+                _ => None,
+            }),
+        )?;
+        for (path, contents) in [
+            ("with space", "SP\n"),
+            ("it's", "Q\n"),
+            ("caf\u{e9}", "U\n"),
+            ("noeol", "tail\n"),
+        ] {
+            fs::write(root.join(path), contents)?;
+        }
+        fs::remove_file(root.join("d/e/deep"))?;
+        fs::remove_file(root.join("gone-empty"))?;
+        Ok(())
+    };
+    change()?;
+    assert_eq!(client.ok(&root, &["diff"]), WORKTREE_PATCH);
     Ok(())
 }

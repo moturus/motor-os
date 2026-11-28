@@ -1,11 +1,12 @@
 use std::{
+    borrow::Cow,
     cmp::Ordering,
     io::{self, BufWriter, Write},
 };
 
 use gix::{
     bstr::{BStr, ByteSlice},
-    index::entry::{Mode, Stage},
+    index::entry::{Flags, Mode, Stage},
     worktree::stack::state::attributes::Source as AttributeSource,
 };
 
@@ -13,7 +14,7 @@ use crate::{
     cancellation::Cancellation,
     diff_input::{Loaded, Loader, Pair, Source as DiffSource},
     diff_policy::{BinaryMode, PathPolicy, Resolver},
-    diff_render,
+    diff_render, patch,
     repository::OpenedRepository,
     selection::{self, Selection},
     tracked_filters, tree_index,
@@ -64,8 +65,24 @@ pub fn run(
             .into());
         }
     }
+    let sparse_checkout = !staged
+        && repo
+            .config_snapshot()
+            .try_boolean("core.sparseCheckout")?
+            .unwrap_or(false);
+    // In a sparse checkout, a file brought back into the worktree is visible to Git.
+    let worktree_entries = index.entries().iter().filter(|entry| {
+        selection.selects(entry.path(&index))
+            && (sparse_checkout || !entry.flags.contains(Flags::SKIP_WORKTREE))
+    });
     if !staged {
-        reject_worktree_filters(opened, &index, &selection, workdir, cancellation)?;
+        reject_worktree_filters(
+            opened,
+            &index,
+            worktree_entries.clone(),
+            workdir,
+            cancellation,
+        )?;
     }
 
     let mut out = BufWriter::new(out);
@@ -84,7 +101,7 @@ pub fn run(
     } else {
         render_worktree(
             &index,
-            &selection,
+            worktree_entries,
             &mut loader,
             &mut resolver,
             cancellation,
@@ -123,19 +140,18 @@ fn preflight_index(
     Ok(())
 }
 
-fn reject_worktree_filters(
+fn reject_worktree_filters<'a>(
     opened: &OpenedRepository,
     index: &gix::index::State,
-    selection: &Selection,
+    entries: impl Iterator<Item = &'a gix::index::Entry>,
     workdir: &std::path::Path,
     cancellation: &Cancellation,
 ) -> crate::Result {
     let mut candidates = Vec::new();
-    for entry in index.entries() {
+    for entry in entries {
         cancellation.check()?;
         let path = entry.path(index);
-        if selection.selects(path)
-            && matches!(entry.mode, Mode::FILE | Mode::FILE_EXECUTABLE)
+        if matches!(entry.mode, Mode::FILE | Mode::FILE_EXECUTABLE)
             && selection::checked_symlink_metadata(workdir, path)?
                 .is_some_and(|meta| meta.is_file())
         {
@@ -154,30 +170,44 @@ fn reject_worktree_filters(
     )
 }
 
-fn render_worktree(
+fn render_worktree<'a>(
     index: &gix::index::State,
-    selection: &Selection,
+    entries: impl Iterator<Item = &'a gix::index::Entry>,
     loader: &mut Loader<'_, '_>,
     resolver: &mut Resolver<'_>,
     cancellation: &Cancellation,
     out: &mut impl Write,
 ) -> crate::Result {
-    for entry in index.entries() {
+    for entry in entries {
         cancellation.check()?;
         let path = entry.path(index);
-        if !selection.selects(path) {
-            continue;
-        }
-        let pair = loader.load_pair(
+        let new = loader.load_source(
             path,
-            object(entry),
             DiffSource::Worktree {
                 index_id: entry.id,
                 index_mode: entry.mode,
             },
             cancellation,
         )?;
-        render_pair(path, pair, resolver, cancellation, out)?;
+        if new == Loaded::Missing && entry.flags.contains(Flags::SKIP_WORKTREE) {
+            continue;
+        }
+        // Git shows an intent-to-add file as new while present. Once removed,
+        // the deletion has the empty blob and mode recorded in the index.
+        let source = if entry.flags.contains(Flags::INTENT_TO_ADD) && new != Loaded::Missing {
+            DiffSource::Missing
+        } else {
+            object(entry)
+        };
+        let old = loader.load_source(path, source, cancellation)?;
+        render(
+            path,
+            Pair { old, new },
+            (known_id(source), None),
+            resolver,
+            cancellation,
+            out,
+        )?;
     }
     Ok(())
 }
@@ -193,7 +223,9 @@ fn render_staged(
 ) -> crate::Result {
     // Advance unselected entries here too so every scan step checks cancellation.
     let mut old = head.entries().iter().peekable();
-    let mut new = index.entries().iter().peekable();
+    // As Git: a file that `git add -N` only announced is not staged.
+    let staged = |entry: &&gix::index::Entry| !entry.flags.contains(Flags::INTENT_TO_ADD);
+    let mut new = index.entries().iter().filter(staged).peekable();
     loop {
         cancellation.check()?;
         let ordering = match (old.peek(), new.peek()) {
@@ -224,9 +256,18 @@ fn render_staged(
             continue;
         }
         let pair = loader.load_pair(path, old_source, new_source, cancellation)?;
-        render_pair(path, pair, resolver, cancellation, out)?;
+        let ids = (known_id(old_source), known_id(new_source));
+        render(path, pair, ids, resolver, cancellation, out)?;
     }
     Ok(())
+}
+
+/// The name of the object that a side is, if it is one. A file has to be hashed.
+fn known_id(source: DiffSource) -> Option<gix::ObjectId> {
+    match source {
+        DiffSource::Object { id, .. } => Some(id),
+        DiffSource::Missing | DiffSource::Worktree { .. } => None,
+    }
 }
 
 fn object(entry: &gix::index::Entry) -> DiffSource {
@@ -247,7 +288,7 @@ fn path_error(path: &BStr, message: &str) -> io::Error {
     ))
 }
 
-/// Render one pair obtained from the diff loader.
+/// Render one pair obtained from the diff loader, in the format of `git diff`.
 ///
 /// Text validation and computation complete before this function writes the file preamble.
 pub fn render_pair(
@@ -257,65 +298,125 @@ pub fn render_pair(
     cancellation: &Cancellation,
     out: &mut impl Write,
 ) -> crate::Result {
+    render(path, pair, (None, None), resolver, cancellation, out)
+}
+
+/// As `render_pair()`. `ids` has the names of the sides that are known to be objects of
+/// the repository, which saves hashing them for the `index` line.
+fn render(
+    path: &BStr,
+    pair: Pair,
+    ids: (Option<gix::ObjectId>, Option<gix::ObjectId>),
+    resolver: &mut Resolver<'_>,
+    cancellation: &Cancellation,
+    out: &mut impl Write,
+) -> crate::Result {
     cancellation.check()?;
     if pair.old == pair.new {
         return Ok(());
     }
+    let (old, new) = ((&pair.old, ids.0), (&pair.new, ids.1));
+    // As Git: a file, a link and a submodule are never compared with one another. The
+    // old one is deleted and the new one is created.
+    if let (Some(old_mode), Some(new_mode)) = (mode(&pair.old), mode(&pair.new))
+        && patch::kind(old_mode.bits()) != patch::kind(new_mode.bits())
+    {
+        // Both halves are made before either is written, so that an error leaves none.
+        let missing = (&Loaded::Missing, None);
+        let mut halves = Vec::new();
+        render_change(path, old, missing, resolver, cancellation, &mut halves)?;
+        render_change(path, missing, new, resolver, cancellation, &mut halves)?;
+        out.write_all(&halves)?;
+        return cancellation.check();
+    }
+    render_change(path, old, new, resolver, cancellation, out)
+}
 
-    let old_mode = mode(&pair.old);
-    let new_mode = mode(&pair.new);
-    let escaped = path.to_str_lossy().escape_debug().to_string();
-    let labels = (
-        label(&pair.old, 'a', &escaped),
-        label(&pair.new, 'b', &escaped),
+/// Write the patch of one change. Each side comes with its object name, if that is known.
+fn render_change(
+    path: &BStr,
+    (old, old_id): (&Loaded, Option<gix::ObjectId>),
+    (new, new_id): (&Loaded, Option<gix::ObjectId>),
+    resolver: &mut Resolver<'_>,
+    cancellation: &Cancellation,
+    out: &mut impl Write,
+) -> crate::Result {
+    let (old_mode, new_mode) = (mode(old), mode(new));
+    let (before, after) = (content(old), content(new));
+    let names = (
+        patch_name("a/", path, resolver.quote_path()),
+        patch_name("b/", path, resolver.quote_path()),
     );
 
-    if matches!(&pair.old, Loaded::Gitlink { .. }) || matches!(&pair.new, Loaded::Gitlink { .. }) {
-        write_header(&escaped, old_mode, new_mode, cancellation, out)?;
-        writeln!(
-            out,
-            "Gitlinks {} ({}) and {} ({}) differ",
-            labels.0,
-            gitlink_state(&pair.old),
-            labels.1,
-            gitlink_state(&pair.new)
-        )?;
-        return cancellation.check();
+    let mut header = Vec::new();
+    header.extend_from_slice(b"diff --git ");
+    header.extend_from_slice(&names.0);
+    header.push(b' ');
+    header.extend_from_slice(&names.1);
+    header.push(b'\n');
+    match (old_mode, new_mode) {
+        (None, Some(mode)) => writeln!(header, "new file mode {:06o}", mode.bits())?,
+        (Some(mode), None) => writeln!(header, "deleted file mode {:06o}", mode.bits())?,
+        (Some(old), Some(new)) if old != new => {
+            writeln!(header, "old mode {:06o}", old.bits())?;
+            writeln!(header, "new mode {:06o}", new.bits())?;
+        }
+        _ => {}
     }
+    let ids = (
+        object_id(old, old_id, resolver)?,
+        object_id(new, new_id, resolver)?,
+    );
+    if ids.0 != ids.1 {
+        let abbreviated = (resolver.abbreviate(&ids.0)?, resolver.abbreviate(&ids.1)?);
+        write!(header, "index {}..{}", abbreviated.0, abbreviated.1)?;
+        if let Some(mode) = old_mode.filter(|mode| Some(*mode) == new_mode) {
+            write!(header, " {:06o}", mode.bits())?;
+        }
+        header.push(b'\n');
+    }
+    let labels = (
+        if old_mode.is_some() {
+            &names.0[..]
+        } else {
+            b"/dev/null"
+        },
+        if new_mode.is_some() {
+            &names.1[..]
+        } else {
+            b"/dev/null"
+        },
+    );
 
-    let before = bytes(&pair.old);
-    let after = bytes(&pair.new);
+    cancellation.check()?;
     if before == after {
-        write_header(&escaped, old_mode, new_mode, cancellation, out)?;
+        out.write_all(&header)?;
         return cancellation.check();
     }
-
-    let raw_symlink = old_mode == Some(Mode::SYMLINK) || new_mode == Some(Mode::SYMLINK);
-    let policy = if raw_symlink {
+    // The text of a link or of a submodule is never binary and has no attributes.
+    let mode = new_mode.or(old_mode).expect("a changed pair has one side");
+    let policy = if matches!(mode, Mode::FILE | Mode::FILE_EXECUTABLE) {
+        resolver.resolve(path, mode, cancellation)?
+    } else {
         PathPolicy {
             algorithm: resolver.default_algorithm(),
             binary: BinaryMode::Text,
         }
-    } else {
-        resolver.resolve(
-            path,
-            new_mode.or(old_mode).expect("a changed pair has one side"),
-            cancellation,
-        )?
     };
-    if policy.binary.is_binary(before, after) {
-        write_header(&escaped, old_mode, new_mode, cancellation, out)?;
-        writeln!(out, "Binary files {} and {} differ", labels.0, labels.1)?;
+    if policy.binary.is_binary(&before, &after) {
+        out.write_all(&header)?;
+        out.write_all(b"Binary files ")?;
+        out.write_all(labels.0)?;
+        out.write_all(b" and ")?;
+        out.write_all(labels.1)?;
+        out.write_all(b" differ\n")?;
         return cancellation.check();
     }
 
-    let prepared = diff_render::prepare_text(path, before, after, policy.algorithm, cancellation)?;
-    write_header(&escaped, old_mode, new_mode, cancellation, out)?;
-    prepared.write_to(
-        (labels.0.as_bytes(), labels.1.as_bytes()),
-        cancellation,
-        out,
-    )
+    let prepared =
+        diff_render::prepare_text(path, &before, &after, policy.algorithm, cancellation)?;
+    out.write_all(&header)?;
+    prepared.write_to(labels, cancellation, out)
 }
 
 fn mode(input: &Loaded) -> Option<Mode> {
@@ -326,52 +427,67 @@ fn mode(input: &Loaded) -> Option<Mode> {
     }
 }
 
-fn bytes(input: &Loaded) -> &[u8] {
+/// What Git compares: the bytes of a file, the target of a link, or the line that
+/// stands for the commit of a submodule.
+fn content(input: &Loaded) -> Cow<'_, [u8]> {
     match input {
-        Loaded::Missing => b"",
-        Loaded::Blob { bytes, .. } => bytes,
-        Loaded::Gitlink { .. } => unreachable!("gitlinks are handled before content"),
+        Loaded::Missing => Cow::Borrowed(b""),
+        Loaded::Blob { bytes, .. } => Cow::Borrowed(bytes),
+        Loaded::Gitlink { id } => Cow::Owned(format!("Subproject commit {id}\n").into_bytes()),
     }
 }
 
-fn label(input: &Loaded, side: char, escaped: &str) -> String {
-    if matches!(input, Loaded::Missing) {
-        "/dev/null".into()
-    } else {
-        format!("{side}/{escaped}")
-    }
-}
-
-fn gitlink_state(input: &Loaded) -> String {
-    match input {
-        Loaded::Missing => "absent".into(),
-        Loaded::Gitlink { id } => id.to_string(),
-        Loaded::Blob { .. } => "non-gitlink".into(),
-    }
-}
-
-fn write_header(
-    escaped: &str,
-    old_mode: Option<Mode>,
-    new_mode: Option<Mode>,
-    cancellation: &Cancellation,
-    out: &mut impl Write,
-) -> io::Result<()> {
-    check(cancellation)?;
-    writeln!(out, "diff --git a/{escaped} b/{escaped}")?;
-    match (old_mode, new_mode) {
-        (None, Some(mode)) => writeln!(out, "new file mode {:o}", mode.bits())?,
-        (Some(mode), None) => writeln!(out, "deleted file mode {:o}", mode.bits())?,
-        (Some(old), Some(new)) if old != new => {
-            writeln!(out, "old mode {:o}", old.bits())?;
-            check(cancellation)?;
-            writeln!(out, "new mode {:o}", new.bits())?;
+fn object_id(
+    input: &Loaded,
+    known: Option<gix::ObjectId>,
+    resolver: &Resolver<'_>,
+) -> crate::Result<gix::ObjectId> {
+    let hash = resolver.object_hash();
+    Ok(match (input, known) {
+        (Loaded::Missing, _) => gix::ObjectId::null(hash),
+        (Loaded::Gitlink { id }, _) => *id,
+        (Loaded::Blob { .. }, Some(id)) => id,
+        (Loaded::Blob { bytes, .. }, None) => {
+            gix::objs::compute_hash(hash, gix::objs::Kind::Blob, bytes)?
         }
-        _ => {}
-    }
-    check(cancellation)
+    })
 }
 
-fn check(cancellation: &Cancellation) -> io::Result<()> {
-    cancellation.check().map_err(io::Error::other)
+/// Write a name the way Git writes it in a patch: as it is, or in double quotes with C
+/// escapes if a byte needs one. `quote_path` is `core.quotePath`, which also escapes
+/// every byte that is not ASCII.
+fn patch_name(prefix: &str, path: &[u8], quote_path: bool) -> Vec<u8> {
+    let escaped =
+        |byte: u8| byte < 0x20 || matches!(byte, b'"' | b'\\' | 0x7f) || quote_path && byte >= 0x80;
+    let mut name = Vec::with_capacity(prefix.len() + path.len() + 2);
+    if !path.iter().copied().any(escaped) {
+        name.extend_from_slice(prefix.as_bytes());
+        name.extend_from_slice(path);
+        return name;
+    }
+    name.push(b'"');
+    name.extend_from_slice(prefix.as_bytes());
+    for &byte in path {
+        let letter = match byte {
+            b'"' | b'\\' => byte,
+            0x07 => b'a',
+            0x08 => b'b',
+            b'\t' => b't',
+            b'\n' => b'n',
+            0x0b => b'v',
+            0x0c => b'f',
+            b'\r' => b'r',
+            _ if escaped(byte) => {
+                name.extend_from_slice(format!("\\{byte:03o}").as_bytes());
+                continue;
+            }
+            _ => {
+                name.push(byte);
+                continue;
+            }
+        };
+        name.extend_from_slice(&[b'\\', letter]);
+    }
+    name.push(b'"');
+    name
 }

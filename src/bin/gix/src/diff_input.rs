@@ -65,7 +65,7 @@ impl<'repo, 'index> Loader<'repo, 'index> {
         Ok(Pair { old, new })
     }
 
-    fn load_source(
+    pub(crate) fn load_source(
         &mut self,
         path: &BStr,
         source: Source,

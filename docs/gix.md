@@ -60,7 +60,7 @@ directory. Put `--` in front of a name that starts with a dash.
 | `pull [OPTIONS] [REMOTE [BRANCH]]` | Fetch, then merge the remote branch into the current branch or rebase onto it. |
 | `status` | Show what has changed, and whether a merge or another operation is unfinished. |
 | `log` | Show the history of the current branch. |
-| `diff [--staged] [PATH…]` | Show your unstaged changes, or with `--staged` what the next commit will contain. Binary files and mode changes are summarized. |
+| `diff [--staged] [PATH…]` | Show your unstaged changes, or with `--staged` what the next commit will contain, as a patch in the format of `git diff`. |
 | `add PATH…`, `add -A` | Stage the named files, or with `-A` every new, changed and deleted file. `-A` skips new files that match an ignore rule; naming such a file yourself is an error. |
 | `unstage PATH…` | Take files out of the next commit without touching the files themselves. |
 | `restore PATH…` | Throw away your unstaged changes to the named files. |
@@ -93,6 +93,20 @@ A few things work differently from Git:
   pass `-c key=value` as many times as you need. The only thing gix writes to
   `.git/config` itself is the upstream of a branch made with `checkout -b`,
   and it leaves the rest of the file as it found it.
+
+### Patches
+
+`diff` uses the patch format of `git diff --no-renames`, including shortened
+object IDs in the `index` line and Git's quoting for file names. `core.abbrev`,
+`core.quotePath` and `diff.algorithm` are honored.
+
+- A renamed file is shown as a deleted file and a new file.
+- An absent file marked `skip-worktree` is omitted from an unstaged diff.
+- Hunk headings use Git's default rule. A language-specific diff driver in
+  Git may pick a different function or line for the heading.
+- A hunk can group changed lines differently from Git.
+- A file with an unresolved conflict stops `diff`. The contents of a binary
+  file are not shown, as in Git.
 
 ### Branches
 
@@ -443,8 +457,8 @@ A few more things to know:
 - Executable files stay writable.
 - Submodule entries are kept as they are, but gix does not operate on
   submodules and refuses a switch or merge that would change one.
-- Text diffs use the Myers or Histogram algorithm. The `minimal` setting is
-  not supported.
+- Text diffs use the Myers algorithm, as in Git, or Histogram if
+  `diff.algorithm` asks for it. The `minimal` setting is not supported.
 - Gix sends whole objects when it pushes, without Git's delta compression, so
   the first push of a repository can be larger than Git's.
 - Gix never repacks or garbage-collects a repository, so loose objects pile
